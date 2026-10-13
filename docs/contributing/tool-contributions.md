@@ -261,8 +261,8 @@ python binary-inventory.py
    cd utilities/tool
    python setup.py develop
    
-   # Test
-   oflm test --tool <tool>
+   # Test -- the suite launcher is oflm-test, not an `oflm` subcommand
+   oflm-test --tools
    ```
 
 4. **Submit PR**
@@ -403,6 +403,6 @@ oflm-test --vision
 ## Quick Links
 
 - [Code contributions](../contributing/code-contributions.md)
-- [Kernel contributions](../kernel-contributions.md)
-- [Documentation](../docs/contributing/doc-contributions.md)
-- [Testing](../docs/contributing/test-contributions.md)
+- [Kernel contributions](kernel-contributions.md)
+- [Documentation](doc-contributions.md)
+- [Testing](test-contributions.md)

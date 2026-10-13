@@ -22,6 +22,7 @@ tensor's bytes as stored, in the file's raster order). It may also offer
   conv_transpose  conv1d [taps, NCH] bf16 -> [groups][taps][width]
   lmhead_q8       the q8 lm_head's 128-row supertile order
   transpose       a small [rows, cols] tensor -> [cols, rows] (qwen35's alpha / beta)
+  transpose_banked [heads, hidden] -> [ceil(heads/32), hidden, 32], zero-padded AB banks
 
 **q8 projections** (OPEN-QUANT-Q8). Where the recipe's per-role quant map says q8, the
 plan carries `q8_perm` instead of `std_perm` and the pool holds the container's q8 values
@@ -113,6 +114,48 @@ def split_q8_q4_1(chunks, part: str) -> np.ndarray:
     q = ((code >> 4) + 8 if hi else code & 15).astype(np.uint8)                       # byte order = code order
     out[:, 1024:] = q[:, 0::2] | (q[:, 1::2] << 4)
     return out
+
+
+def q8_codes_scales(chunks, rows: int, cols: int) -> tuple[np.ndarray, np.ndarray]:
+    """q8 chunks (32-row blocks major, then 256-k tiles) -> int8 codes [rows, cols], bf16-bit scales [rows, cols/32]."""
+    if rows % 32 or cols % 256:
+        raise ValueError(f"q8 [{rows}, {cols}] is not whole 32 x 256 chunks")
+    nr, nc = rows // 32, cols // 256
+    ch = _u8(chunks).reshape(nr, nc, Q8)
+    sc = np.ascontiguousarray(ch[:, :, :512]).view(np.uint16).reshape(nr, nc, 8, 32)     # rb kt kb rl
+    cd = np.ascontiguousarray(ch[:, :, 512:]).view(np.int8).reshape(nr, nc, 2, 8, 32, 16)  # rb kt half b i r16
+    return (cd.transpose(0, 2, 5, 1, 3, 4).reshape(rows, cols),
+            sc.transpose(0, 3, 1, 2).reshape(rows, cols // 32))
+
+
+def bf16_of_q8(codes: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """code * scale rounded to bf16 bits once (the product is exact in f32), as gemm_q8_dequant.h rounds it."""
+    s = np.repeat(_bf16_to_f32(np.ascontiguousarray(scales, np.uint16)), 32, axis=1)
+    return _bf16_rne(codes.astype(np.float32) * s)
+
+
+def bf16_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
+    """q4_1 chunks in the same raster -> bf16 bits [rows, cols] of m + n * d, rounded once as the q4_1 GEMM's mac does."""
+    if rows % 32 or cols % 256:
+        raise ValueError(f"q4_1 [{rows}, {cols}] is not whole 32 x 256 chunks")
+    nr, nc = rows // 32, cols // 256
+    ch = _u8(chunks).reshape(nr, nc, CH)
+    d = _bf16_to_f32(np.ascontiguousarray(ch[:, :, :512]).view(np.uint16)).reshape(nr, nc, 8, 32)      # rb kt kb rl
+    mn = _bf16_to_f32(np.ascontiguousarray(ch[:, :, 512:1024]).view(np.uint16)).reshape(nr, nc, 8, 32)
+    nib = ch[:, :, 1024:].reshape(nr, nc, 2, 256, 8)                                                     # rb kt half k byte
+    q = np.stack([nib & 15, nib >> 4], axis=-1).reshape(nr, nc, 2, 256, 16)                              # rb kt half k r16
+    q = q.transpose(0, 2, 4, 1, 3).reshape(rows, cols).astype(np.float32)
+    scale = lambda v: np.repeat(v.transpose(0, 3, 1, 2).reshape(rows, cols // 32), 32, axis=1)  # noqa: E731
+    return _bf16_rne(scale(mn) + q * scale(d))
+
+
+def pack_bf16_gemm(w: np.ndarray) -> np.ndarray:
+    """bf16 bits [N, K] -> band-major [64 rows x 64 k] elements in mm.cc's A-block order, as uint16."""
+    n, k = w.shape
+    if n % 64 or k % 64:
+        raise ValueError(f"bf16_gemm [{n}, {k}]: 64-row bands of 64-k elements")
+    a = np.ascontiguousarray(w, np.uint16).reshape(n // 64, 16, 4, k // 64, 8, 8)  # b z r kt i kk
+    return a.transpose(0, 3, 1, 4, 2, 5).reshape(-1)                               # b kt z i r kk
 
 
 def requant_q4_1(chunks) -> np.ndarray:
@@ -591,6 +634,31 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         src = np.concatenate([raw, np.zeros((1, CH_HALF), np.uint8)])   # the synthesised block
         n = op["nch"] * CH
         dst[op["dst"]:op["dst"] + n] = fuse_chunks(src[lo], src[hi]).reshape(-1)
+    elif kind == "bf16_gemm":
+        # `nch` SOURCE chunks from `chunk0`: q8 exactly, unless `via` q4_1 asks for the q4 ops' reading
+        name = _name(op, "tensor", layer)
+        if not op.get("nch") or not op.get("in_dim"):
+            raise ValueError(f"{kind} {name} without nch / in_dim")
+        ncol, c0 = op["in_dim"] // 256, op.get("chunk0", 0)
+        if op["in_dim"] % 256 or op["nch"] % ncol:
+            raise ValueError(f"{kind} {name}: {op['nch']} chunks is not whole rows of a {op['in_dim']}-wide tensor")
+        rows = op["nch"] // ncol * 32
+        if op.get("via", "") not in ("", "q4_1"):
+            raise ValueError(f"{kind} {name}: via {op['via']!r}, want q4_1 or nothing")
+        if _chunk_bytes_of(m, name) == Q8 and op.get("via") != "q4_1":
+            sel = _u8(_raw(m, name)).reshape(-1, Q8)[c0:c0 + op["nch"]]
+            if sel.shape[0] != op["nch"]:
+                raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
+            w = bf16_of_q8(*q8_codes_scales(sel, rows, op["in_dim"]))
+        else:
+            sel = q4_chunks_of(m, name, _raw(m, name), c0, op["nch"])
+            if sel.shape[0] != op["nch"]:
+                raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
+            w = bf16_of_q4_1(sel, rows, op["in_dim"])
+        out = pack_bf16_gemm(w).view(np.uint8)
+        if op["dst"] + out.size > len(dst):
+            raise ValueError(f"{kind} {name}: {out.size} B at dst {op['dst']} runs past the {len(dst)} B buffer")
+        dst[op["dst"]:op["dst"] + out.size] = out
     elif kind == "q8_perm":
         # the q8 twin of std_perm: `nch` is the count of POOL half-tiles (5120 B each, twice
         # the q4_1 bytes of the same tensor); `chunk0` is a SOURCE file-chunk offset, as it is
@@ -655,6 +723,27 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         if op["dst"] + n > len(dst):
             raise ValueError("lm_head larger than its pool")
         dst[op["dst"]:op["dst"] + n] = raw[perm].reshape(-1)
+    elif kind == "transpose_banked":
+        # AB projections retain 32-lane rows: [heads, hidden] -> [banks, hidden, 32].
+        # A padded ordinary transpose would interleave banks at every hidden row.
+        name = _name(op, "tensor", layer)
+        rows, cols, elem = (op.get(k, 0) for k in ("rows", "cols", "elem"))
+        if rows <= 0 or cols <= 0 or elem <= 0:
+            raise ValueError(f"transpose_banked {name}: rows / cols / elem must be positive")
+        b = _u8(_raw(m, name))
+        if len(b) != rows * cols * elem:
+            raise ValueError(f"{name}: {len(b)} B is not a [{rows}, {cols}] tensor of {elem}-byte values")
+        banks = (rows + 31) // 32
+        size = banks * cols * 32 * elem
+        off = op["dst"]
+        if off < 0 or off + size > len(dst):
+            raise ValueError(f"transpose_banked {name}: destination does not fit {size} B")
+        src = b.reshape(rows, cols, elem)
+        w = np.zeros((banks, cols, 32, elem), np.uint8)
+        for bank in range(banks):
+            active = min(32, rows - bank * 32)
+            w[bank, :, :active] = src[bank * 32:bank * 32 + active].transpose(1, 0, 2)
+        dst[off:off + size] = w.reshape(-1)
     elif kind == "transpose":
         # a small [rows, cols] tensor of `elem`-byte values -> [cols, rows]. `dst_rows`, when
         # given, widens the destination row to that many values and zeroes the tail -- the

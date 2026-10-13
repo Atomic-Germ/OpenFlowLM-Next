@@ -118,6 +118,8 @@ struct Args {
     int verify_check = 0;           // --verify-check N: N greedy positions by step(), then by verify() passes, compared
     int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
     int verify_probe = 0;           // --verify-probe L (with OFLM_OPEN_VERIFY_STOP=L): act of layers < L, verify vs step
+    std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
+    std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -163,6 +165,7 @@ Args parse(int argc, char** argv) {
     Args a;
     a.cfg.model_dir = std::getenv("OFLM_MODEL_DIR") ? std::getenv("OFLM_MODEL_DIR") : "";
     a.cfg.kernel_dir = std::getenv("OFLM_OPEN_KERNELS_DIR") ? std::getenv("OFLM_OPEN_KERNELS_DIR") : "";
+    if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) a.cfg.prefill_mode = pm;
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {
@@ -171,6 +174,7 @@ Args parse(int argc, char** argv) {
         };
         if (k == "--model") a.cfg.model_dir = val();
         else if (k == "--kernels") a.cfg.kernel_dir = val();
+        else if (k == "--prefill-mode") a.cfg.prefill_mode = val();
         else if (k == "--ids") a.ids = parse_ids(val());
         else if (k == "--ids-file") {
             std::ifstream f(val());
@@ -214,13 +218,15 @@ Args parse(int argc, char** argv) {
         // dispatch, so this makes the gap reproducible without the server.
         else if (k == "--gap-ms") a.gap_ms = std::atoi(val().c_str());
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
+        else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
+        else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] "
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] "
                              "[--spec] [--spec-width N] [--spec-ref] [--spec-log] [--spec-method M]\n");
         std::exit(2);
     }
@@ -444,10 +450,11 @@ std::vector<int> request(Core& core, const Args& a) {
         std::fprintf(stderr,
                      "      mid %.1f (dn conv %.1f, dn rule %.1f, attn %.1f), prenorm %.1f, gemm tile %.1f,"
                      " gemm tr %.1f, tail %.1f, shared %.1f, state %.1f, sync %.1f, setup %.1f"
-                     " | moe prep %.1f, patch %.1f, run %.1f, read %.1f | residue %.1f\n",
+                     " | moe prep %.1f, patch %.1f, run %.1f, read %.1f | qkv scatter %.1f | residue %.1f\n",
                      tm.mid_ms, tm.dn_conv_ms, tm.dn_rule_ms, tm.attn_ms, tm.prenorm_ms, tm.gemm_tile_ms,
                      tm.gemm_tr_ms, tm.tail_ms, tm.shared_ms, tm.state_ms, tm.sync_ms, tm.setup_ms,
                      tm.moe_prep_ms, tm.moe_patch_ms, tm.moe_run_ms, tm.moe_read_ms,
+                     tm.qkv_scatter_ms,
                      tm.total_ms - tm.part0_ms - tm.part1_ms - tm.route_ms - tm.lmhead_ms);
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
@@ -551,18 +558,50 @@ std::vector<int> request(Core& core, const Args& a) {
                          1000.0 * (out.size() - 1) / dec_ms);
         return out;
     }
+    // Stage 2.7 Gate B: the per-step decode schedule ("6n,6h,6n"), the tool for
+    // the one-process mid-stream switch test. Entries are (count, route) pairs
+    // applied to the decode loop's steps in order; beyond the schedule the last
+    // entry's route stays. Letters: n=npu, h=host, a=auto.
+    std::vector<std::pair<int, std::string>> sched;
+    if (!a.decode_schedule.empty()) {
+        size_t at = 0;
+        while (at <= a.decode_schedule.size()) {
+            const size_t comma = a.decode_schedule.find(',', at);
+            const std::string seg = a.decode_schedule.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+            const size_t x = seg.find_first_of("nha");
+            if (x == std::string::npos || x == 0 || seg.find_first_of("nha", x + 1) != std::string::npos)
+                { std::fprintf(stderr, "--decode-schedule wants <N><n|h|a> segments, got '%s'\n", seg.c_str()); std::exit(2); }
+            sched.push_back({std::atoi(seg.substr(0, x).c_str()), seg.substr(x)});
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+    }
+    auto sched_route = [&sched](int n) -> const char* {
+        auto full = [](const std::string& s) -> const char* {
+            if (s == "n") return "npu";
+            if (s == "h") return "host";
+            if (s == "a") return "auto";
+            return s.c_str();
+        };
+        int acc = 0;
+        for (const auto& [cnt, r] : sched)
+            if (n < (acc += cnt)) return full(r);
+        return sched.empty() ? nullptr : full(sched.back().second);
+    };
     for (int n = 0; n < a.max_tokens; ++n) {
         out.push_back(tok);
         std::printf("token %d\n", tok);
         std::fflush(stdout);
         if (n + 1 == a.max_tokens) break;
+        if (const char* r = sched_route(n)) core.set_decode_route(r);
+        const std::string rt = core.decode_route_at(core.position());
         core.step(tok, true);
         if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
         const auto& tm = core.last_timing();
         std::fprintf(stderr,
-                     "  step @%d: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f; embed %.2f, patch %.2f,"
+                     "  step @%d [%s]: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f; embed %.2f, patch %.2f,"
                      " dispatches %.1f)\n",
-                     core.position() - 1, tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms,
+                     core.position() - 1, rt.c_str(), tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms,
                      tm.embed_ms, tm.patch_ms, tm.dispatch_ms);
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
@@ -603,6 +642,13 @@ int main(int argc, char** argv) {
             }
         }
         core.load_weights();
+        // Stage 2.7: the runtime decode route (env only set the initial one).
+        // Stage 2.10 P6: auto is the default when nothing named a route --
+        // NPU-first since the fast attention promotion -- but the 2.6 env's
+        // initial host route still wins for the compat/debug path, so nothing
+        // switches silently under an env user.
+        if (!a.decode_route.empty()) core.set_decode_route(a.decode_route);
+        else if (!std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) core.set_decode_route("auto");
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {

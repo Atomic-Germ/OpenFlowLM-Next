@@ -10,10 +10,17 @@ nav_order: 9
 This section reports the performance of Qwen 3.5 on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on OpenFlowLM v0.9.38.  
+> - Results are based on OpenFlowLM v0.9.38.
 > - Under OFLM's default NPU power mode (Performance)    
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models.   
+
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
 
 ---
 
@@ -32,10 +39,10 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Qwen3.5-0.8B**    | NPU (OFLM)    | 44.83 | 43.84 | 40.3 | 36.5 | 30.21 | 22.8| 
-| **Qwen3.5-2B**    | NPU (OFLM)    | 28.92 | 28.33 | 27.18 | 25.34 | 22.3 | 17.98| 
-| **Qwen3.5-4B**    | NPU (OFLM)    | 15.9 | 15.6 | 15.02 | 14.03 | 12.35 | 9.98| 
-| **Qwen3.5-9B**    | NPU (OFLM)    | 9.9 | 9.8 | 9.56 | 9.15 | 8.41 | 7.24| 
+| **Qwen3.5-0.8B**  | NPU (OFLM)    | 44.83 | 43.84 | 40.3 | 36.5 | 30.21 | 22.8 | 
+| **Qwen3.5-2B**  | NPU (OFLM)    | 28.92 | 28.33 | 27.18 | 25.34 | 22.3 | 17.98 | 
+| **Qwen3.5-4B**  | NPU (OFLM)    | 15.9 | 15.6 | 15.02 | 14.03 | 12.35 | 9.98 | 
+| **Qwen3.5-9B**  | NPU (OFLM)    | 9.9 | 9.8 | 9.56 | 9.15 | 8.41 | 7.24 | 
 
 ---
 
@@ -43,10 +50,10 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Qwen3.5-0.8B**    | NPU (OFLM)    | 851.21 | 1285.09 | 1744.47 | 2007.97 | 2084.64 | 1912.63|
-| **Qwen3.5-2B**    | NPU (OFLM)    | 625.99 | 929.93 | 1198.04 | 1367.84 | 1443.05 | 1381.91|
-| **Qwen3.5-4B**    | NPU (OFLM)    | 322.37 | 445.63 | 543.15 | 599.95 | 616.35 | 571.6|
-| **Qwen3.5-9B**    | NPU (OFLM)    | 248.76 | 328.1 | 391.6 | 420.5 | 436.25 | 416.65|
+| **Qwen3.5-0.8B**  | NPU (OFLM)    | 851.21 | 1285.09 | 1744.47 | 2007.97 | 2084.64 | 1912.63 | 
+| **Qwen3.5-2B**  | NPU (OFLM)    | 625.99 | 929.93 | 1198.04 | 1367.84 | 1443.05 | 1381.91 | 
+| **Qwen3.5-4B**  | NPU (OFLM)    | 322.37 | 445.63 | 543.15 | 599.95 | 616.35 | 571.6 | 
+| **Qwen3.5-9B**  | NPU (OFLM)    | 248.76 | 328.1 | 391.6 | 420.5 | 436.25 | 416.65 | 
 
 ---
 

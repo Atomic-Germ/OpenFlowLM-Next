@@ -213,10 +213,18 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "the core holds taps - 1 state rows, so another tap count is a design change, "
                   "not a knob"),
     Template("ln", "designs/ln/ln.cc",
-             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)}),
-                                # LN_N; 1024 / 2048 take the fused single-core path (N <= 2048),
-                                # 2560 / 3072 / 4096 the split-output one, 5120 the streamed
-                                # residual (ln.py SPLIT; the layer designs' norm_split)
+             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)},
+             combos=(combination(
+                 # (width, groups); 1024 / 2048 take the fused single-core path (N <= 2048),
+                 # 2560 / 3072 / 4096 the split-output one, 5120 the streamed residual (ln.py
+                 # SPLIT; the layer designs' norm_split). (2560, 2) entered with K2's
+                 # GroupRMSNorm(2) -- E3, the physical NPU parity pass on the user's
+                 # Krackan 2026-09-27 (x86-emu + compile + hardware, byte-identical to
+                 # the emulator). A grouped width has to be WIDE: the fused kernel has a
+                 # single reduction (ln.py refuses N <= 2048 with groups).
+                 (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (5120, 1),
+                 keys=("width", "groups"),
+                 defaults={"groups": 1}),),),
     Template("router", "designs/router/router.h",
              {"experts": values(256), "topk": values(8)}),
     Template("moe", "designs/layer_x/moe_*.cc",
@@ -252,6 +260,26 @@ MIXED_CORE_FITS = frozenset({
     ("qwen35", 2048),    # Qwen3.8-Distilled-2B-NPU2
     ("qwen35", 1024),    # Qwen3.5-0.8B-NPU2
 })
+
+
+# A core's IRON control program -- the loops around the kernel calls -- goes through Peano's
+# `opt`, which fully unrolls a loop whose trip count is small enough. Qwen3.5's 4B (hidden 2560)
+# has 20-element up | gate bands where the 9B has 32, and those unroll: its `lx` main core
+# carries 40 call sites of gemv_q4_gms against the 9B's 8, a control program of 8 208 B against
+# 5 568, and comes out 96 B over its 16 KB, so the 4B's kernels stopped building (#145). aiecc
+# runs `opt` with fixed flags, so the lever is per loop: the band loops are emitted with LLVM's
+# unroll.disable (xcommon.band_range). Like the set above this is measured, not derivable: the
+# widths whose band loops are kept rolled. A rolled loop adds one compare-and-branch per call,
+# and each call streams a 4 KB weight element; the 9B's 32-element bands have always run rolled.
+# Every width not listed compiles exactly as it did.
+ROLLED_BANDS = frozenset({
+    ("qwen35", 2560),    # Qwen3.8-Distilled-4B-NPU2
+})
+
+
+def rolled_bands(family: str, hidden: int) -> bool:
+    """Must this width's band loops stay rolled for its main cores to fit program memory?"""
+    return (family, hidden) in ROLLED_BANDS
 
 
 def mixed_core_fits(family: str, hidden: int) -> bool:

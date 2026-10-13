@@ -26,6 +26,11 @@ class Llama(__Q4NX_Converter, model_arch=ModelArch.LLAMA):
     def initialize(self, config_json_path=None):
         super().initialize()
 
+    def _rope_dim_count(self) -> int:
+        """The rotated dims per head, as llama.cpp writes them: the GGUF metadata
+        key carries the arch prefix, and a llama GGUF is always llama.*."""
+        return self.gguf_reader.fields["llama.rope.dimension_count"].contents()
+
     def convert(self, q4nx_path: str, weights_type: str = 'language'):
         self.q4nx_tensors = {}
         if self.gguf_reader is not None:
@@ -49,7 +54,7 @@ class Llama(__Q4NX_Converter, model_arch=ModelArch.LLAMA):
             unpacked = gguf_tensor.unpack(self.default_tensor_type)
 
             if "q_proj" in self.forward_name_map[gguf_tensor.name] or "k_proj" in self.forward_name_map[gguf_tensor.name]:
-                DH = self.gguf_reader.fields["llama.rope.dimension_count"].contents()
+                DH = self._rope_dim_count()
                 pp = DH // 2
                 d, m, qw = unpacked
                 d = rearrange(d, '(g p q) c -> (g q p) c', p = pp, q = 2).contiguous()

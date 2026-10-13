@@ -174,7 +174,10 @@ def test_pad_width_rounds_to_the_lcm_so_a_low_core_count_cannot_land_short():
 
 
 def test_the_norm_width_2880_is_not_a_validated_ln_point():
-    with pytest.raises(OpRangeError, match="width=2880 is outside the validated set"):
+    # ln's width moved into a (width, groups) combination when K2's GroupRMSNorm(2)
+    # entered the set (2026-09-27, E3): the message names the pair now
+    with pytest.raises(OpRangeError, match=r"\('width', 'groups'\) = \(2880, 1\) is outside the "
+                                          r"validated combinations"):
         C.require("ln", width=2880)
     C.require("ln", width=3072)          # the pad lands on Phi-4-mini's point
 

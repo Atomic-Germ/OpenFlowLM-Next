@@ -18,5 +18,6 @@ from .gpt_oss import GPTOSS
 from .nanbeige import Nanbeige
 from .hunyuan import HunyuanDense
 from .granite import Granite
+from .k2 import K2
 
-__all__ = ['Qwen3VL', 'Llama', 'LFM2', 'Qwen3', 'Qwen2', 'Qwen2VL', 'Gemma3', 'Gemma4', 'Phi4', 'GPTOSS', 'Nanbeige', 'Qwen35', 'Qwen35_2B', 'Qwen35_9B', 'Qwen35_08B', 'Qwen35Moe', 'HunyuanDense', 'Granite']
+__all__ = ['Qwen3VL', 'Llama', 'LFM2', 'Qwen3', 'Qwen2', 'Qwen2VL', 'Gemma3', 'Gemma4', 'Phi4', 'GPTOSS', 'Nanbeige', 'Qwen35', 'Qwen35_2B', 'Qwen35_9B', 'Qwen35_08B', 'Qwen35Moe', 'HunyuanDense', 'Granite', 'K2']

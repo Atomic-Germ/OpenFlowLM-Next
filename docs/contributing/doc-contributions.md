@@ -181,7 +181,7 @@ The Qwen3.6-MoE model uses the dense recipe with MoE dispatch.
 
 ## Build Requirements
 
-- XRT 32.0.203.311+
+- XRT 32.0.203.304+
 - ironvenv with mlir-aie
 - NPU present
 
@@ -293,7 +293,7 @@ Each model should have:
 
 **Prerequisites**
 - Linux (Ubuntu 22.04+ recommended)
-- XRT 32.0.203.311+
+- XRT 32.0.203.304+
 - Python 3.11
 
 **Installation**
@@ -328,8 +328,7 @@ oflm run <model> [options]
 ```
 
 **Options**
-- `--ctx-len <int>` -- Context length
-- `--log-level <level>` -- Logging level
+- `--ctx-len <int>` -- Context length (floored at 512; not rounded to a power of 2)
 ```
 
 ### oflm serve
@@ -360,6 +359,6 @@ oflm serve <model>
 ## Quick Links
 
 - [Code contributions](../contributing/code-contributions.md)
-- [Kernel contributions](../kernel-contributions.md)
-- [Testing](../docs/contributing/test-contributions.md)
-- [Tools](../docs/contributing/tool-contributions.md)
+- [Kernel contributions](kernel-contributions.md)
+- [Testing](test-contributions.md)
+- [Tools](tool-contributions.md)

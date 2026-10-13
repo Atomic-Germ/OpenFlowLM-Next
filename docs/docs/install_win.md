@@ -17,7 +17,7 @@ has_children: false
 
 ## 🚨 CRITICAL: NPU Driver Requirement
 
-You must have the **latest** AMD NPU driver -- **version number >= 32.0.203.311** -- installed for OpenFlowLM to work correctly. Earlier versions are no longer supported.
+You must have the **latest** AMD NPU driver -- **version number >= 32.0.203.304** -- installed for OpenFlowLM to work correctly. Earlier versions are no longer supported.
 
 <!-- > ⚙️ **Tip:** Upgrade to the new NPU Driver **32.0.203.311** for over 5–10% speed boost across all models and context lengths. [Download and Install](https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers) *(AMD account required)*   -->
 - Check via:  
@@ -50,7 +50,7 @@ For version history and changelog, see the [release notes](https://github.com/At
 
 ## 🚀 NPU Power Mode
 
-By default, **OFLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`powersaver`, `balanced`, or `turbo`) using the `--pmode` flag:
+By default, **OFLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`default`, `powersaver`, `balanced`, `performance`, or `turbo`) using the `--pmode` flag:
 
 **CLI mode:**
 ```shell

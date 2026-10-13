@@ -13,7 +13,13 @@ parent: Models
 - **Base Model:** [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)
 - **Quantization:** Q4_1
 - **Max Context Length:** 128k tokens 
-- **Default Context Length:** 8192 tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **Default Context Length:** 8k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+> ⚠️ **GPT-OSS has no open kernels.** The arithmetic is settled and tested, but
+> no kernel computes it: the experts need a clamped SwiGLU, and the router and
+> all three expert projections carry biases no current design has room for. Both
+> GPT-OSS tags therefore run the closed `gpt_oss_npu` engine. See the
+> [support-status matrix](/docs/models/#open-vs-closed-support-status) and
+> `NOT_IMPLEMENTED` in `open_kernels/recipes/families.py` for the full reason.
 - **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
 ▶️ Run with OpenFlowLM in PowerShell:  
@@ -35,7 +41,7 @@ oflm run gpt-oss:20b
 > 📝 NOTE
 
 > - **Memory Requirements**  
-   ⚠️ **Note**: Running `gpt-oss:20b` may need a system with **> 32 GB RAM**. The model itself uses ~15.1 GB of memory in OFLM, and there is an internal cap (~15.6 GB) on NPU memory allocation enforced by AMD/Microsoft, which makes only about half of the total system RAM available to the NPU. **On 32 GB machines, it sometimes works and sometimes does not**, so we recommend more RAM for a smooth experience.
+   ⚠️ **Note**: Running `gpt-oss:20b` may need a system with **> 32 GB RAM**. The model itself uses ~14.0 GB of memory in OFLM (its registered `footprint`), and there is an internal cap (~15.6 GB) on NPU memory allocation enforced by AMD/Microsoft, which makes only about half of the total system RAM available to the NPU. **On 32 GB machines, it sometimes works and sometimes does not**, so we recommend more RAM for a smooth experience.
 
 
 ## 🧩 Model Card: [gpt-oss-safeguard-20b](https://huggingface.co/openai/gpt-oss-safeguard-20b)
@@ -52,7 +58,7 @@ oflm run gpt-oss:20b
 ▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-oflm run gpt-oss-safeguard:20b
+oflm run gpt-oss-sg:20b
 ```
 
 Default reasoning effort for both CLI and Server Modes is Medium

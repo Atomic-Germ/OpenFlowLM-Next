@@ -75,6 +75,13 @@ K_TILE = 64        # matmul k-tile (mac_dims s=8 divides it)
 BAND_K = 256       # q4 pool band k-width (one q4_1_pack.py "chunk pair")
 BAND_BYTES = 10240 # 64 rows x 256 K x 5/8 B/elem
 
+# weight element per fifo slot: (bytes, K covered, matmul k-tiles, pool bytes per weight as num/den)
+FORMATS = {
+    "q4_1": (BAND_BYTES, BAND_K, 4, 5, 8),
+    "bf16": (8192, 64, 1, 2, 1),          # recipes/pack.py pack_bf16_gemm, the A operand as stored
+}
+FMT = os.environ.get("GQP_FMT", "q4_1")
+
 # ---- shape this build is specialised to (env-driven, like gemv_q4.py) ----
 N_WEIGHT = int(os.environ.get("GQP_N", 2560))
 K = int(os.environ.get("GQP_K", 2560))
@@ -207,7 +214,8 @@ def gemm_q4_prefill(
     W: In, X: In, Y: Out, *,
     n_weight: CompileTime[int], k: CompileTime[int], t: CompileTime[int],
     tile_n: CompileTime[int] = 32, b_reuse: CompileTime[bool] = True,
-    srchash: CompileTime[int] = 0, bfp16: CompileTime[bool] = False, wfmt_t2: CompileTime[bool] = False,
+    srchash: CompileTime[int] = 0, fmt: CompileTime[str] = "q4_1",
+    bfp16: CompileTime[bool] = False, wfmt_t2: CompileTime[bool] = False,
     kt: CompileTime[int] = 64, yt: CompileTime[bool] = False, t2_stride: CompileTime[int] = 2176,
     xbfp: CompileTime[bool] = False,
 ):
@@ -215,16 +223,18 @@ def gemm_q4_prefill(
     assert kt in (64, 128) and (kt == 64 or wfmt_t2), "k_tile 128 is the t2 weight path's"
     assert not yt or bfp16, "the token-major C reorder reads the bfp16 mmul's (8 x 8) C blocks"
     assert not xbfp or (bfp16 and wfmt_t2 and kt == 128 and yt), "GQP_XBFP is the t2, k 128, token-major build's"
-    KPB = BAND_K // k_tile               # matmul calls per band
+    assert fmt == "q4_1" or not (bfp16 or wfmt_t2 or xbfp or yt or kt != 64), "the bfp16 / t2 builds read a q4_1-shaped band"
+    elem_bytes, elem_k, _, pool_num, pool_den = FORMATS[fmt]
+    KPB = elem_k // k_tile               # matmul calls per weight element
     n = tile_n
     n_aie_rows, n_aie_cols = N_AIE_ROWS, N_AIE_COLS
 
     assert n_weight % (m * n_aie_rows) == 0, "N_WEIGHT must tile into 256-row blocks"
-    assert k % BAND_K == 0, "K must be a multiple of 256 (one q4 band-k-group)"
+    assert k % elem_k == 0, f"K must be a multiple of {elem_k} (one {fmt} element)"
     assert t % (n * n_aie_cols) == 0, f"T must be a multiple of {n * n_aie_cols}"
 
     NRB = n_weight // (m * n_aie_rows)   # weight row-block-groups
-    NBG = k // BAND_K                    # band-k-groups per row-block (weight DMA granularity)
+    NBG = k // elem_k                    # weight elements per row-block (weight DMA granularity)
     NKT = k // k_tile                    # matmul k-tile steps == NBG*KPB
     T_TILES = t // (n * n_aie_cols)      # T-tile iterations per core
     assert NKT == NBG * KPB
@@ -245,17 +255,17 @@ def gemm_q4_prefill(
         assert (r, s, mt) == want, f"unexpected aie2p bf16 mac_dims {(r, s, mt)}, wanted {want}"
     assert m % r == 0 and k_tile % s == 0 and n % mt == 0
 
-    dequant_srcs = ensure_dequant_entries(bfp=xbfp)
     idq = xbfp and os.environ.get("GQP_IDQ") == "1"
     assert not wfmt_t2 or bfp16, "the t2 weight dequant writes the bfp16 mmul's (8 x 8) A blocks"
-    band_bytes = 2 * T2_BODY if wfmt_t2 else BAND_BYTES
-    band_ty = np.ndarray[(band_bytes,), np.dtype[np.uint8]]
+    band_bytes = 2 * T2_BODY if wfmt_t2 else elem_bytes
     # the two-pass q4_1 dequant's row-major nibble scratch (GQD_TWO_PASS). The t2 path never
     # touches it and needs the L1, so it keeps a token 64 B; q4_1 builds keep theirs as they were.
     nib_ty = np.ndarray[(64 if wfmt_t2 else m * k_tile,), np.dtype[np.uint8]]
     # the A operand: bf16, or (GQP_XBFP) 9 B per 8 values of bfp16ebs8
     scratch_ty = (np.ndarray[(m * k_tile * 9 // 8,), np.dtype[np.uint8]] if xbfp
                   else np.ndarray[(m * k_tile,), np.dtype[dtype_in]])
+    # bf16 elements go to the matmul as they arrive, so the fifo carries the A operand's own type
+    band_ty = scratch_ty if fmt == "bf16" else np.ndarray[(band_bytes,), np.dtype[np.uint8]]
     # 0167 stage 16: GQP_SCALAR_GATHER=1 rebuilds Pass 1 with its original
     # scalar integer gather (gemm_q4_dequant.h's GQD_SCALAR_GATHER branch),
     # for a same-toolchain before/after A-B against the vectorized default.
@@ -278,17 +288,23 @@ def gemm_q4_prefill(
             _dequant_flags.append("-DGQD_IDQ")
     # GQP_NULL_MM=1: timing-only ablation, the matmul call skipped (B still acquired/released)
     null_mm = os.environ.get("GQP_NULL_MM") == "1"
-    dequant_kernels = [
-        ExternalFunction(f"gqd_entry_k{ky}", source_file=str(dequant_srcs[ky]),
-                         arg_types=[band_ty, nib_ty, scratch_ty], include_dirs=_include_dirs(),
-                         compile_flags=_dequant_flags)
-        for ky in range(KPB)
-    ]
+    if fmt == "q4_1":
+        dequant_srcs = ensure_dequant_entries(bfp=xbfp)
+        dequant_kernels = [
+            ExternalFunction(f"gqd_entry_k{ky}", source_file=str(dequant_srcs[ky]),
+                             arg_types=[band_ty, nib_ty, scratch_ty], include_dirs=_include_dirs(),
+                             compile_flags=_dequant_flags)
+            for ky in range(KPB)
+        ]
+    else:
+        dequant_kernels = []
 
     # q4_1: 5120 B per 32 x 256 chunk; t2: t2_stride B (the 2176 B body, padded or not)
     assert not wfmt_t2 or (t2_stride >= T2_BODY and t2_stride % 64 == 0), t2_stride
-    pool_bytes = n_weight * k // 8192 * t2_stride if wfmt_t2 else n_weight * k * 5 // 8
-    W_ty = np.ndarray[(pool_bytes,), np.dtype[np.uint8]]
+    pool_bytes = n_weight * k // 8192 * t2_stride if wfmt_t2 else n_weight * k * pool_num // pool_den
+    # W is addressed in the element's own unit: bytes, or bf16 words for the bf16 format
+    w_dtype, w_unit = (dtype_in, 2) if fmt == "bf16" else (np.uint8, 1)
+    W_ty = np.ndarray[(pool_bytes // w_unit,), np.dtype[w_dtype]]
     Y_ty = np.ndarray[(n_weight * t,), np.dtype[dtype_out]]
     if xbfp:   # the activation as bfp16 tiles: [K/kt][T/n] tiles of [n/8][kt/8] 72-byte block vectors
         X_ty = np.ndarray[(k * t * 9 // 8,), np.dtype[np.uint8]]
@@ -355,10 +371,12 @@ def gemm_q4_prefill(
         for row in range(n_aie_rows):
             C_l1l2_fifos[row][col] = tmp[row]
 
-    nib_bufs = [[Buffer(nib_ty, name=f"nib_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
-    scratch_bufs = [[Buffer(scratch_ty, name=f"ascr_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
-    acc_bufs = ([[Buffer(C_acc_ty, name=f"cacc_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
-                if yt else None)
+    def grid(ty, name):
+        return [[Buffer(ty, name=f"{name}_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
+
+    # per-core L1 the format needs besides the fifos: q4_1 nibble + A scratch, bf16 none
+    local_grids = [grid(nib_ty, "nib"), grid(scratch_ty, "ascr")] if fmt == "q4_1" else []
+    acc_bufs = grid(C_acc_ty, "cacc") if yt else None
 
     # The band count K/256 was the only thing making each K its own image, and so its own
     # hardware context - the block route pays ~2.5 ms every time it changes one. It arrives
@@ -374,7 +392,9 @@ def gemm_q4_prefill(
     # One weight row-block group per pass. The worker body already loops forever (IRON's
     # while_true), and a core cannot see dispatch boundaries -- it blocks on the next
     # element -- so the row-block count is a property of the instruction stream too.
-    def core_fn(in_a, in_b, out_c, zero, matmul, nib_scr, a_scr, my_rtp, *rest):
+    def core_fn(in_a, in_b, out_c, zero, matmul, *extra):
+        n_local = len(local_grids)
+        local, my_rtp, rest = extra[:n_local], extra[n_local], extra[n_local + 1:]
         if yt:
             c_acc, c_tok, dequants = rest[0], rest[1], rest[2:]
         else:
@@ -388,10 +408,11 @@ def gemm_q4_prefill(
 
             def one_band(band):
                 for ky in range(KPB):  # compile-time (Python) unroll: distinct entry symbols
-                    dequants[ky](band, nib_scr, a_scr)
+                    if fmt == "q4_1":
+                        dequants[ky](band, local[0], local[1])
                     elem_in_b = in_b.acquire(1)
                     if not null_mm:
-                        matmul(a_scr, elem_in_b, elem_out)
+                        matmul(band if fmt == "bf16" else local[-1], elem_in_b, elem_out)
                     in_b.release(1)
 
             # DO NOT reach for a WorkerRuntimeBarrier here to order the rtp read. It is what
@@ -426,7 +447,7 @@ def gemm_q4_prefill(
         return Worker(
             core_fn,
             [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(), C_l1l2_fifos[row][col].prod(),
-             zero_kernel, matmul_kernel, nib_bufs[row][col], scratch_bufs[row][col],
+             zero_kernel, matmul_kernel, *[g[row][col] for g in local_grids],
              rtp_bufs[row][col], *([acc_bufs[row][col], ctok] if yt else []), *dequant_kernels],
             stack_size=0x1000,
         )
@@ -449,14 +470,14 @@ def gemm_q4_prefill(
     # build's priority; this is strictly more barriers than necessary and a
     # real, reported inefficiency (trap 18's "+4.9%" cost applies again here,
     # likely worse given the finer granularity).
-    row_k_bytes = NBG * (2 * t2_stride if wfmt_t2 else BAND_BYTES)  # one band_idx across the WHOLE K, in DRAM
+    row_k_bytes = NBG * (2 * t2_stride if wfmt_t2 else elem_bytes) // w_unit  # W units for one band_idx across the WHOLE K
     band_idx_stride = n_aie_rows * row_k_bytes
 
     def a_tap(row: int, rbg: int) -> TensorAccessPattern:
         off = row * row_k_bytes + rbg * band_idx_stride
         if wfmt_t2 and t2_stride != T2_BODY:      # every chunk's 2176 B body, its padding skipped
             return TensorAccessPattern((pool_bytes,), off, [1, 2 * NBG, T2_BODY], [row_k_bytes, t2_stride, 1])
-        return TensorAccessPattern((pool_bytes,), off, [1, row_k_bytes], [row_k_bytes, 1])
+        return TensorAccessPattern((pool_bytes // w_unit,), off, [1, row_k_bytes], [row_k_bytes, 1])
 
     # ---- activation taps: same "k,n" pre-tiled access pattern as the
     # reference (npu_offload/gemm_rtp/gemm_pretiled.py's B_taps, "pretiled"
@@ -527,7 +548,7 @@ def gemm_q4_prefill(
 DESIGN = gemm_q4_prefill
 SPECIALIZE = {
     "n_weight": N_WEIGHT, "k": K, "t": T, "tile_n": TILE_N,
-    "b_reuse": recommend_b_reuse(K, T, TILE_N), "bfp16": BFP16, "wfmt_t2": WFMT == "t2", "kt": KT, "yt": YT,
+    "b_reuse": recommend_b_reuse(K, T, TILE_N), "fmt": FMT, "bfp16": BFP16, "wfmt_t2": WFMT == "t2", "kt": KT, "yt": YT,
     "t2_stride": T2_STRIDE, "xbfp": XBFP,
 }
 

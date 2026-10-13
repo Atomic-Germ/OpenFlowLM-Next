@@ -1,6 +1,8 @@
 build
 build_*/
 build-*/
+npu-cache
+oflm-data
 .vscode
 .codegraph/
 *.egg-info/
@@ -19,6 +21,9 @@ Models
 # tracked and unaffected, and a NEW one is silently not added.
 !utilities/q4nx-build/q4nx/models/
 !utilities/q4nx-build/q4nx/models/**
+# ...but the negation above re-admits the models dir's __pycache__ too, since
+# `**` matches inside it. Re-ignore it, or a pack run commits .pyc files.
+utilities/q4nx-build/q4nx/models/__pycache__/
 tmp
 
 # open_npue AIE design sets -- BUILT, not checked in.
@@ -89,3 +94,13 @@ src/xclbins/*/open_kernels*/
 
 # repro-open-timeout.sh output (server logs, per-attempt client logs)
 .repro-open-timeout/
+
+# Nix build result symlinks
+result
+result-*
+bin/
+.env
+
+# local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
+TestGGUF/
+*.gguf

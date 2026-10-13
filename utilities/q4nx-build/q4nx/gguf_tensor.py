@@ -407,10 +407,37 @@ class GGUFTensor:
             else:  # BF16
                 return [torch.from_numpy(self.data.copy()).view(torch.bfloat16)]
 
-        elif self.tensor_type == GGMLQuantizationType.Q4_0:
-            return self.unpack_q4_0(self.data, self.shape[0])
-        elif self.tensor_type == GGMLQuantizationType.Q4_1:
-            return self.unpack_q4_1(self.data, self.shape[0])
+        elif self.tensor_type in (GGMLQuantizationType.Q4_0, GGMLQuantizationType.Q4_1, GGMLQuantizationType.Q4_K):
+            # All three carry the same structure: uint4 codes on a per-32 group
+            # with an effective (scale, min) pair, i.e. w = t*q + m (additive
+            # convention). Canonicalize to that additive-min, non-negative-code
+            # form once, then hand the packer exactly the convention it expects:
+            #
+            #   target Q4_1: (t, m, q) as-is
+            #   target Q4_K: (t, -m, q) -- pack_q4k stores the min SUBTRACTED,
+            #                 and M is negated again at pack time, so the triple
+            #                 here must match unpack_q4_k's (t, u, q) with
+            #                 u = -m.
+            #   target Q4_0: only a Q4_0 source passes through (its zero min
+            #                 and implicit -8 offset survive); anything else has
+            #                 a real min Q4_0 cannot store, so re-quantize.
+            #   target Q8_0/MXFP4/float: no additive-min 4-bit pack exists;
+            #                 re-quantize from the dequantized values.
+            #
+            # Codes and d are preserved exactly -- only Q4_K's fp16 S*s_j and
+            # M*m_j products get rounded to fp16 at the Q4_1/Q4_K pack boundary.
+            # Before this, a Q4_K source with a Q4_1 target packed unpack_q4_k's
+            # subtracted min u as Q4_1's added min -- a silent sign flip that
+            # mirrored every weight about its block minimum; and a Q4_0 source
+            # with a Q4_1 target packed q-8 (negative) codes as uint4.
+            d, m_add, q = self._canonical_q4_triple()
+            if default_tensor_type == GGMLQuantizationType.Q4_1:
+                return (d, m_add, q)
+            if default_tensor_type == GGMLQuantizationType.Q4_K:
+                return (d, -m_add, q)
+            if default_tensor_type == GGMLQuantizationType.Q4_0 and self.tensor_type == GGMLQuantizationType.Q4_0:
+                return self.unpack_q4_0(self.data, self.shape[0])
+            return self._requantize_to(default_tensor_type)
         elif self.tensor_type == GGMLQuantizationType.Q8_0:
             if default_tensor_type == GGMLQuantizationType.Q8_0:
                 return self.unpack_q8_0(self.data, self.shape[0])
@@ -420,11 +447,6 @@ class GGUFTensor:
             return self._requantize_to(default_tensor_type)
         elif self.tensor_type == GGMLQuantizationType.MXFP4:
             return self.unpack_mxfp4(self.data, self.shape[0])
-        elif self.tensor_type == GGMLQuantizationType.Q4_K:
-            # Read natively. Stacking a dequantize onto a re-quantize costs 0.240 bits of
-            # ENOB and 0.375 bpw against this path, and damages the tail far more than the
-            # mean; q5/q6 still take the fallback below.
-            return self.unpack_q4_k(self.data, self.shape[0])
         else:
             """
                 If the tensor type is not natively packable as-is (either a
@@ -440,13 +462,40 @@ class GGUFTensor:
             # (shortconv / ssm-style weights) -- cannot be packed that way, so
             # keep them as a float passthrough rather than crashing in
             # gguf.quantize.
-            if wants_quantized_target and self.shape and self.shape[-1] % 32 != 0:
+            # The columns (matul K axis) are shape[0] in GGUF's innermost-first
+            # order -- that is exactly the symmetry the native unpackers use
+            # (unpack_q4_1(tensor, self.shape[0])). Checking shape[-1]
+            # instead sends a Q6_K [hidden, vocab] token embedding (vocab is
+            # almost never a multiple of 32) down the float-passthrough
+            # escape hatch, which then crashes a head that needs a quantized
+            # triple (hunyuan's lm_head padding path).
+            if wants_quantized_target and self.shape and self.shape[0] % 32 != 0:
                 w = dequantize(self.data, self.tensor_type)
                 w = torch.from_numpy(w).contiguous()
                 if self.tensor_type == GGMLQuantizationType.BF16:
                     w = w.view(torch.bfloat16)
                 return [w]
             return self._requantize_to(default_tensor_type)
+
+    def _canonical_q4_triple(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(d, m_add, q) with non-negative uint4 codes and an ADDITIVE min.
+
+        w = d * q + m_add on a per-32-group (d, m_add). Q4_0 and Q4_1 are
+        already in this shape (Q4_0's m_add is just its implicit -8*d offset
+        folded out of the codebook), Q4_K's subtracted min flips sign.
+        """
+        if self.tensor_type == GGMLQuantizationType.Q4_1:
+            return self.unpack_q4_1(self.data, self.shape[0])
+        if self.tensor_type == GGMLQuantizationType.Q4_0:
+            d, m_zero, qs = self.unpack_q4_0(self.data, self.shape[0])
+            # unpack_q4_0 returns codes shifted by -8 to be signed; undo that
+            # so q is uint4 again, moving the offset onto the min.
+            q = qs + 8
+            return (d, -8.0 * d, q)
+        if self.tensor_type == GGMLQuantizationType.Q4_K:
+            t, u, q = self.unpack_q4_k(self.data, self.shape[0])
+            return (t, -u, q)
+        raise ValueError(f"_canonical_q4_triple: {self.tensor_type.name}")
 
     def _requantize_to(self, default_tensor_type: GGMLQuantizationType) -> np.ndarray:
         """Dequantize the source tensor and re-quantize it into the requested

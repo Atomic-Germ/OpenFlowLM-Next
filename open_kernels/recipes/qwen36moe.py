@@ -21,18 +21,48 @@ offset fails that test before it reaches a build.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .attnknobs import knobs as attn_knobs, probe_env  # noqa: F401  (probe_env: cache.py reads it off the family module)
+from .attnknobs import knobs as attn_knobs, probe_env as _attn_probe_env
 from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
+
+
+def one_context() -> bool:
+    """The decode layer loop as ONE hardware context: the two whole-layer designs merged into
+    designs/layer_x/ux.py's four instruction streams over one image (OPEN-DECODE-ONE-CONTEXT).
+    On by default; OPEN_LAYER_ONE_CTX=0 at export rolls back to the two-context lx/ax sets.
+    A spec the merged image cannot carry stays on two contexts anyway (`merged_image`)."""
+    return os.environ.get("OPEN_LAYER_ONE_CTX", "1") != "0"
+
+
+def merged_image(spec: ModelSpec) -> bool:
+    """Whether this spec's layer kernels are the merged image. It needs both layer types, and
+    no q8 projection role: ux.py's main-core program has room for ONE GEMV entry (the main
+    cores sit at 16256 of 16384 bytes), so a q8 model of the family keeps lx/ax."""
+    return one_context() and spec.has_linear and spec.has_full and not spec.q8_roles
+
+
+def probe_env() -> dict[str, str]:
+    """The build key's probe variables (cache.py reads this off the family module). The
+    merged-image flavour joins them: it changes what `builds` compiles and what `programs`
+    emits, and nothing else in the key can see it, so without this a merged set and an
+    lx/ax set would share a key and the second would be skipped."""
+    e = dict(_attn_probe_env())
+    if one_context():
+        e["OPEN_LAYER_ONE_CTX"] = "1"
+    return e
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
+CHUNK_F32 = 6144             # GGUF-direct (spec.quant "q4_1_f32"): the same tile, the fp16
+                             # block scales/mins widened EXACTLY to f32 (open_kernels/gguf_pool.py)
 CHUNK_VALUES = 8192
 CHUNK_ROWS = 32
 CHUNK_COLS = CHUNK_VALUES // CHUNK_ROWS   # 256: the k-tile the band law and std_perm both count in
 Q8_CHUNK = 8704              # lm_head q8: 8192 int8 + 256 bf16 scales
+Q8_CHUNK_F32 = 9216          # GGUF-direct: the same tile with f32 scales
 ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
 PER_CALL = 2                 # chunks per w element
@@ -59,20 +89,39 @@ AB_LANES = 32                # dn_glue.h's kV: the lanes of one alpha/beta W row
                              # W element stays 64 rows x 32 bf16 = 4 KB (see glue_ab_tile).
 
 
-def q4_bytes(rows: int, cols: int) -> int:
+def chunk_bytes(quant: str) -> int:
+    """The q4 pool chunk bytes for a scale layout: q4nx bf16 (5120) or GGUF-direct f32 (6144)."""
+    if quant == "q4_1":
+        return CHUNK
+    if quant == "q4_1_f32":
+        return CHUNK_F32
+    raise OpRangeError(f"quant={quant!r}: no open q4 pool chunk layout "
+                       f"(have q4_1, q4_1_f32)")
+
+
+def q8_chunk_bytes(quant: str) -> int:
+    """The lm_head q8 chunk bytes: q4nx bf16 scales (8704) or GGUF-direct f32 (9216)."""
+    if quant in ("q4_1", "q4_1_f32", "q8_0"):
+        return Q8_CHUNK
+    if quant == "q8_0_f32":
+        return Q8_CHUNK_F32
+    raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
+
+
+def q4_bytes(rows: int, cols: int, quant: str = "q4_1") -> int:
     n = rows * cols
     if n % CHUNK_VALUES:
         raise OpRangeError(f"q4 tensor [{rows}, {cols}] is not a whole number of {CHUNK_VALUES}-value chunks")
-    return n // CHUNK_VALUES * CHUNK
+    return n // CHUNK_VALUES * chunk_bytes(quant)
 
 
-def q4_chunks(rows: int, cols: int) -> int:
-    return q4_bytes(rows, cols) // CHUNK
+def q4_chunks(rows: int, cols: int, quant: str = "q4_1") -> int:
+    return q4_bytes(rows, cols, quant) // chunk_bytes(quant)
 
 
-def band_bytes(K: int) -> int:
+def band_bytes(K: int, quant: str = "q4_1") -> int:
     """One 64-row band of a K-wide standard-layout matrix: K/128 chunks."""
-    return q4_bytes(BAND_ROWS, K)
+    return q4_bytes(BAND_ROWS, K, quant)
 
 
 def per_band(K: int) -> int:
@@ -97,12 +146,19 @@ def per_band(K: int) -> int:
 # is streamed as 16-row half-tiles of its chunks: the same 64-row band, twice the bytes,
 # four half-tiles per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h).
 def role_bytes(spec: ModelSpec, role: str, rows: int, cols: int) -> int:
-    return q4_bytes(rows, cols) * (2 if spec.quant_of(role) == "q8" else 1)
+    # a q8 role is twice the q4_1 band; q4_1 and q4_1_f32 (GGUF-direct) use their own chunk layout
+    q = spec.quant_of(role)
+    if q == "q8":
+        return q4_bytes(rows, cols) * 2
+    return q4_bytes(rows, cols, "q4_1" if q == "t2" else q)      # t2 counts its q4_1 source chunks
 
 
 def role_chunks(spec: ModelSpec, role: str, rows: int, cols: int) -> int:
-    """Pool elements the projection occupies: q4_1 chunks, or q8 half-tiles (twice as many)."""
-    return role_bytes(spec, role, rows, cols) // CHUNK
+    """Pool elements the projection occupies: q4_1 / q4_1_f32 chunks, or q8 half-tiles (twice as many)."""
+    q = spec.quant_of(role)
+    if q == "q8":
+        return q4_chunks(rows, cols) * 2
+    return q4_chunks(rows, cols, "q4_1" if q == "t2" else q)
 
 
 def quant_check(spec: ModelSpec, who: str) -> None:
@@ -152,7 +208,15 @@ def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: 
     q8 (twice the pool elements, 16-row half-tiles). `chunk0` is a SOURCE file-chunk offset
     in either format, so the fused [q | gate] split reads the same way."""
     q = spec.quant_of(role)
-    op: dict = {"op": {"q8": "q8_perm", "t2": "t2_perm"}.get(q, "std_perm"), "tensor": tensor, "dst": dst}
+    if q == "q4_1_f32":
+        pop = "std_perm_gguf"
+    elif q == "q8":
+        pop = "q8_perm"
+    elif q == "t2":
+        pop = "t2_perm"
+    else:
+        pop = "std_perm"
+    op: dict = {"op": pop, "tensor": tensor, "dst": dst}
     if chunk0 is not None:
         op["chunk0"] = chunk0
     op["nch"] = role_chunks(spec, role, rows, cols)
@@ -218,6 +282,10 @@ def ab_lanes(spec: ModelSpec) -> int:
     dn_glue's accumulator width. 32 heads (every validated model) is itself."""
     return roundup(spec.lin_value_heads, AB_LANES)
 
+
+def ab_banks(spec: ModelSpec) -> int:
+    """Number of sequential 32-lane AB projections, not a wider vector primitive."""
+    return ab_lanes(spec) // AB_LANES
 
 def glue_fills(xn_elems: int, half_outer: bool) -> int:
     """DMA fills the dense glue's `side` channel issues per linear-attention dispatch, for an
@@ -335,6 +403,9 @@ class Attn:
     # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
     # kernel every family compiled before it existed
     VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
+    BLOCK: int = 0                       # 1: attn.h ATTN_BLOCK_ONLY -- no single-row kernel is built,
+                                         # and the driver pads the streamed row count to a whole
+                                         # number of blocks (stream_patch::attn_apply, manifest `rb`)
 
 
 @dataclass(frozen=True)
@@ -967,7 +1038,7 @@ def attn(spec: ModelSpec) -> Attn | None:
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
         OG_ELEMS=roundup(qw * 2, ELEM) // ELEM,
-        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB,
+        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
     )
 
 
@@ -1072,12 +1143,74 @@ GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 col
 # up (the plan's B(3)); the design and the driver are ready for it.
 MB_NT = 8
 ATTN_LMAX = 4096      # the widest attention GEMM stream (rows of window); a longer window is chunked on the host
-# The projections the route streams out of the layer's own packed bytes, which the GEMM can
-# read only at q4_1. `linear_out` is not among them: at q8 the route packs it as the exact
-# sum of two q4_1 halves (a `from: pack` weight), which is what lets a Qwen3.5 container --
-# whose ssm_out_proj ships q8 -- have a route at all.
-GEMM_ROLES = ("attn", "linear", "shared")
-DENSE_GEMM_ROLES = ("attn", "linear", "ffn")    # ... and with a dense FFN (Qwen3.5)
+# The q4_1 GEMM reads the band law; an all-q8 MoE route runs every GEMM on bf16 instead (bf16_route), and
+# a q8 projection elsewhere runs as its exact q4_1 split (gemm_weight): every q8 code is 16 hi + lo, so two q4_1 halves sum
+# to it exactly. That is how the published q8 containers -- the 35B's attention and DeltaNet,
+# Qwen3.5's ssm_out_proj -- get a route at all; re-quantising them to q4_1 flips 13% of the
+# 35B's next tokens (utilities/quant-compare/README.md). The shared expert has no q8 form in
+# this family (qwen36moe refuses it), so it is the one role that still means "no route".
+
+
+# the pack op, context and kernel-name prefix of the bf16 GEMM, and its bytes per source chunk (32 x 256 values)
+GEMM_FORMATS = {"bf16": ("bf16_gemm", "gemmb", "gemmb_", 2 * CHUNK_VALUES)}
+
+
+def gemm_format_of(weight: dict) -> str:
+    """q4_1 for a weight packed in the band law, else the GEMM format its pack ops build."""
+    if weight["from"] != "pack":
+        return "q4_1"
+    op = weight["pack"][0]["op"]
+    return next((f for f, v in GEMM_FORMATS.items() if v[0] == op), "q4_1")
+
+
+def bf16_route(spec: ModelSpec, dense: bool) -> bool:
+    """Every projection q8 on a MoE route: all its GEMMs, the shared expert's too, read bf16 on one context."""
+    if dense:
+        return False
+    roles = (["attn"] if spec.has_full else []) + (["linear", "linear_out"] if spec.has_linear else [])
+    return bool(roles) and all(spec.quant_of(r) == "q8" for r in roles)
+
+
+def bf16_weight(ops: list[dict]) -> dict:
+    """Pack ops `ops` (q8_perm or std_perm, in order, stacked along the rows) as one bf16 GEMM weight."""
+    pack, dst = [], 0
+    for o in ops:
+        op = {"op": "bf16_gemm", "tensor": o["tensor"]}
+        if "chunk0" in o:
+            op["chunk0"] = o["chunk0"]
+        op.update(nch=o["nch"] // 2 if o["op"] == "q8_perm" else o["nch"], in_dim=o["in_dim"], dst=dst)
+        if o["op"] == "std_perm":
+            op["via"] = "q4_1"     # as the sequential path reads it: a q8 source re-quantized, like every q4 op
+        pack.append(op)
+        dst += op["nch"] * GEMM_FORMATS["bf16"][3]
+    return {"from": "pack", "pack": pack}
+
+
+def gemm_weight(ops: list[dict], idxs: list[int]) -> dict:
+    """The route's weight buffer for pack ops `idxs` of a layer type's plan: the ops in place
+    when they are q4_1 (what is packed is already the band law the GEMM reads), or, when the
+    container stores them at q8, their exact q4_1 split -- every op's hi half, then every op's
+    lo half, stacked in one buffer (pools split_q4_1_chunks; one q4_1 chunk per q8 chunk, so
+    half the q8 op's half-tile count). The step that reads a split weight runs twice the rows
+    and carries `split`, and the host adds the halves. A weight mixing the two formats would
+    need a lo half for an op that has none, so it is refused rather than half-split."""
+    sel = [ops[i] for i in idxs]
+    q8 = [o["op"] == "q8_perm" for o in sel]
+    if not any(q8):
+        return {"from": "pool", "ops": list(idxs)}
+    if not all(q8):
+        names = ", ".join(f"{o['tensor']} ({o['op']})" for o in sel)
+        raise OpRangeError(f"gemm route: a weight that mixes q8 and q4_1 pack ops has no exact split: {names}")
+    pack, dst = [], 0
+    for part in ("hi", "lo"):
+        for o in sel:
+            op = {"op": "std_perm", "tensor": o["tensor"]}
+            if "chunk0" in o:
+                op["chunk0"] = o["chunk0"]
+            op.update(nch=o["nch"] // 2, in_dim=o["in_dim"], dst=dst, split=part)
+            pack.append(op)
+            dst += op["nch"] * CHUNK
+    return {"from": "pack", "pack": pack}
 
 
 def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
@@ -1089,7 +1222,7 @@ def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
     return hits[0]
 
 
-def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> dict | None:
+def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_split: bool = False) -> dict | None:
     """Per layer type the `gemm_block` the driver reads, plus the contexts / kernels / globals /
     builds the route adds. None when a projection is streamed at q8: the GEMM dequantises the
     q4_1 band law only, and the sequential path is then exactly what it was.
@@ -1097,22 +1230,35 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     `ffn="dense"` is Qwen3.5 (recipes/qwen35.py): the same linear / full halves, and in place of
     the router, the shared expert and the routed experts an `ffn_program` -- up|gate then down,
     the shared expert's two GEMMs without its sigmoid gate. `plan` is that family's pack plan's
-    `layer_types`, since the op indices the weight buffers name are its own."""
+    `layer_types`, since the op indices the weight buffers name are its own. `q8_split` builds an
+    all-q8 route as the exact q4_1 split, which the bf16 route carries as `variants.lean` (OPEN-PREFILL-MODE)."""
     dense = ffn == "dense"
-    if any(spec.quant_of(r) == "q8" for r in (DENSE_GEMM_ROLES if dense else GEMM_ROLES)):
+    if not dense and spec.quant_of("shared") == "q8":
         return None
     L, T = layout(spec, ffn=ffn), GEMM_T
     hid, ff = spec.hidden, spec.intermediate if dense else spec.moe_intermediate
     plan = plan if plan is not None else pack_plan(spec)["layer_types"]
-    shapes: set[tuple[int, int]] = set()
+    shapes: set[tuple[int, int, str]] = set()
+    bf16 = bf16_route(spec, dense) and not q8_split
 
-    def ctx(N: int, K: int) -> str:
+    def weight(ops: list[dict], idxs: list[int]) -> dict:
+        return bf16_weight([ops[i] for i in idxs]) if bf16 else gemm_weight(ops, idxs)
+
+    def ctx(N: int, K: int, fmt: str = "q4_1") -> str:
         if N % 256 or K % 256:
             raise OpRangeError(f"gemm route: [{N}, {K}] is not a multiple of 256 in both dims")
-        shapes.add((N, K))
-        return f"gemm_n{N}_k{K}"
+        shapes.add((N, K, fmt))
+        return f"{GEMM_FORMATS[fmt][2] if fmt != 'q4_1' else 'gemm_'}n{N}_k{K}"
 
-    def run(N: int, K: int, w: str) -> dict:
+    def run(N: int, K: int, w: str, weights: dict | None = None) -> dict:
+        """A GEMM step of N output rows. When its weight (looked up in `weights`) is a split,
+        the dispatch is twice the rows and the step says so; a q8 / bf16 GEMM weight runs on its own kernel."""
+        if weights is not None and gemm_format_of(weights[w]) != "q4_1":
+            return {"op": "run", "kernel": ctx(N, K, gemm_format_of(weights[w])),
+                    "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
+        if weights is not None and weights[w]["from"] == "pack" and weights[w]["pack"][0].get("split"):
+            N2 = 2 * N
+            return {"op": "run", "kernel": ctx(N2, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N2}"], "split": True}
         return {"op": "run", "kernel": ctx(N, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
 
     # The routed experts stay on mx, one token at a time, until the token-batched expert
@@ -1157,11 +1303,11 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         # up and gate are the pool's first two ops, contiguous and both std_perm, so one GEMM
         # gives [up | gate] -- the layout the shared expert's up|gate GEMM already has
         pool = plan[lt]["pool"]
-        return {"ffn_program": [run(2 * ff, hid, "gffn_ug_w"), run(hid, ff, "gffn_down_w")],
-                "ffn_weights": {
-                    "gffn_ug_w": {"from": "pool", "ops": [_op_index(pool, "mlp.up_proj.weight"),
-                                                          _op_index(pool, "mlp.gate_proj.weight")]},
-                    "gffn_down_w": {"from": "pool", "ops": [_op_index(pool, "mlp.down_proj.weight")]}}}
+        w = {"gffn_ug_w": gemm_weight(pool, [_op_index(pool, "mlp.up_proj.weight"),
+                                             _op_index(pool, "mlp.gate_proj.weight")]),
+             "gffn_down_w": gemm_weight(pool, [_op_index(pool, "mlp.down_proj.weight")])}
+        return {"ffn_program": [run(2 * ff, hid, "gffn_ug_w", w), run(hid, ff, "gffn_down_w", w)],
+                "ffn_weights": w}
 
     def moe_of(lt: str, a_xm: int, a_rout: int, a_res: int) -> tuple[dict, dict, dict]:
         """The MoE tail's keys, in the three places the 35B's manifest has always had them."""
@@ -1174,20 +1320,21 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
 
     def shared_of(lt: str) -> dict:
         pool = plan[lt]["pool"]
-        return {"shared_program": [run(2 * sff, hid, "gshare_w"), run(hid, sff, "gsdown_w")],
-                "shared_ff": sff,
-                "shared_weights": {
-                    "gshare_w": {"from": "pool", "ops": [_op_index(pool, "share_up_exps_proj.weight"),
-                                                         _op_index(pool, "share_gate_exps_proj.weight")]},
-                    "gsdown_w": {"from": "pool", "ops": [_op_index(pool, "share_down_exps_proj.weight")]}}}
+        sw = {"gshare_w": weight(pool, [_op_index(pool, "share_up_exps_proj.weight"),
+                                        _op_index(pool, "share_gate_exps_proj.weight")]),
+              "gsdown_w": weight(pool, [_op_index(pool, "share_down_exps_proj.weight")])}
+        return {"shared_program": [run(2 * sff, hid, "gshare_w", sw), run(hid, sff, "gsdown_w", sw)],
+                "shared_ff": sff, "shared_weights": sw}
 
     types: dict[str, dict] = {}
     if spec.has_linear:
         pool, consts = plan[LINEAR]["pool"], plan[LINEAR]["consts"]
         nch, vw = spec.lin_qkv_dim, spec.lin_value_width
         out_i = _op_index(consts, "linear_attn.ssm_out_proj.weight")
-        split = spec.quant_of("linear_out") == "q8"
-        if split:
+        split = spec.quant_of("linear_out") == "q8" and not bf16
+        if bf16:
+            gout = bf16_weight([consts[out_i]])
+        elif split:
             # The sequential kernel streams this projection at q8 and the GEMM reads q4_1 only.
             # Re-quantising it costs what OPEN-QUANT-Q8 measured (the reason q8 is native), so
             # the route packs the q8 weight as the exact sum of two q4_1 ones (hi and lo codes,
@@ -1200,12 +1347,15 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         else:
             gout = {"from": "consts", "ops": [out_i]}
         m0, m1, m2 = moe_of(LINEAR, L.A_XM, L.A_ROUT, L.A_RES)
+        w = {"gqkvz_w": weight(pool, [_op_index(pool, "linear_attn.qkv_proj.weight"),
+                                           _op_index(pool, "self_attn.gate_proj.weight")]),
+             "gout_w": gout}
         types[LINEAR] = {
             "kind": "linear", "t": T, "eps": spec.norm_eps,
-            "program": [run(nch + vw, hid, "gqkvz_w"), run(2 * hid if split else hid, vw, "gout_w")], **m0,
-            "weights": {"gqkvz_w": {"from": "pool", "ops": [_op_index(pool, "linear_attn.qkv_proj.weight"),
-                                                           _op_index(pool, "self_attn.gate_proj.weight")]},
-                        "gout_w": gout},
+            # the out projection keeps its own `out_split` flag (older engines read only that)
+            "program": [run(nch + vw, hid, "gqkvz_w", w),
+                        run(2 * hid, vw, "gout_w") if split else run(hid, vw, "gout_w", w)], **m0,
+            "weights": w,
             "qkv_dim": nch, "vw": vw, "key_heads": spec.lin_key_heads, "value_heads": spec.lin_value_heads,
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
             **({"out_split": True} if split else {}),
@@ -1217,14 +1367,15 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         qw, kvw = spec.attn_q_width, spec.attn_kv_width
         nq = q4_chunks(qw, hid)
         m0, m1, m2 = moe_of(FULL, L.AA_XM, L.AA_ROUT, L.AA_RES)
+        w = {"gqkvg_w": weight(pool, [_op_index(pool, "self_attn.q_proj.weight", 0),
+                                           _op_index(pool, "self_attn.k_proj.weight"),
+                                           _op_index(pool, "self_attn.v_proj.weight"),
+                                           _op_index(pool, "self_attn.q_proj.weight", nq)]),
+             "go_w": weight(pool, [_op_index(pool, "self_attn.o_proj.weight")])}
         types[FULL] = {
             "kind": "full", "t": T, "eps": spec.norm_eps,
-            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w"), run(hid, qw, "go_w")], **m0,
-            "weights": {"gqkvg_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight", 0),
-                                                           _op_index(pool, "self_attn.k_proj.weight"),
-                                                           _op_index(pool, "self_attn.v_proj.weight"),
-                                                           _op_index(pool, "self_attn.q_proj.weight", nq)]},
-                        "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]}},
+            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w", w), run(hid, qw, "go_w", w)], **m0,
+            "weights": w,
             "qw": qw, "kvw": kvw, "nh": spec.num_heads, "kvh": spec.num_kv_heads, "hd": spec.head_dim,
             "rot": spec.rotary_dim, "ff": ff, **m1, **m2, **(ffn_of(FULL) if dense else {}),
         }
@@ -1289,15 +1440,18 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     # block-of-8 shared-exponent rounding. A q4_1 model's 16-level weights are not exact in bfp16,
     # so every other spec keeps the native bf16 build, byte for byte.
     bfp = is_t2(spec)
-    for N, K in sorted(shapes):
-        name, ctx = f"gemm_n{N}_k{K}", "gemm"
+    for N, K, fmt in sorted(shapes):
+        q4 = fmt == "q4_1"
+        name = f"{'gemm_' if q4 else GEMM_FORMATS[fmt][2]}n{N}_k{K}"
+        ctx = "gemm" if q4 else GEMM_FORMATS[fmt][1]
         if ctx not in out["contexts"]:
             out["contexts"][ctx] = f"{name}/final.xclbin"
         out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}
-        out["globals"][f"gemm_x_k{K}"] = K * T * 9 // 8 if bfp else K * T * 2
-        out["globals"][f"gemm_y_n{N}"] = N * T * 4
-        env = {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}
-        if bfp:
+        xbfp = bfp and q4
+        out["globals"][f"gemm_x_k{K}"] = K * T * 9 // 8 if xbfp else K * T * 2
+        out["globals"][f"gemm_y_n{N}"] = max(out["globals"].get(f"gemm_y_n{N}", 0), N * T * 4)
+        env = {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T), **({} if q4 else {"GQP_FMT": fmt})}
+        if xbfp:
             # OPEN-GEMM-T2: and it reads the decode pool's 2-bit chunks (copied per weight, as the
             # q4_1 route copies its own), 128 k per matmul call, and writes y token-major
             # -- and (GQP_XBFP) both operands reach the matmul as bfp16 blocks: the activation from
@@ -1306,8 +1460,17 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
             env.update(GQP_BFP16="1", GQP_WFMT="t2", GQP_KT="128", GQP_YT="1", GQP_T2_STRIDE=str(T2_CHUNK),
                        GQP_XBFP="1", GQP_IDQ="1")
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
-                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2kyxi" if bfp else ""),
+                               "build_dir": f"gemm_q4_prefill/build_{'' if q4 else fmt + '_'}n{N}_k{K}_t{T}"
+                                            + ("_t2kyxi" if xbfp else ""),
                                "env": env}
+    if bf16:
+        # 1.1 GiB lighter on the 35B and ~20% slower; the engine loads one of the two
+        lean = gemm_route(spec, ffn, plan, q8_split=True)
+        out["variants"] = {"lean": lean["layer_types"]}
+        for k in ("contexts", "kernels", "builds"):
+            out[k].update(lean[k])
+        for k, v in lean["globals"].items():
+            out["globals"][k] = max(out["globals"].get(k, 0), v)
     return out
 
 
@@ -1326,12 +1489,18 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     out["contexts"]["lm"] = "lm_head_q8/final.xclbin"
     out["kernels"]["ln"] = {"context": "ln", "insts": "ln/insts.bin", "build": "ln"}
     out["kernels"]["lm"] = {"context": "lm", "insts": "lm_head_q8/insts.bin", "build": "lm_head_q8"}
+    # The merged image (ux.py) carries both layer types, so both run in the context named
+    # here and the linear stream takes the attention layer's six buffer arguments -- one
+    # image, one kernel signature; its `ptab` is never touched (OPEN-DECODE-ONE-CONTEXT).
+    merged = merged_image(spec)
+    lin_ctx, full_ctx = ("layer", "layer") if merged else ("lx", "ax")
     if spec.has_linear:
-        args = ["pool", "xres", "consts", "state", "act"]
+        args = ["pool", "xres", "consts", "state", "act", "ptab"] if merged else \
+               ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx0/final.xclbin"
-        out["kernels"]["lx0"] = {"context": "lx", "insts": "lx0/insts.bin", "build": "lx0"}
-        out["kernels"]["lx1"] = {"context": "lx", "insts": "lx1/insts.bin", "patch": "moeroute2", "build": "lx1"}
+        out["contexts"][lin_ctx] = "lx0/final.xclbin"
+        out["kernels"]["lx0"] = {"context": lin_ctx, "insts": "lx0/insts.bin", "build": "lx0"}
+        out["kernels"]["lx1"] = {"context": lin_ctx, "insts": "lx1/insts.bin", "patch": "moeroute2", "build": "lx1"}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES, "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
             "program": [{"op": "run", "kernel": "lx0", "args": args},
@@ -1341,9 +1510,20 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax0/final.xclbin"
-        out["kernels"]["ax0"] = {"context": "ax", "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
-        out["kernels"]["ax1"] = {"context": "ax", "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
+        out["contexts"].setdefault(full_ctx, "ax0/final.xclbin")
+        ax0 = {"context": full_ctx, "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
+        _A = attn(spec)
+        if _A and _A.BLOCK:
+            # The blocked walk consumes cached + new rows in whole blocks of RB, so the
+            # driver streams RB*ceil((valid+1)/RB) - 1 cached rows rather than `valid` --
+            # the padding rows sit at or past `pos` and the kernel masks them. The count
+            # has to come off the manifest: the row count is patched per token by the
+            # host, and a kernel built one way against a driver patching the other way
+            # deadlocks on the fifo rather than answering wrongly. The merged image
+            # (OPEN_LAYER_ONE_CTX) carries the same attention cores, so the same rb.
+            ax0["rb"] = _A.RB
+        out["kernels"]["ax0"] = ax0
+        out["kernels"]["ax1"] = {"context": full_ctx, "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": "ax0", "args": args},
@@ -1356,6 +1536,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        for name, types in r.get("variants", {}).items():
+            for lt, gb in types.items():
+                out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
     return out
 
 
@@ -1394,12 +1577,19 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     # no q8 role keeps the name every shipped build already uses (OPEN-QUANT-Q8).
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
-    if spec.has_linear:
-        b["lx0"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx0{sfx}", "env": {"LX_PART": "0"}}
-        b["lx1"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx1{sfx}", "env": {"LX_PART": "1"}}
-    if spec.has_full:
-        b["ax0"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax0{sfx}", "env": {"AX_PART": "0"}}
-        b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
+    if merged_image(spec):
+        # Same four set names, so the manifest, the driver's kernel names and an export's
+        # --only list do not move; one design, four parts, one image.
+        for name, part in (("lx0", 0), ("lx1", 1), ("ax0", 2), ("ax1", 3)):
+            b[name] = {"design": "layer_x/ux.py", "build_dir": f"layer_x/build_ux{part}{sfx}",
+                       "env": {"UX_PART": str(part)}}
+    else:
+        if spec.has_linear:
+            b["lx0"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx0{sfx}", "env": {"LX_PART": "0"}}
+            b["lx1"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx1{sfx}", "env": {"LX_PART": "1"}}
+        if spec.has_full:
+            b["ax0"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax0{sfx}", "env": {"AX_PART": "0"}}
+            b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
     b["ln"] = {"design": "ln/ln.py", "build_dir": "ln/build", "env": {}}
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
@@ -1423,7 +1613,7 @@ KERNEL_SOURCES = [
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
-    "include/vecmath.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

@@ -58,6 +58,10 @@ from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
+if int(os.environ.get("GEMV_SCALES_F32", 0)) and SPEC.quant != "q4_1_f32":
+    # the export builds this design twice: q4nx chunks and GGUF-direct f32-scale chunks
+    from dataclasses import replace
+    SPEC = replace(SPEC, quant="q4_1_f32")
 QR = for_spec(SPEC)      # dense, or lfm2 for its attention layers
 R = QR.recipe(SPEC)
 L, G = R.layout, R.geo
@@ -69,27 +73,38 @@ OS = ["-Os"]
 STOP = int(os.environ.get("DX_STOP", 99))     # debug: 1 = after q/k/v, 2 = after attention, 3 = after the o proj + norm
 assert not G.GATE, "dx.py: the Qwen3 dense recipe has no attention gate"
 
+# GGUF-direct pools (spec.quant == "q4_1_f32"): f32-scale chunks, the gemv
+# wrappers compiled with the f32-scale define and the gemv_q4s32 symbol prefix.
+F32 = SPEC.quant == "q4_1_f32"
+CH = QR.chunk_bytes(SPEC.quant)
+GEMV_DEF = ["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if F32 else []
+GYSYM = "gemv_q4s32_gy" if F32 else "gemv_q4_gy"
+GMSYM = "gemv_q4s32_gms" if F32 else "gemv_q4_gms"
+
 
 Q8 = SPEC.q8_roles              # the roles the container stores at q8 (OPEN-QUANT-Q8); usually empty
 
 
 def per_band(K):
-    return band_bytes(K) // 5120
+    return QR.band_bytes(K, SPEC.quant) // CH
 
 
 def n_groups(K):
-    return band_bytes(K) // CALL_BYTES
+    return QR.band_bytes(K, SPEC.quant) // CALL_BYTES
 
 
 # A q8 projection's band is the same 64 rows and twice the bytes: four 16-row half-tiles
 # per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h). A q4_1 role gets exactly
 # today's numbers, so a model with no q8 role builds the design it always built.
 def role_band_bytes(role, K):
-    return 2 * band_bytes(K) if role in Q8 else band_bytes(K)
+    # The q4_1 side is F32-aware: the GGUF-direct f32-scale build (SPEC.quant ==
+    # "q4_1_f32") uses 6144-byte chunks rather than q4nx's 5120.
+    b = QR.band_bytes(K, SPEC.quant)
+    return 2 * b if role in Q8 else b
 
 
 def role_per_band(role, K):
-    return role_band_bytes(role, K) // 5120
+    return role_band_bytes(role, K) // CH
 
 
 def role_groups(role, K):
@@ -151,6 +166,8 @@ ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
+if SPEC.norm_groups != 1:                  # ln.h defaults it to 1; adding the flag would change
+    LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")   # every other family's build line (K2: 2)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -191,8 +208,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # One ExternalFunction per name in KN, in that order: a q4_1 entry only while a
     # projection still uses it, a q8 one only when a role is q8 -- an ExternalFunction that
     # exists changes the build, so a q4_1 model must see exactly the set it always saw.
-    mk = {"gy": lambda: ef("gemv_q4_gy", HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32]),
-          "gms": lambda: ef("gemv_q4_gms", HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32]),
+    # The q4_1 entries use GYSYM/GMSYM so the GGUF-direct f32-scale build (SPEC.quant ==
+    # "q4_1_f32") picks the gemv_q4s32 wrappers and the f32-scale compile defines.
+    mk = {"gy": lambda: ef(GYSYM, HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], GEMV_OS + GEMV_DEF),
+          "gms": lambda: ef(GMSYM, HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], GEMV_OS + GEMV_DEF),
           "gyms": lambda: ef("gemv_q4_gyms", HERE / "gemv_q4_gyms.cc",
                              [elem, tab_ty, y_ty, ms_ty, i32, i32, i32], GEMV_OS),
           "act": lambda: ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty]),
@@ -364,14 +383,16 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
 
         if G.SANDWICH:
             f_nr32 = rest[0]
-            post_norm(f_nr32)                  # 2a. t = post_attn_norm(out)
-            add_norm(True)                     # 2b. res = x + t; xm = pre_ffn_norm(res)
-            if stop >= 3:
+            if stop >= 3:                      # group 2 runs from the o projection on
+                post_norm(f_nr32)              # 2a. t = post_attn_norm(out)
+                add_norm(True)                 # 2b. res = x + t; xm = pre_ffn_norm(res)
+            if stop >= 99:                     # group 3 only in the full layer
                 post_norm(f_nr32)              # 3a. t2 = post_ffn_norm(out2)
                 add_norm(False)                # 3b. xres = res + t2
         else:
-            add_norm(True)                     # 2. res = x + out; xm = post_attn_norm(res)
-            if stop >= 3:
+            if stop >= 3:                      # group 2 runs from the o projection on
+                add_norm(True)                 # 2. res = x + out; xm = post_attn_norm(res)
+            if stop >= 99:                     # group 3 only in the full layer
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
 
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
@@ -495,8 +516,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
-                                                  Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
-                              tile=Tile(c, 2), stack_size=0x1800))
+                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
+                               tile=Tile(c, 2), stack_size=0x1400 if F32 else 0x1800))
     def abufs(c):
         s = "" if c == 0 else str(c)
         return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),
@@ -536,11 +557,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         tg_ln.finish()                                            # xn is in DDR
         tg_x = TaskGroup()
         x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_XN, G.XN_ELEMS * ELEM), wait=True, group=tg_x)
-        if stop == 1:
-            py.finish()
-            pw.finish()
-            tg_x.finish()
-            return
+        # DX_STOP=1 no longer early-returns: phase 3 (attention) runs for every stop
+        # now, fed the placeholder 1-row window at stop=1, so the attention cores
+        # complete their bodies and multi-run invocations stay clean (the early
+        # return left every attention worker blocked mid-body).
         # 3. attention: meta + record now, q / k / v after the GEMVs, the window, the new row out
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
@@ -559,17 +579,24 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_VB, KVW * 2))
         pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
         # 4. o projection against og
-        for c in range(N_CORES):
-            pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_O + c * G.O_PC * BB_Q, G.O_PC * BB_Q))
-            py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_OUT + c * G.O_PC * YB, G.O_PC * YB))
+        if stop >= 2:
+            # at stop=1 the main cores return after q/k/v: nobody would consume
+            # the o weights or drain the o results
+            for c in range(N_CORES):
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_O + c * G.O_PC * BB_Q, G.O_PC * BB_Q))
+                py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_OUT + c * G.O_PC * YB, G.O_PC * YB))
         pa_out.finish()                                           # og (and the new cache row) are in DDR
-        if stop == 2:
+        if stop >= 2:
+            # the og x-fill must PRECEDE the stop<=2 tail: the o gemv consumes
+            # it, and the old early return starved it (the cores park in
+            # state 8 for seconds waiting on an x fill that never arrives)
+            x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OG, G.OG_ELEMS * ELEM), wait=True, group=tg_x)
+        if stop <= 2:
             pa_in.finish()
             py.finish()
             pw.finish()
             tg_x.finish()
             return
-        x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OG, G.OG_ELEMS * ELEM), wait=True, group=tg_x)
         # 5. residual + norms -> res, xm (sandwich: t = post_attn_norm(out) first, then res = x + t,
         #    xm = pre_ffn_norm(res); plain: res = x + out, xm = post_attn_norm(res))
         tg_ln2 = TaskGroup()
@@ -667,5 +694,5 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + sorted(f.read_bytes() for f in (HERE.parent.parent / "recipes").glob("*.py"))
                 + [(LN / "ln.h").read_bytes(), (LN / "ln_y.cc").read_bytes(), (LN / "ln_xn.cc").read_bytes(), (LN / "ln_nr32.cc").read_bytes(), (LINL / "ln_nr.cc").read_bytes(), (GEMV / "gemv_q4.h").read_bytes(),
                    (GEMV / "gemv_tab.h").read_bytes(),
-                   (HERE.parent.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode()])
+                   (HERE.parent.parent / "include" / "vecmath.h").read_bytes(), (HERE.parent.parent / "include" / "scalar_fp.h").read_bytes(), SPEC.spec_hash().encode()])
 SPECIALIZE = {"stop": STOP, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

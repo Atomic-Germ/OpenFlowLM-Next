@@ -10,10 +10,11 @@ sections:
     body: |
       Every OpenFlowLM release is validated on Ryzen™ AI NPUs.
       We publish the results in `docs/benchmarks` so teams can compare apples-to-apples.
-      
-      The runtime extends AMD’s native 2K context limit to 256K tokens for long-context LLMs and VLMs and, in power
-      efficiency tests, consumes 67.2× less energy per token than the integrated GPU and 222.9× less energy per token than the CPU on the same
-      chip while holding higher throughput.
+
+      The runtime extends AMD’s native 2K context limit for long-context LLMs and
+      VLMs. All published numbers are throughput and latency (TTFT, prefill
+      tok/s, decode tok/s) measured with `oflm bench`; we do not publish energy
+      or power-draw figures, because `oflm bench` does not instrument them.
     ctas:
       - label: "View benchmark docs"
         href: "/docs/benchmarks/"
@@ -21,14 +22,14 @@ sections:
     right:
       metrics:
         - label: "GPT-OSS 20B"
-          value: "19 tps"
-          desc: "AMD Ryzen™ AI 7 350 with 32 GB DRAM"
+          value: "18.2 tok/s"
+          desc: "decode @ 1k · AMD Ryzen™ AI 9 HX 370"
         - label: "Qwen 3 0.6B"
-          value: "80 tps"
-          desc: "Prefill speed: 1,356 tps with 2K prompt"
-        - label: "Gemma3 1B"
-          value: "66 tps"
-          desc: "Prefill speed: 1,657 tps with 16K prompt"
+          value: "2,003 tok/s"
+          desc: "prefill @ 2k · AMD Ryzen™ AI 9 HX 370"
+        - label: "Gemma 3 1B"
+          value: "1,785 tok/s"
+          desc: "prefill @ 16k · AMD Ryzen™ AI 7 350"
 
   # - type: media
   #   variant: alt
@@ -47,12 +48,12 @@ sections:
 
   - type: media
     variant: alt
-    kicker: "Gemma3 4B Vision"
-    title: "On-device power efficiency (Tokens/s/Watt or Tokens/Joule)"
+    kicker: "Gemma 3 4B"
+    title: "Prefill and decode throughput on the NPU"
     media:
       src: "/assets/bench/gemma3-4b.png"
-      alt: "Gemma3 4B benchmark overview of power efficiency (TPS/W) for both prefill and decoding"
-      title: "Ultra-high power efficiency"
+      alt: "Gemma 3 4B benchmark overview of prefill and decoding throughput on the NPU"
+      title: "Throughput on Ryzen™ AI silicon"
 
 ---
 

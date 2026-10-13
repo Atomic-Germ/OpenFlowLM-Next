@@ -32,6 +32,14 @@ float silu(float x) { return x / (1.0f + std::exp(-x)); }
 float sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 float softplus(float x) { return x > 0 ? x + std::log1p(std::exp(-x)) : std::log1p(std::exp(x)); }
 
+// bf16r over eight floats: f32_to_bf16's integer rounding, so the same bits
+inline __m256 bf16r8(const float* p) {
+    const __m256i u = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    const __m256i odd = _mm256_and_si256(_mm256_srli_epi32(u, 16), _mm256_set1_epi32(1));
+    const __m256i r = _mm256_add_epi32(u, _mm256_add_epi32(odd, _mm256_set1_epi32(0x7FFF)));
+    return _mm256_castsi256_ps(_mm256_and_si256(r, _mm256_set1_epi32(static_cast<int>(0xFFFF0000u))));
+}
+
 // x[d] / sqrt(mean(x^2) + eps) * w[d]
 void rms_vec(const float* x, size_t d, const float* w, double eps, float* out) {
     double ss = 0;

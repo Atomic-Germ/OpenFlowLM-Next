@@ -10,10 +10,17 @@ nav_order: 2
 This section reports the performance of Qwen 3 on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on OpenFlowLM v0.9.31.  
+> - Results are based on OpenFlowLM v0.9.31.
 > - Under OFLM's default NPU power mode (Performance)    
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models.   
+
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
 
 ---
 
@@ -32,10 +39,10 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Qwen 3 0.6B**  | NPU (OFLM)    | 66.5 | 57.5 | 44.5 | 31.0 | 19.6 | 14.1|
-| **Qwen 3 1.7B**  | NPU (OFLM)    | 40.2 | 35.8 | 30.8 | 23.7 | 16.4 | 12.5|
-| **Qwen 3 4B**    | NPU (OFLM)    | 19.6 | 18.1 | 16.3 | 13.7 | 10.6 | 8.5| 
-| **Qwen 3 8B**    | NPU (OFLM)    | 11.9 | 11.5 | 11.1 | 10.4 | 8.7 | 7.2|
+| **Qwen 3 0.6B**  | NPU (OFLM)    | 66.5 | 57.5 | 44.5 | 31.0 | 19.6 | 14.1 | 
+| **Qwen 3 1.7B**  | NPU (OFLM)    | 40.2 | 35.8 | 30.8 | 23.7 | 16.4 | 12.5 | 
+| **Qwen 3 4B**  | NPU (OFLM)    | 19.6 | 18.1 | 16.3 | 13.7 | 10.6 | 8.5 | 
+| **Qwen 3 8B**  | NPU (OFLM)    | 11.9 | 11.5 | 11.1 | 10.4 | 8.7 | OOC | 
 
 ---
 
@@ -43,10 +50,10 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Qwen 3 0.6B**  | NPU (OFLM)    | 1494 |	2003 |	2165 |	1981 |	1485 |	907 |
-| **Qwen 3 1.7B**  | NPU (OFLM)    | 956 |	1263 |	1434 |	1411 |	1143 |	768|
-| **Qwen 3 4B**    | NPU (OFLM)    | 509 |	582 |	615 |	576 |	448 |	303| 
-| **Qwen 3 8B**    | NPU (OFLM)    | 357 |	435 |	457 |	442 |	367 |	260|
+| **Qwen 3 0.6B**  | NPU (OFLM)    | 1494 | 2003 | 2165 | 1981 | 1485 | 907 | 
+| **Qwen 3 1.7B**  | NPU (OFLM)    | 956 | 1263 | 1434 | 1411 | 1143 | 768 | 
+| **Qwen 3 4B**  | NPU (OFLM)    | 509 | 582 | 615 | 576 | 448 | 303 | 
+| **Qwen 3 8B**  | NPU (OFLM)    | 357 | 435 | 457 | 442 | 367 | OOC | 
 
 ---
 

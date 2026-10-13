@@ -1,0 +1,24 @@
+# The vcpkg ports the Windows build needs.
+#
+# One line per port, `#` comments and blank lines ignored; the release
+# workflow's cache key is the hash of this file, so editing it is a one-line
+# diff rather than a workflow edit, and a dependency bump invalidates the
+# cache on its own.
+#
+# The list is the one from src/build-windows-vcpkg.cmd, which is the command
+# that is known to have produced a working oflm.exe on a dev machine. It is
+# here rather than inlined in release.yml for exactly that reason: it is a
+# fact about the build, kept with the other build inputs.
+#
+# boost-asio and boost-beast are not linked directly. They are here because
+# tokenizers-cpp's configure looks for them, and a vcpkg tree without them
+# fails deep inside a FetchContent with a message about a header.
+#
+# ffmpeg is the expensive one (it compiles from source; budget 20+ minutes on
+# a cold cache) and the reason the cache step exists.
+boost-program-options
+boost-asio
+boost-beast
+curl
+ffmpeg
+fftw3
