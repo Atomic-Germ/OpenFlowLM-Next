@@ -4048,7 +4048,8 @@ The dense route's host attention (`OFLM_OPEN_HOST_ATTN` for prefill, `OFLM_OPEN_
 and `--decode-route host` for decode) computes K2's attention: no q/k norm, no bias, no gate,
 no window, a full half-split rotation, scale 1/sqrt(head_dim). `Manifest::host_attention_refusal()`
 returns why it cannot compute a model, or "" when it can. It accepts `family == "k2"` with that
-geometry and refuses every other family by name. It is an allow-list: the variants (q/k norm
+geometry (including an even head_dim and every layer's `qw` / `kvw` equal to heads * head_dim, the
+checks `host_attn_layer` repeats at dispatch) and refuses every other family by name. It is an allow-list: the variants (q/k norm
 before or after the rotation, a q/k/v bias, Granite's multiplier, Gemma 3's window, partial
 rotation) are family properties in the recipe, not manifest fields, so a family joins by
 measurement, as it does for FAST_ATTENTION. Origin: #171 (Qwen3-8B passed the old geometry-only
@@ -4062,7 +4063,8 @@ guard and produced garbage with exit 0).
 **Acceptance criteria (test):**
 - the qwen3, qwen36moe, qwen35, gemma3, hunyuan and phi3 fixtures are each refused, the message naming the family;
 - the qwen3_4b fixture with its family set to `k2` is accepted;
-- that fixture with `rotary_dim` halved is refused on geometry.
+- that fixture with `rotary_dim` halved is refused on geometry;
+- that fixture with an odd head_dim, or with a layer's `qw` off by one, is refused on geometry.
 
 **Verification (manual):** with a Qwen3-8B kernel set, `OFLM_OPEN_HOST_ATTN=1`,
 `OFLM_OPEN_HOST_ATTN_DECODE=1` and `--decode-route host` each fail at load with the reason;
