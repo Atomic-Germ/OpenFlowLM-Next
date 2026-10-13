@@ -35,6 +35,19 @@ instruction stream. Core program: 4.2 KB of 16 KB.
    `open_qwen36_cli --layers 1 ... --draft <dir> --draft-kernels <set> --draft-run <run> --draft-pids ...`;
    `utilities/dflash2_ref.py compare`.
 
+## Using it (OPEN-DECODE-SPECULATIVE method `dflash2`)
+
+- Install: `oflm-add <Bonsai container dir> --tag <tag> --speculative dflash2 --draft-model <drafter container dir>`
+  copies the drafter beside the model, links its kernel set (found by spec_hash: build it with step 2 first) and
+  writes `"speculative": {"method": "dflash2", "draft": "<drafter dir name>"}`. Refused, before the registry is
+  written, without a verify program in the target's kernel set (`open_kernels_w4h`: verify width 4), for a
+  drafter trained for another target, or with no kernel set installed for it.
+- Serve: `oflm serve <tag> --spec` (or `OFLM_OPEN_SPEC=1`; `OFLM_OPEN_SPEC_WIDTH=2..4`). Greedy requests only.
+  `OFLM_OPEN_DRAFT_KERNELS_DIR` points at a drafter kernel set that is not linked.
+- CLI: `open_qwen36_cli --model <Bonsai container> --kernels <its set> --ids-file p.ids --max-tokens 256
+  --gemm-block --spec --spec-method dflash2 --draft <drafter container> --draft-kernels <dflash2 set> [--spec-width 3]`.
+- Time it only on an idle box, spec off / lookup / dflash2 interleaved; width 4 is the default and the best.
+
 ## Traps
 
 - `cmd.exe /c script.cmd` from Git bash needs `MSYS_NO_PATHCONV=1` and the script's full Windows path, or it
