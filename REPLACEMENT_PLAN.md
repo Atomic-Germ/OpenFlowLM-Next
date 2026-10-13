@@ -1,5 +1,14 @@
 # Open OpenFlowLM Closed-Source Replacement Plan
 
+> **Status 2026-09-18.** Historical planning document from the closed-source era
+> (`model.q4nx`, `docs/ExampleNPU`, per-model `open_<family>` engines). The open
+> kernels now run every dense and MoE family through the shared recipes, so the
+> live replacements are tracked in
+> [`docs/precompiled_replacement_map.md`](docs/precompiled_replacement_map.md)
+> with per-family evidence in
+> [`specs/open-engine/spec.md`](specs/open-engine/spec.md). Kept for the
+> replacement ordering and the closed-surface inventory it established.
+
 ## Overview
 Map of all pre-compiled closed-source artifacts and replacement strategies for AMD NPU2/iron/mlirae backends.
 

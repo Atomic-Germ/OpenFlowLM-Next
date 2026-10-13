@@ -3180,8 +3180,9 @@ post-processes block b, so the transposes, DeltaNet, the residual / norm /
 router and the shared expert's host steps run while the NPU works. Only one
 dispatch is ever outstanding: a second run of the same kernel queued behind the
 first gave different bits from run to run, and the overlap doesn't need it.
-Even blocks use each step's `gemm_x_k*` / `gemm_y_n*` globals and odd blocks a
-`#1` twin of them, so neither side touches a buffer the other is using. A
+Even blocks use each step's x / y globals and odd blocks a `#1` twin of them,
+allocated only when this schedule can run, so neither side touches a buffer the
+other is using. A
 full-attention layer runs every block's attention products after every block's
 projection, in one visit to the attention context per layer instead of two
 context changes per block. DeltaNet still runs block by block in position order,
