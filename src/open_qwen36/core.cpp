@@ -3646,7 +3646,7 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         return mk;
     };
     static const bool log_passes = std::getenv("OFLM_OPEN_MOE_BATCH_LOG") != nullptr;
-    const bool overlap = stage_major_on_ && moe_overlap_on_ && globals_.count(mb.args[1] + "#1") && globals_.count(mb.args[3] + "#1");
+    const bool overlap = stage_major_on_ && moe_overlap_on_ && !moe_redispatch_ && globals_.count(mb.args[1] + "#1") && globals_.count(mb.args[3] + "#1");
     if (!overlap) {
         xrt::bo& xb = buffer(mb.args[1], 0);
         xrt::bo& yb = buffer(mb.args[3], 0);
