@@ -123,8 +123,9 @@ private:
 class Proposer : public spec::Drafter {
 public:
     struct Stats {
-        size_t drafts = 0, skipped = 0, restarts = 0, rows = 0;
+        size_t drafts = 0, skipped = 0, restarts = 0, rows = 0, restart_rows = 0;
         double draft_ms = 0, inject_ms = 0, stage_ms = 0;   ///< the block pass; the cache rows; gathering the taps
+        double restart_ms = 0;                              ///< of inject_ms: the calls that restarted the cache (the prompt)
         PassTiming last;                                    ///< the last block pass's breakdown
     };
 

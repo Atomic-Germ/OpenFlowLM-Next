@@ -225,6 +225,69 @@ static void silu_tests() {
     CHECK(worst < 1e-5, "silu_mul worst relative error %.3g", worst);
 }
 
+// the attention as it was before the key rows were shared between queries: one (row, head) at a time
+static void attention_one_by_one(const float* q, size_t rows, size_t nh, size_t kvh, size_t hd, const float* kc, const float* vc,
+                                 size_t L, long ctx_pos0, const float* kb, const float* vb, long p0, size_t window, float* out) {
+    const size_t grp = nh / kvh, kvw = kvh * hd;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    auto dot = [](const float* a, const float* b, size_t n) {
+        float s = 0;
+        for (size_t i = 0; i < n; ++i) s += a[i] * b[i];
+        return s;
+    };
+    for (size_t g = 0; g < kvh; ++g)
+        for (size_t t = 0; t < rows; ++t) {
+            const long P = p0 + static_cast<long>(t);
+            long lo = 0;
+            if (window) lo = std::min<long>(static_cast<long>(L), std::max<long>(0, P - static_cast<long>(window) + 1 - ctx_pos0));
+            const size_t nk = (L > static_cast<size_t>(lo) ? L - lo : 0) + rows;
+            std::vector<double> sc(nk);
+            for (size_t hl = 0; hl < grp; ++hl) {
+                const size_t h = g * grp + hl;
+                const float* qv = q + (t * nh + h) * hd;
+                double mx = -1e300;
+                for (size_t j = 0; j < nk; ++j) {
+                    const float* kv = j + lo < L ? kc + (j + lo) * kvw + g * hd : kb + (j + lo - L) * kvw + g * hd;
+                    sc[j] = static_cast<double>(dot(qv, kv, hd)) * scale;
+                    mx = std::max(mx, sc[j]);
+                }
+                double sum = 0;
+                for (size_t j = 0; j < nk; ++j) { sc[j] = std::exp(sc[j] - mx); sum += sc[j]; }
+                float* o = out + (t * nh + h) * hd;
+                for (size_t d = 0; d < hd; ++d) o[d] = 0;
+                std::vector<double> acc(hd, 0.0);
+                for (size_t j = 0; j < nk; ++j) {
+                    const float* vv = j + lo < L ? vc + (j + lo) * kvw + g * hd : vb + (j + lo - L) * kvw + g * hd;
+                    for (size_t d = 0; d < hd; ++d) acc[d] += sc[j] / sum * vv[d];
+                }
+                for (size_t d = 0; d < hd; ++d) o[d] = static_cast<float>(acc[d]);
+            }
+        }
+}
+
+static void attention_tests() {
+    std::mt19937 rng(21);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    const size_t nh = 8, kvh = 2, hd = 32;
+    struct Case { size_t rows, L; long ctx0; long p0; size_t window; };
+    const Case cases[] = {{8, 0, 0, 0, 0}, {8, 5, 0, 5, 0}, {8, 100, 0, 100, 0}, {8, 100, 0, 100, 64}, {8, 300, 52, 352, 128},
+                          {4, 40, 0, 40, 16}, {7, 33, 10, 43, 20}, {1, 17, 0, 17, 0}, {8, 64, 0, 64, 8}};
+    for (const Case& c : cases) {
+        std::vector<float> q(c.rows * nh * hd), kc(c.L * kvh * hd), vc(c.L * kvh * hd), kb(c.rows * kvh * hd), vb(c.rows * kvh * hd);
+        for (auto* v : {&q, &kc, &vc, &kb, &vb})
+            for (auto& x : *v) x = nd(rng);
+        std::vector<float> got(c.rows * nh * hd), want(got.size());
+        attention(q.data(), c.rows, nh, kvh, hd, kc.data(), vc.data(), c.L, c.ctx0, kb.data(), vb.data(), c.p0, c.window, got.data());
+        attention_one_by_one(q.data(), c.rows, nh, kvh, hd, kc.data(), vc.data(), c.L, c.ctx0, kb.data(), vb.data(), c.p0, c.window, want.data());
+        double worst = 0, mag = 0;
+        for (size_t i = 0; i < got.size(); ++i) {
+            worst = std::max(worst, static_cast<double>(std::fabs(got[i] - want[i])));
+            mag = std::max(mag, static_cast<double>(std::fabs(want[i])));
+        }
+        CHECK(worst < 1e-5 * (mag + 1e-3), "attention rows %zu L %zu window %zu: worst error %.3g of %.3g", c.rows, c.L, c.window, worst, mag);
+    }
+}
+
 static void sync_tests() {
     auto all = [](long) { return true; };
     std::vector<int> fed(100);
@@ -270,6 +333,7 @@ static void sync_tests() {
 }
 
 int main() {
+    attention_tests();
     sync_tests();
     silu_tests();
     hadamard_tests();
