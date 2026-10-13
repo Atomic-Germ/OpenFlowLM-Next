@@ -333,11 +333,21 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     if (g_proposer) {
         const auto& ps = g_proposer->stats();
         const double n = static_cast<double>(std::max<size_t>(1, ps.drafts - ps0.drafts));
+        const double sn = static_cast<double>(std::max<size_t>(1, ps.drafts - ps0.drafts - (ps.restarts - ps0.restarts)));
         std::fprintf(stderr,
                      "spec: dflash2 %zu drafts (%zu skipped, %zu cache restarts), %zu cache rows; per draft: block pass %.1f ms,"
                      " cache rows %.1f ms (gathering the taps %.2f ms)\n",
                      ps.drafts - ps0.drafts, ps.skipped - ps0.skipped, ps.restarts - ps0.restarts, ps.rows - ps0.rows,
                      (ps.draft_ms - ps0.draft_ms) / n, (ps.inject_ms - ps0.inject_ms) / n, (ps.stage_ms - ps0.stage_ms) / n);
+        std::fprintf(stderr,
+                     "spec: dflash2 the prompt's %zu rows went in once, %.0f ms; the other drafts' cache rows %.1f ms each\n",
+                     ps.restart_rows - ps0.restart_rows, ps.restart_ms - ps0.restart_ms,
+                     (ps.inject_ms - ps0.inject_ms - (ps.restart_ms - ps0.restart_ms)) / sn);
+        const auto& l = ps.last;
+        std::fprintf(stderr,
+                     "spec: dflash2 the last block pass %.1f ms: matrices %.1f (head %.1f), attention %.1f, host around the matrices %.1f,"
+                     " selector %.1f\n",
+                     l.total_ms, l.gemv_ms, l.head_ms, l.attn_ms, l.host_ms, l.select_ms);
     }
     return out;
 }

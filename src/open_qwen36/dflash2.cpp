@@ -410,6 +410,10 @@ std::vector<int> Proposer::propose(const std::vector<int>& fed, int next, size_t
     }
     stats_.rows += static_cast<size_t>(plan.to - plan.from);
     stats_.inject_ms += ms_since(t0);
+    if (plan.restart) {
+        stats_.restart_rows += static_cast<size_t>(plan.to - plan.from);
+        stats_.restart_ms += ms_since(t0);
+    }
     std::vector<int> d = d_->draft(next, k);
     stats_.last = d_->last_pass();
     stats_.draft_ms += stats_.last.total_ms;
