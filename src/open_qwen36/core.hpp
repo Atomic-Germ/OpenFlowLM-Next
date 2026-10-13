@@ -272,6 +272,9 @@ public:
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
     const Q4nxFile& file() const { return *file_; }
+    /// A manifest global's device buffer: the DFlash 2 drafter streams `lmpool` (OPEN-DRAFT-DFLASH2).
+    xrt::bo& global_bo(const std::string& name) { return globals_.at(name); }
+    xrt::device& device() { return *dev_; }
 
     /// OPEN-DECODE-TAPS: keep the residual after each of `layers` (0-based, caller's order) for the last `window` positions; empty = off.
     void set_taps(const std::vector<int>& layers, size_t window = 2048);

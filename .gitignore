@@ -89,3 +89,6 @@ src/xclbins/*/open_kernels*/
 
 # repro-open-timeout.sh output (server logs, per-attempt client logs)
 .repro-open-timeout/
+
+# gemv_t2n make_test.py vectors and MLIR dumps
+open_kernels/designs/gemv_t2n/test/

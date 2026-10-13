@@ -164,6 +164,12 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
               "rows_per_core": multiple_of(64),
               "per_call": values(1)},                # one 2176 B chunk per w element (probe 0a: same DMA floor)
              note="2-bit ternary chunks from an exact-q4_1 ternary container (OPEN-QUANT-T2)"),
+    Template("gemv_t2n", "designs/gemv_t2n/gemv_t2n.cc",
+             {"N": multiple_of(64),                  # whole 64-row bands; the plan splits them over cores
+              "K": values(4096, 5120, 17408, 25600)},  # the DFlash 2 drafter's widths (OPEN-DRAFT-DFLASH2):
+                                                       # o, every hidden-input matrix and the head, down, fc
+             note="eight rows on gemv_t2.h's chunks, K sliced at 8 k-tiles with host tables; a new K "
+                  "needs designs/gemv_t2n/make_test.py at that K first"),
     Template("gemv_q4_prep_f32", "designs/gemv_q4/gemv_tab.h",
              {"K": values(512)},                 # the expert hidden h (moe_experts' law)
              note="validated through the whole-layer MoE block only"),

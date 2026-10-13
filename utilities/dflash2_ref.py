@@ -288,6 +288,65 @@ class Drafter:
         lat = self.lattice(anchor, hn, logits)
         return walk(lat.cpu().numpy(), self.top_k), lat.cpu()
 
+    def conv_b(self, x, dyn, base, side, nb):
+        """conv() over nb independent blocks stacked in the rows (each block's row 0 has no predecessor)."""
+        n = x.shape[1]
+        ng = n // self.group
+        c = dyn.view(-1, 2, self.kernel, ng)[:, side]
+        w = c.repeat_interleave(self.group, dim=-1) + base[side][None]
+        xb = x.view(nb, -1, n)
+        prev = torch.cat([torch.zeros(nb, 1, n, device=x.device), xb[:, :-1]], dim=1).reshape(-1, n)
+        return w[:, 0] * x + w[:, 1] * prev
+
+    def draft_many(self, tgt, anchors, p0s, caches, n_draft=7, f16_cache=True):
+        """draft() for several independent blocks at once, so each weight is read once for all of them.
+        caches[b] = (per-layer (K, V) rows of positions cache_pos[b]), as draft() takes."""
+        nb, B = len(anchors), n_draft + 1
+        ids = [t for a in anchors for t in [a] + [self.mask_id] * n_draft]
+        x = tgt.embed(ids)
+        pos = torch.cat([torch.arange(p, p + B) for p in p0s]).to(self.device)
+        rep = self.n_head // self.n_kv
+        for il, ly in enumerate(self.L):
+            h = rms(x, ly["attn_norm"], self.eps)
+            dyn = h @ ly["attn_cp"].T
+            h = self.conv_b(h, dyn, ly["attn_cb"], 0, nb)
+            R = nb * B
+            q = rms((h @ ly["wq"].T).view(R, self.n_head, self.hd), ly["q_norm"], self.eps)
+            k = rms((h @ ly["wk"].T).view(R, self.n_kv, self.hd), ly["k_norm"], self.eps)
+            v = (h @ ly["wv"].T).view(R, self.n_kv, self.hd)
+            q, k = rope_neox(q, pos, self.base), rope_neox(k, pos, self.base)
+            if f16_cache:
+                k, v = f16_round(k), f16_round(v)
+            outs = []
+            for b in range(nb):
+                sl = slice(b * B, (b + 1) * B)
+                (ck, cv), cpos = caches[b][0][il], caches[b][1]
+                K, V = torch.cat([ck, k[sl]], 0), torch.cat([cv, v[sl]], 0)
+                kp = torch.cat([cpos, pos[sl]])
+                allowed = torch.ones(B, len(kp), dtype=torch.bool, device=self.device)
+                if self.n_swa:
+                    allowed = (pos[sl][:, None] - kp[None, :]) < self.n_swa
+                s = torch.einsum("bhd,khd->hbk", q[sl], K.repeat_interleave(rep, dim=1)) / math.sqrt(self.hd)
+                s = s.masked_fill(~allowed[None], float("-inf"))
+                outs.append(torch.einsum("hbk,khd->bhd", torch.softmax(s, -1), V.repeat_interleave(rep, dim=1)).reshape(B, -1))
+            o = self.conv_b(torch.cat(outs) @ ly["wo"].T, dyn, ly["attn_cb"], 1, nb)
+            x2 = o + x
+            h2 = rms(x2, ly["ffn_norm"], self.eps)
+            dyn2 = h2 @ ly["ffn_cp"].T
+            h2 = self.conv_b(h2, dyn2, ly["ffn_cb"], 0, nb)
+            f = (torch.nn.functional.silu(h2 @ ly["gate"].T) * (h2 @ ly["up"].T)) @ ly["down"].T
+            x = self.conv_b(f, dyn2, ly["ffn_cb"], 1, nb) + x2
+        hn = rms(x, self.out_norm, self.eps)
+        keep = torch.tensor([b * B + t for b in range(nb) for t in range(1, B)])
+        logits = tgt.logits(hn[keep]).view(nb, n_draft, -1)
+        hn = hn.view(nb, B, -1)
+        out = []
+        for b in range(nb):
+            full = torch.cat([torch.zeros(1, logits.shape[-1], device=logits.device), logits[b]])
+            lat = self.lattice(anchors[b], hn[b], full)
+            out.append((walk(lat.cpu().numpy(), self.top_k), lat.cpu()))
+        return out
+
 
 def walk(lat, top_k=TOP_K):
     """common/speculative.cpp's greedy walk (beam 1, p_min 0); position 1 reads predecessor column 0."""
@@ -383,9 +442,121 @@ def gate(a):
     print(f"TOTAL {same}/{tot} drafts identical ({same / max(1, tot):.4f}); {len(mism)} mismatches, {tie} near-tie (< {a.tie})")
 
 
+def run_steps(a, pid):
+    hdr, rows = load_run(a.run, pid, None)
+    steps = list(range(0, len(rows), a.stride))
+    if a.max_steps:
+        steps = steps[:a.max_steps]
+    return hdr, rows, steps
+
+
+def drafts(a):
+    """Reference drafts for the NPU gate: one 7-token walk (8-row block) per step, as the engine runs it."""
+    torch.set_num_threads(a.threads)
+    tgt = Target(a.target, a.device)
+    dr = Drafter(a.drafter, a.device)
+    nt = len(dr.taps) * tgt.n_embd
+    with open(a.out, "w") as out:
+        for pid in a.pids:
+            hdr, rows, steps = run_steps(a, pid)
+            n0 = hdr["prompt_n"] - 1
+            taps = np.fromfile(Path(a.run) / f"{pid}.taps", np.float32).reshape(-1, nt)
+            steps = [s for s in steps if n0 + s <= len(taps)]
+            last = n0 + steps[-1]
+            with torch.no_grad():
+                cache_all = dr.encode(torch.from_numpy(taps[:last]).to(dr.device), torch.arange(last, device=dr.device))
+            for c0 in range(0, len(steps), a.batch):
+                chunk = steps[c0:c0 + a.batch]
+                anchors, caches = [], []
+                for s in chunk:
+                    p0 = n0 + s
+                    anchors.append(hdr["prompt_ids"][-1] if s == 0 else rows[s - 1]["g"])
+                    lo = max(0, p0 - dr.n_swa + 1) if dr.n_swa else 0
+                    caches.append(([(K[lo:p0], V[lo:p0]) for K, V in cache_all], torch.arange(lo, p0, device=dr.device)))
+                with torch.no_grad():
+                    res = dr.draft_many(tgt, anchors, [n0 + s for s in chunk], caches)
+                for s, (d, lat) in zip(chunk, res):
+                    lat = lat.numpy()
+                    m, pr = [], 0
+                    for i in range(7):
+                        m.append(margin(lat[i], pr))
+                        pr = int(np.where(lat[i, :TOP_K].astype(int) == d[i])[0][0])
+                    out.write(json.dumps({"pid": pid, "s": s, "p0": n0 + s, "d": d, "m": m,
+                                          "c1": [int(c) for c in lat[0, :TOP_K]]}) + "\n")
+                out.flush()
+            print(f"{pid}: {len(steps)} reference drafts", flush=True)
+
+
+def accepted(d, g, s, k):
+    """Teacher-forced tokens a verify pass keeps: the drafts that match the target's next tokens, plus one."""
+    n = 0
+    while n < k and s + n < len(g) and d[n] == g[s + n]:
+        n += 1
+    return n + 1
+
+
+def compare(a):
+    """NPU drafts against reference drafts on the same taps: agreement at each k (near-ties excepted) and tokens/pass."""
+    def load(p):
+        out = {}
+        for line in Path(p).read_text().splitlines():
+            r = json.loads(line)
+            out[(r["pid"], r["s"])] = r
+        return out
+    npu, ref = load(a.npu), load(a.ref)
+    keys = sorted(set(npu) & set(ref))
+    gs = {pid: [r["g"] for r in load_run(a.run, pid, None)[1]] for pid in {k[0] for k in keys}}
+    report = {}
+    for k in a.k:
+        same = tie = 0
+        tp_n = tp_r = 0
+        mism = []
+        for key in keys:
+            dn, dr_ = npu[key]["d"][:k], ref[key]["d"][:k]
+            g = gs[key[0]]
+            tp_n += accepted(dn, g, key[1], k)
+            tp_r += accepted(dr_, g, key[1], k)
+            if dn == dr_:
+                same += 1
+                continue
+            i = next(j for j in range(k) if dn[j] != dr_[j])
+            m = min(ref[key]["m"][i], npu[key]["m"][i])
+            near = m < a.tie or (i == 0 and dn[0] not in ref[key]["c1"])
+            tie += near
+            mism.append({"pid": key[0], "s": key[1], "row": i + 1, "npu": dn[i], "ref": dr_[i], "margin": m, "near_tie": near})
+        n = len(keys)
+        report[k] = {"steps": n, "identical": same, "near_tie_mismatches": tie, "other_mismatches": len(mism) - tie,
+                     "agreement": same / max(1, n), "agreement_excl_ties": (same + tie) / max(1, n),
+                     "tokens_per_pass_npu": tp_n / max(1, n), "tokens_per_pass_ref": tp_r / max(1, n),
+                     "tokens_per_pass_rel": (tp_n - tp_r) / max(1, tp_r), "mismatches": mism}
+        print(f"k={k}: {same}/{n} identical ({same / max(1, n):.4f}), {tie} near-tie (< {a.tie}), "
+              f"{len(mism) - tie} other; tokens/pass NPU {tp_n / max(1, n):.4f} vs reference {tp_r / max(1, n):.4f} "
+              f"({100 * (tp_n - tp_r) / max(1, tp_r):+.2f}%)")
+    if a.out:
+        Path(a.out).write_text(json.dumps(report, indent=1))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
+    d = sp.add_parser("drafts")
+    d.add_argument("--run", required=True)
+    d.add_argument("--drafter", required=True)
+    d.add_argument("--target", required=True)
+    d.add_argument("--pids", nargs="+", required=True)
+    d.add_argument("--stride", type=int, default=2)
+    d.add_argument("--max-steps", type=int, default=0)
+    d.add_argument("--threads", type=int, default=8)
+    d.add_argument("--device", default="cpu")
+    d.add_argument("--batch", type=int, default=16)
+    d.add_argument("--out", required=True)
+    c = sp.add_parser("compare")
+    c.add_argument("--run", required=True)
+    c.add_argument("--npu", required=True)
+    c.add_argument("--ref", required=True)
+    c.add_argument("--k", type=int, nargs="+", default=[3, 7])
+    c.add_argument("--tie", type=float, default=0.1)
+    c.add_argument("--out")
     g = sp.add_parser("gate")
     g.add_argument("--run", required=True)
     g.add_argument("--key", required=True)
@@ -402,6 +573,10 @@ def main():
     a = ap.parse_args()
     if a.cmd == "gate":
         gate(a)
+    elif a.cmd == "drafts":
+        drafts(a)
+    elif a.cmd == "compare":
+        compare(a)
 
 
 if __name__ == "__main__":
