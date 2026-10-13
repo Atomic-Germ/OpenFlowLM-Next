@@ -381,6 +381,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         }
     }
     // Stage 2.5 Gate B: opt-in host attention for the dense block route.
+    // OPEN-PREFILL-HOST-ATTN: the plain shape (no qk-norm, window, gate) defaults to the host; =0 keeps dxB
+    host_attn_on_ = gemm_block_t_ && host_attn_fits();
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN")) host_attn_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
     // OPEN-HOST-ATTN-GUARD: refuse at load, not on the first dispatch, and keep Auto off the host route
@@ -388,8 +390,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if ((host_attn_on_ || host_attn_decode_on_) && !host_attn_refusal_.empty())
         throw std::runtime_error("open_qwen36: OFLM_OPEN_HOST_ATTN / OFLM_OPEN_HOST_ATTN_DECODE: " + host_attn_refusal_);
     if (host_attn_on_)
-        log("gemm-block attention: HOST (OFLM_OPEN_HOST_ATTN=1; K2 dense shape only, "
-            "no qk-norm/gate, geometry checked against the manifest)");
+        log("gemm-block attention: HOST (plain dense shape: no qk-norm, window or gate; "
+            "OFLM_OPEN_HOST_ATTN=0 keeps the dxB dispatches)");
     // Stage 2.6 Gate B: opt-in host DECODE route -- the whole decode step through
     // the 2.5 gemm-block chain at T=1 (host attention forced for those calls
     // only) instead of the fused per-layer dx dispatch. Decode-only: the
@@ -470,6 +472,21 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
                                                      : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
                               : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
                                                             : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
+}
+
+bool Core::host_attn_fits() const {
+    if (nl_ == 0) return false;
+    for (int l = 0; l < nl_; ++l) {
+        const LayerType& lt = *types_[l];
+        const GemmBlockProgram& gb = lt.gemm_block;
+        if (gb.kind != "dense" || gb.attn_block.present() || gb.sandwich || gb.act != "silu") return false;
+        const auto k = w_->kernels.find(gb.attn_kernel);
+        if (k == w_->kernels.end() || k->second.window != 0) return false;
+        for (const PackOp& op : lt.consts)
+            if (op.tensor.find("q_norm.weight") != std::string::npos || op.tensor.find("k_norm.weight") != std::string::npos)
+                return false;
+    }
+    return true;
 }
 
 bool Core::layer_major_ok() const {

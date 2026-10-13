@@ -257,6 +257,7 @@ public:
     /// Whether step_gemm_prompt() can run this kernel set: a block route whose every
     /// layer is a MoE kind, and OFLM_OPEN_LAYER_MAJOR not set to 0.
     bool layer_major_ok() const;
+    bool host_attn_fits() const;
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
     /// sequential path needs. Off by default; costs a tail per token.
