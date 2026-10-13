@@ -28,6 +28,8 @@ public:
     virtual std::vector<int> propose(const std::vector<int>& fed, int next, size_t k) = 0;
     // the pass kept `kept[0..m)` (`next`, then the accepted draft): where a drafter with its own state advances it
     virtual void observe(const int* kept, size_t m) = 0;
+    // a drafter with its own state may catch it up with the history now (a stack asks when another member drafted)
+    virtual void keep_up(const std::vector<int>& fed) { (void)fed; }
 };
 
 class PromptLookup : public Drafter {
@@ -111,6 +113,66 @@ private:
     int nmin_, nmax_;
     std::vector<int> ctx_;
     std::unordered_map<Key, size_t, KeyHash> idx_;   // n-gram -> most recent start with a successor
+};
+
+// An ordered stack of drafters: each pass, the first one that has a draft drafts, and the ones after it do not run
+// (OPEN-DECODE-SPECULATIVE). The usual stack is lookup, then a draft model: lookup's drafts cost nothing and are
+// right when the text copies itself, and the model's pass is paid only where lookup has none.
+class Stacked : public Drafter {
+public:
+    struct Member {
+        std::string name;
+        std::unique_ptr<Drafter> drafter;
+        size_t drafted = 0;     // passes this member's draft was used
+    };
+
+    // the whole decision rule: a member that proposed something drafts, one that proposed nothing yields
+    static bool takes(const std::vector<int>& proposal) { return !proposal.empty(); }
+
+    // `eager`: after an earlier member drafts, the later ones catch up with the history now, each pass, instead of
+    // when they next draft (one cache fill for all the passes in between; never cheaper to do it each pass)
+    explicit Stacked(bool eager = false) : eager_(eager) {}
+    void add(const std::string& name, std::unique_ptr<Drafter> d) { members_.push_back({name, std::move(d), 0}); }
+
+    std::vector<int> propose(const std::vector<int>& fed, int next, size_t k) override {
+        ++passes_;
+        for (size_t i = 0; i < members_.size(); ++i) {
+            std::vector<int> d = members_[i].drafter->propose(fed, next, k);
+            if (!takes(d)) continue;
+            ++members_[i].drafted;
+            if (eager_)
+                for (size_t j = i + 1; j < members_.size(); ++j) members_[j].drafter->keep_up(fed);
+            return d;
+        }
+        return {};
+    }
+    void observe(const int* kept, size_t m) override {
+        for (Member& mem : members_) mem.drafter->observe(kept, m);
+    }
+    void keep_up(const std::vector<int>& fed) override {
+        for (Member& mem : members_) mem.drafter->keep_up(fed);
+    }
+
+    const std::vector<Member>& members() const { return members_; }
+    size_t passes() const { return passes_; }
+    // "lookup 41 / dflash2 30 / none 5 of 76 passes", then the counts start over
+    std::string report(bool reset = true) {
+        std::string s;
+        size_t used = 0;
+        for (Member& m : members_) {
+            s += m.name + " " + std::to_string(m.drafted) + " / ";
+            used += m.drafted;
+            if (reset) m.drafted = 0;
+        }
+        s += "none " + std::to_string(passes_ - used) + " of " + std::to_string(passes_) + " passes";
+        if (reset) passes_ = 0;
+        return s;
+    }
+
+private:
+    bool eager_;
+    std::vector<Member> members_;
+    size_t passes_ = 0;
 };
 
 // pick may be the app's stateful sampler: call it in position order and only as far as the walk goes
@@ -212,9 +274,10 @@ struct Method {
     const char* name;
     bool needs_verify;   // the kernel set's verify program (OPEN-DECODE-SPECULATIVE-VERIFY)
     bool needs_draft;    // a drafter container named by the entry's `draft` (OPEN-REGISTRY-SPECULATIVE)
+    bool always_drafts;  // proposes on every pass, so a method listed after it in a stack would never run
 };
 inline const std::vector<Method>& known_methods() {
-    static const std::vector<Method> m{{"lookup", true, false}, {"dflash2", true, true}};
+    static const std::vector<Method> m{{"lookup", true, false, false}, {"dflash2", true, true, true}};
     return m;
 }
 
@@ -266,31 +329,34 @@ inline DraftInfo resolve_draft(const std::string& draft, const std::string& mode
 
 struct Availability {
     enum Status { kAvailable, kUnavailable, kError };
+    struct Member {
+        std::string method;
+        int min_match = 0;   // lookup: the shortest suffix match that proposes (0 = the default for the stack it is in)
+    };
     Status status = kUnavailable;
-    std::string method;
+    std::string method;          // the methods in priority order, joined by "," ("lookup", "dflash2", "lookup,dflash2")
+    std::vector<Member> members; // the same, one each
     std::string reason;
-    DraftInfo draft;   // set when the method has a drafter container
+    DraftInfo draft;             // set when a member has a drafter container
     bool ok() const { return status == kAvailable; }
+    bool has(const std::string& name) const {
+        for (const Member& m : members)
+            if (m.method == name) return true;
+        return false;
+    }
 };
 
-// `entry` is the model's registry entry; `manifest` its kernel set's, null when none was found;
-// `resolve` finds the drafter container a method with one names
-inline Availability spec_availability(const nlohmann::json& entry, const Manifest* manifest,
-                                      const DraftResolver& resolve = nullptr) {
+// One listed method of the entry's `speculative`, against the kernel set (`resolve` finds a drafter container).
+inline Availability method_availability(const nlohmann::json& item, const Manifest* manifest, const DraftResolver& resolve) {
     Availability a;
-    const auto it = entry.is_object() ? entry.find("speculative") : entry.end();
-    if (!entry.is_object() || it == entry.end() || it->is_null()) {
-        a.reason = "the registry entry declares no speculative method";
-        return a;
-    }
     std::string names;
     for (const Method& m : known_methods()) names += std::string(names.empty() ? "" : ", ") + m.name;
-    if (!it->is_object() || !it->contains("method") || !(*it)["method"].is_string()) {
+    if (!item.is_object() || !item.contains("method") || !item["method"].is_string()) {
         a.status = Availability::kError;
         a.reason = "the registry entry's \"speculative\" has no \"method\" (this build knows: " + names + ")";
         return a;
     }
-    a.method = (*it)["method"].get<std::string>();
+    a.method = item["method"].get<std::string>();
     const Method* m = nullptr;
     for (const Method& k : known_methods())
         if (a.method == k.name) m = &k;
@@ -298,6 +364,16 @@ inline Availability spec_availability(const nlohmann::json& entry, const Manifes
         a.status = Availability::kError;
         a.reason = "unknown speculative method \"" + a.method + "\" (this build knows: " + names + ")";
         return a;
+    }
+    a.members.push_back({a.method, 0});
+    if (item.contains("min_match")) {
+        if (a.method != "lookup" || !item["min_match"].is_number_integer() || item["min_match"].get<int>() < 1 ||
+            item["min_match"].get<int>() > PromptLookup::kMaxN) {
+            a.status = Availability::kError;
+            a.reason = "\"min_match\" is the shortest suffix match of method \"lookup\" (1 to " + std::to_string(PromptLookup::kMaxN) + ")";
+            return a;
+        }
+        a.members[0].min_match = item["min_match"].get<int>();
     }
     if (!manifest) {
         a.reason = "no open kernel set was found";
@@ -308,7 +384,7 @@ inline Availability spec_availability(const nlohmann::json& entry, const Manifes
         return a;
     }
     if (m->needs_draft) {
-        if (!it->contains("draft") || !(*it)["draft"].is_string() || (*it)["draft"].get<std::string>().empty()) {
+        if (!item.contains("draft") || !item["draft"].is_string() || item["draft"].get<std::string>().empty()) {
             a.status = Availability::kError;
             a.reason = "method \"" + a.method + "\" needs a \"draft\" naming the drafter container";
             return a;
@@ -317,14 +393,14 @@ inline Availability spec_availability(const nlohmann::json& entry, const Manifes
             a.reason = "method \"" + a.method + "\" needs a drafter container and this caller cannot look for one";
             return a;
         }
-        a.draft = resolve((*it)["draft"].get<std::string>());
+        a.draft = resolve(item["draft"].get<std::string>());
         if (a.draft.dir.empty()) {
             a.reason = a.draft.why;
             return a;
         }
         // the verify pass writes the taps; the drafter reads them, so its geometry must be the target's
         if (a.draft.hidden != manifest->hidden || a.draft.vocab != manifest->vocab) {
-            a.reason = "the drafter " + (*it)["draft"].get<std::string>() + " was trained for another target (hidden " +
+            a.reason = "the drafter " + item["draft"].get<std::string>() + " was trained for another target (hidden " +
                        std::to_string(a.draft.hidden) + ", vocab " + std::to_string(a.draft.vocab) + "; this model has " +
                        std::to_string(manifest->hidden) + ", " + std::to_string(manifest->vocab) + ")";
             return a;
@@ -338,6 +414,51 @@ inline Availability spec_availability(const nlohmann::json& entry, const Manifes
     }
     a.status = Availability::kAvailable;
     return a;
+}
+
+// `entry` is the model's registry entry; `manifest` its kernel set's, null when none was found;
+// `resolve` finds the drafter container a method with one names. `speculative` is one method object or an
+// ordered list of them (a stack: the first with a draft drafts, OPEN-DECODE-SPECULATIVE); the object is a list of one.
+// Every listed method must be available: a stack is what the entry declares, not what happens to work.
+inline Availability spec_availability(const nlohmann::json& entry, const Manifest* manifest,
+                                      const DraftResolver& resolve = nullptr) {
+    Availability a;
+    const auto it = entry.is_object() ? entry.find("speculative") : entry.end();
+    if (!entry.is_object() || it == entry.end() || it->is_null() || (it->is_array() && it->empty())) {
+        a.reason = "the registry entry declares no speculative method";
+        return a;
+    }
+    std::vector<nlohmann::json> items;
+    if (it->is_array())
+        items.assign(it->begin(), it->end());
+    else
+        items.push_back(*it);
+    Availability stack;
+    stack.status = Availability::kAvailable;
+    bool always_drafts = false;
+    for (const nlohmann::json& item : items) {
+        Availability one = method_availability(item, manifest, resolve);
+        if (!one.ok()) {
+            one.method = stack.method.empty() ? one.method : stack.method + "," + one.method;
+            return one;
+        }
+        if (stack.has(one.method)) {
+            a.status = Availability::kError;
+            a.reason = "method \"" + one.method + "\" is listed twice";
+            return a;
+        }
+        if (always_drafts) {
+            a.status = Availability::kError;
+            a.reason = "method \"" + one.method + "\" is listed after one that always drafts, so it would never run";
+            return a;
+        }
+        for (const Method& k : known_methods())
+            if (one.method == k.name && k.always_drafts) always_drafts = true;
+        stack.method += (stack.method.empty() ? "" : ",") + one.method;
+        stack.members.push_back(one.members.front());
+        if (!one.draft.dir.empty()) stack.draft = one.draft;
+    }
+    return stack;
 }
 
 }  // namespace spec

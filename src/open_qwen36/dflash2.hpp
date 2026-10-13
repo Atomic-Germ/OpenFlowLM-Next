@@ -135,6 +135,12 @@ public:
     /// `next` sits at position fed.size(): the cache is brought to the history first.
     std::vector<int> propose(const std::vector<int>& fed, int next, size_t k) override;
     void observe(const int*, size_t) override {}   // the next propose() reads what the pass left from the taps
+    /// A cold cache takes a long prompt's last `rows` positions only (the fill is ~0.85 ms a row); after
+    /// `deepen_after` drafts it is refilled with the whole window (ColdFill). 0 = the whole window at once.
+    void set_fill(size_t rows, size_t deepen_after = 4) { fill_.cold = rows; fill_.after = deepen_after; }
+    /// Bring the cache to `fed` without drafting (what propose() does first). False: no context to draft from.
+    bool sync(const std::vector<int>& fed);
+    void keep_up(const std::vector<int>& fed) override;
 
     const Stats& stats() const { return stats_; }
     dflash2::Drafter& drafter() { return *d_; }
@@ -145,8 +151,25 @@ private:
     std::vector<int> ids_;          ///< the token at each cached position, from d_->base()
     std::vector<float> stage_;
     Stats stats_;
+    ColdFill fill_;
     static constexpr size_t kStageRows = 64;
 };
+
+/// The shortest suffix match prompt lookup proposes from when it is in front of a draft model (the measured default).
+constexpr int kStackLookupMin = 5;
+constexpr size_t kStackFillRows = 256, kStackDeepenAfter = 4;
+
+struct StackOptions {
+    size_t fill_rows = 0;  ///< Proposer::set_fill: the cold fill (0 = the stack's default, kStackFillRows; alone: the window)
+    size_t deepen_after = 0;   ///< likewise (0 = kStackDeepenAfter)
+    int lookup_min = 0;    ///< overrides every lookup member's min_match (0 = the entry's, else the default)
+    bool eager = false;    ///< the draft model catches up every pass lookup drafted, not when it next drafts
+};
+
+/// The drafter a speculative availability answer declares, on a core whose weights are loaded: the one member as
+/// itself, several as a `spec::Stacked` in the declared order. `proposer` receives the dflash2 member, if any.
+std::unique_ptr<spec::Drafter> make_stack(Core& core, const spec::Availability& av, const StackOptions& opt, bool verbose,
+                                          Proposer** proposer = nullptr);
 
 }  // namespace dflash2
 }  // namespace open_qwen36
