@@ -217,6 +217,9 @@ DN_FLAGS = [] if C.DN_ROWS in (0, DNX_ROWS_DEFAULT) else [f"-DDNX_ROWS={C.DN_ROW
 # leaves every stream and fifo exactly as it was, to tell a stream limit from a compute one
 if os.environ.get("LX_NULL_DN") == "1":
     DN_FLAGS = DN_FLAGS + ["-DLX_NULL_DN"]
+# Ternary Bonsai 2 (OPEN-HADAMARD) runs pass 2 a row at a time (dnx.h DNX_ROW_UPDATE); every other spec keeps the slice form
+if R.spec.hadamard:
+    DN_FLAGS = DN_FLAGS + ["-DDNX_ROW_UPDATE=1"]
 
 
 def kernels(inc, t):
