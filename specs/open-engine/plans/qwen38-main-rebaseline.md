@@ -13,11 +13,16 @@ Independent attention gates pass: **1152/1152 heads**, worst absolute error
 error **0.0005515331 <0.005**. These use propagated inputs from the new export,
 not forced inputs from the preceding isolated experiment.
 
-The hardware run streams weights through one shared BO while retaining every
-layer state. Resident-runtime identity/reset for this export remains untested:
-available memory is below the 35–40 GiB full-load requirement. Independent
-state/LM-head, prefill, serving and final performance/resource acceptance remain
-open. This is not complete model support.
+The same export now passes both streamed-weight and resident execution:
+all 387 activation/residual/logit captures match bytewise. Native-runtime logits
+match the harness at all three positions; repeated requests and three full-buffer
+reset replays pass. Independent final norm/Q8 LM-head checks pass at all three
+positions, worst composed normalized error **0.0008821369 <0.005**.
+
+There are 144 captured DeltaNet states ready for independent numerical checking;
+capturing them and passing reset hashes do not establish state accuracy. That
+check, remaining primitive/projection gates, prefill, serving and final
+performance/resource acceptance remain open. This is not complete model support.
 
 ## Stage 1: complete decode comparison
 
@@ -1061,3 +1066,63 @@ block-prefill parity, serving isolation and final resource/performance gates
 remain open. Next add independent state/LM-head validation; run resident gates
 separately when memory is available. Passing this fixture is not complete model
 support or proof for arbitrary prompts/context lengths.
+
+## Stage 5c11a: final norm/head checks, state captures and resident replay
+
+Added opt-in `make_decode.py --capture-boundaries`. It dumps the complete linear
+recurrent state after each layer/position and BF16 final RMSNorm output before
+LM-head dispatch. It verifies the supported tail contract and leaves all existing
+dispatches/default captures unchanged. Separate fixture directories preserve
+previous evidence. No kernels, native binaries, weight packing or references
+were changed.
+
+Added `lm_head.py`, an independent FP64 tail checker conditioned on captured
+last-layer residuals. It streams native Q8 weights in 256-row slabs and computes
+unrounded RMSNorm → logits without materializing the full head matrix. Captured
+norm → logits is a separate required projection gate; ideally rounded BF16 norm
+is diagnostic only. Every position and all 248320 padded vocabulary rows are
+checked. Norm and projection errors must remain <0.005; projection correlation
+must exceed 0.9999 and argmax must match. Identical constant outputs are handled
+without undefined correlation. Malformed/non-finite captures, incompatible
+identity/dimensions, unsupported head format and incomplete row coverage fail.
+Results pin nine captures, fixture metadata and both effective weight hashes.
+
+TDD: missing-checker collection failure and two failing capture-contract tests
+preceded implementation. **33 new tests** cover BF16 cancellation hidden by
+conditioned references, near-tie argmax, zero references, exact row coverage,
+Q8 row/K ordering, provenance, bad inputs and CLI failure. Full host suite:
+**1130 passed, 47 skipped**.
+
+The unchanged 41-set/82-hash export audit passes. A new streamed 64×3 NPU run
+completes 198 dispatches; all **387 existing captures reproduce byte for byte**.
+It adds **144 state captures (468910080 bytes)** and **three norm captures**.
+All 195 independent CPU reference hashes are preserved. The full-chain
+residual/logit comparator remains PASS.
+
+| Tail gate (three positions) | Result | Worst normalized error |
+|---|---:|---:|
+| Final RMSNorm against unrounded FP64 | 3/3 PASS | 0.0021158452 |
+| Composed RMSNorm → logits | 3/3 PASS | 0.0008821369 |
+| Projection from captured norm | 3/3 PASS | 0.0000110584 |
+
+Composed correlations are **0.9999993625 / 0.9999987783 / 0.9999989898**;
+argmax **8678 / 198 / 2** matches the local independent reference. The primary
+reference was not replaced with rounded or device-derived norm values.
+
+Available memory rose to about **60 GiB**, allowing the previously deferred
+resident checks on this same export. The original resident harness cfg completes
+198 dispatches and reproduces all **387 streamed captures bytewise**. The hash-
+verified native CLI runs all 64 layers and three tokens twice; request 2 reproduces
+the first. All **three runtime logit captures are byte-identical** to resident
+harness output and pass the independent full-depth comparator. Forced IDs
+248045,8678,198 with `--det-step 3 --det-full` produce **0 of 3 differing replays**.
+This validates repeatability against an NPU reference, not independent recurrent
+state accuracy. The power-mode request failed; no throughput claim is made.
+
+Evidence is under `Models/qwen38-27b/head-state-validation/`: `decode/` retains
+new boundaries, `resident/` retains resident captures, and the audits, numerical
+JSON and logs pin both runs. The integrated export's build key is unchanged:
+`63d7cd0879422f0f31f0b9d1e018799b8db868a3f110e3ee5f908a3faa5fc8da`.
+Next independently validate the captured multi-token DeltaNet state. Remaining
+all-layer primitive/projection, prefill, serving and final acceptance gates are
+not implied by the passing tail or reset checks.

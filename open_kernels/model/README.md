@@ -352,3 +352,36 @@ rounding; full-attention scratch grows by 8192 bytes. `attention_projections.py`
 reads that dtype only after manifest/fixture validation. Rebuild the complete
 export and regenerate fixtures; weights need no repacking. Reproduction and
 acceptance scope are in the [FP32 entry integration skill](../../.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md).
+
+### Final norm and Q8 LM-head validation
+
+`make_decode.py --capture-boundaries` additionally dumps `y_norm[_tN].bin`
+(BF16 final RMSNorm output) and `y_stateL[_tN].bin` (each complete linear state)
+after every position. It supports the declared BF16 norm/Q8-head tail and
+leaves the dispatch order and default capture set unchanged. Use a separate
+fixture directory to retain earlier evidence. Compatible copied reference/input
+files can be bound with `--cfg-only`; reference hashes are still checked.
+Streaming weights preserves these captures and every layer's state.
+
+```bash
+OPENBLAS_NUM_THREADS=1 python open_kernels/model/lm_head.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-fp32-entry/kernels \
+  --out Models/qwen38-27b/head-state-validation/decode
+```
+
+The checker computes final RMSNorm in FP64 from the captured last-layer residual
+and streams native Q8 weights in 256-row blocks. It compares both composed
+norm-to-logits and projection from captured norm, across the entire padded
+vocabulary. Norm and both projection gates require normalized maximum error
+<0.005. Projection gates also require correlation >0.9999 and equal argmax;
+identical constant outputs are accepted without an undefined correlation.
+Ideal-BF16-norm results are diagnostic only and cannot override primary failure.
+
+All fixture positions, exact capture sizes, finite values, manifest identity
+and complete Q8 row coverage are required. JSON pins nine captures for a
+three-position run and the effective norm/head weight hashes. The default
+projection slab is 256 × hidden FP64 values; no full head matrix or resident
+model is needed. This is an independent tail check conditioned on captured
+residuals. It does not validate upstream recurrent state. The new state dumps
+supply data for that separate multi-token check; capturing them is not a PASS.

@@ -110,3 +110,39 @@ was not run (about 30 GiB available). State/LM-head, prefill, serving and final
 resource/performance acceptance remain open. `decode-results.json` and the
 four boundary JSON files pin the numerical evidence; this scoped PASS must
 not be promoted to complete model support.
+
+## Follow-up: tail boundaries and resident validation
+
+Use `make_decode.py --capture-boundaries` when preparing a new fixture, or with
+`--cfg-only` after copying compatible reference/input files to a separate
+fixture directory. This adds one BF16 `y_norm` and one full `y_stateL` per
+linear layer at each position. `stream-decode-weights.py` retains these dumps.
+Run `open_kernels/model/lm_head.py --model-dir ... --kernel-dir ... --out ...`
+to validate the unrounded FP64 norm/head chain and captured-norm projection.
+It streams native Q8 weight slabs and records exact coverage/input/weight hashes.
+Do not treat the BF16-conditioned or rounded diagnostic as the composed gate.
+
+The follow-up fixture is `Models/qwen38-27b/head-state-validation/decode`.
+All 387 original activation/residual/logit captures reproduce the integrated
+export byte for byte; 144 state snapshots (468910080 bytes total) and three norm
+captures are retained. LM-head passes all three positions: worst norm maxrel
+0.0021158452, composed logits 0.0008821369, conditioned projection 0.0000110584;
+minimum composed correlation 0.9999987783, matching argmax 8678/198/2. State
+snapshots still need an independent numerical oracle.
+
+When available RAM rose to about 60 GiB, the same export was also run with all
+weights resident, in `head-state-validation/resident`. Its 387 captures match
+the streamed run byte for byte. Native CLI `--ids 248045 --max-tokens 3
+--layers 64 --max-ctx 2048 --twice --dump-logits .../resident/engine` reproduces
+the token sequence; `compare_decode.py --runtime-prefix .../resident/engine`
+checks all three logit dumps bytewise and all independent full-depth gates.
+Use the existing CLI `/tmp/qwen38-paired-runtime/open_qwen36_cli` only after
+verifying its hash against the integrated export's `integration-evidence.json`.
+No new kernel or native binary build was required for this follow-up.
+
+The subsequent reset run uses `--ids 248045,8678,198 --layers 64 --max-ctx 2048
+--det-step 3 --det-full`: 0 of 3 replays differ. This closes resident repeatability
+for the integrated export, superseding the earlier memory-deferred status;
+independent state accuracy remains open. The power-mode request failed, so do
+not present these validation timings as a performance benchmark. Host suite:
+1130 passed, 47 skipped.
