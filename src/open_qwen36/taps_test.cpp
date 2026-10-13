@@ -91,6 +91,14 @@ int main() {
     r.clear();
     check(r.row(25) == nullptr, "clear empties the ring");
 
+    // a rewind to 22 (Core::restore): the rows before it stay, from it on go
+    TapRing w;
+    w.configure(kTaps, kHidden, 8);
+    for (long p = 18; p < 26; ++p) run_pass(w, p, 1, 6, false);
+    w.truncate(22);
+    check(holds(w, 18, 6) && holds(w, 21, 6) && w.row(22) == nullptr && w.row(25) == nullptr,
+          "truncate(pos) drops the rows from pos on and keeps the ones before it");
+
     // block prefill of 20 positions from 5: only the last window (8) is written, like Core does
     TapRing q;
     q.configure(kTaps, kHidden, 8);

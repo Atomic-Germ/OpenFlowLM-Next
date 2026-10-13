@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
@@ -219,9 +221,9 @@ void availability_tests() {
     a = spec_availability({{"speculative", nullptr}}, &with_verify);
     check(a.status == Availability::kUnavailable, "`speculative: null` -> unavailable, as if absent");
 
-    a = spec_availability({{"speculative", {{"method", "dflash2"}}}}, &with_verify);
+    a = spec_availability({{"speculative", {{"method", "mtp"}}}}, &with_verify);
     check(a.status == Availability::kError &&
-              a.reason == "unknown speculative method \"dflash2\" (this build knows: lookup)",
+              a.reason == "unknown speculative method \"mtp\" (this build knows: lookup, dflash2)",
           "an unknown method -> error listing the known ones: \"" + a.reason + "\"");
     a = spec_availability({{"speculative", {{"draft", "qwen3.5:0.8b"}}}}, &with_verify);
     check(a.status == Availability::kError && a.reason.find("lookup") != std::string::npos,
@@ -234,6 +236,80 @@ void availability_tests() {
     a = spec_availability(lookup, nullptr);
     check(a.status == Availability::kUnavailable && a.reason == "no open kernel set was found",
           "declared lookup + no kernel set -> unavailable");
+}
+
+// a drafter container and kernel set on disk, as oflm-add leaves them: <root>/<name>/{config.json,open_kernels/manifest.json}
+std::string make_draft(const std::filesystem::path& root, const std::string& name, const nlohmann::json& cfg, const std::string& family) {
+    namespace fs = std::filesystem;
+    fs::create_directories(root / name / "open_kernels");
+    std::ofstream(root / name / "config.json") << cfg.dump();
+    std::ofstream(root / name / "open_kernels" / "manifest.json") << nlohmann::json{{"family", family}}.dump();
+    return (root / name).string();
+}
+
+void draft_tests() {
+    namespace fs = std::filesystem;
+    using J = nlohmann::json;
+    const fs::path root = fs::temp_directory_path() / "oflm_spec_test_draft";
+    fs::remove_all(root);
+    const J cfg = {{"model_type", "dflash2"}, {"hidden_size", 5120}, {"vocab_size", 248320}, {"target_layer_ids", {5, 19, 33, 47, 61}}};
+    make_draft(root, "Bonsai2-drafter", cfg, "dflash2");
+    J wrong_type = cfg;
+    wrong_type["model_type"] = "qwen3";
+    make_draft(root, "NotADrafter", wrong_type, "dflash2");
+    make_draft(root, "NoKernels", cfg, "qwen3");
+
+    DraftInfo d = resolve_draft("Bonsai2-drafter", root.string());
+    check(!d.dir.empty() && d.hidden == 5120 && d.vocab == 248320 && d.tap_layers == std::vector<int>({5, 19, 33, 47, 61}) &&
+              fs::path(d.kernel_dir) == root / "Bonsai2-drafter" / "open_kernels",
+          "a drafter named beside the models resolves to its directory, geometry, taps and linked kernel set");
+    d = resolve_draft((root / "Bonsai2-drafter").string(), "");
+    check(!d.dir.empty(), "a drafter given as a directory resolves without a models root");
+    d = resolve_draft("Bonsai2-drafter", root.string(), (root / "elsewhere").string());
+    check(d.dir.empty() && d.why.find("no dflash2 kernel set") != std::string::npos, "a kernel override with no manifest -> why: \"" + d.why + "\"");
+    d = resolve_draft("Missing", root.string());
+    check(d.dir.empty() && d.why.find("is not installed") != std::string::npos, "a drafter that is not installed -> why: \"" + d.why + "\"");
+    d = resolve_draft("NotADrafter", root.string());
+    check(d.dir.empty() && d.why.find("not a DFlash 2 drafter container") != std::string::npos, "a container of another model type is refused");
+    d = resolve_draft("NoKernels", root.string());
+    check(d.dir.empty() && d.why.find("no dflash2 kernel set") != std::string::npos, "a drafter whose kernel set is another family is refused");
+
+    open_qwen36::Manifest bonsai;
+    bonsai.verify.width = 4;
+    bonsai.hidden = 5120;
+    bonsai.vocab = 248320;
+    bonsai.layers.assign(64, "lin");
+    const DraftResolver res = [&](const std::string& n) { return resolve_draft(n, root.string()); };
+    const J declared = {{"speculative", {{"method", "dflash2"}, {"draft", "Bonsai2-drafter"}}}};
+
+    Availability a = spec_availability(declared, &bonsai, res);
+    check(a.status == Availability::kAvailable && a.method == "dflash2" && !a.draft.dir.empty(),
+          "dflash2 + verify + taps' geometry + the drafter installed -> available");
+    a = spec_availability({{"speculative", {{"method", "dflash2"}}}}, &bonsai, res);
+    check(a.status == Availability::kError && a.reason.find("needs a \"draft\"") != std::string::npos,
+          "dflash2 without a draft -> error: \"" + a.reason + "\"");
+    a = spec_availability({{"speculative", {{"method", "dflash2"}, {"draft", "Missing"}}}}, &bonsai, res);
+    check(a.status == Availability::kUnavailable && a.reason.find("is not installed") != std::string::npos,
+          "dflash2 with a drafter that is not installed -> unavailable: \"" + a.reason + "\"");
+    open_qwen36::Manifest no_verify = bonsai;
+    no_verify.verify.width = 0;
+    a = spec_availability(declared, &no_verify, res);
+    check(a.status == Availability::kUnavailable && a.reason.find("no verify program") != std::string::npos,
+          "dflash2 on a kernel set without a verify program -> unavailable");
+    open_qwen36::Manifest small = bonsai;
+    small.hidden = 2560;
+    a = spec_availability(declared, &small, res);
+    check(a.status == Availability::kUnavailable && a.reason.find("trained for another target") != std::string::npos,
+          "a drafter whose hidden size is not the target's -> unavailable: \"" + a.reason + "\"");
+    open_qwen36::Manifest short_stack = bonsai;
+    short_stack.layers.assign(40, "lin");
+    a = spec_availability(declared, &short_stack, res);
+    check(a.status == Availability::kUnavailable && a.reason.find("taps layer 47") != std::string::npos,
+          "a drafter that taps a layer the target lacks -> unavailable: \"" + a.reason + "\"");
+    a = spec_availability(declared, &bonsai);
+    check(a.status == Availability::kUnavailable, "dflash2 from a caller that cannot look for a drafter -> unavailable");
+    check(make_drafter("dflash2") == nullptr, "dflash2 is built by the engine (it needs the core), not make_drafter");
+    fs::remove_all(root);
 }
 
 void loop_tests() {
@@ -352,6 +428,7 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     drafter_tests();
     availability_tests();
+    draft_tests();
     loop_tests();
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "ALL OK", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;

@@ -26,6 +26,12 @@ public:
     size_t window() const { return window_; }
     void clear() { std::fill(pos_.begin(), pos_.end(), -1L); }
 
+    /// A rewind to `pos`: the positions from it on are not the history any more.
+    void truncate(long pos) {
+        for (long& p : pos_)
+            if (p >= pos) p = -1;
+    }
+
     /// Rows [pos0, pos0 + n) are being written; they hold nothing until end().
     void begin(long pos0, size_t n) {
         for (size_t j = 0; j < std::min(n, window_); ++j) pos_[slot(pos0 + static_cast<long>(j))] = -1;

@@ -225,7 +225,52 @@ static void silu_tests() {
     CHECK(worst < 1e-5, "silu_mul worst relative error %.3g", worst);
 }
 
+static void sync_tests() {
+    auto all = [](long) { return true; };
+    std::vector<int> fed(100);
+    for (size_t i = 0; i < fed.size(); ++i) fed[i] = static_cast<int>(i * 7 + 1);
+    const std::vector<int> none;
+    auto cache = [&](long from, long to) { return std::vector<int>(fed.begin() + from, fed.begin() + to); };
+
+    SyncPlan p = plan_sync(none, 0, fed, 2048, all);
+    CHECK(p.can_draft && p.restart && p.from == 0 && p.to == 100, "an empty cache takes every position");
+    p = plan_sync(cache(0, 90), 0, fed, 2048, all);
+    CHECK(p.can_draft && !p.restart && p.keep == 90 && p.from == 90 && p.to == 100, "a cache that is the history takes the new rows");
+    p = plan_sync(cache(0, 100), 0, fed, 2048, all);
+    CHECK(p.can_draft && !p.restart && p.keep == 100 && p.from == 100 && p.to == 100, "a cache that is up to date takes nothing");
+    std::vector<int> other = cache(0, 100);
+    other[60] = -5;
+    p = plan_sync(other, 0, fed, 2048, all);
+    CHECK(p.can_draft && !p.restart && p.keep == 60 && p.from == 60 && p.to == 100, "a different token at 60 rewinds the cache to 60");
+    std::vector<int> shorter(fed.begin(), fed.begin() + 40);
+    p = plan_sync(cache(0, 100), 0, shorter, 2048, all);
+    CHECK(p.can_draft && !p.restart && p.keep == 40 && p.from == 40 && p.to == 40, "a request that rewound below the cache drops the rest");
+
+    std::vector<int> big(5000);
+    for (size_t i = 0; i < big.size(); ++i) big[i] = static_cast<int>(i % 977);
+    p = plan_sync(none, 0, big, 2048, all);
+    CHECK(p.can_draft && p.restart && p.from == 5000 - 2048 && p.to == 5000, "a long prompt injects the last window only");
+    std::vector<int> c1000(big.begin(), big.begin() + 1000);
+    p = plan_sync(c1000, 0, big, 2048, all);
+    CHECK(p.can_draft && p.restart && p.from == 5000 - 2048, "a cache that ends before the window restarts at its start");
+    std::vector<int> c4000(big.begin() + 1952, big.begin() + 4000);
+    p = plan_sync(c4000, 1952, big, 2048, all);
+    CHECK(p.can_draft && !p.restart && p.keep == 4000 && p.from == 4000 && p.to == 5000, "a cache inside the window is extended");
+
+    p = plan_sync(cache(0, 90), 0, fed, 2048, [](long q) { return q != 95; });
+    CHECK(p.can_draft && p.restart && p.from == 96 && p.to == 100, "a position the target lost restarts the cache after it");
+    p = plan_sync(cache(0, 100), 0, fed, 2048, [](long q) { return q != 95; });
+    CHECK(p.can_draft && !p.restart && p.from == 100, "a lost position below an up-to-date cache is not needed");
+    p = plan_sync(none, 0, fed, 2048, [](long q) { return q != 99; });
+    CHECK(!p.can_draft, "no taps for the last position and nothing cached: no draft");
+    p = plan_sync(none, 0, std::vector<int>{}, 2048, all);
+    CHECK(!p.can_draft, "no history: no draft");
+    p = plan_sync(cache(10, 50), 10, fed, 2048, all);
+    CHECK(p.can_draft && !p.restart && p.keep == 50 && p.from == 50, "a cache that begins late is extended from its end");
+}
+
 int main() {
+    sync_tests();
     silu_tests();
     hadamard_tests();
     walk_tests();

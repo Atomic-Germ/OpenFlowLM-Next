@@ -96,6 +96,8 @@ private:
     std::vector<int> fed_;           ///< every token the core has consumed, position i at index i
     std::vector<int> fed_snap_;      ///< fed_ at checkpoint()
     std::unique_ptr<spec::Drafter> drafter_;
+    spec::DraftInfo draft_;          ///< the drafter container, for a method that has one (dflash2)
+    void open_drafter();             ///< builds the container's drafter on the resident core (turns the taps on)
     /// A kernel that timed out or aborted leaves the hardware context dead:
     /// every later submission fails. Mark the engine and rebuild it (contexts
     /// + weights, ~90 s) before the next request instead of failing forever.

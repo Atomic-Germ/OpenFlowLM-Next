@@ -3,8 +3,10 @@
 ///        dispatches, XRT-free so dflash2_test.cpp can hold it to utilities/dflash2_ref.py.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace open_qwen36 {
@@ -28,6 +30,39 @@ struct Lattice {
 std::vector<int> walk(const Lattice& lat);
 /// The winning score's margin over the runner-up at each row along the walk (near-tie diagnostics).
 std::vector<float> walk_margins(const Lattice& lat);
+
+/// What the drafter's cache needs before a draft whose anchor sits at position P = fed.size()
+/// (OPEN-DRAFT-DFLASH2-SYNC): the cache holds the taps of positions [base, base + cached.size()) of the
+/// history `cached` (token ids); `has_taps(p)` says whether the target still holds position p's taps.
+/// The cache keeps the longest prefix that is still the history, then takes the taps of the positions after it
+/// (at most the window's worth, none that the target has lost); a hole in them restarts the cache after it.
+struct SyncPlan {
+    bool can_draft = false;    ///< false: there is no context to draft from
+    bool restart = false;      ///< empty the cache and begin it at `from`
+    long keep = 0;             ///< otherwise keep the positions below this
+    long from = 0, to = 0;     ///< inject the taps of positions [from, to)
+};
+inline SyncPlan plan_sync(const std::vector<int>& cached, long base, const std::vector<int>& fed, size_t window,
+                          const std::function<bool(long)>& has_taps) {
+    SyncPlan s;
+    const long P = static_cast<long>(fed.size());
+    const long lo = window && P > static_cast<long>(window) ? P - static_cast<long>(window) : 0;
+    long c = base;
+    const long limit = std::min(base + static_cast<long>(cached.size()), P);
+    while (c < limit && cached[static_cast<size_t>(c - base)] == fed[static_cast<size_t>(c)]) ++c;
+    s.keep = c;
+    s.from = std::max(c, lo);
+    s.restart = cached.empty() || s.from > c;
+    for (long p = P - 1; p >= s.from; --p)
+        if (!has_taps(p)) {
+            s.from = p + 1;
+            s.restart = true;
+            break;
+        }
+    s.to = P;
+    s.can_draft = P > 0 && (s.from < P || !s.restart);
+    return s;
+}
 
 /// Top-16 of logits [n] by value, descending, the lower id first on a tie.
 void top16(const float* logits, size_t n, int32_t* ids, float* vals);

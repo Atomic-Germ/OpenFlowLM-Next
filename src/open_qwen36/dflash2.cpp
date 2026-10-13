@@ -204,11 +204,16 @@ void Drafter::load_weights() {
     if (verbose_) std::fprintf(stderr, "dflash2: weights packed in %.1f s\n", ms_since(t0) / 1000.0);
 }
 
-void Drafter::reset() {
+void Drafter::reset() { restart(0); }
+
+void Drafter::restart(long pos) {
     const size_t kvw = cfg_.kvh * cfg_.hd;
-    kc_.assign(cfg_.layers, std::vector<float>(max_rows_ * kvw, 0.f));
-    vc_.assign(cfg_.layers, std::vector<float>(max_rows_ * kvw, 0.f));
-    base_pos_ = next_pos_ = 0;
+    // rows past next_pos_ are never read, so a restart only moves the cursor once the cache exists
+    if (kc_.size() != cfg_.layers) {
+        kc_.assign(cfg_.layers, std::vector<float>(max_rows_ * kvw, 0.f));
+        vc_.assign(cfg_.layers, std::vector<float>(max_rows_ * kvw, 0.f));
+    }
+    base_pos_ = next_pos_ = pos;
 }
 
 void Drafter::truncate(long pos) {
@@ -357,6 +362,64 @@ std::vector<int> Drafter::draft(int anchor, size_t k, Lattice* lat_out) {
     d.resize(k);
     if (lat_out) *lat_out = std::move(lat);
     timing_.total_ms = ms_since(t0);
+    return d;
+}
+
+Proposer::Proposer(Core& target, const std::string& model_dir, const std::string& kernel_dir, bool verbose)
+    : core_(target), d_(std::make_unique<dflash2::Drafter>(model_dir, kernel_dir, target, verbose)) {
+    const DraftConfig& c = d_->config();
+    target.set_taps(c.tap_layers, c.window ? c.window : 2048);
+    d_->load_weights();
+    stage_.resize(kStageRows * c.tap_width());
+}
+
+std::vector<int> Proposer::propose(const std::vector<int>& fed, int next, size_t k) {
+    const DraftConfig& c = d_->config();
+    k = std::min(k, kRows - 1);
+    if (k == 0 || next < 0 || static_cast<size_t>(next) >= core_.real_vocab()) {
+        ++stats_.skipped;
+        return {};
+    }
+    const SyncPlan plan = plan_sync(ids_, d_->base(), fed, c.window ? c.window : 2048,
+                                    [&](long p) { return core_.tap_row(p) != nullptr; });
+    if (!plan.can_draft) {
+        ++stats_.skipped;
+        return {};
+    }
+    if (plan.restart) {
+        d_->restart(plan.from);
+        ids_.clear();
+        ++stats_.restarts;
+    } else {
+        d_->truncate(plan.keep);
+        ids_.resize(static_cast<size_t>(plan.keep - d_->base()));
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t tw = c.tap_width();
+    for (long p = plan.from; p < plan.to;) {
+        const size_t n = std::min(kStageRows, static_cast<size_t>(plan.to - p));
+        const auto ts = std::chrono::steady_clock::now();
+        for (size_t r = 0; r < n; ++r) std::memcpy(&stage_[r * tw], core_.tap_row(p + static_cast<long>(r)), tw * sizeof(float));
+        stats_.stage_ms += ms_since(ts);
+        const long b0 = d_->base();
+        d_->inject(stage_.data(), n);
+        ids_.insert(ids_.end(), fed.begin() + p, fed.begin() + p + static_cast<long>(n));
+        // inject() slides the cache window: ids_ follows its first position
+        if (d_->base() > b0) ids_.erase(ids_.begin(), ids_.begin() + (d_->base() - b0));
+        p += static_cast<long>(n);
+    }
+    stats_.rows += static_cast<size_t>(plan.to - plan.from);
+    stats_.inject_ms += ms_since(t0);
+    std::vector<int> d = d_->draft(next, k);
+    stats_.last = d_->last_pass();
+    stats_.draft_ms += stats_.last.total_ms;
+    ++stats_.drafts;
+    // ids past the tokenizer's vocabulary are head padding: the verify pass would refuse them
+    for (size_t i = 0; i < d.size(); ++i)
+        if (static_cast<size_t>(d[i]) >= core_.real_vocab()) {
+            d.resize(i);
+            break;
+        }
     return d;
 }
 

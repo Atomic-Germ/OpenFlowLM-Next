@@ -303,6 +303,8 @@ if(NOT OFLM_USE_HRX)
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/dflash2_host.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/dflash2.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/vision/vit.cpp")
 endif()
@@ -599,10 +601,12 @@ if(NOT OFLM_USE_HRX)
     endif()
     # The block prefill's host stages (open_qwen36/block_host.cpp) are written for the
     # vectoriser; the same per-source flag the open embedding sources carry.
+    set(_avx_srcs "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/dflash2_host.cpp"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/dflash2.cpp")
     if(MSVC)
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+        set_source_files_properties(${_avx_srcs} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        set_source_files_properties(${_avx_srcs} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
     endif()
 endif()
 
