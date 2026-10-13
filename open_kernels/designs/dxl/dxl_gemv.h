@@ -105,15 +105,22 @@ __attribute__((noinline)) inline void dxl_tile4(const uint8_t *__restrict tile,
         aie::concat(me.template extract<16>(0), mo.template extract<16>(0));
     const aie::vector<bfloat16, kRows> ds = aie::mul(dperm, dsc).template to_vector<bfloat16>();
 
+    aie::vector<bfloat16, kRows> hi[4], lo[4];
 #pragma clang loop unroll(full)
     for (unsigned t = 0; t < 4; ++t) {
       const aie::vector<int32_t, kRows> vi = aie::concat(ve[t][0], ve[t][1], vo[t][0], vo[t][1]);
       aie::accum<accfloat, kRows> part;
       part.from_vector(aie::to_float<float>(vi, sh[t][kb]));
-      const aie::vector<bfloat16, kRows> hi = part.template to_vector<bfloat16>();
-      const aie::vector<bfloat16, kRows> lo = aie::sub(part, hi).template to_vector<bfloat16>();
-      acc[t] = aie::mac(acc[t], hi, ds);
-      acc[t] = aie::mac(acc[t], lo, ds);
+      hi[t] = part.template to_vector<bfloat16>();
+      lo[t] = aie::sub(part, hi[t]).template to_vector<bfloat16>();
+    }
+#pragma clang loop unroll(full)
+    for (unsigned t = 0; t < 4; ++t) {
+      acc[t] = aie::mac(acc[t], hi[t], ds);
+      acc[t] = aie::mac(acc[t], lo[t], ds);
+    }
+#pragma clang loop unroll(full)
+    for (unsigned t = 0; t < 4; ++t) {
       acc[t] = aie::mac(acc[t], mperm, xsh[t][kb]);
       acc[t] = aie::mac(acc[t], mperm, xsl[t][kb]);
     }
