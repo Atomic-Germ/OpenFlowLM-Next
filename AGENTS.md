@@ -86,4 +86,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build full Qwen3.8 layers with paired KV and FP32 attention output-to-projection, then validate the new cache/scratch ABI and full-depth decode.</description>
     <location>.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-fp32-attention-entry</name>
+    <description>Build isolated full-ax FP32 entry norm and compare against a byte-exact paired-attention control with forced inputs and causal KV history.</description>
+    <location>.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md</location>
+  </skill>
 </available_skills>
