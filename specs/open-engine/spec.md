@@ -4260,74 +4260,104 @@ tok/s). Timer stamps: the down projection's second piece (preps + GEMV) 259 -> 2
 wait for its x elements. Splitting the first piece's preps over the main cores (A1(b)) and moving the
 second piece's table to the prep core were built, byte-identical, and timing-neutral; not kept.
 
-### OPEN-DECODE-SPECULATIVE-VERIFY: a verify pass of two positions, bit-identical to two decode steps
-**Applies to:** openflowlm-next (`open_kernels/designs/verify/vux.py` and `gemv_t2x2.h`, `open_kernels/recipes/qwen35.py` `verify_image()`, `open_kernels/harness/stream_patch.hpp` `stateslot` / `attnposv`, `src/open_qwen36/core.cpp` `verify()` / `accept()`, `src/open_qwen36/verify_slots.hpp`)
+### OPEN-DECODE-SPECULATIVE-VERIFY: a verify pass of 2 to 4 positions, bit-identical to decode steps
+**Applies to:** openflowlm-next (`open_kernels/designs/verify/vux.py`, `vdn.h` and `gemv_t4.h`, `open_kernels/recipes/qwen35.py` `verify_image()`, `open_kernels/harness/stream_patch.hpp` `stateslot` / `attnposv`, `src/open_qwen36/core.cpp` `verify()` / `accept()`, `src/open_qwen36/manifest.cpp` `verify.narrow`, `src/open_qwen36/verify_slots.hpp`)
 **Verification:** test (the slot and position bookkeeping and the two stream patches against a fake, `src/open_qwen36/verify_slots_test.cpp`, ctest `OPEN-DECODE-SPECULATIVE-VERIFY`, run by `build.cmd`; the recipe's emission, `tests/test_verify_image.py`) + manual (bit-identity on the NPU, below)
 
-Speculative decode needs a pass that runs the last committed token and a drafted one through the
-model at once and returns both positions' logits. For an all-t2 merged-image spec (Ternary Bonsai 2
-27B, `verify_image()`), the export adds a **verify image**: three more instruction streams `vlx`,
-`vax`, `vlm` over one more xclbin, in their own hardware context `verify`, sharing the decode
-image's weight pools, consts, KV caches and DeltaNet state buffers. `Core::verify(ids, n, argmax)`
-runs n positions from the current position and returns each position's greedy argmax (cli.cpp's tie
-rule: the first maximum over the real vocabulary) and its logits (`verify_logits(j)`); `accept(m)`
-keeps the first m. `verify_width()` is 2 (0 when the kernel set has no verify image, or when
-`OFLM_OPEN_VERIFY=0`). n = 1 is a decode step.
+Speculative decode needs a pass that runs the last committed token and up to three drafted ones
+through the model at once and returns every position's logits. For an all-t2 merged-image spec
+(Ternary Bonsai 2 27B, `verify_image()`), the export adds a **verify image**: one more xclbin in its
+own hardware context `verify`, sharing the decode image's weight pools, consts, KV caches and
+DeltaNet state buffers, with one set of instruction streams per pass width: `vlx`, `vax`, `vlm`
+for 4 positions and `vlxN`, `vaxN`, `vlmN` for N = 2, 3 (the manifest's `verify.narrow`). The
+cores are the same for every width and read n from run-time words. `Core::verify(ids, n, argmax)`
+runs n positions from the current position and returns each position's greedy argmax (cli.cpp's
+tie rule: the first maximum over the real vocabulary; `argmax` may be null) and its logits
+(`verify_logits(j)`, copied from the device on first use); `accept(m)` keeps the first m.
+`verify_width()` is 4 (0 when the kernel set has no verify image, or when `OFLM_OPEN_VERIFY=0`).
+n = 1 is a decode step.
 
 - **Every position's logits are bit for bit what `step()` computes at that position.** Each weight
-  chunk is streamed once for both positions: the 2-token tile (`gemv_t2x2.h`) puts the two tokens in
-  rows 0 and 1 of the 1-wide tile's mmul, whose int32 sums are exact, and then runs the 1-wide
-  float epilogue per token in the same order. The activation preps, SwiGLU, DeltaNet, glue, post,
-  norms and attention are the decode image's own kernels from the same generated sources and flags,
-  run once per position in position order.
-- **Width 2.** Two tables of 20,736 B fit a main core's data memory only with the x fifo one element
-  deep and DeltaNet's scratch inside the first table; three do not fit without cutting K into slices.
+  chunk is streamed once for all positions: the four-token tile (`gemv_t4.h`) reads four tokens as
+  the four A rows of the 1-wide tile's mmul from an interleaved table, so each token's int32 sums are
+  exact, and runs the 1-wide float epilogue per token in the same order. GEMVs wider than the hidden
+  size run in 2048-wide K slices with their partial y kept on core in fp32 (the chunk order is
+  unchanged; the 1-wide tile stores and reloads y between chunks too). DeltaNet reads each head's S
+  once and computes every position's S' in place with the 1-wide per-column op order (`vdn.h`); the
+  attention cores walk the cached window once for every query, each with its own running max, sum
+  and output (blocks past a query's position are all padding to it and are skipped); the glue runs
+  every position's conv per tile. Preps, SwiGLU, norms and post are the decode image's own
+  expressions; o's 1/sqrt(128) moved to the post core with the same ops.
+- **Width 4.** Four tokens' tables at K = 5120 (42,240 B) fill a main core's table region, which
+  DeltaNet reuses for its half-head block; the main cores' program is 16,320 B of 16,384.
+- **Run-time words.** Every core reads its per-dispatch words (n, band counts) after a barrier the
+  stream sets once they are written (acquire-greater-equal, so each dispatch consumes it); an
+  acquire-equal barrier stays set after the first dispatch and later dispatches read the previous
+  dispatch's words.
 - **No copies on rollback.** A linear layer's state buffer holds width + 1 slots (`verify.slot_bytes`
   each). Position j reads its conv rows and S from the j-th slot of the pass's map and writes the
   (j+1)-th; the committed slot is never written. `accept(m)` makes slot map[m] the committed one; the
-  decode stream `lx` and the verify stream `vlx` address the state through slots (`stateslot`: every
-  DDR patch on the state argument is re-pointed by an instruction patch). An attention layer writes
-  KV rows pos .. pos + n - 1 and position j attends rows [0, pos + j] (`attnposv`: one window length,
-  row drain and record per position); rows past the accepted position are dead and are overwritten.
+  decode stream `lx` and the verify streams address the state through slots (`stateslot`: every DDR
+  patch on the state argument is re-pointed by an instruction patch). An attention layer writes KV
+  rows pos .. pos + n - 1 and position j attends rows [0, pos + j] (`attnposv`: the window fill once,
+  patched for the last position, and per position its row drain, its row read back and its record);
+  rows past the accepted position are dead and are overwritten.
 - **Buffers.** Every layer's act holds width copies of `verify.act_bytes` (position j at j x
   act_bytes); the verify image's xres, logits and the tail's scratch are their own globals (`vxres`,
   `vlogits`, `vlmact`). `checkpoint()` / `restore()` / `reset()` and the block prefill route read and
   write the committed slot.
 
 **Acceptance criteria (test):**
-- After any sequence of 1- or 2-position passes, accepts of 1..n and plain steps, the committed slot
-  holds the state after exactly `position()` tokens, and no pass writes the committed slot.
+- After any sequence of 1- to width-position passes, accepts of 1..n and plain steps, the committed
+  slot holds the state after exactly `position()` tokens, and no pass writes the committed slot.
 - `accept` with no pass pending, after a step, or with m > n is refused.
 - `slot_table` decodes every state transfer's slot; `slot_apply` re-points slot s to perm[s] and keeps
   the offset inside the slot; a transfer past the last slot is refused.
-- `attnv_table` finds one window length, window offset, row drain and record per position;
-  `attnv_apply(pos)` gives position j the values `attn_apply(pos + j)` would.
-- The recipe emits the verify block (width 2, a 4 KB-aligned slot no smaller than the state, one
-  position's act), the three streams in context `verify`, `stateslot` on `lx` and `vlx`, `attnposv`
-  on `vax`; `OPEN_LAYER_VERIFY=0` (in the build key) or a spec without the in-layer ternary head
-  emits none of it and leaves `lx` unpatched.
+- `attnv_table` finds one window length, window offset, row drain and record per position, or one
+  shared window (assigned to the last position) with each row drained and read back; a third patch of
+  one position's row is refused; `attnv_apply(pos)` gives position j the values `attn_apply(pos + j)`
+  would.
+- The recipe emits the verify block (width 4, a 4 KB-aligned slot no smaller than the state, one
+  position's act, `narrow` streams for 2 and 3), the nine streams in context `verify`, `stateslot` on
+  `lx` and the `vlx` streams, `attnposv` (with `nq` on the narrow ones) on the `vax` streams;
+  `OPEN_LAYER_VERIFY=0` (in the build key) or a spec without the in-layer ternary head emits none of
+  it and leaves `lx` unpatched.
 
 **Verification (manual):**
-1. Export with the verify image (`verify_image()` true); every core of `vlx`, `vax`, `vlm` fits
-   16384 B of program memory and the three images' core ELFs are identical.
+1. Export with the verify image (`verify_image()` true); every core fits 16,384 B of program memory
+   and the nine streams' core ELFs are byte-identical.
 2. `open_qwen36_cli --model <Bonsai lmhead container> --kernels <set> --ids-file short.ids
-   --verify-check 40` and `--ids-file prompt512.ids --gemm-block --verify-check 40`: 40 greedy
-   positions by `step()` from a checkpoint, then the same positions by verify passes whose draft is
-   right on two passes of three and wrong on the third, with a plain step every fourth pass. Every
-   compared logit row must be byte-identical (memcmp over the whole vocabulary) and every argmax the
-   reference token: the run prints `VERIFY CHECK PASS`.
-3. The decode step unchanged: the normal token gates (33/33 short.ids, 129/129 prompt512
-   `--gemm-block`) on the verify-capable set, and an A/B of the 1-token step against the same set
-   without it in one clean window (within 1%).
-4. Cost: `--bench-verify N` under the timing lock gives the verify pass (n = 2) and the step (n = 1).
+   --verify-check 48` and `--ids-file prompt512.ids --gemm-block --verify-check 48`: 48 greedy
+   positions by `step()` from a checkpoint, then the same positions by verify passes of 2, 3 and 4
+   positions in turn, whose draft is right on two passes of three and wrong at a rotating position
+   on the third, with a plain step every fourth pass. Every compared logit row must be
+   byte-identical (memcmp over the whole vocabulary) and every argmax the reference token: the run
+   prints `VERIFY CHECK PASS`.
+3. The decode step unchanged: the decode images are untouched by the verify image; the token gates
+   (33/33 short.ids, 129/129 prompt512 `--gemm-block`) on the verify-capable set.
+4. Cost: `--bench-verify N --verify-n n` under the timing lock gives the n-position pass and the
+   step (n = 1).
 
-**Result 2026-10-08 (`open_kernels_v6`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`).** The 2-token
-tile alone (`designs/gemv_t2` probe, `t2x2`): y byte-identical per token to the 1-wide tile on the
-gate, og and down shapes at 1, 2 and 8 cores. `--verify-check 40`: PASS on short.ids and on prompt512
-`--gemm-block`, every logit row memcmp-identical. Tokens 33/33 and 129/129. The step is unchanged by
-the verify image (2026-10-07, `open_kernels_v1`: step minimum 155.7 / 155.8 / 155.7 -> 155.9 / 155.7 /
-155.6 ms, clean A/B, 3 rounds). Cost at ctx ~512 (`--bench-verify 10`, clean, min): a 2-position
-pass 190.4-190.8 ms against a step of 158.2-159.9 ms. History: `plans/archive/bonsai2-speculative.md`.
+**Result 2026-10-08 (`open_kernels_v6`, the two-position image).** `--verify-check 40` PASS on
+short.ids and on prompt512 `--gemm-block`. Cost at ctx ~512 (`--bench-verify 10`, clean, min): a
+2-position pass 190.4-190.8 ms against a step of 158.2-159.9 ms. History:
+`plans/archive/bonsai2-speculative.md`.
+
+**Result 2026-10-12 (`open_kernels_w4h`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`, width 4).**
+Program memory of the nine streams (identical core ELFs): main cores 16,320 of 16,384 B, attention
+core 0 15,440, glue 16,096, norm 4,704, post 5,856. `--verify-check 48` PASS on short.ids and on
+prompt512 `--gemm-block` (n cycling 2, 3, 4; 47 logit rows each, every one memcmp-identical). CLI
+`--spec` on == off on six cases (up to 4.00 tokens a pass on prompt512), and `oflm serve` spec
+0 / 1 / `--spec` on four prompts identical, a sampled request served. Cost at ctx ~512
+(`--bench-verify 10`, minimum, quiet machine: CPU 30% or less before and after each run, rounds
+with a background job or a load spike discarded, three rounds interleaved): step 164.2-165.0 ms;
+2 positions 197.0-199.1 ms (the v6 image 195.7); 3 positions 230.5-231.2 ms; 4 positions
+261.3-261.5 ms. Each added position costs 31-33 ms: per dispatch the linear layer's `vlx` grows
+0.57 ms a position (48 layers, 27 ms), the full layer's `vax` 0.27 ms (16 layers, 4 ms), the tail
+nothing. A 4-position pass is 1.59 times a step. The 2-position pass did not get cheaper than
+v6's (one S read, one window walk and the parallel argmax saved host time, the weight pass
+dominates); per-position cost stays above the 20-25 ms the four-token tile would need.
+History: `plans/archive/bonsai2-speculative.md`.
 
 ### OPEN-DECODE-SPECULATIVE: speculative greedy decode, opt-in and declared per model, with the same output
 **Applies to:** openflowlm-next (`src/open_qwen36/spec.hpp`, `cli.cpp`, `engine.cpp`; `src/include/causal_lm.hpp` `forward_speculative`; `src/common/AutoModel/automodel.cpp` `_spec_*`, `speculative_unavailable` and the decode loops of `_shared_generate` and `modeling_qwen3_5vl.cpp`; `src/src/main.cpp` and `src/include/utils/vm_args.hpp` `--spec`)
