@@ -3726,17 +3726,21 @@ OPEN-PREFILL-ATTN) carries a second route on it:
   the q4 route's per-layer weight buffers, while the q4_1 pools the decode path reads stay.
 - A `bfp16_dit` op needs manifest_version 4. The route needs `attn_block.prep` and t a
   multiple of 256, and every step's weight packed by `bfp16_dit`; the parser refuses it
-  otherwise. Its block is wider than the dxB scratch and the host attention's, so
+  otherwise. It also refuses a `bfp16_dit` weight on any other route (a q4 dense route, a
+  linear or full route): their GEMMs would read the 9-bit layout as q4 or bf16. Its block is wider than the dxB scratch and the host attention's, so
   `OFLM_OPEN_ATTN_BLOCK=0`, `OFLM_OPEN_HOST_ATTN` and `OFLM_OPEN_HOST_ATTN_DECODE` on this
   route are refused at load, naming `--prefill-mode lean`.
 - The attention products stay at their 256-row build and run in sub-blocks
   (OPEN-PREFILL-ATTN): every sub-block's scores, then every sub-block's values, so a layer
   switches hardware context as often as one 256-token block did.
+- `footprint` in `model_list.json` is the container's size, shared with the closed engine, and
+  does not follow the prefill mode. The open engine's peak under `fast` is 13.3 GiB against
+  9.8 GiB under `lean` (the result below); a machine short of that runs `--prefill-mode lean`.
 
 **Acceptance criteria (unit):**
 - Qwen3-8B's emission (`test_prefill_gemm8.py`): `gemm_block` is `gemm: "dit"` at t 1024 with steps `dit_n6144_k4096`, `dit_n4096_k4096`, `dit_n12288_k4096` twice, `dit_n4096_k12288`, args (`g8<w>`, `g8_a`, `g8_c`); the qkv weight is three `bfp16_dit` ops (q_proj at 0, k_proj at 4096 x 4096 x 9 / 8, v_proj at 5120 x 4096 x 9 / 8); every `dit_*` kernel is on context `dit`, built with `DG_M` 1024 and an empty layout; `g8_a` and `g8_c` are 1024 x 12288 x 2 bytes; the `lean` variant is the q4_1 route at t 256 with the same `attn_block`; manifest_version 4. Qwen3-4B (o_proj 2560 wide), Llama 3.1 and K2 (no products prep) carry no `dit` route, no `dit` kernels and a version below 4.
 - The pack op (`pools_test.cpp`, `test_prefill_gemm8.py`): 24 shared chunks at q4_1 as a [128, 1536] projection pack to fnv1a `0xf9c5bb308b534125` in both languages, and every value decodes within one mantissa step of its q4_1 reading at W^T's place; three ops at their dst offsets write exactly `pack_b` of the concatenated projection.
-- The parser (`manifest_test.cpp`): a `dit` route at t 1024 beside a q4 `lean` at 256 parses, and each mode keeps its own route and globals; a `dit` route without the products' prep, or with a step reading the q4 pool, is refused; a q4 variant at another t than a q4 route is still refused; a `bfp16_dit` weight in a version 3 manifest is refused, in version 4 it loads.
+- The parser (`manifest_test.cpp`): a `dit` route at t 1024 beside a q4 `lean` at 256 parses, and each mode keeps its own route and globals; a `dit` route without the products' prep, or with a step reading the q4 pool, is refused; a q4 variant at another t than a q4 route is still refused; a `bfp16_dit` weight in a version 3 manifest is refused, and on a q4 dense route or a linear route in any version.
 
 **Verification (manual):** on Qwen3-8B-NPU2 with this set,
 1. The accuracy gate: teacher-forced NLL over 2048 tokens of natural text

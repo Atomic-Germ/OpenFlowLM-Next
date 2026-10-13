@@ -509,6 +509,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                                      " without `split`");
                 }
             };
+            // the 9-bit dit_gemm layout is read by nothing but a dense dit route; the q4 and bf16 GEMMs would misread it
+            for (const auto* ws : {&g.weights, &g.shared_weights, &g.ffn_weights})
+                for (const auto& [wn, w] : *ws)
+                    if (w.from == "pack" && w.pack.front().op == "bfp16_dit" && !(g.kind == "dense" && g.gemm == "dit"))
+                        fail(gw, "weight " + wn + " packs bfp16_dit, which only a dense route with gemm \"dit\" reads");
             check_split(g.program, g.weights, "program");
             check_split(g.shared_program, g.shared_weights, "shared");
             check_split(g.ffn_program, g.ffn_weights, "ffn");

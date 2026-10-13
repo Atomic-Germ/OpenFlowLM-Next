@@ -802,6 +802,8 @@ KERNEL_SOURCES = [
     # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
+    # the 8-bit prefill route (dit_route): the GEMM design, its microkernel and the layout its weights are packed to
+    "designs/dit_gemm/dit_gemm.py", "designs/dit_gemm/mm_dit.cc", "designs/dit_gemm/pack.py",
     "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

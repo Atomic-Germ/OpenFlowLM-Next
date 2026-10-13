@@ -284,16 +284,9 @@ int main(int argc, char** argv) {
             {"pack", json::array({{{"op", "bfp16_dit"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
                                    {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}}})}};
     };
-    refused_manifest(argv[1], "needs version 4", "a bfp16_dit weight in a version 3 manifest is refused at load",
-                     [&](json& j) { dit_weight(j, 3); });
-    {
-        std::ifstream f(argv[1]);
-        json g = json::parse(f);
-        dit_weight(g, 4);
-        bool ok = true;
-        try { Manifest::parse(g, "dit"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
-        check(ok, "a version 4 manifest with a bfp16_dit weight loads");
-    }
+    // the 9-bit layout is read only by a dense dit route; a linear route would run it through the q4 / bf16 GEMM
+    refused_manifest(argv[1], "only a dense route", "a bfp16_dit weight on a linear route is refused at load",
+                     [&](json& j) { dit_weight(j, 4); });
     // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
     auto with_lean = [](json& j) {
         j["kernels"]["gemm_lean"] = {{"context", "gemm"}, {"insts", "gemm_lean/insts.bin"}};
@@ -519,6 +512,10 @@ int main(int argc, char** argv) {
                           fast.globals.count("g8_a") && !lean.globals.count("g8_a"),
                       "qwen3: an 8-bit route at t 1024 parses beside a q4 lean at 256; each mode keeps its own route and globals");
             }
+            refused_manifest(argv[2], "needs version 4", "qwen3: a bfp16_dit weight in a version 3 manifest is refused at load",
+                             [&](json& j) { with_dit(j); j["manifest_version"] = 3; });
+            refused_manifest(argv[2], "only a dense route", "qwen3: a bfp16_dit weight on a q4 dense route is refused",
+                             [&](json& j) { with_dit(j); j["layer_types"]["dense"]["gemm_block"].erase("gemm"); });
             refused_manifest(argv[2], "needs the attention products", "qwen3: an 8-bit route without the products' prep is refused",
                              [&](json& j) { with_dit(j); j["layer_types"]["dense"]["gemm_block"]["attn_block"].erase("prep"); });
             refused_manifest(argv[2], "is not packed by bfp16_dit", "qwen3: an 8-bit step reading the q4 pool is refused",

@@ -1,7 +1,31 @@
 # Dense prefill on 8-bit GEMMs (dit_gemm)
 
-**Status (2026-10-10): done** (OPEN-PREFILL-GEMM8: gate PASS, 981 tokens 11.1 -> 4.7 s, +3.5 GiB). Design notes and Phase 0 measurements:
-`C:\code\openflowlm-dense\.claude\plans\prefill-gemm-8bit.md`.
+**Status (2026-10-10): done** (OPEN-PREFILL-GEMM8: gate PASS, 981 tokens 11.1 -> 4.7 s, +3.5 GiB).
+
+## Why dit_gemm, and what the kernel measured alone
+
+`gemm_q4_prefill` multiplies bf16 by bf16 (mac 4x8x8) and dequantises q4_1 on every core before each
+k-step. On this NPU only 8-bit operands (int8, or bfp16ebs8: an 8-bit mantissa sharing one exponent
+per 8 values) reach the fast MAC array; a bf16 matmul runs on the fp32 vector unit, capped near
+2.9 TFLOPS. Even with the dequant removed the old kernel ran 2.37 TFLOPS (3.62 ms against 4.47 ms
+at n8192 k2048 T256), so the kernel path, not the dequant, was the ceiling.
+
+Phase 0, `dit_gemm` alone on a quiet box at M = 1024, performance mode (the engine's default),
+random operands packed by `pack.pack_b`, min of 10 runs:
+
+| GEMM (K x N) | ms | TFLOPS | rel_fro |
+|---|---|---|---|
+| qkv 4096 x 6144 | 2.82 | 18.3 | 1.3e-2 |
+| o 4096 x 4096 | 2.02 | 17.0 | 1.3e-2 |
+| gate+up fused 4096 x 24576 | 10.75 | 19.2 | 1.3e-2 |
+| down 12288 x 4096 | 5.42 | 19.0 | 1.9e-2 |
+
+Per layer 21 ms, 0.76 s over 36 layers, against 7.4 s for the same padded work on the old kernel.
+Performance mode cost 0-10 % against turbo here. rel_fro is per GEMM on random data and about 10x
+the bf16 kernel's, which is why the gate below is teacher-forced NLL, not logits correlation (K2's
+batched attention failed a corr gate at 0.9988 yet matched the fp32 route's NLL to 0.0003).
+The option of keeping q4 nibbles and quantising activations to int8 (weights exact, no extra
+memory, but a new kernel with a per-32 epilogue) was the fallback had the NLL gate failed.
 
 ## What changes
 
