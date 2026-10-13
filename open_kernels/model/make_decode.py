@@ -71,8 +71,13 @@ def npu_routing(out: Path, layer, t):
 
 
 def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx: int,
-              kernel_dir: Path | None = None) -> str:
+              kernel_dir: Path | None = None, capture_boundaries: bool = False) -> str:
     """The manifest's programs as harness directives."""
+    if capture_boundaries:
+        expected = [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
+                    {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}]
+        if m["tail"] != expected or m["globals"].get("hn") != m["layout"]["hidden"] * 2:
+            raise ValueError("boundary captures require the BF16 norm/LM-head tail")
     d = DESIGNS.as_posix()
     o = out.as_posix()
     lay = m["layout"]
@@ -134,8 +139,14 @@ def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx:
                     runs.append(f"dump act{l} {o}/y_rout{l}{s}.bin 4096 {step['act_off']}")
             runs.append(f"dump xres {o}/y_res{l}{s}.bin {hid * 4}")
             runs.append(f"dump act{l} {o}/y_act{l}{s}.bin {m['layer_types'][lt]['buffers']['act']}")
+            if capture_boundaries:
+                state = m["layer_types"][lt]["buffers"]["state"]
+                if state["kind"] == "linear":
+                    runs.append(f"dump state{l} {o}/y_state{l}{s}.bin {state['bytes']}")
         for step in m["tail"]:
             runs.append(f"run {step['kernel']} " + " ".join(step["args"]))
+            if capture_boundaries and step["kernel"] == "ln":
+                runs.append(f"dump hn {o}/y_norm{s}.bin {m['globals']['hn']}")
         runs.append(f"dump logits {o}/y_logits{s}.bin {m['globals']['logits']}")
     return "\n".join(cfg + runs) + "\n"
 
@@ -151,6 +162,8 @@ def main() -> int:
     ap.add_argument("--kernel-dir", type=Path, help="use a compatible exported manifest and hash-verified binaries")
     ap.add_argument("--max-ctx", type=int, default=4096)
     ap.add_argument("--reuse-pools", action="store_true", help="keep pool files that already exist")
+    ap.add_argument("--capture-boundaries", action="store_true",
+                    help="dump each linear recurrent state and the BF16 final norm after each position")
     ap.add_argument("--cfg-only", action="store_true", help="only rewrite the .cfg")
     ap.add_argument("--requant", action="store_true",
                     help="force the whole run -- spec, packing plan, pools and reference -- onto the "
@@ -286,7 +299,7 @@ def main() -> int:
             tok = int(logits[:spec.real_vocab].argmax())
             print(f"  token {t} (position {t}): reference argmax {tok}", flush=True)
 
-    cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx, kernel_dir=a.kernel_dir)
+    cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx, kernel_dir=a.kernel_dir, capture_boundaries=a.capture_boundaries)
     (out / "run_decode.cfg").write_text(cfg, newline="\n")
     if not a.cfg_only:
         save_reference(out, m, nl, a.tokens, tok0, routing)
