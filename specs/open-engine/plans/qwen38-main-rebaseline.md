@@ -1,23 +1,23 @@
 # Qwen3.8-27B validation report
 
 Updated 2026-10-13. This branch adds strict decode/source validation, FP32
-split-FFN input preparation, and integrated paired-BF16 KV with FP32 gated
-attention/output-projection preparation. The new complete export passes all
-**1152 independent attention-head checks** at 64 layers × three positions;
-worst absolute error is **0.0003238841**, below 0.02.
+split-FFN and full-attention entry preparation, and paired-BF16 KV with FP32
+gated attention/output-projection preparation. The complete FP32-entry export
+passes **192/192 residual checks** at **64 layers × three positions**, worst
+normalized error **0.0040853661 <0.005**. Logit correlation and argmax pass at
+all three positions. The three residual failures seen before entry integration
+are no longer reproduced on this fixture.
 
-Full-chain acceptance remains **FAIL**: **189/192 residuals pass**; layers
-59/61/63 at position 1 exceed 0.005 (worst **0.00580822**). Logit correlation and
-argmax pass at all three positions. The hardware run streams layer weights
-through one shared BO while retaining every layer state. Resident-runtime
-identity/reset for this export remains untested because available memory is
-below the full-load requirement. This is not complete model support.
+Independent attention gates pass: **1152/1152 heads**, worst absolute error
+**0.0004209284 <0.02**; **48/48 composed attention branches**, worst normalized
+error **0.0005515331 <0.005**. These use propagated inputs from the new export,
+not forced inputs from the preceding isolated experiment.
 
-A controlled FP32 attention-entry replay now passes **48/48 cases**, reducing
-worst composed branch error from **0.0236300737 to 0.0005290482**. The BF16
-control reproduces all 96 retained captures byte for byte and the same ten
-local failures. Production integration and new full-depth validation remain
-pending; this isolated result does not change the export acceptance above.
+The hardware run streams weights through one shared BO while retaining every
+layer state. Resident-runtime identity/reset for this export remains untested:
+available memory is below the 35–40 GiB full-load requirement. Independent
+state/LM-head, prefill, serving and final performance/resource acceptance remain
+open. This is not complete model support.
 
 ## Stage 1: complete decode comparison
 
@@ -992,3 +992,72 @@ Next integrate the entry dtype/scratch/stream ABI into production, build a fresh
 complete export and repeat full-depth gates. The retained production export's
 three residual failures and failure marker remain unchanged; resident runtime/
 reset, independent state/LM-head, prefill and serving acceptance remain open.
+
+## Stage 5c10: production FP32 attention entry and full-depth validation
+
+Integrated FP32 entry RMSNorm and direct FP32 Q/gate/K/V preparation into the
+paired, split dense attention recipe. The manifest declares `attn_entry_dtype:
+float32`; entry scratch grows from three to five 4096-byte stream elements.
+Full-attention act size is **274432 bytes**, an increase of **8192 bytes**.
+Later scratch offsets move consistently in the recipe and generated sequences.
+Linear-attention entry remains BF16. Model tensors, packing, FFN precision and
+paired attention semantics are unchanged.
+
+The shared norm helper emits two FP32 halves for attention entry. Its existing
+FIFO depths and **6144-byte stack** are preserved. The production checker reads
+the declared dtype after full manifest/fixture validation; old layouts and
+unknown dtypes fail. The native parser also rejects unknown entry dtypes.
+The historical private replay now refuses integrated recipes and documents
+its required checkout, preventing accidental reinterpretation of old buffers.
+
+TDD: five new contract tests and the native parser test failed before the fix;
+a further regression first exposed the historical replay's missing ABI guard.
+The manifest-to-capture dtype path has its own regression. Full suite:
+**1097 passed, 47 skipped**; native CTest **4/4 PASS**. The model config passes
+the rebuilt C++ production parser.
+
+Built a fresh complete export: **41 kernel sets, 82 verified binary hashes**.
+Maximum .text is **15584 bytes** for lx and **13760** for ax, below 16384.
+Compiler-assigned L1 buffer ends are **64384** and **59920** bytes respectively,
+below 65536 with the existing stack. Native toolchain: Python 3.14, mlir-aie
+1.4.2, Peano 21.0.0.2026080301+c9c5ecb7. Build key:
+`sha256:63d7cd0879422f0f31f0b9d1e018799b8db868a3f110e3ee5f908a3faa5fc8da`.
+
+Model and all 65 reused weight-pool hashes match retained provenance. All
+**195 regenerated independent CPU reference hashes are unchanged**. The NPU
+run completes **198 dispatches**, **64 layers × three positions**, using one
+reloaded weight BO while retaining every layer's state. Logical data buffers
+are **2.960 GiB**; this is a correctness run, not a resident-runtime benchmark.
+
+| Gate on the new propagated captures | Result | Worst error |
+|---|---:|---:|
+| Full-depth residual | **192/192 PASS** | **0.0040853661** (L63/T1) |
+| Attention heads | **1152/1152 PASS** | absolute **0.0004209284** |
+| Entry norm/Q/gate/K/V | **48/48 PASS** | V **0.0003181145** |
+| Conditioned output projection | **48/48 PASS** | **0.0001953298** |
+| Composed attention branch | **48/48 PASS** | **0.0005515331** |
+| Composed post-attention residual | **48/48 PASS** | **0.0000732911** |
+| FFN norm/front | **192/192 PASS** | **0.0000160763 / 0.0013213623** |
+| Split down partial0/partial1 | **192/192 PASS** | **0.0003836580 / 0.0002338498** |
+| Split down sum/closing residual | **192/192 PASS** | **0.0002655461 / 0.0000957904** |
+
+Except the explicitly absolute per-head metric, these are normalized maximum
+errors under the unchanged **0.005** bound. Attention cosine minimum is
+**0.999999998443142**, above 0.9999; absolute bound remains 0.02. Logit
+correlations are **0.9999988740 / 0.9999971796 / 0.9999982962**; argmax
+**8678 / 198 / 2** matches CPU at every position. The preceding export's three
+full-depth residual failures and ten attention-branch failures do not reproduce
+on the new propagated captures. No reference or threshold was relaxed.
+
+Artifacts: `Models/qwen38-27b/production-fp32-entry/`, including export/resource,
+input/reference audits, numerical JSON, captures and logs. Old exports and their
+failure markers remain untouched. Reproduction is documented in the
+[FP32 entry integration skill](../../../.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md).
+
+Resident runtime/harness byte identity, repeated requests and reset for this
+export remain untested: available memory was about 30 GiB versus the estimated
+35–40 GiB full-load requirement. Independent recurrent-state/LM-head checks,
+block-prefill parity, serving isolation and final resource/performance gates
+remain open. Next add independent state/LM-head validation; run resident gates
+separately when memory is available. Passing this fixture is not complete model
+support or proof for arbitrary prompts/context lengths.

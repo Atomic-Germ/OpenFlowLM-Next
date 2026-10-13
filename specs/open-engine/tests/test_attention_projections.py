@@ -184,3 +184,16 @@ def test_nonfinite_capture_refused(bundle):
 def test_dimension_mismatch_refused(bundle):
     mod,p,m=bundle;m['hidden']=3
     with pytest.raises(ValueError,match='dimensions'):mod.check(p,p,p)
+
+
+def test_checker_uses_declared_fp32_entry(bundle, monkeypatch):
+    mod, p, meta = bundle
+    monkeypatch.setattr(mod, 'load_bundle', lambda *args: dict(
+        meta, layout={'attn_output_dtype': 'float32', 'attn_entry_dtype': 'float32'}))
+    for capture in p.glob('y_act*.bin'):
+        data = bytearray(capture.read_bytes())
+        data[:8] = np.ones(2, np.float32).tobytes()
+        capture.write_bytes(data)
+    result = mod.check(p, p, p)
+    assert result['passed']
+    assert all(row['entry']['metrics']['norm']['maxrel'] < 1e-5 for row in result['results'])

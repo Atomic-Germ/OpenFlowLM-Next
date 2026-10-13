@@ -1,6 +1,7 @@
 """Experimental entry precision must not relabel the production ABI or inputs."""
 from pathlib import Path
 import sys
+from dataclasses import replace
 import numpy as np
 import pytest
 ROOT=Path(__file__).resolve().parents[3]
@@ -9,10 +10,25 @@ from entry_common import geometry, render_design, source_hash, read_candidate_no
 from recipes.load import load_spec
 
 
+@pytest.fixture
+def retained_recipe(monkeypatch):
+    # This historical probe requires the pre-integration checkout. Model its
+    # retained geometry explicitly; never reinterpret current production captures.
+    import entry_common as mod
+    original = mod.recipe
+    def retained(s):
+        r = original(s)
+        if r.attn.KV_PAIR:
+            r = replace(r, attn=replace(r.attn, XN_F32=False),
+                        layout=replace(r.layout, AA_BYTES=266240, AA_XN=0))
+        return r
+    monkeypatch.setattr(mod, 'recipe', retained)
+
+
 def spec():return load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json')
 
 
-def test_candidate_appends_fp32_norm_without_moving_production_regions():
+def test_candidate_appends_fp32_norm_without_moving_production_regions(retained_recipe):
     g=geometry(spec(),'fp32')
     assert g['norm_offset']==g['production_act_bytes']
     assert g['act_bytes']==g['production_act_bytes']+20480
@@ -21,15 +37,20 @@ def test_candidate_appends_fp32_norm_without_moving_production_regions():
     assert b['act_bytes']==b['production_act_bytes'] and b['norm_bytes']==10240
 
 
-def test_render_changes_only_candidate_entry_route_and_pins_hash():
-    s=render_design(spec())
+def test_render_changes_only_candidate_entry_route_and_pins_hash(retained_recipe):
+    retained_source = '\n'.join([
+        'HERE = Path(__file__).parent', 'OG_ELEMS = D.OG_ELEMS',
+        'X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, 2 * Q_PC + 2 * KV_PC, "attn")',
+        'lno.drain(a_act, tap=bt(AA_BYTES, AA_XN, ELN), wait=True, group=tg_ln)',
+    ])
+    s=render_design(spec(),source=retained_source)
     assert 'AA_XN = AA_BYTES' in s and 'fp32=True' in s
     assert 'AA_XN, HID * 4)' in s and 'install_entry_worker(X)' in s
     assert 'ENTRY_SOURCE_HASH' in s
     assert source_hash(spec(),'fp32')!=source_hash(spec(),'bf16')
 
 
-def test_render_rejects_upstream_source_drift():
+def test_render_rejects_upstream_source_drift(retained_recipe):
     with pytest.raises(ValueError,match='anchor'):render_design(spec(),source='different source')
 
 
@@ -83,3 +104,8 @@ def test_controlled_comparison_requires_inputs_identity_and_complete_rows():
     with pytest.raises(ValueError,match='control'):compare_records(dict(a,control_identical=False),b,{}, {})
     with pytest.raises(ValueError,match='coverage'):compare_records(a,dict(b,results=[]),{}, {})
     assert not compare_records(a,dict(b,passed=False,results=base['results']),{'input':'hash'},{'input':'hash'})['passed']
+
+
+def test_historical_probe_rejects_already_integrated_entry():
+    with pytest.raises(ValueError, match='already uses FP32'):
+        geometry(spec(), 'bf16')

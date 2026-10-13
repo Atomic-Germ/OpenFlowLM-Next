@@ -70,14 +70,16 @@ def compare_output(x, og, weight, out, res):
     return dict(passed=all(m['passed'] for m in metrics.values()), metrics=metrics)
 
 
-def read_boundaries(path, offsets, hidden):
+def read_boundaries(path, offsets, hidden, norm_dtype="bfloat16"):
+    if norm_dtype not in ("bfloat16", "float32"):
+        raise ValueError("unsupported attention entry dtype")
     data = path.read_bytes()
     if len(data) != offsets.AA_BYTES:
         raise ValueError(f'{path.name}: wrong act buffer bytes')
     if hidden <= 0:
         raise ValueError('invalid hidden size')
     result = {}
-    for name, off, dtype in [('xn', offsets.AA_XN, np.uint16),
+    for name, off, dtype in [('xn', offsets.AA_XN, np.float32 if norm_dtype == 'float32' else np.uint16),
                              ('out', offsets.AA_OUT, np.float32), ('res', offsets.AA_RES, np.float32)]:
         size = np.dtype(dtype).itemsize
         if off < 0 or off % size or off + hidden*size > len(data):
@@ -162,7 +164,8 @@ def check(model_dir, kernel_dir, out, layers=None):
             inputs.append(read_capture(inp, spec.hidden))
             c = read_attention(path, offsets, spec.num_heads, spec.num_kv_heads, spec.head_dim,
                                selected.get('layout', {}).get('attn_output_dtype', 'bfloat16'))
-            c.update(read_boundaries(path, offsets, spec.hidden))
+            c.update(read_boundaries(path, offsets, spec.hidden,
+                                     norm_dtype=selected.get('layout', {}).get('attn_entry_dtype', 'bfloat16')))
             captures.append(c)
             for f in (inp, path):hashes[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
         rows, weights = score_layer(spec, model, layer, inputs, captures)

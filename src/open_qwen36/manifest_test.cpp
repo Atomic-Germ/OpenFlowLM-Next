@@ -93,6 +93,16 @@ int main(int argc, char** argv) {
             catch (const std::runtime_error&) { check(true, "bad paired ABI refused"); }
         }
     }
+    // Entry norm dtype is explicit; the parser must not silently accept a typo.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_entry_dtype"] = "float32";
+        try { Manifest::parse(j, "FP32 entry"); check(true, "FP32 entry accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        j["layout"]["attn_entry_dtype"] = "float16";
+        try { Manifest::parse(j, "bad entry dtype"); check(false, "bad entry dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad entry dtype refused"); }
+    }
     // ---- what the recipe wrote for the 27B
     // Only exercise the new pack-op schema; this synthetic manifest is not a
     // claim that a 48-head kernel has been built or validated.

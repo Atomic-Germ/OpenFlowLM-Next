@@ -186,6 +186,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     }
     const std::string kv_dtype = lay.value("attn_kv_dtype", "bfloat16");
     const std::string og_dtype = lay.value("attn_output_dtype", "bfloat16");
+    const std::string entry_dtype = lay.value("attn_entry_dtype", "bfloat16");
+    if (entry_dtype != "bfloat16" && entry_dtype != "float32")
+        fail(lw, "unsupported attention entry dtype");
     m.attn_kv_pair = kv_dtype == "bfloat16_pair";
     if ((kv_dtype != "bfloat16" && !m.attn_kv_pair) ||
         og_dtype != (m.attn_kv_pair ? "float32" : "bfloat16"))

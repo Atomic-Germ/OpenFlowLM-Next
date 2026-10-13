@@ -18,6 +18,8 @@ def digest(path):
 
 def geometry(spec,mode):
     r=recipe(spec);l=r.layout
+    if r.attn is not None and r.attn.XN_F32:
+        raise ValueError("production already uses FP32 entry; replay requires the pre-integration checkout")
     if mode not in ('bf16','fp32') or not r.attn.KV_PAIR or spec.hidden!=5120 or not r.ln_split:
         raise ValueError('requires paired Qwen H5120 split norm and bf16/fp32 mode')
     fp=mode=='fp32'
