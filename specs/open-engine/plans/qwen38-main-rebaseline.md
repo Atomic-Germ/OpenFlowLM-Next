@@ -19,9 +19,23 @@ match the harness at all three positions; repeated requests and three full-buffe
 reset replays pass. Independent final norm/Q8 LM-head checks pass at all three
 positions, worst composed normalized error **0.0008821369 <0.005**.
 
-There are 144 captured DeltaNet states ready for independent numerical checking;
-capturing them and passing reset hashes do not establish state accuracy. That
-check, remaining primitive/projection gates, prefill, serving and final
+DeltaNet recurrence now passes 144/144 whole-state/output checks with independent
+FP64 carry from captured input records. Worst normalized errors are
+**1.76881057e-5 / 3.68898003e-5 <1e-4**; conv history is bit-exact and padded
+state rows remain zero. All 6912 head-state diagnostics pass, while
+**99/6912 head-output diagnostics fail**: worst relative error **0.0493718151**
+at reference magnitude 9.91052341e-8, absolute error 4.89300530e-9. Maximum
+absolute error among failed head outputs is 1.80884340e-7. These failures remain
+visible; whole-tensor acceptance does not imply per-head acceptance.
+
+The checker covers all declared linear layers and positions, validates initial
+state, sizes, finite values and export identity, and records 289 input hashes.
+All 288 retained activation/state captures match the previous audit. The host
+suite passes **1168 tests, with 47 skipped**, including 38 new recurrence tests.
+No runtime/kernel change, new NPU run or full-model load was needed.
+
+Independent input-record preparation and composed state accuracy, head-output
+diagnostics, remaining primitive/projection gates, prefill, serving and final
 performance/resource acceptance remain open. This is not complete model support.
 
 ## Stage 1: complete decode comparison

@@ -97,3 +97,39 @@ Measured:4 default32-head tokens pass8 state/output checks; the full Python
 suite has684 passes and47 skips. The synthetic A7 chain passes416 acceptance
 checks across96 NPU dispatches. These are synthetic component results; Track B
 still needs whole-layer integration, xn buffering, segmented FFN and model tests.
+
+## Production recurrent snapshots (Qwen3.8-27B)
+
+For retained production captures, use `open_kernels/model/deltanet_state.py`:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/deltanet_state.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-fp32-entry/kernels \
+  --out Models/qwen38-27b/head-state-validation/decode
+```
+
+Prepare captures with `make_decode.py --capture-boundaries` and a compatible
+export. The production state has 48 heads, 130 padded rows per head for this
+export, and three BF16 conv-history rows. Read geometry from the recipe; do not
+reuse the standalone 128-row raster. The checker validates export hashes and
+fixture identity, full sizes/finite values, zero initial state, padded zeros,
+and bit-exact conv shifting. Its FP64 reference carries its own state across
+positions, using captured records as inputs, never captured previous state.
+It does not load model weights, rebuild kernels, or need NPU access.
+
+Measured on 2026-10-13, build `63d7cd087942…`: 48 layers × 3 positions = 144
+whole-state/output checks PASS. Worst state maxrel 1.76881057e-5, output
+3.68898003e-5; all conv histories and padded zeros PASS. All 6912 head-state
+diagnostics pass, but **99/6912 head-output diagnostics fail**. The worst head
+has reference magnitude 9.91052341e-8, absolute error 4.89300530e-9, relative
+error 0.0493718151 and cosine 0.9998768601 (L25/T0/H9). Maximum absolute error
+among failed head outputs is 1.80884340e-7. Keep these failures visible; do not
+relax thresholds or present the whole-tensor result as per-head acceptance.
+
+Evidence: `Models/qwen38-27b/deltanet-state-validation/state-results.json`;
+289 input hashes cover 144 activation/state pairs and the initial zero buffer.
+The 288 captures match their previously retained hashes. Host TDD suite:
+1168 passed, 47 skipped. No kernels or runtime arithmetic changed.
+Record preparation (norm/projections, conv/L2, alpha/beta), composed state
+accuracy and diagnosis of the head-output failures remain separate work.

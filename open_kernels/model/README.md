@@ -385,3 +385,30 @@ projection slab is 256 × hidden FP64 values; no full head matrix or resident
 model is needed. This is an independent tail check conditioned on captured
 residuals. It does not validate upstream recurrent state. The new state dumps
 supply data for that separate multi-token check; capturing them is not a PASS.
+
+### Multi-token DeltaNet recurrence validation
+
+```bash
+OPENBLAS_NUM_THREADS=1 python open_kernels/model/deltanet_state.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-fp32-entry/kernels \
+  --out Models/qwen38-27b/head-state-validation/decode
+```
+
+This checker uses retained `--capture-boundaries` snapshots. It carries its own
+FP64 `[head, key, value]` state from zero across every recorded position, taking
+Q/K/V, decay and beta from the captured DeltaNet records. Captured previous
+states never feed the reference. It checks both updated state and recurrent
+output, all padded state rows, and the bit-exact BF16 conv-history shift from
+captured QKV projections. Every declared linear layer and position is required,
+with at least two positions, exact buffer sizes, finite values, compatible
+manifest/build identity and a complete zero-state input. JSON records hashes
+of all inputs and per-head metrics. No weights or NPU execution are needed.
+
+Whole-state and whole-output gates retain normalized maximum error <1e-4 and
+cosine >0.9999999. Per-head scores use the same bounds but remain separately
+reported diagnostics, consistent with the standalone DeltaNet checker. A
+whole-tensor PASS does not imply every head passes; both statuses must be
+reported. This isolates recurrence and state storage conditioned on captured
+records, not the norm/projection/conv/alpha/beta computation producing them.
+Residual-to-state accuracy and complete model acceptance remain separate gates.
