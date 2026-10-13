@@ -334,7 +334,7 @@ state, source-tensor conversion, linear attention, or LM-head accuracy. Passing
 local gates cannot override a failed full-chain residual gate. No new NPU run
 or full-model residency is required.
 
-`utilities/attention-entry-replay/` tests FP32 entry norm and direct FP32
+The historical `utilities/attention-entry-replay/` (checkout `dfefe4d`) tests FP32 entry norm and direct FP32
 Q/gate/K/V preparation in a private full-ax design. Its appended scratch region
 is explicitly experimental; no production manifest is rewritten. It reuses one
 weight pool and retains K/V history across forced input positions. The BF16
@@ -342,5 +342,13 @@ control must reproduce production activation/residual bytes and oracle results.
 Use the [FP32 entry replay skill](../../.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md)
 for build, resource audit, prepare/run/score and controlled comparison commands.
 The experiment shares the production checker's unrounded `score_layer` oracle.
+It refuses the current integrated ABI; reproduce it with its matching checkout.
 Passing it requires subsequent ABI integration and a new full-depth run before
 making claims about whole-model residual or runtime accuracy.
+
+Production full attention now declares `attn_entry_dtype: float32` for the
+validated paired/split geometry. Entry RMSNorm feeds Q/gate/K/V without BF16
+rounding; full-attention scratch grows by 8192 bytes. `attention_projections.py`
+reads that dtype only after manifest/fixture validation. Rebuild the complete
+export and regenerate fixtures; weights need no repacking. Reproduction and
+acceptance scope are in the [FP32 entry integration skill](../../.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md).

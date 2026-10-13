@@ -703,7 +703,7 @@ def ln_body(ain, aout, f_nr, f_lny, f_lnx):
         ain.release(5)
 
 
-def _split_stages(ain, aout, f_nr, f_add2, f_nr32=None):
+def _split_stages(ain, aout, f_nr, f_add2, f_nr32=None, entry_fp32=False):
     """Stages 1 and 2 of the split norm helper (recipes/qwen36moe.py norm_split):
 
       1. layer-entry norm                 [x0 x1 lnw] -> [xn]
@@ -711,9 +711,15 @@ def _split_stages(ain, aout, f_nr, f_add2, f_nr32=None):
          xm = post_attention_norm(res)    [res0 res1 w] -> [xm]      (res read back)
     Three input elements at most, so the fifo is 3 deep and 4 elements are ever held."""
     e = ain.acquire(3)
-    o = aout.acquire(1)
-    f_nr(e[0], e[1], e[2], o)
-    aout.release(1)
+    if entry_fp32:
+        for i in range(2):
+            o = aout.acquire(1)
+            f_nr32(e[0], e[1], e[2], o, i)
+            aout.release(1)
+    else:
+        o = aout.acquire(1)
+        f_nr(e[0], e[1], e[2], o)
+        aout.release(1)
     ain.release(3)
     for _ in range(2):
         e = ain.acquire(2)
@@ -745,10 +751,10 @@ def ln_split_body(ain, aout, f_nr, f_add2):
         ain.release(2)
 
 
-def ln_split_body3(ain, aout, f_nr, f_add2, f_add3, f_nr32=None):
+def ln_split_body3(ain, aout, f_nr, f_add2, f_add3, f_nr32=None, entry_fp32=False):
     """... 3. xres_i = res_i + (out2_i + out2b_i), the two down pieces' outputs
     (recipes/qwen36moe.py down_split)   [res_i out2_i out2b_i] -> [xres_i]"""
-    _split_stages(ain, aout, f_nr, f_add2, f_nr32)
+    _split_stages(ain, aout, f_nr, f_add2, f_nr32, entry_fp32)
     for _ in range(2):
         e = ain.acquire(3)
         o = aout.acquire(1)
@@ -757,13 +763,15 @@ def ln_split_body3(ain, aout, f_nr, f_add2, f_add3, f_nr32=None):
         ain.release(3)
 
 
-def ln_dense_worker(of_lni, of_lno, L):
+def ln_dense_worker(of_lni, of_lno, L, entry_fp32=False):
     """(body, fn_args) of the dense norm helper: the fused stages, or the split ones."""
+    if entry_fp32 and not (LN_SPLIT and DOWN_SPLIT and FFN.XM_F32):
+        raise ValueError("FP32 attention entry requires split FP32 norm/down")
     if not LN_SPLIT:
         return ln_body, [of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]]
     if DOWN_SPLIT:
         return ln_split_body3, ([of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_add2"], L["ln_add3"]]
-                               + ([L["ln_nr32"]] if FFN.XM_F32 else []))
+                               + ([L["ln_nr32"], entry_fp32] if FFN.XM_F32 else []))
     return ln_split_body, [of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_add2"]]
 
 

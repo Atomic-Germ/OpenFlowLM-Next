@@ -75,10 +75,10 @@ def ln_fifos(tl):
     return of_lni, of_lno
 
 
-def ln_worker(of_lni, of_lno, tl, L):
+def ln_worker(of_lni, of_lno, tl, L, entry_fp32=False):
     """The norm (+ router) helper at Tile(0, 3)."""
     if DENSE:
-        ln_fn, ln_args = X.ln_dense_worker(of_lni, of_lno, L)
+        ln_fn, ln_args = X.ln_dense_worker(of_lni, of_lno, L, entry_fp32=entry_fp32)
         return Worker(ln_fn, fn_args=ln_args, tile=Tile(0, 3), stack_size=STACK)
     return Worker(X.ln_router_body,
                   fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),

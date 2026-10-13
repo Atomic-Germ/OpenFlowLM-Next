@@ -91,4 +91,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build isolated full-ax FP32 entry norm and compare against a byte-exact paired-attention control with forced inputs and causal KV history.</description>
     <location>.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-fp32-entry-integration</name>
+    <description>Build and validate production FP32 attention-entry norm, its scratch/stream ABI and full-depth Qwen3.8 decode with independent projection gates.</description>
+    <location>.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md</location>
+  </skill>
 </available_skills>

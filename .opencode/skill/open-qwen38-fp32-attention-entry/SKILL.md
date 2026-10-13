@@ -10,6 +10,11 @@ although individual projection/head gates pass. This workflow uses the retained
 paired-KV export and forced incoming residuals for each layer/position. It does
 not change production recipes, manifests, weights or full-model references.
 
+This historical experiment requires checkout `dfefe4d` (and its matching export).
+The subsequent production integration changes the entry ABI; the probe refuses
+that geometry rather than reinterpreting old captures. Use a separate checkout
+to reproduce the retained experiment.
+
 ## Design and identity
 
 `utilities/attention-entry-replay/build.py --mode bf16` pins copies of the

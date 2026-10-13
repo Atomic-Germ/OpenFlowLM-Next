@@ -359,6 +359,11 @@ def paired_attention(spec: ModelSpec) -> bool:
             (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (24, 4, 256, 64))
 
 
+def attention_entry_fp32(spec: ModelSpec) -> bool:
+    """Validated FP32 entry route on the paired, split dense attention geometry."""
+    return paired_attention(spec) and norm_split(spec) and bool(down_split(spec))
+
+
 @dataclass(frozen=True)
 class Attn:
     """ax.py's geometry."""
@@ -377,6 +382,8 @@ class Attn:
     # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
     # kernel every family compiled before it existed
     VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
+    XN_F32: bool = False                 # full-attention entry norm and projection input
+    XN_ELEMS: int = 1                    # 4-KiB entry stream elements
     KV_PAIR: bool = False                # [K hi, K lo, V hi, V lo], with FP32 gated output
     BLOCK: int = 0                       # 1: attn.h ATTN_BLOCK_ONLY -- no single-row kernel is built,
                                          # and the driver pads the streamed row count to a whole
@@ -877,7 +884,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         kv.update(CA_LNW=c.off["lnw"], CA_POSTLN=c.off["postln"], CA_META=c.off["meta"], CA_RW=0, CA_SGW=0,
                   CA_BYTES=c.n)
         a = _Alloc()
-        a.add("xn", F.XN_ELEMS * ELEM)
+        a.add("xn", roundup(hid * (4 if attention_entry_fp32(spec) else 2), ELEM))
         a.add("qg", 2 * qw * 4)                        # q | gate f32
         a.add("kvn", 2 * kvw * 4)                      # k | v f32
         a.add("og", og_att)
@@ -992,6 +999,8 @@ def attn(spec: ModelSpec) -> Attn | None:
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
         OG_ELEMS=roundup(qw * (4 if paired else 2), ELEM) // ELEM, KV_PAIR=paired,
+        XN_F32=attention_entry_fp32(spec),
+        XN_ELEMS=roundup(spec.hidden * (4 if attention_entry_fp32(spec) else 2), ELEM) // ELEM,
         VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
     )
 

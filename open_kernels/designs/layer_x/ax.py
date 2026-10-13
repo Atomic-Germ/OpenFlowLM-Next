@@ -70,7 +70,7 @@ DENSE = X.KIND == "dense"                               # the Qwen3.5 compositio
 PART = int(os.environ.get("AX_PART", 0))
 if DENSE and PART:
     sys.exit("ax.py: the dense tail is one instruction stream; AX_PART must be 0")
-XN_ELEMS = X.FFN.XN_ELEMS if DENSE else 1               # 4 KB x elements the xn arrives in
+XN_ELEMS = D.XN_ELEMS if DENSE else 1               # 4 KB x elements the xn arrives in
 OG_ELEMS = D.OG_ELEMS
 OG_ITEM_BYTES = 4 if D.KV_PAIR else 2
 # The attention cores (their flags, kernels, bodies, fifos) and this layer's part-0 host
@@ -107,7 +107,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         tab = B["tab"]
         if DENSE:
             # ONE stream: q | gate | k | v, the o projection, then the dense FFN tail.
-            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, 2 * Q_PC + 2 * KV_PC, "attn")
+            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, 2 * Q_PC + 2 * KV_PC, "attn", fp32=D.XN_F32)
             X.prep_bands(win, xin, yout, B, K, O_K, OG_ELEMS, O_PC, "attn", fp32=D.KV_PAIR)
             X.ffn_body(win, xin, yout, B, K)
             return
@@ -122,7 +122,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         xin.release(2)
         X.moe_body(win, xin, yout, B, K)
 
-    workers = ([XL.ln_worker(of_lni, of_lno, tl, L)] + XL.main_workers(main_body, of_w, of_x, of_y, t, K)
+    workers = ([XL.ln_worker(of_lni, of_lno, tl, L, entry_fp32=D.XN_F32)] + XL.main_workers(main_body, of_w, of_x, of_y, t, K)
                + XL.attn_workers(of_ain, of_aout, of_og, a, afns))
 
     bt = X.bt
@@ -134,7 +134,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
         lni.fill(a_consts, tap=bt(CA_BYTES, CA_LNW, ELN), wait=True, group=tg_ln)
-        lno.drain(a_act, tap=bt(AA_BYTES, AA_XN, ELN), wait=True, group=tg_ln)
+        lno.drain(a_act, tap=bt(AA_BYTES, AA_XN, HID * (4 if D.XN_F32 else 2)), wait=True, group=tg_ln)
         pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
         for c in range(N_CORES):
             for off, n in w_regions(c)[:3]:
