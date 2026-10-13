@@ -150,3 +150,6 @@ same measurement.
 - Granite has **no closed engine** to fall back on (`llama_npu` whitelists
   `hidden_size` to {2048, 3072, 4096} and refuses 2560). A missing kernel set is
   a named refusal naming the build command, not a quiet substitution.
+- Prefill is not decode-as-prefill and not `dxB`: the engine takes the block route with host attention, layer-major
+  (OPEN-PREFILL-HOST-ATTN, 60 -> 220 tok/s at pp512). Measure it with `open_qwen36_cli --gemm-block --ids-file`; a
+  kernel dir carrying the Uno `dxl` / `lmhl` entries needs the Uno engine build to parse it.

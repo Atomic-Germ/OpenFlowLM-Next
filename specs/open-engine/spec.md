@@ -4059,6 +4059,20 @@ quoted. Through `oflm serve` with `OFLM_OPEN_KERNELS_DIR` at the set and no othe
 `oflm-test --llm` on `qwen3.6-moe:35b-a3b` PASSes 5 of 5, its 169- and 618-token turns on the
 route. Details: `specs/open-engine/plans/archive/q8-gemm.md`.
 
+### OPEN-PREFILL-HOST-ATTN: the plain dense shape prefills with host attention, layer-major
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp` `host_attn_fits`, `layer_dense_staged`, `step_gemm_prompt_dense`)
+**Verification:** manual (needs the NPU and a dense kernel set with a `gemm_block`; Granite-4.2-3B-NPU2 is the one measured)
+
+A dense `gemm_block` set with no `attn_block`, no q/k norm, no sliding window, no sandwich norms and full rotary (Granite, Llama 3) takes its prefill attention on the host by default, and runs the whole prompt layer-major with each GEMM step over every block (OPEN-PREFILL-BATCH's stage-major order): block b + 1 is on the NPU while the host works block b. Before this the set ran 256 single-token `dxB` dispatches per layer per block, 60-70 % of a Granite prefill. `OFLM_OPEN_HOST_ATTN=0` restores the `dxB` dispatches; `OFLM_OPEN_LAYER_MAJOR=0` / `OFLM_OPEN_STAGE_MAJOR=0` keep the host attention but run block at a time.
+
+**Acceptance criteria:**
+- The load log names `gemm-block attention: HOST` and `prefill schedule: layer-major ... stage-major`.
+- Logits at every position of a 512-token prompt against the `dxB` route: corr >= 0.9998, and an argmax flip only where the reference's top-2 margin is under 0.05 logits.
+- A 340-token chat prompt greedy-decodes the same 24 tokens as the `dxB` route.
+- A prompt at `--at-position 300` agrees with `dxB` (corr 0.9998).
+
+**Result 2026-10-13 (Granite-4.2-3B-NPU2, q4_1, pp512, T 256, performance mode, quiet box):** `dxB` 8.45-8.82 s (58-60 tok/s); host attention block at a time 3.5-3.85 s (133-145); layer-major stage-major **2.28-2.33 s (220-225 tok/s)**. At 2048 tokens 14.4 s (142 tok/s): the host attention grows with position (5-6 s of it) and is not overlapped, so a long prompt wants the NPU attention products (`attn_block`, which needs `prep` for a no-norm family and hd 64 builds, not built). What is left at 512 is the projection GEMMs themselves: 2.3-2.5 TFLOPS per dispatch (`gemm_n8192_k2560` 5.3 ms min), about 1.15 s a block, so the route is NPU-bound.
+
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
 **Test category:** test (the recipe emission, `tests/test_prefill_batch.py`; the manifest's route selection, `src/open_qwen36/manifest_test.cpp`) + manual (memory and speed on the NPU, below)
