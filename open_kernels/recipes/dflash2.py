@@ -43,6 +43,11 @@ def _ops(spec: ModelSpec) -> dict[str, tuple[int, int]]:
     }
 
 
+def probe_env() -> dict[str, str]:
+    # no attention probes in this family; cache.py reads the hook off every family module
+    return {}
+
+
 def kernel_name(n: int, k: int) -> str:
     return f"t2n_n{n}_k{k}"
 
