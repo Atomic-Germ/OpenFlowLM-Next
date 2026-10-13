@@ -398,23 +398,34 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         reason = MAX_LENGTH_REACHED;
         return result;
     }
+    this->_spec_begin();
     while (this->total_tokens < this->MAX_L){
-        if (is_cancelled()) {
+        // OPEN-DECODE-SPECULATIVE: queued tokens are already fed; hand them out before a cancel
+        if (this->spec_pending_.empty() && is_cancelled()) {
             reason = CANCEL_DETECTED;
-            // reset stream content 
+            // reset stream content
             buffer_.clear();
             current_mode_ = StreamEventType::CONTENT;
             tool_name_.clear();
             is_in_tool_block_ = false;
             break;
         }
-        this->profiler_list[DECODING_TIME].start();
-        buffer<bf16> y = this->lm_engine->forward(last_sampled_token);
-        this->profiler_list[DECODING_TIME].stop(1);
+        int sampled_token;
+        if (this->_spec_eligible()) {
+            int max_emit = static_cast<int>(this->MAX_L - this->total_tokens);
+            if (length_limit > 0) max_emit = std::min(max_emit, length_limit - meta_info.generated_tokens);
+            this->profiler_list[DECODING_TIME].start();
+            sampled_token = this->_spec_next(last_sampled_token, max_emit);
+            this->profiler_list[DECODING_TIME].stop(1);
+        } else {
+            this->profiler_list[DECODING_TIME].start();
+            buffer<bf16> y = this->lm_engine->forward(last_sampled_token);
+            this->profiler_list[DECODING_TIME].stop(1);
 
-        this->profiler_list[SAMPLING_TIME].start();
-        int sampled_token = this->sampler->sample(y);
-        this->profiler_list[SAMPLING_TIME].stop(1);
+            this->profiler_list[SAMPLING_TIME].start();
+            sampled_token = this->sampler->sample(y);
+            this->profiler_list[SAMPLING_TIME].stop(1);
+        }
         this->total_tokens++;
         last_sampled_token = sampled_token;
 
@@ -437,6 +448,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
             break;
         }
     }
+    this->_spec_end();
     meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
     meta_info.stop_reason = reason;
     if (this->total_tokens >= this->MAX_L){

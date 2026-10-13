@@ -1,7 +1,7 @@
 r"""Test vectors for lm_head_t2: random ternary weights packed as the head's t2 pool (std_perm's
 64-row band order, unpadded 2176 B chunks -- what pools.cpp `t2_perm` writes with chunk_bytes
 2176), one bf16 activation, and the fp64 reference of W @ (H(x)/32 per 1024 block) with the
-rotated input rounded to bf16, as the prep feeds the table (designs/gemv_t2 probe 0a's rule).
+rotated input as the prep's table holds it (fwht_ref.py's model of wht_int.h).
 
     python make_test.py [--n 248320] [--k 5120] [--out DIR] [--runs 20]
 
@@ -26,17 +26,6 @@ from t2_pack import QK, random_pq2_codes  # noqa: E402
 CH = 2176
 
 
-def fwht_blocks(x: np.ndarray, block: int = 1024) -> np.ndarray:
-    """Normalized Sylvester Walsh-Hadamard per `block` of x, fp64."""
-    y = x.astype(np.float64).reshape(-1, block).copy()
-    h = 1
-    while h < block:
-        y = y.reshape(-1, block // (2 * h), 2, h)
-        y = np.stack([y[:, :, 0] + y[:, :, 1], y[:, :, 0] - y[:, :, 1]], axis=2)
-        h *= 2
-    return y.reshape(-1) / np.sqrt(block)
-
-
 def pack_head(codes: np.ndarray, s: np.ndarray) -> np.ndarray:
     """[n, k] ternary -> the head's t2 pool, vectorised: band b, chunk c = 2 * ktile + half."""
     n, k = codes.shape
@@ -52,6 +41,13 @@ def pack_head(codes: np.ndarray, s: np.ndarray) -> np.ndarray:
     out[..., :128] = np.ascontiguousarray(sc).view(np.uint8).reshape(n // 64, nkt, 2, 128)
     out[..., 128:] = code.reshape(n // 64, nkt, 2, 2048)
     return out.reshape(-1)
+
+
+def _int_table_values(x: np.ndarray) -> np.ndarray:
+    """The values the prep's table holds: wht_int.h's integer H/32 (designs/fwht_int/fwht_ref.py)."""
+    sys.path.insert(0, str(HERE.parent / "fwht_int"))
+    from fwht_ref import effective, int_tables
+    return effective(int_tables(x))[0]
 
 
 def reference(codes: np.ndarray, s: np.ndarray, xr: np.ndarray, rows: int = 4096) -> np.ndarray:
@@ -95,7 +91,7 @@ def main() -> int:
     rng = np.random.default_rng(a.seed)
     codes, s = random_pq2_codes(a.n, a.k, rng)
     x = rng.standard_normal(a.k).astype(np.float32).astype(bfloat16)
-    xr = fwht_blocks(x.astype(np.float64)).astype(np.float32).astype(bfloat16)
+    xr = _int_table_values(x)
     w = pack_head(codes, s)
     ref = reference(codes, s, xr)
     (out / "w.bin").write_bytes(w.tobytes())

@@ -47,6 +47,8 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         "globals": prog["globals"],
         "builds": F.builds(spec),
     }
+    if "verify" in prog:          # speculative decode's verify image (OPEN-DECODE-SPECULATIVE-VERIFY)
+        m["verify"] = prog["verify"]
     plan = F.pack_plan(spec)
     for lt, d in plan.pop("layer_types").items():
         m["layer_types"][lt]["pack"] = d

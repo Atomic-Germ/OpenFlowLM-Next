@@ -286,4 +286,101 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
     }
 }
 
+/// `stateslot` (OPEN-DECODE-SPECULATIVE-VERIFY): committed state moves between slots by re-pointing patches, never by a copy.
+struct SlotPatch {
+    size_t word;
+    uint32_t slot;
+    uint32_t local;
+    uint32_t flags;
+};
+
+inline std::vector<SlotPatch> slot_table(const std::vector<uint32_t>& w, const std::string& kn, uint32_t arg,
+                                         uint64_t slot_bytes, unsigned nslots) {
+    std::vector<SlotPatch> t;
+    for (size_t i = 4; i < w.size(); i += op_len(w[i])) {
+        if (w[i] != 0x81 || i + 11 >= w.size() || w[i + 8] != arg) continue;
+        const uint64_t off = w[i + 10] & 0x7fffffffu;
+        const uint32_t flags = w[i + 10] & 0x80000000u;
+        const uint64_t slot = off / slot_bytes;
+        if (slot >= nslots)
+            throw std::runtime_error("stateslot: " + kn + ": a state transfer at offset " + std::to_string(off) +
+                                     " is past slot " + std::to_string(nslots - 1));
+        t.push_back({i + 10, static_cast<uint32_t>(slot), static_cast<uint32_t>(off % slot_bytes), flags});
+    }
+    if (t.empty()) throw std::runtime_error("stateslot: " + kn + " has no state transfers");
+    return t;
+}
+
+inline void slot_apply(uint32_t* iw, const std::vector<SlotPatch>& table, const unsigned* perm, uint64_t slot_bytes) {
+    for (const auto& p : table)
+        iw[p.word] = static_cast<uint32_t>(perm[p.slot] * slot_bytes + p.local) | p.flags;
+}
+
+/// `attnposv`: compiled at placeholder position 1, so position j's fill is the j-th arg-3 offset-0 patch and its row/record sit at row 1 + j.
+struct AttnPatchV {
+    size_t word;
+    uint8_t kind;
+    uint8_t q;
+    uint32_t flags;
+};
+
+inline std::vector<AttnPatchV> attnv_table(const std::vector<uint32_t>& w, const std::string& kn, unsigned nq,
+                                           const AttnGeometry& g = AttnGeometry{}) {
+    std::vector<AttnPatchV> t;
+    size_t bd_write = 0;
+    bool have_bd = false;
+    unsigned nwin = 0;
+    for (size_t i = 4; i < w.size(); i += op_len(w[i])) {
+        if (w[i] == 1) { bd_write = i; have_bd = true; }
+        if (w[i] != 0x81 || i + 11 >= w.size()) continue;
+        uint32_t reg = w[i + 6], arg = w[i + 8];
+        uint64_t off = w[i + 10] & 0x7fffffffu;
+        uint32_t flags = w[i + 10] & 0x80000000u;
+        if (arg == 3 && off == 0) {
+            if (!have_bd || bd_write + 2 >= w.size() || w[bd_write + 2] + 4 != reg)
+                throw std::runtime_error("attnposv: " + kn + ": no BD write before a KV window fill");
+            t.push_back({bd_write + 4, 0, static_cast<uint8_t>(nwin), 0});
+            t.push_back({i + 10, 3, static_cast<uint8_t>(nwin), flags});
+            ++nwin;
+        } else if (arg == 3 && off % g.kv_row == 0 && off / g.kv_row >= 1 && off / g.kv_row <= nq) {
+            t.push_back({i + 10, 1, static_cast<uint8_t>(off / g.kv_row - 1), flags});
+        } else if (arg == 3) {
+            throw std::runtime_error("attnposv: " + kn + ": unexpected kv transfer at offset " + std::to_string(off));
+        } else if (arg == 5) {
+            if (off % g.ptab_row || off / g.ptab_row < 1 || off / g.ptab_row > nq)
+                throw std::runtime_error("attnposv: " + kn + ": unexpected record fill at offset " + std::to_string(off));
+            t.push_back({i + 10, 2, static_cast<uint8_t>(off / g.ptab_row - 1), flags});
+        }
+    }
+    for (uint8_t kind = 0; kind < 4; ++kind)
+        for (unsigned q = 0; q < nq; ++q) {
+            size_t n = 0;
+            for (const auto& p : t) n += (p.kind == kind && p.q == q);
+            if (n != 1)
+                throw std::runtime_error("attnposv: " + kn + ": " + std::to_string(n) + " patches of kind " +
+                                         std::to_string(kind) + " for position " + std::to_string(q) + ", expected 1");
+        }
+    return t;
+}
+
+/// Must stay in step with attn_apply(pos + j), or verify and decode attend different windows.
+inline void attnv_apply(uint32_t* iw, const std::vector<AttnPatchV>& table, uint64_t pos,
+                        const AttnGeometry& g = AttnGeometry{}) {
+    for (const auto& p : table) {
+        const uint64_t ps = pos + p.q;
+        uint64_t start, nf;
+        attn_window(ps, g.window, &start, &nf);
+        if (g.rb_win > 1) {
+            const uint64_t valid = ps - start;
+            const uint64_t nb = (valid + g.rb_win - 1) / g.rb_win;
+            nf = g.rb_win * (nb ? nb : 1);
+        }
+        uint64_t v = p.kind == 0   ? nf * g.kv_row / 4
+                     : p.kind == 1 ? ps * g.kv_row
+                     : p.kind == 2 ? ps * g.ptab_row
+                                   : start * g.kv_row;
+        iw[p.word] = static_cast<uint32_t>(v) | p.flags;
+    }
+}
+
 }  // namespace stream_patch

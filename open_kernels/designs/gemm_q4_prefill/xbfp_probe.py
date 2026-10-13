@@ -3,11 +3,14 @@ weights, same activations -- bf16 tiles for the production build, host-made bfp1
 the XBFP build -- timed interleaved and compared bit for bit.
 
     python xbfp_probe.py gen
-    python xbfp_probe.py run [--rounds 4]        (npu lock; timing lock for numbers you report)
-    python xbfp_probe.py check
+    python xbfp_probe.py run [--rounds 4] [--variants ...] [--data rand adv]
+                                                 (npu lock; timing lock for numbers you report)
+    python xbfp_probe.py check [--pairs t2ky:xbfp xbfp:idq] [--data rand adv]
 
 The host's bf16 -> bfp16ebs8 conversion is ../bfp_cvt/bfp16_host.py's, the model bfp_cvt's
 hardware probe confirmed byte for byte; with it the two builds must give the same y.
+
+`idq` (GQP_IDQ) must match `xbfp` on `rand` and on `adv`, weights that hit the integer dequant's byte-level special cases.
 """
 from __future__ import annotations
 
@@ -30,10 +33,13 @@ from bench import RUN  # noqa: E402
 
 N, K, T, KT, TN = 5120, 6144, 256, 128, 32
 DRIVER = Path(r"C:\code\openflowlm-next\open_kernels\harness\out\run_kernel.exe")
-BUILDS = {"t2ky": "build_n5120_k6144_t256_t2ky", "xbfp": "build_n5120_k6144_t256_xbfp",
+BUILDS = {"t2ky": "build_n5120_k6144_t256_t2ky", "xbfp": "build_n5120_k6144_t256_t2kyx",
+          "idq": "build_n5120_k6144_t256_idq",
           # timing-only ablations (GQP_NULL_MM / GQP_NULL_DEQUANT; their y is garbage)
           "t2ky_nmnd": "build_n5120_k6144_t256_t2ky_nmnd", "xbfp_nm": "build_n5120_k6144_t256_xbfp_nm",
-          "xbfp_nd": "build_n5120_k6144_t256_xbfp_nd", "xbfp_nmnd": "build_n5120_k6144_t256_xbfp_nmnd"}
+          "xbfp_nd": "build_n5120_k6144_t256_xbfp_nd", "xbfp_nmnd": "build_n5120_k6144_t256_xbfp_nmnd",
+          "idq_nm": "build_n5120_k6144_t256_idq_nm", "idq_nd": "build_n5120_k6144_t256_idq_nd"}
+DATA = {"rand": "w_xbfp_t2.bin", "adv": "w_xbfp_t2_adv.bin"}
 
 
 def tile_bf16(bits: np.ndarray) -> np.ndarray:
@@ -51,6 +57,31 @@ def tile_bfp(bits: np.ndarray) -> np.ndarray:
     return bf16_to_bfp16_v64(lanes).reshape(-1)
 
 
+def adversarial_weights(rng: np.random.Generator) -> np.ndarray:
+    """t2 chunks whose scales and codes hit the integer dequant's byte-level special cases"""
+    from ml_dtypes import bfloat16
+    from t2_pack import pack_t2_pool
+    codes = rng.integers(0, 3, (N, K), dtype=np.uint8)
+    c8 = codes.reshape(N, K // 8, 8)
+    # all-1 runs: a zero row in an A block
+    zrun = rng.random((N, K // 8)) < 0.05
+    c8[zrun] = 1
+    # runs with no +1, so a significand-255 row holds only -s there
+    nrun = (rng.random((N, K // 8)) < 0.10) & ~zrun
+    c8[nrun] = np.minimum(c8[nrun], 1)
+    # fp16-representable so pack_t2_pool keeps the bits; 0x7F is the significand-255 rounding case
+    g = K // 128
+    e = rng.integers(119, 123, (N, g)).astype(np.uint16)
+    m = rng.integers(0, 128, (N, g)).astype(np.uint16)
+    m[rng.random((N, g)) < 0.30] = 0x7F
+    sign = (rng.random((N, g)) < 0.25).astype(np.uint16)
+    bits = (sign << 15) | (e << 7) | m
+    bits[rng.random((N, g)) < 0.01] = 0
+    s = bits.view(bfloat16).astype(np.float32).astype(np.float16)
+    assert (s.astype(np.float32).astype(bfloat16).view(np.uint16) == bits).all()
+    return pack_t2_pool(codes, s, rs=2)
+
+
 def gen() -> None:
     rng = np.random.default_rng(5)
     nb = K // 32
@@ -62,6 +93,7 @@ def gen() -> None:
     blocks[..., 4:20] = q[..., :16] | (q[..., 16:] << 4)
     w = t2_from_q4_1_pool(pack_q4_1_pool(blocks, rs=2)).reshape(-1, 2560)[:, :2176]
     (HERE / "w_xbfp_t2.bin").write_bytes(np.ascontiguousarray(w).tobytes())
+    (HERE / "w_xbfp_t2_adv.bin").write_bytes(adversarial_weights(np.random.default_rng(7)).tobytes())
     # activations shaped like the engine's: Hadamard-rotated rows are close to Gaussian
     x = rng.standard_normal((T, K)).astype(np.float32)
     bits = (x.view(np.uint32) + 0x7FFF + ((x.view(np.uint32) >> 16) & 1)) >> 16
@@ -69,21 +101,25 @@ def gen() -> None:
     (HERE / "x_xbfp_bf16.bin").write_bytes(tile_bf16(bits).tobytes())
     (HERE / "x_xbfp_bfp.bin").write_bytes(tile_bfp(bits).tobytes())
     yb = N * T * 4
-    for v, b in BUILDS.items():
-        xf = "x_xbfp_bfp.bin" if v.startswith("xbfp") else "x_xbfp_bf16.bin"
-        xs = (HERE / xf).stat().st_size
-        cfg = ["device", f"xclbin G {b}/final.xclbin", f"kernelx k G {b}/insts.bin", f"buf w {w.size} w_xbfp_t2.bin",
-               f"buf x {xs} {xf}", f"buf y {yb}"] + ["run k w x y"] * 8 + [f"dump y y_xbfp_{v}.bin {yb}", ""]
-        (HERE / f"run_xbfp_{v}.cfg").write_text("\n".join(cfg), newline="\n")
-    print("wrote w_xbfp_t2.bin, x_xbfp_{bf16,bfp}.bin, run_xbfp_{t2ky,xbfp}.cfg")
+    for d, wf in DATA.items():
+        sfx = "" if d == "rand" else f"_{d}"
+        ws = (HERE / wf).stat().st_size
+        for v, b in BUILDS.items():
+            xf = "x_xbfp_bf16.bin" if v.startswith("t2ky") else "x_xbfp_bfp.bin"
+            xs = (HERE / xf).stat().st_size
+            cfg = ["device", f"xclbin G {b}/final.xclbin", f"kernelx k G {b}/insts.bin", f"buf w {ws} {wf}",
+                   f"buf x {xs} {xf}", f"buf y {yb}"] + ["run k w x y"] * 8 + [f"dump y y_xbfp_{v}{sfx}.bin {yb}", ""]
+            (HERE / f"run_xbfp_{v}{sfx}.cfg").write_text("\n".join(cfg), newline="\n")
+    print("wrote w_xbfp_t2{,_adv}.bin, x_xbfp_{bf16,bfp}.bin, run_xbfp_*.cfg")
 
 
-def run(rounds: int, variants: list[str]) -> None:
+def run(rounds: int, variants: list[str], data: str = "rand") -> None:
+    sfx = "" if data == "rand" else f"_{data}"
     times = {v: [] for v in variants}
     for r in range(rounds):
         line = []
         for v in variants:
-            p = subprocess.run([str(DRIVER), f"run_xbfp_{v}.cfg"], cwd=HERE, capture_output=True, text=True)
+            p = subprocess.run([str(DRIVER), f"run_xbfp_{v}{sfx}.cfg"], cwd=HERE, capture_output=True, text=True)
             ts = [float(m.group(3)) for m in map(RUN.match, p.stdout.splitlines()) if m]
             bad = [l for l in p.stdout.splitlines() if RUN.match(l) and int(RUN.match(l).group(2)) != 4]
             if p.returncode or not ts or bad:
@@ -98,11 +134,19 @@ def run(rounds: int, variants: list[str]) -> None:
             print(f"{v:5s} min {min(ts):.3f} ms  median of round minima {statistics.median(ts):.3f} ms")
 
 
-def check() -> None:
-    a = np.fromfile(HERE / "y_xbfp_t2ky.bin", np.uint32)
-    b = np.fromfile(HERE / "y_xbfp_xbfp.bin", np.uint32)
+def check(pairs: list[str], data: str = "rand") -> None:
+    sfx = "" if data == "rand" else f"_{data}"
+    for pair in pairs:
+        va, vb = pair.split(":")
+        check_pair(f"y_xbfp_{va}{sfx}.bin", f"y_xbfp_{vb}{sfx}.bin")
+
+
+def check_pair(fa: str, fb: str) -> None:
+    a = np.fromfile(HERE / fa, np.uint32)
+    b = np.fromfile(HERE / fb, np.uint32)
     same = a == b
-    print(f"y: {same.mean() * 100:.4f} % of {a.size} values bit-identical")
+    print(f"{fa} vs {fb}: {same.mean() * 100:.4f} % of {a.size} values bit-identical, "
+          f"finite {np.isfinite(a.view(np.float32)).all()}")
     if not same.all():
         fa, fb = a.view(np.float32).astype(np.float64), b.view(np.float32).astype(np.float64)
         rel = np.linalg.norm(fa - fb) / np.linalg.norm(fa)
@@ -115,8 +159,14 @@ def main() -> int:
     ap.add_argument("what", choices=("gen", "run", "check"))
     ap.add_argument("--rounds", type=int, default=4)
     ap.add_argument("--variants", nargs="*", default=["t2ky", "xbfp"])
+    ap.add_argument("--pairs", nargs="*", default=["t2ky:xbfp"])
+    ap.add_argument("--data", nargs="*", default=["rand"], choices=list(DATA))
     a = ap.parse_args()
-    {"gen": gen, "run": lambda: run(a.rounds, a.variants), "check": check}[a.what]()
+    if a.what == "gen":
+        gen()
+    for d in (a.data if a.what != "gen" else []):
+        print(f"== data {d}")
+        run(a.rounds, a.variants, d) if a.what == "run" else check(a.pairs, d)
     return 0
 
 

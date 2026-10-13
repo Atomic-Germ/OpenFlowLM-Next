@@ -145,6 +145,6 @@ def lm_head_t2(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
 DESIGN = lm_head_t2
 # The jit cache keys on this file + CompileTime args only: hash the kernel sources in.
 _src = b"".join([(HERE / f).read_bytes() for f in ("lm_head_t2.cc", "lm_head_t2_prep.cc")]
-                + [(GEMV / f).read_bytes() for f in ("gemv_t2.h", "wht.h", "gemv_tab.h")])
+                + [(GEMV / f).read_bytes() for f in ("gemv_t2.h", "wht.h", "wht_int.h", "gemv_tab.h")])
 SPECIALIZE = {"n": N, "k": K, "n_cores": N_CORES, "per_call": PER_CALL, "null": NULL,
               "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

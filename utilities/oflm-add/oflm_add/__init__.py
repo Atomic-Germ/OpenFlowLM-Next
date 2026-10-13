@@ -23,7 +23,9 @@ installed set whose manifest.json carries the same spec_hash as this model
 drives it. oflm-add derives the spec from the installed config.json (+
 tokenizer.json and the model.q4nx header) via the open_kernels/recipes
 checkout, finds the matching set, and links it at <model dir>/open_kernels --
-the second place open_qwen36::Engine::find_kernels looks.
+the second place open_qwen36::Engine::find_kernels looks. When that set
+carries a verify program, the entry declares speculative decode by prompt
+lookup ("speculative": {"method": "lookup"}); --speculative overrides it.
 
 The script never rewrites the system model list or the system xclbins; it
 writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
@@ -811,31 +813,73 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     return False
 
 
-def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
-    """Find and link the open kernel set for this model; say which and why."""
+def choose_open_kernels(model_dir, dir_name, roots, override=None, quiet=False):
+    """The open kernel set for this model, or None; says which and why."""
     if override:
         kernel_dir = Path(override)
         if not (kernel_dir / "manifest.json").is_file():
             raise SystemExit(f"--open-kernels {kernel_dir} has no manifest.json")
         log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
-        return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+        return kernel_dir
 
     spec_hash, note = model_spec_hash(model_dir)
     if not spec_hash:
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
-        return False
+        return None
     kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
     if kernel_dir:
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
-        return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+        return kernel_dir
     checkout = open_kernels_checkout()
     script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
     log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
         "the closed kernels stay in charge. Build one with:")
     log(f'           python "{script}" --model-dir "{model_dir}"')
-    return False
+    return None
+
+
+def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
+    """Find and link the open kernel set for this model; say which and why."""
+    kernel_dir = choose_open_kernels(model_dir, dir_name, roots, override=override, quiet=quiet)
+    if kernel_dir is None:
+        return False
+    return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+
+
+# -------------------------------------------------------- speculative decode
+
+# method -> the kernel manifest block it needs; the registry entry names the method (OPEN-REGISTRY-SPECULATIVE)
+SPECULATIVE_METHODS = {"lookup": "verify"}
+
+
+def _manifest_has(kernel_dir, block):
+    try:
+        m = load_json(Path(kernel_dir) / "manifest.json")
+    except Exception:
+        return False
+    b = m.get(block)
+    return isinstance(b, dict) and int(b.get("width", 0) or 0) >= 2
+
+
+def speculative_field(kernel_dir, requested=None):
+    """The entry's `speculative` value for `kernel_dir` and --speculative `requested`; None writes no field."""
+    if requested == "none":
+        return None
+    if requested is None:
+        return {"method": "lookup"} if kernel_dir and _manifest_has(kernel_dir, "verify") else None
+    need = SPECULATIVE_METHODS.get(requested)
+    if need is None:
+        raise SystemExit(f"--speculative {requested}: unknown method "
+                         f"(known: {', '.join(sorted(SPECULATIVE_METHODS))}, none)")
+    if not kernel_dir:
+        raise SystemExit(f"--speculative {requested}: this model has no open kernel set, "
+                         f"and {requested} needs one with a {need} program")
+    if not _manifest_has(kernel_dir, need):
+        raise SystemExit(f"--speculative {requested}: the kernel set {kernel_dir} has no {need} program, "
+                         f"which {requested} needs")
+    return {"method": requested}
 
 
 # ---------------------------------------------------------------------- main
@@ -922,6 +966,9 @@ def main():
     ap.add_argument("--modelscope", action="store_true", help="Treat REPO as a ModelScope repo id (implied by www.modelscope.ai/.cn URLs)")
     ap.add_argument("--open-kernels", help="open kernel set for this model (a directory holding manifest.json); default: the installed set whose manifest spec_hash matches")
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
+    ap.add_argument("--speculative", metavar="METHOD", choices=sorted(SPECULATIVE_METHODS) + ["none"],
+                    help="speculative decode method for the registry entry (default: lookup when the open kernel set "
+                         "has a verify program); 'none' declares none")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and exit")
@@ -981,6 +1028,7 @@ def main():
             found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
             print(f"spec hash      : {sh or '(' + note + ')'}")
             print(f"open kernels   : {found or '(none installed)'}")
+            print(f"speculative    : {speculative_field(found, args.speculative) or '(none)'}")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return
@@ -1013,10 +1061,27 @@ def main():
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
 
+    # Open kernels: keyed by this model's spec, not by an official model name.
+    system_root = find_system_xclbin_root()
+    kernel_dir = None
+    if args.open_kernels or not args.no_xclbin:
+        kernel_dir = choose_open_kernels(
+            target,
+            dir_name,
+            [user_xclbin_dir(args.xclbin_dir), system_root],
+            override=args.open_kernels,
+            quiet=args.quiet,
+        )
+    speculative = speculative_field(kernel_dir, args.speculative)
+    if speculative:
+        entry["speculative"] = speculative
+        log(f"[INFO] speculative decode: method {speculative['method']}")
+    else:
+        entry.pop("speculative", None)
+
     register(user_list, tag, entry, system_registry)
     log(f"[INFO] Registered tag '{tag}' in {user_list}")
 
-    system_root = find_system_xclbin_root()
     if not args.no_xclbin:
         if system_root is None:
             log("[WARN] Could not locate system xclbins; skipped symlink.")
@@ -1030,16 +1095,8 @@ def main():
                 quiet=args.quiet,
             )
 
-    # Open kernels: keyed by this model's spec, not by an official model name.
-    if args.open_kernels or not args.no_xclbin:
-        setup_open_kernels(
-            target,
-            dir_name,
-            [user_xclbin_dir(args.xclbin_dir), system_root],
-            override=args.open_kernels,
-            force=args.force,
-            quiet=args.quiet,
-        )
+    if kernel_dir is not None:
+        link_open_kernels(target, kernel_dir, force=args.force, quiet=args.quiet)
 
     write_vision_sidecar(target, dir_name, quiet=args.quiet)
 

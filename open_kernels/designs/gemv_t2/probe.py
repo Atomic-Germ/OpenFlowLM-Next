@@ -39,7 +39,31 @@ def run(driver: Path, cfg: Path) -> list[float]:
     return ts[1:] or ts          # drop the cold run
 
 
+def check_t2x2(tag: str) -> str:
+    """t2x2c<n>_<shape>: each token's y must be byte-identical to t2p1c<n>'s on that token's x."""
+    fc, shape = tag.split("_")[:2]
+    got = np.fromfile(HERE / f"y_{tag}.bin", np.float32)
+    n = got.size // 2
+    got = got.reshape(n // 64, 2, 64).transpose(1, 0, 2).reshape(2, n)
+    if tag.endswith("_null"):
+        return f"zeros={not got.any()}"
+    ref2 = np.fromfile(HERE / f"ref2_{shape}.bin", np.float32).reshape(2, n)
+    base = "t2p1" + fc[len("t2x2"):]
+    out = []
+    for t, f in enumerate((f"y_{base}_{shape}.bin", f"y_{base}_{shape}_x1.bin")):
+        r = np.fromfile(HERE / f, np.float32)
+        same = np.array_equal(got[t].view(np.uint32), r.view(np.uint32))
+        d = np.abs(got[t].astype(np.float64) - r)
+        bad = np.flatnonzero(got[t].view(np.uint32) != r.view(np.uint32))
+        rel = np.abs(got[t].astype(np.float64) - ref2[t]).max() / (np.abs(ref2[t]).max() + 1e-30)
+        out.append(f"tok{t}: bytes_identical={same} maxdiff={d.max():.3g} nbad={bad.size}"
+                   + (f" first_bad_rows={bad[:8].tolist()}" if bad.size else "") + f" vs_fp64_maxrel={rel:.2e}")
+    return " | ".join(out)
+
+
 def check(tag: str, ref: np.ndarray) -> str:
+    if tag.startswith("t2x2"):
+        return check_t2x2(tag)
     if tag.startswith("t2h") and not tag.endswith("_null"):
         ref = np.fromfile(HERE / f"ref_{tag.split('_')[1]}_h.bin", np.float32)
     got = np.fromfile(HERE / f"y_{tag}.bin", np.float32).astype(np.float64)
@@ -57,7 +81,7 @@ def main() -> int:
     ap.add_argument("shape")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--driver", type=Path, default=DEFAULT_DRIVER)
-    ap.add_argument("--fmts", default="q4,t2", help="comma list of q4 / t2 / t2g")
+    ap.add_argument("--fmts", default="q4,t2", help="comma list of q4 / t2 / t2g / t2p2 / t2x2c8 ...")
     a = ap.parse_args()
     tags = [f"{f}_{a.shape}{n}" for f in a.fmts.split(",") for n in ("", "_null")]
     times: dict[str, list[float]] = {t: [] for t in tags}
@@ -71,6 +95,10 @@ def main() -> int:
                 meds[t].append(statistics.median(ts))
                 line.append(f"{t} {min(ts):.3f}")
         print(f"round {r}: " + "  ".join(line))
+    for t in tags:
+        x1 = HERE / f"run_{t}_x1.cfg"
+        if x1.is_file():
+            run(a.driver, x1)
     ref = np.fromfile(HERE / f"ref_{a.shape}.bin", np.float32)
     n = ref.size
     k = (HERE / f"x_{a.shape}.bin").stat().st_size // 2
@@ -83,6 +111,9 @@ def main() -> int:
         best = min(times[t])
         print(f"{t:16s} min {best:7.3f} ms  med {statistics.median(meds[t]):7.3f} ms  "
               f"{wbytes / best / 1e6:6.1f} GB/s  {n * k / best / 1e6:7.1f} Gweights/s  {check(t, ref)}")
+    print("\nper-round minima (ms):")
+    for t in tags:
+        print(f"{t:16s} " + " ".join(f"{v:.3f}" for v in times[t]))
     return 0
 
 

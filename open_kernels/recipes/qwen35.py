@@ -343,12 +343,30 @@ def tail_in_layer(spec: ModelSpec) -> bool:
             and (spec.vocab // LM_T2_BAND_ROWS) % LIMITS["n_cols"] == 0)
 
 
+# ---- OPEN-DECODE-SPECULATIVE-VERIFY: the verify image (designs/verify/vux.py)
+VERIFY_W = 2                       # positions per verify pass: two tables per main core is what fits
+
+
+def verify_image(spec: ModelSpec) -> bool:
+    """vux.py is the two-position twin of the in-layer-head image with two down pieces; OPEN_LAYER_VERIFY=0 opts out."""
+    if os.environ.get("OPEN_LAYER_VERIFY") == "0" or not tail_in_layer(spec):
+        return False
+    R = recipe(spec)
+    return R.ffn is not None and len(R.ffn.DOWN_SPLIT) == 2 and R.common.PER_CALL == 1
+
+
+def verify_geometry(spec: ModelSpec) -> dict:
+    L = layout(spec)
+    slot = -(-L.STATE_BYTES // 4096) * 4096
+    return {"width": VERIFY_W, "slot_bytes": slot, "act_bytes": max(L.A_BYTES, L.AA_BYTES)}
+
+
 def probe_env() -> dict[str, str]:
     """The build key's probe variables (cache.py). An explicit OPEN_LAYER_ONE_CTX joins them: it
     changes what `builds` compiles, and nothing else in the key sees it. Unset, the flavour is a
     function of the spec, which the key already hashes."""
     e = dict(_attn_probe_env())
-    for k in ("OPEN_LAYER_ONE_CTX", "OPEN_LAYER_TAIL"):
+    for k in ("OPEN_LAYER_ONE_CTX", "OPEN_LAYER_TAIL", "OPEN_LAYER_VERIFY"):
         if os.environ.get(k) is not None:
             e[k] = os.environ[k]
     return e
@@ -411,6 +429,25 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                         "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": "ax", "args": args}],
         }
+    if verify_image(spec):
+        # own context on the decode image's buffers; only xres, logits and lmact need width rows
+        vg = verify_geometry(spec)
+        out["contexts"]["verify"] = "vlx/final.xclbin"
+        out["kernels"]["lx"]["patch"] = "stateslot"
+        out["kernels"]["vlx"] = {"context": "verify", "insts": "vlx/insts.bin", "build": "vlx", "patch": "stateslot"}
+        out["kernels"]["vax"] = {"context": "verify", "insts": "vax/insts.bin", "build": "vax", "patch": "attnposv",
+                                 "rb_win": recipe(spec).attn.RB}
+        out["kernels"]["vlm"] = {"context": "verify", "insts": "vlm/insts.bin", "build": "vlm"}
+        w = vg["width"]
+        out["globals"]["vxres"] = w * spec.hidden * 4
+        out["globals"]["vlogits"] = w * spec.vocab * 4
+        out["globals"]["vlmact"] = w * 64 * 1024
+        va = ["pool", "vxres", "consts", "state", "act", "ptab"]
+        out["verify"] = {**vg, "xres": "vxres", "logits": "vlogits",
+                         "programs": {LINEAR: [{"op": "run", "kernel": "vlx", "args": va}],
+                                      FULL: [{"op": "run", "kernel": "vax", "args": va}]},
+                         "tail": [{"op": "run", "kernel": "vlm",
+                                   "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}]}
     r = gemm_route(spec)
     if r:
         for k in ("contexts", "kernels", "globals"):
@@ -455,6 +492,11 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
             b[name] = {"design": "layer_x/dux.py",
                        "build_dir": f"layer_x/build_{spec.family}_dux{part}_h{spec.hidden}{sfx}",
                        "env": {"DUX_PART": str(part)}}
+        if verify_image(spec):
+            for name, part in (("vlx", 0), ("vax", 1), ("vlm", 2)):
+                b[name] = {"design": "verify/vux.py",
+                           "build_dir": f"verify/build_{spec.family}_vux{part}_h{spec.hidden}{sfx}",
+                           "env": {"VUX_PART": str(part)}}
         if tail_in_layer(spec):
             return {**b, **(gemm_route(spec) or {}).get("builds", {})}
     else:
@@ -486,7 +528,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 
 GEN_KERNELS = "designs/layer_x/gen_kernels.py"
 KERNEL_SOURCES = [
-    "designs/layer_x/*.py", "designs/layer_x/*.h",
+    "designs/layer_x/*.py", "designs/layer_x/*.h", "designs/verify/*.py", "designs/verify/*.h",
     "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4.py",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
@@ -500,7 +542,8 @@ KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
 # a rotated ternary head (head_t2) compiles these; listed only for such a spec (recipes/cache.py),
 # so no other kernel set's build key moves
 KERNEL_SOURCES_T2_HEAD = ["designs/lm_head_t2/*.py", "designs/lm_head_t2/*.cc",
-                          "designs/gemv_q4/gemv_t2.h", "designs/gemv_q4/wht.h"]
+                          "designs/gemv_q4/gemv_t2.h", "designs/gemv_q4/wht.h",
+                          "designs/gemv_q4/wht_int.h"]     # the t2 layers' preps (same specs only)
 # every projection this family runs goes through `gemv_q4_gy` or `gemv_q4_gms`, both of
 # which have q8 twins, so every role it has can be streamed at q8 (OPEN-QUANT-Q8)
 Q8_ROLES = frozenset({"attn", "linear", "linear_out", "ffn"})

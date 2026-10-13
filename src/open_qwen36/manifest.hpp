@@ -193,6 +193,15 @@ struct RowGlobal {
     uint64_t switch_row = kSwitchNever;
 };
 
+/// Shares the decode image's state buffers, so a linear state needs width + 1 slots (OPEN-DECODE-SPECULATIVE-VERIFY).
+struct VerifyProgram {
+    size_t width = 0;                                  ///< 0 = the kernel set has no verify program
+    uint64_t slot_bytes = 0, act_bytes = 0;
+    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es)
+    std::vector<Step> tail;                            ///< the final norm + head for every position
+    std::string xres, logits;                          ///< the globals holding width rows of xres / logits
+};
+
 struct Manifest {
     int version = 0;
     std::string family, spec_hash, build_key;
@@ -212,6 +221,7 @@ struct Manifest {
     std::map<std::string, KernelDesc> kernels;
     std::map<std::string, LayerType> layer_types;
     std::vector<Step> tail;
+    VerifyProgram verify;
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;

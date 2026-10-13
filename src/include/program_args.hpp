@@ -27,6 +27,8 @@ struct program_args_t {
     bool json_output = false;
     int ctx_length = -1; // let model decide
     int prefill_chunk_len = -1; // let model decide
+    // main() sets OFLM_OPEN_SPEC=1, and refuses to start when the named model cannot run it (OPEN-DECODE-SPECULATIVE)
+    bool spec = false;
 
     // handling input file
     std::string input_file_name = "";

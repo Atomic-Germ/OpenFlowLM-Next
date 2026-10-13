@@ -475,8 +475,8 @@ def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss
     With the down GEMV split, each piece is its h elements, its strided slice of every band
     and its own output region (A_OUT2, then A_OUT2B).
     hprep = (hpi, hpo, A_HT) (dux.py HPREP): the second piece's h goes to the prep core right
-    behind the first piece's x fill, comes back through H/32 as bf16 at act[A_HT], and the cores'
-    x fill for that piece reads it there. The wait for it comes after the first piece's transfers
+    behind the first piece's x fill, comes back as that piece's per-128 table at act[A_HT], and the
+    cores' x fill for that piece reads it there. The wait for it comes after the first piece's transfers
     are issued, so it blocks nothing the first piece needs."""
     bb_h, bb_f, yb = role_band_bytes("ffn", HID), role_band_bytes("ffn", FF), BAND_ROWS * 4
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, FFN.XM_ELEMS * ELEM))
@@ -492,17 +492,17 @@ def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss
         k0 = 0
         for p, (k, dst) in enumerate(zip(DOWN_SPLIT, (A_OUT2, A_OUT2B))):
             if p == 1 and hprep is not None:
-                ph.finish()                                   # piece 1 through H/32, bf16, is in DDR
+                ph.finish()                                   # piece 1's table is in DDR
                 pipe_x.fill(x_prod, a_act, bt(A_BYTES, a_ht, -(-k * 2 // ELEM) * ELEM))
             else:
                 pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H + k0 * 4, k * 4))
             if p == 0 and hprep is not None:
                 # behind piece 0's x fill (its h preps start at once) and before its weights (not
                 # needed for the ~20 us those preps take): piece 1's h to the prep core and back
-                hpi, hpo, a_ht = hprep
+                hpi, hpo, a_ht = hprep                    # the table drains as whole x elements
                 ph = Pipeline(3)
                 ph.fill(hpi, a_act, bt(A_BYTES, A_H + k * 4, DOWN_SPLIT[1] * 4))
-                ph.drain(hpo, a_act, bt(A_BYTES, a_ht, DOWN_SPLIT[1] * 2))
+                ph.drain(hpo, a_act, bt(A_BYTES, a_ht, -(-DOWN_SPLIT[1] * 2 // ELEM) * ELEM))
             for c in range(N_CORES):
                 pipe_w.fill(w_prods[c], a_pool, piece_tap(POOL_DOWN_FFN + c * FFN.DOWN_PC * bb_f + role_band_bytes("ffn", k0),
                                                           bb_f, role_band_bytes("ffn", k), FFN.DOWN_PC))

@@ -484,6 +484,14 @@ int main(int argc, char* argv[]) {
     if (!arg_utils::parse_options(argc, argv, parsed_args)) {
         return 1; // Help was already printed by Boost Program Options
     }
+    // OPEN-DECODE-SPECULATIVE: --spec is OFLM_OPEN_SPEC=1, set before any engine reads it
+    if (parsed_args.spec) {
+#ifdef _WIN32
+        _putenv_s("OFLM_OPEN_SPEC", "1");
+#else
+        setenv("OFLM_OPEN_SPEC", "1", 1);
+#endif
+    }
 
     
     // Get the command, model tag, and force flag
@@ -526,6 +534,17 @@ int main(int argc, char* argv[]) {
         }
     }
   
+    // OPEN-DECODE-SPECULATIVE: --spec refuses to start for the named model unless it can run it; models loaded later get the variable's rule
+    if (parsed_args.spec && (parsed_args.command == "run" || parsed_args.command == "serve") &&
+        !parsed_args.model_tag.empty() && parsed_args.model_tag != "model-faker") {
+        auto [spec_tag, spec_entry] = availble_models.get_model_info(parsed_args.model_tag);
+        const std::string why = AutoModel::speculative_unavailable(availble_models.get_model_path(spec_tag), spec_entry);
+        if (!why.empty()) {
+            header_print("ERROR", "--spec: speculative decode is not available for " << spec_tag << ": " << why);
+            return 1;
+        }
+    }
+
     if (parsed_args.command == "serve" || parsed_args.command == "run" || parsed_args.command == "bench" || parsed_args.command == "bench-embed"){
         // Configure AMD XRT for the specified power mode
         if (parsed_args.power_mode == "default" || parsed_args.power_mode == "powersaver" || parsed_args.power_mode == "balanced" || 

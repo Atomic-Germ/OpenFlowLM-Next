@@ -246,11 +246,12 @@ def test_a_q8_role_changes_the_spec_hash_and_survives_a_round_trip():
     assert ref.q8_roles == frozenset()
 
 
-def test_every_checked_in_spec_still_reads_as_all_q4_1():
+def test_every_checked_in_spec_still_reads_as_one_format_without_q8():
     for p in sorted(SPECS.glob("*.json")):
         s = load_spec(p)
-        assert s.quant == "q4_1" and s.q8_roles == frozenset(), p.name
-        assert json.loads(p.read_text(encoding="utf-8"))["quant"] == "q4_1"
+        want = "t2" if s.hadamard else "q4_1"   # a rotated-basis ternary model is all-t2 (OPEN-QUANT-T2)
+        assert s.quant == want and s.q8_roles == frozenset(), p.name
+        assert json.loads(p.read_text(encoding="utf-8"))["quant"] == want
 
 
 def test_the_shipped_27b_manifest_is_byte_identical():

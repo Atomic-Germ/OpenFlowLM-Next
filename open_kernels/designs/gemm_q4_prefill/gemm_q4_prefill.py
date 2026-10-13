@@ -246,6 +246,7 @@ def gemm_q4_prefill(
     assert m % r == 0 and k_tile % s == 0 and n % mt == 0
 
     dequant_srcs = ensure_dequant_entries(bfp=xbfp)
+    idq = xbfp and os.environ.get("GQP_IDQ") == "1"
     assert not wfmt_t2 or bfp16, "the t2 weight dequant writes the bfp16 mmul's (8 x 8) A blocks"
     band_bytes = 2 * T2_BODY if wfmt_t2 else BAND_BYTES
     band_ty = np.ndarray[(band_bytes,), np.dtype[np.uint8]]
@@ -272,6 +273,9 @@ def gemm_q4_prefill(
         _dequant_flags += ["-DGQD_T2", f"-DGQD_KC={k_tile}"]
     if xbfp:
         _dequant_flags.append("-DGQD_BFPA")
+        # GQP_IDQ=1: integer dequant into mantissa / exponent planes the matmul reads with plain loads
+        if idq:
+            _dequant_flags.append("-DGQD_IDQ")
     # GQP_NULL_MM=1: timing-only ablation, the matmul call skipped (B still acquired/released)
     null_mm = os.environ.get("GQP_NULL_MM") == "1"
     dequant_kernels = [
@@ -304,7 +308,8 @@ def gemm_q4_prefill(
         # one source, two objects (as mm.cc's MATMUL_ONLY / ZERO_ONLY): one symbol each
         matmul_kernel = ExternalFunction("gqp_mm_bfp", source_file=str(HERE / "gemm_bfp_mm.cc"),
                                          arg_types=[scratch_ty, B_l1_ty, C_acc_ty], include_dirs=_include_dirs(),
-                                         compile_flags=[f"-DGQP_KC={k_tile}", "-DGQP_MM_ONLY"])
+                                         compile_flags=[f"-DGQP_KC={k_tile}", "-DGQP_MM_ONLY"]
+                                         + (["-DGQP_IDQ"] if idq else []))
         zero_kernel = ExternalFunction("gqp_zero_c", source_file=str(HERE / "gemm_bfp_mm.cc"),
                                        arg_types=[C_acc_ty], include_dirs=_include_dirs(),
                                        compile_flags=[f"-DGQP_KC={k_tile}", "-DGQP_ZERO_ONLY"])

@@ -16,6 +16,7 @@
 #include <string>
 #include <type_traits>
 #include <any>
+#include <deque>
 #include "typedef.hpp"
 #include "causal_lm.hpp"
 #include "lm_config.hpp"
@@ -183,6 +184,11 @@ protected:
 
 	void _shared_load_model(std::string model_path, json model_info, int default_context_length = -1, bool enable_preemption = false);
 	nlohmann::json _shared_setup_tokenizer(std::string model_path);
+	nlohmann::json model_entry_;   // the registry entry: the open engine reads `speculative` from it (OPEN-DECODE-SPECULATIVE)
+public:
+	/// Empty when the model at `model_path` can decode speculatively under its registry `entry`, else why not.
+	static std::string speculative_unavailable(const std::string& model_path, const nlohmann::json& entry);
+protected:
 
 	/// \brief Pick the engine for this model: the open one (open_qwen36/, the
 	///        open XDNA2 kernel set under xclbins/<model>/open_kernels) whenever
@@ -196,6 +202,15 @@ protected:
 	/// \return the loaded open engine, or nullptr when the caller should build
 	///         its own closed engine
 	std::unique_ptr<causal_lm> _shared_select_open_engine(const char* env_var, const std::string& family_label);
+
+	// OPEN-DECODE-SPECULATIVE: the engine runs our own sampler on each verified position, so output matches plain decode
+	std::deque<int> spec_pending_;   // already fed to the engine, not yet handed to the loop
+	bool spec_declined_ = false;     // the engine has no speculative path: plain decode for the rest of the request
+	size_t spec_calls_ = 0, spec_tokens_ = 0;
+	bool _spec_eligible();
+	int _spec_next(int last, int max_emit);
+	void _spec_begin();
+	void _spec_end();
 
 	/// \brief Insert tokens into the model
 	/// \param meta_info the meta information of the chat

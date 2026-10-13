@@ -278,6 +278,21 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_pv) wanted[k] = true;
     }
     for (const auto& s : man_.tail) wanted[s.kernel] = true;
+    // OPEN-DECODE-SPECULATIVE-VERIFY: the verify image's streams, unless OFLM_OPEN_VERIFY=0
+    slot_bytes_ = man_.verify.slot_bytes;
+    vw_ = man_.verify.width;
+    vs_.width = static_cast<unsigned>(man_.verify.width);
+    if (vs_.width > VerifySlots::kMaxWidth) throw std::runtime_error("open_qwen36: verify width " + std::to_string(vs_.width));
+    if (const char* env = std::getenv("OFLM_OPEN_VERIFY"); env && std::string(env) == "0") vw_ = 0;
+    if (vw_ && nl_ != total) vw_ = 0;   // a layer prefix (testing) has no tail of its own to verify with
+    if (const char* env = std::getenv("OFLM_OPEN_VERIFY_STOP")) verify_stop_ = std::atoi(env);
+    if (const char* env = std::getenv("OFLM_OPEN_VERIFY_FROM")) verify_from_ = std::atoi(env);
+    if (vw_) {
+        for (int l = 0; l < nl_; ++l)
+            for (const auto& s : man_.verify.programs.at(types_[l]->name)) wanted[s.kernel] = true;
+        for (const auto& s : man_.verify.tail) wanted[s.kernel] = true;
+        vlogits_.assign(vw_, std::vector<float>(man_.vocab, 0.f));
+    }
     for (const auto& [name, d] : man_.kernels)
         if (wanted.count(name)) load_kernel(name, d);
     logits_host_.assign(man_.vocab, 0.f);
@@ -398,6 +413,18 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
         k.attn = stream_patch::attn_table(k.words, name, man_.attn);
+        k.geom = man_.attn;
+        k.geom.window = d.window;
+        k.geom.rb_win = d.rb_win;
+    } else if (d.patch == "stateslot") {
+        if (!man_.verify.width) throw std::runtime_error("open_qwen36: " + name + " wants stateslot but the manifest has no verify block");
+        k.slot = stream_patch::slot_table(k.words, name, 3, man_.verify.slot_bytes,
+                                          static_cast<unsigned>(man_.verify.width + 1));
+    } else if (d.patch == "attnposv") {
+        if (!man_.verify.width) throw std::runtime_error("open_qwen36: " + name + " wants attnposv but the manifest has no verify block");
+        unsigned nq = static_cast<unsigned>(man_.verify.width);
+        if (const char* env = std::getenv("OFLM_OPEN_ATTNV_NQ")) nq = static_cast<unsigned>(std::atoi(env));   // bring-up only
+        k.attnv = stream_patch::attnv_table(k.words, name, nq, man_.attn);
         k.geom = man_.attn;
         k.geom.window = d.window;
         k.geom.rb_win = d.rb_win;
@@ -565,7 +592,9 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         }
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
-        act_.push_back(alloc(lt.act_bytes));
+        // the verify image's act holds width positions of act_bytes each (OPEN-DECODE-SPECULATIVE-VERIFY)
+        act_.push_back(alloc(man_.verify.width ? std::max<uint64_t>(lt.act_bytes, man_.verify.width * man_.verify.act_bytes)
+                                               : lt.act_bytes));
         // A window walked in whole blocks (manifest `rb_win`) streams padding rows up to
         // pos + rb - 2 (stream_patch::attn_apply), past the context capacity at its last
         // positions: the slack is allocated -- and zeroed, so the masked rows are finite --
@@ -573,7 +602,9 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         uint64_t kv_slack = 0;
         for (const auto& [kn, kd] : man_.kernels)
             if (kd.patch == "attnpos" && kd.rb_win > 1) kv_slack = std::max<uint64_t>(kv_slack, kd.rb_win);
-        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
+        // a linear layer's state as width + 1 slots when the set carries a verify program
+        const uint64_t lin_bytes = man_.verify.width ? (man_.verify.width + 1) * man_.verify.slot_bytes : lt.state_bytes;
+        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lin_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
@@ -605,6 +636,8 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     if (progress) progress(nl_ + 1, nl_ + 1);
     weights_loaded_ = true;
     pos_ = 0;
+    vs_.reset();
+    slots_dirty_ = true;
     log("weights resident: " + std::to_string(nl_) + " pools + lm_head, " +
         std::to_string(static_cast<int>(ms_since(t0) / 1000)) + " s");
 }
@@ -614,11 +647,13 @@ void Core::reset() {
     // The linear layers' state must start at zero. The KV rows need not: the
     // window read is [0, max(pos, 1)) and row 0 at position 0 is a dummy the
     // kernel masks.
+    vs_.reset();                                 // the committed state is slot 0 again
+    slots_dirty_ = true;
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
         if (lt.state_kind != "linear") continue;
-        std::memset(state_[l].map<uint8_t*>(), 0, lt.state_bytes);
-        state_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+        std::memset(state_[l].map<uint8_t*>() + lin_off(), 0, lt.state_bytes);
+        state_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, lin_off());
     }
     // A request with an image rewrote the position records of the rows it used
     // (write_record); the next request expects row p to say position p again.
@@ -1281,7 +1316,7 @@ int Core::det_step(int reps, const std::vector<int>& ids, bool full) {
                     take("kv@" + std::to_string(pos), l, state_[l], static_cast<size_t>(pos) * lt.state_row,
                          lt.state_row, false);
                 else
-                    take("state", l, state_[l], 0, lt.state_bytes, true);
+                    take("state", l, state_[l], lin_off(), lt.state_bytes, true);
             }
         if (full)
             for (const char* g : {"xres", "xresf", "hn"})
@@ -1658,6 +1693,11 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         stream_patch::attn_apply(k.iw(), k.attn, static_cast<uint64_t>(pos_), k.geom);
         k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     }
+    if (slots_dirty_) {
+        const unsigned perm[1] = {vs_.cur};
+        apply_slots(perm, false);
+    }
+    vs_.drop();                                 // a step is not a verify: nothing to accept
     timing_.patch_ms = ms_since(tp);
     if (route_sentinel_) arm_route_records();
 
@@ -2542,9 +2582,9 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     // once at the layer's first block and pushed back once at its last.
     xrt::bo& st = state_[l];
     auto ts = std::chrono::steady_clock::now();
-    if (first) read_back(st, lt.state_bytes, 0);
+    if (first) read_back(st, lt.state_bytes, lin_off());
     timing_.state_ms += ms_since(ts);
-    uint8_t* sp = st.map<uint8_t*>();
+    uint8_t* sp = st.map<uint8_t*>() + lin_off();
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
@@ -2561,7 +2601,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     timing_.part1_ms += ms_since(t0);
     timing_.mid_ms += ms_since(t0);
     ts = std::chrono::steady_clock::now();
-    if (last) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+    if (last) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, lin_off());
     timing_.state_ms += ms_since(ts);
     auto t1 = std::chrono::steady_clock::now();
     if (gb.out_split) {
@@ -2870,6 +2910,125 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
     timing_.route_ms += ms_since(tp);
 }
 
+// ---- verify pass (OPEN-DECODE-SPECULATIVE-VERIFY): state slots are re-pointed by stream patches, never copied
+
+void Core::apply_slots(const unsigned* perm, bool verify_kernels) {
+    for (auto& [name, k] : kerns_) {
+        if (k.patch != "stateslot") continue;
+        const bool is_verify = k.ctx == "verify";
+        if (is_verify != verify_kernels) continue;
+        if (!is_verify) {
+            // the decode stream only ever addresses slot 0
+            stream_patch::slot_apply(k.iw(), k.slot, perm, slot_bytes_);
+            slots_dirty_ = false;
+        } else {
+            stream_patch::slot_apply(k.iw(), k.slot, perm, slot_bytes_);
+        }
+        k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    }
+}
+
+namespace {
+// first maximum wins a tie: cli.cpp argmax's rule
+int greedy(const std::vector<float>& v, size_t n) {
+    int best = 0;
+    for (size_t i = 1; i < n; ++i)
+        if (v[i] > v[best]) best = static_cast<int>(i);
+    return best;
+}
+}  // namespace
+
+void Core::verify(const int* ids, size_t n, int* argmax_out) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: verify before load_weights");
+    if (n < 1 || n > std::max<size_t>(vw_, 1))
+        throw std::runtime_error("open_qwen36: verify of " + std::to_string(n) + " positions (width " +
+                                 std::to_string(vw_) + ")");
+    const int pos0 = pos_;
+    if (n == 1) {
+        // one position is a decode step: the same dispatches, the same bytes
+        step(ids[0], true);
+        if (vlogits_.empty()) vlogits_.assign(1, std::vector<float>());
+        vlogits_[0] = logits_host_;
+        argmax_out[0] = greedy(logits_host_, man_.real_vocab);
+        vs_.begin(pos0, 1);
+        return;
+    }
+    if (mrope_on_) throw std::runtime_error("open_qwen36: verify after an image (M-RoPE records) is not supported");
+    if (static_cast<size_t>(pos_) + n > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: verify past the context capacity " + std::to_string(cfg_.max_ctx));
+    for (size_t j = 0; j < n; ++j)
+        if (ids[j] < 0 || static_cast<size_t>(ids[j]) >= man_.vocab) throw std::runtime_error("open_qwen36: token id out of range");
+    if (n != vw_)
+        throw std::runtime_error("open_qwen36: the verify image runs exactly " + std::to_string(vw_) +
+                                 " positions; use verify(ids, 1) for one");
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+    xrt::bo& vx = buffer(man_.verify.xres, 0);
+    for (size_t j = 0; j < n; ++j)
+        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[j]), man_.hidden, vx.map<float*>() + j * man_.hidden);
+    vx.sync(XCL_BO_SYNC_BO_TO_DEVICE, n * man_.hidden * 4, 0);
+    timing_.embed_ms = ms_since(t0);
+    auto tp = std::chrono::steady_clock::now();
+    vs_.begin(pos0, n);
+    apply_slots(vs_.perm, true);
+    for (auto& [name, k] : kerns_) {
+        if (k.patch != "attnposv") continue;
+        stream_patch::attnv_apply(k.iw(), k.attnv, static_cast<uint64_t>(pos_), k.geom);
+        k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    }
+    timing_.patch_ms = ms_since(tp);
+    // the layer walk, each layer's dispatch queued behind the previous one (one context)
+    Inflight prev;
+    for (int l = 0; l < nl_; ++l) {
+        if (verify_stop_ >= 0 && l >= verify_stop_) break;     // bring-up: a prefix of the walk, no tail
+        if (verify_from_ > 0 && l < verify_from_) continue;      // bring-up: start the walk at a later layer
+        const std::vector<Step>& prog = man_.verify.programs.at(types_[l]->name);
+        for (const Step& s : prog) {
+            Inflight cur = start_run(kerns_.at(s.kernel), s.args, l);
+            timing_.dispatch_ms += cur.submit_ms;
+            if (prev.active()) {
+                const auto [elapsed, blocked] = wait_run(prev);
+                timing_.part0_ms += blocked;
+                timing_.dispatch_ms += elapsed;
+            }
+            prev = std::move(cur);
+        }
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    for (const Step& s : man_.verify.tail) {
+        if (verify_stop_ >= 0) break;
+        Inflight cur = start_run(kerns_.at(s.kernel), s.args, 0);
+        if (prev.active()) {
+            const auto [elapsed, blocked] = wait_run(prev);
+            timing_.part0_ms += blocked;
+            timing_.dispatch_ms += elapsed;
+        }
+        prev = std::move(cur);
+    }
+    if (prev.active()) {
+        const auto [elapsed, blocked] = wait_run(prev);
+        timing_.part1_ms += blocked;               // the tail's dispatch
+        timing_.dispatch_ms += elapsed;
+    }
+    auto tr = std::chrono::steady_clock::now();
+    xrt::bo& lg = buffer(man_.verify.logits, 0);
+    read_back(lg, n * man_.vocab * 4, 0);
+    for (size_t j = 0; j < n; ++j) {
+        std::memcpy(vlogits_[j].data(), lg.map<uint8_t*>() + j * man_.vocab * 4, man_.vocab * 4);
+        argmax_out[j] = greedy(vlogits_[j], man_.real_vocab);
+    }
+    timing_.route_ms = ms_since(tr);              // the host's logits read, copy and argmax
+    timing_.lmhead_ms = ms_since(t1);
+    pos_ += static_cast<int>(n);
+    timing_.total_ms = ms_since(t0);
+}
+
+void Core::accept(size_t m) {
+    const unsigned before = vs_.cur;
+    pos_ = vs_.accept(m);
+    if (vs_.cur != before) slots_dirty_ = true;
+}
+
 void Core::seek(int pos) {
     if (pos < 0 || static_cast<size_t>(pos) >= cfg_.max_ctx) throw std::runtime_error("open_qwen36: seek out of range");
     pos_ = pos;
@@ -2893,8 +3052,8 @@ Snapshot Core::checkpoint() const {
             s.kv.push_back(std::move(rows));
         } else {
             std::vector<uint8_t> st(lt.state_bytes);
-            read_back(bo, lt.state_bytes, 0);
-            std::memcpy(st.data(), bo.map<uint8_t*>(), lt.state_bytes);
+            read_back(bo, lt.state_bytes, lin_off());
+            std::memcpy(st.data(), bo.map<uint8_t*>() + lin_off(), lt.state_bytes);
             s.states.push_back(std::move(st));
         }
     }
@@ -2914,13 +3073,14 @@ void Core::restore(const Snapshot& s) {
         } else {
             const auto& st = s.states.at(il++);
             if (st.size() != lt.state_bytes) throw std::runtime_error("open_qwen36: snapshot state size mismatch");
-            std::memcpy(state_[l].map<uint8_t*>(), st.data(), lt.state_bytes);
-            state_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+            std::memcpy(state_[l].map<uint8_t*>() + lin_off(), st.data(), lt.state_bytes);
+            state_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, lin_off());
         }
     }
     pos_ = s.pos;
     mrope_pos_ = s.mrope_pos;
     mrope_on_ = s.mrope_on;
+    vs_.drop();
 }
 
 void Core::kv_row(int layer, int row, bool value, uint16_t* out) {

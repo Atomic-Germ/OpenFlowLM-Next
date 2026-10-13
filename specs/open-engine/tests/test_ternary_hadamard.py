@@ -131,14 +131,14 @@ def test_t2_pack_plan_and_gemm_weights():
 def test_t2_gemm_builds_and_token_major_output():
     plain = ModelSpec.from_hf_config(json.loads((FIX / "config_qwen35_27b.json").read_text(encoding="utf-8")))
     t2_env = {"GQP_BFP16": "1", "GQP_WFMT": "t2", "GQP_KT": "128", "GQP_YT": "1",
-              "GQP_T2_STRIDE": str(Q36.T2_CHUNK), "GQP_XBFP": "1"}
+              "GQP_T2_STRIDE": str(Q36.T2_CHUNK), "GQP_XBFP": "1", "GQP_IDQ": "1"}
     for spec, t2 in ((_spec("t2"), True), (_spec("q4_1"), False), (plain, False)):
         gemms = {k: b for k, b in Q35.builds(spec).items() if k.startswith("gemm_")}
         assert gemms, "the 27B has a block route"
         for b in gemms.values():
             extra = {k: v for k, v in b["env"].items() if k not in ("GQP_N", "GQP_K", "GQP_T")}
             assert extra == (t2_env if t2 else {})      # a q4_1 spec's build is the one it always was
-            assert b["build_dir"].endswith("_t2kyx") is t2
+            assert b["build_dir"].endswith("_t2kyxi") is t2
         route = Q35.gemm_route(spec)
         for g in route["layer_types"].values():
             assert g.get("y_tn", False) is t2

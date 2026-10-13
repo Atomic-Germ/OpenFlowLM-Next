@@ -29,7 +29,7 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
                                  "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
                                  "OFLM_OPEN_KERNELS_DIR at a built set.");
     header_print("OFLM", "Granite on the open kernels (" + kernels + ")");
-    auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
+    auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L, this->model_entry_);
     eng->load_open_weights();
     this->lm_engine = std::move(eng);
 #else

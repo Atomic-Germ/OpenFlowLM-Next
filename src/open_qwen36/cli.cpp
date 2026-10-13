@@ -21,6 +21,8 @@
 /// resident engine and compares every step's logits (--det-full: every buffer) bit for
 /// bit against a reference pass (OPEN-REQUEST-ISOLATION); exit 1 if any rep moved.
 /// OFLM_ROUTE_CHECK=1 re-reads each router record and counts reads that changed.
+/// --spec decodes speculatively (OPEN-DECODE-SPECULATIVE): same tokens as without it. --spec-method
+/// names the drafter (default lookup); refused when the kernel set cannot serve it.
 ///
 /// 0167/#32: --gemm-block prefills via Core::step_gemm_block() (T tokens per
 /// layer as 5 whole-array GEMM dispatches plus T attention dispatches, the
@@ -33,6 +35,7 @@
 /// run once without --gemm-block, once with, then diff `_p<position>.bin`
 /// pairs (correlation / argmax / top-5).
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <thread>
 #include <cstdio>
@@ -43,6 +46,7 @@
 #include <vector>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/spec.hpp"
 
 using open_qwen36::Core;
 using open_qwen36::CoreConfig;
@@ -106,6 +110,14 @@ struct Args {
     int bench_step = 0;             // --bench-step N: the REAL step, min of N, at --at-position
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
+    bool spec = false;              // --spec: speculative greedy decode (OPEN-DECODE-SPECULATIVE)
+    int spec_width = 0;             // --spec-width N: positions per verify pass (0 = the kernel set's, else 4)
+    bool spec_ref = false;          // --spec-ref: the reference verifier even when the set has a verify program
+    bool spec_log = false;          // --spec-log: one line per pass
+    std::string spec_method = "lookup";   // --spec-method M: this CLI has no registry entry to read the method from
+    int verify_check = 0;           // --verify-check N: N greedy positions by step(), then by verify() passes, compared
+    int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
+    int verify_probe = 0;           // --verify-probe L (with OFLM_OPEN_VERIFY_STOP=L): act of layers < L, verify vs step
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -184,10 +196,18 @@ Args parse(int argc, char** argv) {
         }
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else if (k == "--det-step") a.det_step = std::atoi(val().c_str());
+        else if (k == "--verify-check") a.verify_check = std::atoi(val().c_str());
+        else if (k == "--bench-verify") a.bench_verify = std::atoi(val().c_str());
+        else if (k == "--verify-probe") a.verify_probe = std::atoi(val().c_str());
         else if (k == "--det-full") a.det_full = true;
         else if (k == "--bench-step") a.bench_step = std::atoi(val().c_str());
         else if (k == "--bench-kernel") a.bench_kernel = val();
         else if (k == "--pmode") a.pmode = val();
+        else if (k == "--spec") a.spec = true;
+        else if (k == "--spec-width") { a.spec = true; a.spec_width = std::atoi(val().c_str()); }
+        else if (k == "--spec-ref") { a.spec = true; a.spec_ref = true; }
+        else if (k == "--spec-log") a.spec_log = true;
+        else if (k == "--spec-method") { a.spec = true; a.spec_method = val(); }
         // The server has a host gap right here that the CLI does not: between the last
         // prefill dispatch and the first decode one it samples, detokenises and writes
         // the first SSE chunk to a socket. Every dx timeout so far has landed on that
@@ -200,10 +220,200 @@ Args parse(int argc, char** argv) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE]\n");
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] "
+                             "[--spec] [--spec-width N] [--spec-ref] [--spec-log] [--spec-method M]\n");
         std::exit(2);
     }
     return a;
+}
+
+// greedy tokens do not depend on the draft, so this prints the same `token <id>` lines as the plain loop
+std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
+    namespace sp = open_qwen36::spec;
+    using clock = std::chrono::steady_clock;
+    const bool fast = core.verify_width() > 0 && !a.spec_ref;
+    size_t W = a.spec_width > 0 ? static_cast<size_t>(a.spec_width) : (fast ? core.verify_width() : size_t{4});
+    if (fast) W = std::min(W, core.verify_width());
+    if (W < 2) { std::fprintf(stderr, "--spec-width must be >= 2\n"); std::exit(2); }
+    std::fprintf(stderr, "speculative decode: width %zu, method %s, %s\n", W, a.spec_method.c_str(),
+                 fast ? "the kernel set's verify pass" : "reference verify (step + checkpoint/restore)");
+    const std::unique_ptr<sp::Drafter> drafter = sp::make_drafter(a.spec_method);
+    sp::ReferenceVerify<Core> ref(core);
+    sp::CoreVerify<Core> cv(core);
+    sp::Stats st;
+    std::vector<int> hist = a.ids;      // every token the engine has consumed
+    const size_t real = core.real_vocab();
+    auto never = [](int) { return false; };
+    std::vector<int> out{tok};
+    std::printf("token %d\n", tok);
+    std::fflush(stdout);
+    double pass_ms[2] = {0, 0};          // plain steps, drafted passes
+    while (out.size() < static_cast<size_t>(a.max_tokens)) {
+        const size_t left = static_cast<size_t>(a.max_tokens) - out.size();
+        std::vector<int> ids{tok};
+        for (int d : drafter->propose(hist, tok, std::min(W - 1, left - 1))) ids.push_back(d);
+        const auto tp = clock::now();
+        const size_t before = out.size();
+        size_t m = 1;
+        if (ids.size() == 1) {
+            core.step(tok, true);
+            out.push_back(argmax(core.logits(), real));
+        } else if (fast) {
+            // the CLI's own argmax rule on the pass's logits (they are step()'s, bit for bit)
+            m = sp::run_pass(cv, ids, left, [&](size_t i) { return sp::argmax(cv.logits(i).data(), real); }, never, out);
+        } else {
+            m = sp::run_pass(ref, ids, left, [&](size_t i) { return sp::argmax(ref.logits(i).data(), real); }, never, out);
+        }
+        const double ms = std::chrono::duration<double, std::milli>(clock::now() - tp).count();
+        pass_ms[ids.size() > 1] += ms;
+        st.add(ids.size(), m);
+        if (a.spec_log)
+            std::fprintf(stderr, "  pass @%d: %zu positions, %zu kept, %.1f ms\n", core.position() - static_cast<int>(m),
+                         ids.size(), m, ms);
+        for (size_t i = before; i < out.size(); ++i) std::printf("token %d\n", out[i]);
+        std::fflush(stdout);
+        drafter->observe(ids.data(), m);
+        hist.insert(hist.end(), ids.begin(), ids.begin() + static_cast<long>(m));
+        tok = out.back();
+    }
+    std::fprintf(stderr,
+                 "spec: %zu passes (%zu drafted), %zu positions, %zu draft tokens kept, %.2f tokens/pass;"
+                 " plain steps %.0f ms, drafted passes %.0f ms\n",
+                 st.passes, st.drafted, st.positions, st.accepted, st.passes ? double(st.emitted) / st.passes : 0.0,
+                 pass_ms[0], pass_ms[1]);
+    return out;
+}
+
+// OPEN-DECODE-SPECULATIVE-VERIFY gate: every fourth pass is a plain step so the decode stream reads the slot accept() left
+int g_verify_bad = 0;
+
+void verify_check(Core& core, const Args& a) {
+    const int n = a.verify_check;
+    const size_t V = core.vocab();
+    auto snap = core.checkpoint();
+    std::vector<int> tokens{argmax(core.logits(), core.real_vocab())};
+    std::vector<std::vector<float>> ref;
+    for (int i = 0; i < n; ++i) {
+        core.step(tokens.back(), true);
+        ref.push_back(core.logits());
+        tokens.push_back(argmax(core.logits(), core.real_vocab()));
+    }
+    core.restore(snap);
+    const int p0 = core.position();
+    int bad = 0, passes = 0, checked = 0;
+    double vms = 0, sms = 0;
+    int nv = 0, ns = 0;
+    auto cmp = [&](const std::vector<float>& got, int i, const char* what) {
+        ++checked;
+        if (std::memcmp(got.data(), ref[i].data(), V * 4) == 0) return;
+        float md = 0;
+        size_t nd = 0;
+        for (size_t v = 0; v < V; ++v) {
+            const float d = std::fabs(got[v] - ref[i][v]);
+            if (got[v] != ref[i][v]) ++nd;
+            md = std::max(md, d);
+        }
+        std::fprintf(stderr, "  MISMATCH %s position %d (+%d): %zu of %zu logits differ, max |diff| %g\n", what,
+                     p0 + i, i, nd, V, md);
+        ++bad;
+    };
+    int i = 0;
+    for (int k = 0; i + 1 < n; ++k) {
+        if (k % 4 == 3) {                          // a plain step after an accept
+            core.step(tokens[i], true);
+            sms += core.last_timing().total_ms;
+            ++ns;
+            cmp(core.logits(), i, "step");
+            ++i;
+            continue;
+        }
+        const bool right = k % 3 != 2;
+        const int draft = right ? tokens[i + 1] : (tokens[i + 1] + 1) % static_cast<int>(core.real_vocab());
+        const int ids[2] = {tokens[i], draft};
+        int am[2] = {-1, -1};
+        core.verify(ids, 2, am);
+        vms += core.last_timing().total_ms;
+        ++nv;
+        ++passes;
+        cmp(core.verify_logits(0), i, "verify[0]");
+        if (am[0] != tokens[i + 1]) {
+            std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i, am[0], tokens[i + 1]);
+            ++bad;
+        }
+        if (right) {
+            cmp(core.verify_logits(1), i + 1, "verify[1]");
+            if (am[1] != tokens[i + 2]) {
+                std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i + 1, am[1], tokens[i + 2]);
+                ++bad;
+            }
+            core.accept(2);
+            i += 2;
+        } else {
+            core.accept(1);
+            i += 1;
+        }
+        if (core.position() != p0 + i) {
+            std::fprintf(stderr, "  POSITION after accept: %d, want %d\n", core.position(), p0 + i);
+            ++bad;
+        }
+    }
+    std::fprintf(stderr, "verify check: %d positions from %d, %d verify passes (%.1f ms mean), %d steps (%.1f ms mean), "
+                         "%d logit rows compared: %s (%d bad)\n",
+                 i, p0, passes, nv ? vms / nv : 0.0, ns, ns ? sms / ns : 0.0, checked, bad ? "FAIL" : "PASS", bad);
+    std::printf(bad ? "VERIFY CHECK FAIL\n" : "VERIFY CHECK PASS\n");
+    g_verify_bad = bad;
+}
+
+// both positions of each pass are accepted, so the position advances by two
+void bench_verify(Core& core, const Args& a) {
+    const int n = a.bench_verify;
+    int tok = argmax(core.logits(), core.real_vocab());
+    std::vector<double> v2, v1;
+    for (int r = 0; r < n; ++r) {
+        const int ids[2] = {tok, tok};
+        int am[2];
+        core.verify(ids, 2, am);
+        v2.push_back(core.last_timing().total_ms);
+        {
+            const auto& t = core.last_timing();
+            std::fprintf(stderr, "  verify @%d: %.1f ms (layers blocked %.1f, tail %.1f, host read+argmax %.2f, embed %.2f, patch %.2f)\n",
+                         core.position(), t.total_ms, t.part0_ms, t.part1_ms, t.route_ms, t.embed_ms, t.patch_ms);
+        }
+        core.accept(2);
+        tok = am[1];
+    }
+    for (int r = 0; r < n; ++r) {
+        core.step(tok, true);
+        v1.push_back(core.last_timing().total_ms);
+        {
+            const auto& t = core.last_timing();
+            std::fprintf(stderr, "  step @%d: %.1f ms (part0 %.1f, part1 %.1f, lm_head+read %.1f, embed %.2f, patch %.2f)\n",
+                         core.position() - 1, t.total_ms, t.part0_ms, t.part1_ms, t.lmhead_ms, t.embed_ms, t.patch_ms);
+        }
+        tok = argmax(core.logits(), core.real_vocab());
+    }
+    auto stat = [](std::vector<double> v, const char* what) {
+        std::sort(v.begin(), v.end());
+        std::fprintf(stderr, "bench-verify %s: min %.1f ms, median %.1f ms over %zu\n", what, v.front(), v[v.size() / 2], v.size());
+        std::printf("BENCH %s min %.2f median %.2f\n", what, v.front(), v[v.size() / 2]);
+    };
+    // alternating, as a loop with draftless passes does: each switch of hardware context costs
+    std::vector<double> a2, a1;
+    for (int r = 0; r < n; ++r) {
+        const int ids[2] = {tok, tok};
+        int am[2];
+        core.verify(ids, 2, am);
+        a2.push_back(core.last_timing().total_ms);
+        core.accept(2);
+        core.step(am[1], true);
+        a1.push_back(core.last_timing().total_ms);
+        tok = argmax(core.logits(), core.real_vocab());
+    }
+    stat(v2, "verify2");
+    stat(v1, "step1");
+    stat(a2, "verify2-after-step");
+    stat(a1, "step1-after-verify");
+    core.dump_step_trace("--bench-verify");
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -292,9 +502,55 @@ std::vector<int> request(Core& core, const Args& a) {
     std::fprintf(stderr, "prefill %zu tokens: %.0f ms (%.0f ms/token)\n", a.ids.size(), prefill_ms, prefill_ms / a.ids.size());
 
     std::vector<int> out;
+    if (a.verify_check > 0) {
+        verify_check(core, a);
+        return out;
+    }
+    if (a.bench_verify > 0) {
+        bench_verify(core, a);
+        return out;
+    }
+    if (a.verify_probe > 0) {
+        // bring-up: layer acts after a step vs after a verify pass stopped before layer L (OFLM_OPEN_VERIFY_STOP=L)
+        const int L = a.verify_probe;
+        auto snap = core.checkpoint();
+        const int tok = argmax(core.logits(), core.real_vocab());
+        core.step(tok, false);
+        std::vector<std::vector<uint8_t>> ref(L);
+        auto bytes = [&](int l) { return static_cast<size_t>(core.manifest().layer_type(l).act_bytes); };
+        for (int l = 0; l < L; ++l) { ref[l].resize(bytes(l)); core.read_act(l, 0, bytes(l), ref[l].data()); }
+        core.restore(snap);
+        const int ids[2] = {tok, tok};
+        int am[2];
+        core.verify(ids, 2, am);
+        for (int l = 0; l < L; ++l) {
+            std::vector<uint8_t> got(bytes(l));
+            core.read_act(l, 0, bytes(l), got.data());
+            size_t nd = 0, first = got.size(), last = 0;
+            std::string granules;
+            for (size_t o = 0; o < got.size(); ++o)
+                if (got[o] != ref[l][o]) { ++nd; first = std::min(first, o); last = o; }
+            for (size_t g = 0; g < got.size(); g += 4096) {
+                bool d = std::memcmp(got.data() + g, ref[l].data() + g, std::min<size_t>(4096, got.size() - g)) != 0;
+                granules += d ? 'x' : '.';
+            }
+            std::fprintf(stderr, "probe layer %d (%s): %zu bytes differ, first %zu last %zu\n  %s\n", l,
+                         core.is_attention_layer(l) ? "full" : "linear", nd, first, last, granules.c_str());
+        }
+        std::printf("PROBE DONE\n");
+        return out;
+    }
     auto t1 = clock::now();
     core.take_dispatch_stats();   // prefill's dispatches are not this loop's
     int tok = argmax(core.logits(), core.real_vocab());
+    if (a.spec) {
+        out = decode_spec(core, a, tok);
+        const double dec_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+        if (out.size() > 1)
+            std::fprintf(stderr, "decode %zu tokens: %.0f ms/token (%.2f tok/s)\n", out.size() - 1, dec_ms / (out.size() - 1),
+                         1000.0 * (out.size() - 1) / dec_ms);
+        return out;
+    }
     for (int n = 0; n < a.max_tokens; ++n) {
         out.push_back(tok);
         std::printf("token %d\n", tok);
@@ -337,6 +593,15 @@ int main(int argc, char** argv) {
     try {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);
+        if (a.spec) {
+            const open_qwen36::spec::Availability av =
+                open_qwen36::spec::spec_availability({{"speculative", {{"method", a.spec_method}}}}, &core.manifest());
+            if (!av.ok()) {
+                std::fprintf(stderr, "--spec: speculative decode is not available with %s: %s\n", a.cfg.kernel_dir.c_str(),
+                             av.reason.c_str());
+                return 2;
+            }
+        }
         core.load_weights();
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
@@ -396,6 +661,7 @@ int main(int argc, char** argv) {
             return bad ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
+        if (a.verify_check > 0) return g_verify_bad ? 1 : 0;
         for (const std::string& d : a.dump_act) dump_act_slice(core, d);   // all from the same last step
         int reps = a.twice ? 2 : a.repeat;
         for (int r = 1; r < reps; ++r) {
