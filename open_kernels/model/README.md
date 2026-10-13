@@ -412,3 +412,36 @@ whole-tensor PASS does not imply every head passes; both statuses must be
 reported. This isolates recurrence and state storage conditioned on captured
 records, not the norm/projection/conv/alpha/beta computation producing them.
 Residual-to-state accuracy and complete model acceptance remain separate gates.
+
+### DeltaNet input preparation and composed state
+
+```bash
+OPENBLAS_NUM_THREADS=1 python open_kernels/model/deltanet_inputs.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-fp32-entry/kernels \
+  --out Models/qwen38-27b/head-state-validation/decode
+```
+
+This checker reads one linear layer's effective QKV, norm, conv, alpha/beta,
+decay and bias weights at a time. From captured incoming residuals it computes
+FP64 RMSNorm, projections, causal depthwise convolution, SiLU, Q/K L2 norm,
+decay/beta and recurrent state/output. Primary conv history and state start at
+zero and carry independently without rounding or captured-state feedback.
+Each record field has its own comparison, so large V values cannot hide an
+incorrect decay or beta. Primary norm/projection/composed gates use the existing
+0.005 normalized maximum error bound.
+
+Separately, captured-norm QKV projection and captured-input glue checks isolate
+preparation arithmetic. Glue retains normalized maximum error <1e-4 and cosine
+>0.99999; the captured-record recurrence checker and its per-head diagnostics
+are included unchanged. All declared linear layers/positions are required,
+with finite, exactly sized captures, a zero-state input and verified export
+identity. JSON pins incoming residuals, activation/state buffers, and effective
+FP64 weights. Runtime arithmetic and kernels are unchanged.
+
+Three CPU rounding experiments round entry norm, conv history, or both to BF16.
+Their predicted states/outputs are compared both to captures and to the primary
+reference. These are diagnostic estimates; they never replace primary gates
+or demonstrate a hardware fix. A numerical failure produces complete JSON and
+exit status 1. Passing full-depth residuals or conditioned recurrence does not
+override a failed composed-state comparison.

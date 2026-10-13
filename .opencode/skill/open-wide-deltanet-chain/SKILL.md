@@ -133,3 +133,36 @@ The 288 captures match their previously retained hashes. Host TDD suite:
 1168 passed, 47 skipped. No kernels or runtime arithmetic changed.
 Record preparation (norm/projections, conv/L2, alpha/beta), composed state
 accuracy and diagnosis of the head-output failures remain separate work.
+
+## Independent production input preparation
+
+Run `open_kernels/model/deltanet_inputs.py` with the same `--model-dir`,
+`--kernel-dir` and `--out` arguments above. It loads one layer's weights and
+uses incoming residual captures. Primary norm, projection, conv history and
+state stay FP64; no BF16 rounding or captured-state feedback is substituted.
+It separately checks each Q/K/V/decay/beta field, conditioned QKV and glue,
+and retains the recurrence/head diagnostics. The composed bound is the
+norm/projection bound <0.005; conditioned glue keeps <1e-4 and cosine >0.99999.
+
+The retained 64-layer × 3-position fixture **fails** the new composed check:
+121/144 primary rows PASS; state 133/144 PASS (worst 0.0100545744, L34/T1),
+output 134/144 PASS (worst 0.0317001700, L32/T0). Q/K/V record fields have
+2/5/5 failures; norm, QKV, decay, beta and conv-history fields pass their
+0.005 gates. All 144 conditioned glue and QKV checks pass; unchanged
+captured-record recurrence also passes its whole-tensor gates. Preserve the
+99 failing head-output diagnostics reported above.
+
+CPU experiments distinguish entry-norm and conv-history BF16 rounding. Both
+together reproduce all 144 captured state/output comparisons within 0.005
+(worst 0.0027398376 / 0.0032102892), but cannot override primary failure.
+Entry rounding alone produces up to 0.0335971623 output error versus the exact
+reference; history rounding alone produces up to 0.0054568534 state error.
+These estimates motivate an isolated FP32 linear-entry hardware experiment
+with a byte-exact BF16 control, then an independent conv-history investigation.
+They do not prove that either kernel change alone will close all failures.
+
+Evidence: `Models/qwen38-27b/deltanet-input-validation/input-results.json` and
+`run.log` (expected exit status **1**); 433 input and 336 effective-weight
+hashes. Runtime was about 31 seconds, peak RSS about 2.64 GiB; these measure
+the CPU checker, not model inference. TDD: 30 added tests; full suite
+1198 passed, 47 skipped. No NPU rebuild/run or full-model residency was needed.
