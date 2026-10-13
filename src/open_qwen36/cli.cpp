@@ -286,16 +286,24 @@ int uno(Core& core, const Args& a, int n) {
     std::vector<int> out, hist(L, 0), dr(L), vr(L), am(L), av(L);
     int seed = a.ids[P - 1];
     size_t cycles = 0;
+    Core::RowsPhase ph[2];
+    auto acc = [&](Core::RowsPhase& d) {
+        const auto& r = core.rows_phase();
+        d.embed_ms += r.embed_ms; d.patch_ms += r.patch_ms; d.submit_ms += r.submit_ms; d.blocked_ms += r.blocked_ms;
+        d.layers_ms += r.layers_ms; d.head_ms += r.head_ms; d.total_ms += r.total_ms;
+    };
     const auto t0 = clock::now();
     while (out.size() < static_cast<size_t>(n)) {
         const int p = core.position();                  // the seed's own position
         dr[0] = seed;
         for (size_t j = 1; j < L; ++j) dr[j] = noise(rng);
         core.step_rows(dr.data(), am.data(), false, true);
+        acc(ph[0]);
         vr[0] = am[0];
         for (size_t j = 1; j < L; ++j) vr[j] = am[j];
         core.seek(p + 1);
         core.step_rows(vr.data(), av.data(), false, false);
+        acc(ph[1]);
         size_t k = 0;
         while (k + 1 < L && vr[k + 1] == av[k]) ++k;    // draft k+1 checked by verify row k
         ++hist[k];
@@ -312,16 +320,32 @@ int uno(Core& core, const Args& a, int n) {
     std::fprintf(stderr, "uno: %d tokens in %zu cycles (%.2f a cycle, accepted-draft histogram %s): %.1f ms/token "
                          "(%.2f tok/s)\n", n, cycles, static_cast<double>(n) / cycles, h.c_str(), uno_ms / n,
                  1000.0 * n / uno_ms);
+    for (const char* nm : {"draft", "verify"}) {
+        const auto& r = ph[nm[0] == 'v'];
+        const double c = static_cast<double>(cycles);
+        std::fprintf(stderr, "uno pass %-6s: %.2f ms (embed %.2f, patch %.2f, layers %.2f [submit %.2f, blocked %.2f], head %.2f)\n",
+                     nm, r.total_ms / c, r.embed_ms / c, r.patch_ms / c, r.layers_ms / c, r.submit_ms / c, r.blocked_ms / c, r.head_ms / c);
+    }
+    std::fprintf(stderr, "uno cycle: %.2f ms, passes %.2f ms, outside the passes %.2f ms\n", uno_ms / cycles,
+                 (ph[0].total_ms + ph[1].total_ms) / cycles, uno_ms / cycles - (ph[0].total_ms + ph[1].total_ms) / cycles);
     for (int t : out) std::printf("token %d\n", t);
     // plain decode from the same prompt
     core.seek(0);
     for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
     std::vector<int> ar;
     const auto t1 = clock::now();
+    double st_total = 0, st_lm = 0, st_embed = 0, st_patch = 0;
     for (int t = 0; t < n; ++t) {
         ar.push_back(argmax_bf16(core.logits(), core.real_vocab()));
-        if (t + 1 < n) core.step(ar.back(), true);
+        if (t + 1 < n) {
+            core.step(ar.back(), true);
+            const auto& tm = core.last_timing();
+            st_total += tm.total_ms; st_lm += tm.lmhead_ms; st_embed += tm.embed_ms; st_patch += tm.patch_ms;
+        }
     }
+    const double nn = std::max(1, n - 1);
+    std::fprintf(stderr, "decode step: %.2f ms inside step() (embed %.2f, patch %.2f, head %.2f)\n", st_total / nn,
+                 st_embed / nn, st_patch / nn, st_lm / nn);
     const double ar_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
     size_t first = 0;
     while (first < ar.size() && ar[first] == out[first]) ++first;

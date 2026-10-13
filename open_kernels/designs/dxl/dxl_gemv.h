@@ -19,7 +19,7 @@ static inline int32_t greedy_key(int32_t v) {
 }
 
 __attribute__((noinline)) inline void dxl_tile4(const uint8_t *__restrict tile,
-                                                const uint8_t *__restrict tab0, unsigned tabStride,
+                                                const uint8_t *__restrict tab0,
                                                 unsigned K, unsigned kt, bool first, bool last,
                                                 float *__restrict y, unsigned yStride) {
   event0();
@@ -40,16 +40,15 @@ __attribute__((noinline)) inline void dxl_tile4(const uint8_t *__restrict tile,
   const uint8_t *__restrict nib0 = tile + kMetaBytes;
   const uint8_t *__restrict nib1 = tile + kMetaBytes + 2048;
 
-  const int16_t *__restrict xi[4];
+  // The 4 tokens' tables are one group (dxl_tab.h): A for (kb, oc) is a single 64 B load.
+  const int16_t *__restrict xg = (const int16_t *)tab0 + kt * kTileK * 4;
   const int32_t *__restrict sh[4];
   const bfloat16 *__restrict xsh[4];
   const bfloat16 *__restrict xsl[4];
 #pragma clang loop unroll(full)
   for (unsigned t = 0; t < 4; ++t) {
-    const uint8_t *__restrict tb = tab0 + t * tabStride;
-    xi[t] = (const int16_t *)tb + kt * kTileK;
-    sh[t] = (const int32_t *)(tb + 2 * K) + kt * kKBlocks;
-    xsh[t] = (const bfloat16 *)(tb + 2 * K + 4 * NB) + kt * kKBlocks;
+    sh[t] = (const int32_t *)(tab0 + 8 * K + t * 4 * NB) + kt * kKBlocks;
+    xsh[t] = (const bfloat16 *)(tab0 + 8 * K + 16 * NB + t * 4 * NB) + kt * kKBlocks;
     xsl[t] = xsh[t] + NB;
   }
 
@@ -75,10 +74,7 @@ __attribute__((noinline)) inline void dxl_tile4(const uint8_t *__restrict tile,
       aie::mmul<4, 8, 8, int16_t, uint8_t> Ce, Co;
 #pragma clang loop unroll(full)
       for (unsigned oc = 0; oc < 4; ++oc) {
-        const unsigned off = kb * kKInBlock + oc * 8;
-        const aie::vector<int16_t, 32> A =
-            aie::concat(aie::load_v<8>(xi[0] + off), aie::load_v<8>(xi[1] + off),
-                        aie::load_v<8>(xi[2] + off), aie::load_v<8>(xi[3] + off));
+        const aie::vector<int16_t, 32> A = aie::load_v<32>(xg + kb * 128 + oc * 32);
         const aie::vector<uint8_t, 64> q = aie::load_v<64>(src + oc * 64);
         const aie::vector<uint8_t, 64> e = aie::bit_and((uint8_t)0x0F, q);
         const aie::vector<uint8_t, 64> o = aie::bit_and((uint8_t)0xF0, q);
@@ -148,7 +144,7 @@ static inline void dxl_gemv_chunk(const uint8_t *__restrict tile, const uint8_t 
   const unsigned tb = gemv_q4_tab_bytes(KS);
 #pragma clang loop unroll(disable)
   for (unsigned m = 0; m < kL; m += 4) {
-    dxl_tile4(tile, tab + m * tb, tb, KS, kt, ktg == 0, ktg == kt_total - 1,
+    dxl_tile4(tile, tab + m * tb, KS, kt, ktg == 0, ktg == kt_total - 1,
               y + m * kBandFloats + part * kRows, kBandFloats);
   }
 }
