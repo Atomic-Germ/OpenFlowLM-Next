@@ -174,6 +174,9 @@ def install_draft(tmp_path, monkeypatch):
     return run
 
 
+LOOKUP_THEN_DFLASH2 = [{"method": "lookup"}, {"method": "dflash2", "draft": "Synth-Draft"}]
+
+
 def test_draft_model_declares_dflash2_and_installs_the_drafter(install_draft):
     entry = install_draft("--speculative", "dflash2")
     assert entry["speculative"] == {"method": "dflash2", "draft": "Synth-Draft"}
@@ -183,9 +186,60 @@ def test_draft_model_declares_dflash2_and_installs_the_drafter(install_draft):
     assert (drafter / "open_kernels").resolve() == install_draft.draft_kernels.resolve()
 
 
-def test_draft_model_alone_implies_dflash2(install_draft):
+def test_draft_model_alone_implies_the_stack(install_draft):
     entry = install_draft()
-    assert entry["speculative"] == {"method": "dflash2", "draft": "Synth-Draft"}
+    assert entry["speculative"] == LOOKUP_THEN_DFLASH2
+
+
+def test_a_comma_list_is_a_stack_in_the_order_given(install_draft):
+    entry = install_draft("--speculative", "lookup,dflash2")
+    assert entry["speculative"] == LOOKUP_THEN_DFLASH2
+    drafter = install_draft.models / "Synth-Draft"
+    assert (drafter / "model.q4nx").is_file()
+
+
+def test_one_method_in_a_list_is_the_single_object(install_draft):
+    entry = install_draft("--speculative", "lookup", draft_args=False)
+    assert entry["speculative"] == {"method": "lookup"}
+
+
+@pytest.mark.parametrize("value, message", [
+    ("dflash2,lookup", "would never run"),
+    ("lookup,lookup", "listed twice"),
+    ("lookup,mtp", "unknown method 'mtp'"),
+    ("lookup,", "unknown method '(empty)'"),
+    ("none,lookup", "unknown method 'none'"),
+])
+def test_a_bad_list_is_refused_before_anything_is_written(install_draft, value, message):
+    with pytest.raises(SystemExit) as e:
+        install_draft("--speculative", value)
+    assert message in str(e.value)
+    assert not install_draft.registry.exists()
+
+
+def test_a_list_on_a_kernel_set_without_verify_is_refused(install_draft):
+    with pytest.raises(SystemExit) as e:
+        install_draft("--speculative", "lookup,dflash2", verify=False)
+    assert "has no verify program" in str(e.value)
+    assert not install_draft.registry.exists()
+
+
+def test_a_list_without_dflash2_does_not_take_a_draft_model(install_draft):
+    with pytest.raises(SystemExit) as e:
+        install_draft("--speculative", "lookup")
+    assert "goes with --speculative dflash2" in str(e.value)
+
+
+def test_a_list_with_dflash2_needs_the_draft_model(install_draft):
+    with pytest.raises(SystemExit) as e:
+        install_draft("--speculative", "lookup,dflash2", draft_args=False)
+    assert "needs --draft-model" in str(e.value)
+
+
+def test_none_with_a_draft_model_is_refused(install_draft):
+    with pytest.raises(SystemExit) as e:
+        install_draft("--speculative", "none")
+    assert "goes with --speculative dflash2" in str(e.value)
 
 
 def test_dflash2_on_a_kernel_set_without_verify_is_refused(install_draft):

@@ -64,6 +64,32 @@ inline SyncPlan plan_sync(const std::vector<int>& cached, long base, const std::
     return s;
 }
 
+/// How much of a long prompt a cold drafter cache is filled with (OPEN-DRAFT-DFLASH2-SYNC). The fill is ~0.85 ms a
+/// row, and behind a lookup that drafts most passes the drafter may be asked only once or twice: so a cold cache
+/// takes the last `cold` positions, and once the drafter has drafted `after` times -- it is earning its keep -- the
+/// cache is refilled with the whole window. `cold` 0 = always the whole window.
+struct ColdFill {
+    size_t cold = 0, after = 4;
+    bool deep = false;       ///< the whole window is in (or being put in)
+    size_t drafts = 0;       ///< drafts since the cache went cold
+    /// The window sync should plan with; `deepen` is set when the cache has to be thrown away and refilled with all of it.
+    size_t window(size_t full, bool* deepen) {
+        *deepen = false;
+        if (!cold || cold >= full || deep) return full;
+        if (drafts >= after) {
+            deep = true;
+            *deepen = true;
+            return full;
+        }
+        return cold;
+    }
+    void drafted() { ++drafts; }
+    void went_cold() {   // a new request, a rewind past the cache, a lost row: back to a small fill
+        deep = false;
+        drafts = 0;
+    }
+};
+
 /// Top-16 of logits [n] by value, descending, the lower id first on a tie.
 void top16(const float* logits, size_t n, int32_t* ids, float* vals);
 

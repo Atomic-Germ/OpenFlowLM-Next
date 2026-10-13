@@ -373,23 +373,22 @@ Proposer::Proposer(Core& target, const std::string& model_dir, const std::string
     stage_.resize(kStageRows * c.tap_width());
 }
 
-std::vector<int> Proposer::propose(const std::vector<int>& fed, int next, size_t k) {
+bool Proposer::sync(const std::vector<int>& fed) {
     const DraftConfig& c = d_->config();
-    k = std::min(k, kRows - 1);
-    if (k == 0 || next < 0 || static_cast<size_t>(next) >= core_.real_vocab()) {
-        ++stats_.skipped;
-        return {};
+    bool deepen = false;
+    const size_t window = fill_.window(c.window ? c.window : 2048, &deepen);
+    if (deepen) {   // thrown away: the plan restarts the cache at the whole window
+        ids_.clear();
+        d_->restart(0);
     }
-    const SyncPlan plan = plan_sync(ids_, d_->base(), fed, c.window ? c.window : 2048,
+    const SyncPlan plan = plan_sync(ids_, d_->base(), fed, window,
                                     [&](long p) { return core_.tap_row(p) != nullptr; });
-    if (!plan.can_draft) {
-        ++stats_.skipped;
-        return {};
-    }
+    if (!plan.can_draft) return false;
     if (plan.restart) {
         d_->restart(plan.from);
         ids_.clear();
         ++stats_.restarts;
+        if (!deepen) fill_.went_cold();
     } else {
         d_->truncate(plan.keep);
         ids_.resize(static_cast<size_t>(plan.keep - d_->base()));
@@ -414,7 +413,19 @@ std::vector<int> Proposer::propose(const std::vector<int>& fed, int next, size_t
         stats_.restart_rows += static_cast<size_t>(plan.to - plan.from);
         stats_.restart_ms += ms_since(t0);
     }
+    return true;
+}
+
+void Proposer::keep_up(const std::vector<int>& fed) { sync(fed); }
+
+std::vector<int> Proposer::propose(const std::vector<int>& fed, int next, size_t k) {
+    k = std::min(k, kRows - 1);
+    if (k == 0 || next < 0 || static_cast<size_t>(next) >= core_.real_vocab() || !sync(fed)) {
+        ++stats_.skipped;
+        return {};
+    }
     std::vector<int> d = d_->draft(next, k);
+    fill_.drafted();
     stats_.last = d_->last_pass();
     stats_.draft_ms += stats_.last.total_ms;
     ++stats_.drafts;
@@ -425,6 +436,31 @@ std::vector<int> Proposer::propose(const std::vector<int>& fed, int next, size_t
             break;
         }
     return d;
+}
+
+std::unique_ptr<spec::Drafter> make_stack(Core& core, const spec::Availability& av, const StackOptions& opt, bool verbose,
+                                          Proposer** proposer) {
+    const bool stacked = av.members.size() > 1;
+    auto stack = std::make_unique<spec::Stacked>(opt.eager);
+    for (const spec::Availability::Member& m : av.members) {
+        std::unique_ptr<spec::Drafter> d;
+        if (m.method == "lookup") {
+            const int min = opt.lookup_min > 0 ? opt.lookup_min : m.min_match > 0 ? m.min_match : stacked ? kStackLookupMin : 2;
+            d = std::make_unique<spec::PromptLookup>(min, 4);
+        } else if (m.method == "dflash2") {
+            auto p = std::make_unique<Proposer>(core, av.draft.dir, av.draft.kernel_dir, verbose);
+            // behind a lookup the drafter is asked rarely on copy-heavy text, so its first fill is a small one
+            if (stacked) p->set_fill(opt.fill_rows ? opt.fill_rows : kStackFillRows, opt.deepen_after ? opt.deepen_after : kStackDeepenAfter);
+            else p->set_fill(opt.fill_rows, opt.deepen_after ? opt.deepen_after : kStackDeepenAfter);
+            if (proposer) *proposer = p.get();
+            d = std::move(p);
+        } else {
+            throw std::runtime_error("dflash2: no drafter for method " + m.method);
+        }
+        if (!stacked) return d;
+        stack->add(m.method, std::move(d));
+    }
+    return stack;
 }
 
 }  // namespace dflash2

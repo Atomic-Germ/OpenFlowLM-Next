@@ -312,6 +312,124 @@ void draft_tests() {
     fs::remove_all(root);
 }
 
+// a drafter that answers from a script and counts what it was asked
+struct ScriptedDrafter : Drafter {
+    std::vector<std::vector<int>> answers;
+    size_t calls = 0, keeps = 0;
+    explicit ScriptedDrafter(std::vector<std::vector<int>> a = {}) : answers(std::move(a)) {}
+    std::vector<int> propose(const std::vector<int>&, int, size_t) override {
+        if (calls < answers.size()) return answers[calls++];
+        ++calls;
+        return {};
+    }
+    void observe(const int*, size_t) override {}
+    void keep_up(const std::vector<int>&) override { ++keeps; }
+};
+
+void stack_tests() {
+    check(!Stacked::takes({}) && Stacked::takes({7}) && Stacked::takes({7, 8, 9}),
+          "the stacking rule: a member that proposed nothing yields, one that proposed anything drafts");
+
+    for (const bool eager : {false, true}) {
+        auto a = std::make_unique<ScriptedDrafter>(std::vector<std::vector<int>>{{}, {5, 6}, {}});
+        auto b = std::make_unique<ScriptedDrafter>(std::vector<std::vector<int>>{{9}, {}});
+        ScriptedDrafter *pa = a.get(), *pb = b.get();
+        Stacked s(eager);
+        s.add("first", std::move(a));
+        s.add("second", std::move(b));
+        const std::vector<int> fed{1, 2, 3};
+        const std::vector<int> d1 = s.propose(fed, 4, 3), d2 = s.propose(fed, 4, 3), d3 = s.propose(fed, 4, 3);
+        check(d1 == std::vector<int>({9}), "first has nothing -> the second drafts");
+        check(d2 == std::vector<int>({5, 6}), "first has a draft -> it drafts");
+        check(pa->calls == 3 && pb->calls == 2, "the member behind one that drafted is not run: first 3 passes, second 2");
+        check(d3.empty(), "nobody has a draft -> no draft");
+        check(pb->keeps == (eager ? 1u : 0u), std::string(eager ? "eager: " : "deferred: ") +
+                                                  "the later member catches up after an earlier one drafted: " + std::to_string(pb->keeps));
+        check(pa->keeps == 0, "a member is never asked to catch up after its own draft");
+        check(s.report(false) == "first 1 / second 1 / none 1 of 3 passes", "the mix: " + s.report(false));
+        check(s.report() == "first 1 / second 1 / none 1 of 3 passes" && s.report() == "first 0 / second 0 / none 0 of 0 passes",
+              "reading the mix starts the count over");
+    }
+
+    // the real thing: lookup in front, where the match length decides who drafts
+    const std::vector<int> fed{7, 8, 1, 2, 9, 3, 4, 7};   // with next = 8 the suffix [7, 8] recurs, [4, 7, 8] does not
+    for (const int min : {2, 3, 4}) {
+        Stacked s;
+        s.add("lookup", std::make_unique<PromptLookup>(min, 4));
+        auto model = std::make_unique<ScriptedDrafter>(std::vector<std::vector<int>>{{40, 41, 42}});
+        ScriptedDrafter* pm = model.get();
+        s.add("model", std::move(model));
+        const std::vector<int> d = s.propose(fed, 8, 3);
+        if (min == 2)
+            check(d == std::vector<int>({1, 2, 9}) && pm->calls == 0, "min match 2: a 2-token match drafts and the model is not run");
+        else
+            check(d == std::vector<int>({40, 41, 42}) && pm->calls == 1,
+                  "min match " + std::to_string(min) + ": no match that long -> the model drafts");
+    }
+}
+
+void list_tests() {
+    using J = nlohmann::json;
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "oflm_spec_test_list";
+    fs::remove_all(root);
+    const J cfg = {{"model_type", "dflash2"}, {"hidden_size", 5120}, {"vocab_size", 248320}, {"target_layer_ids", {5, 19, 33, 47, 61}}};
+    make_draft(root, "Drafter", cfg, "dflash2");
+    open_qwen36::Manifest m;
+    m.verify.width = 4;
+    m.hidden = 5120;
+    m.vocab = 248320;
+    m.layers.assign(64, "lin");
+    const DraftResolver res = [&](const std::string& n) { return resolve_draft(n, root.string()); };
+    const J lookup = {{"method", "lookup"}}, dflash2 = {{"method", "dflash2"}, {"draft", "Drafter"}};
+
+    Availability a = spec_availability({{"speculative", J::array({lookup, dflash2})}}, &m, res);
+    check(a.ok() && a.method == "lookup,dflash2" && a.members.size() == 2 && a.members[0].method == "lookup" &&
+              a.members[1].method == "dflash2" && !a.draft.dir.empty(),
+          "a list of lookup then dflash2 -> available, in that order: " + a.method + " " + a.reason);
+    a = spec_availability({{"speculative", J::array({lookup})}}, &m, res);
+    check(a.ok() && a.method == "lookup", "a list of one is the single object");
+    a = spec_availability({{"speculative", lookup}}, &m, res);
+    check(a.ok() && a.method == "lookup" && a.members.size() == 1 && a.members[0].min_match == 0,
+          "the single-object form of PR 201 still means a list of one");
+    a = spec_availability({{"speculative", J::array({J{{"method", "lookup"}, {"min_match", 3}}, dflash2})}}, &m, res);
+    check(a.ok() && a.members[0].min_match == 3 && a.members[1].min_match == 0, "lookup's min_match is carried");
+    for (const J& bad : {J(0), J(9), J("4"), J(2.5)}) {
+        a = spec_availability({{"speculative", J::array({J{{"method", "lookup"}, {"min_match", bad}}})}}, &m, res);
+        check(a.status == Availability::kError && a.reason.find("min_match") != std::string::npos,
+              "min_match " + bad.dump() + " -> error: " + a.reason);
+    }
+    a = spec_availability({{"speculative", J::array({lookup, J{{"method", "dflash2"}, {"draft", "Drafter"}, {"min_match", 3}}})}}, &m, res);
+    check(a.status == Availability::kError && a.reason.find("min_match") != std::string::npos, "min_match on dflash2 -> error");
+    a = spec_availability({{"speculative", J::array()}}, &m, res);
+    check(a.status == Availability::kUnavailable && a.reason == "the registry entry declares no speculative method",
+          "an empty list declares nothing");
+    a = spec_availability({{"speculative", J::array({lookup, lookup})}}, &m, res);
+    check(a.status == Availability::kError && a.reason.find("listed twice") != std::string::npos, "a method listed twice -> error");
+    a = spec_availability({{"speculative", J::array({dflash2, lookup})}}, &m, res);
+    check(a.status == Availability::kError && a.reason.find("always drafts") != std::string::npos,
+          "lookup behind dflash2 would never run -> error: " + a.reason);
+    a = spec_availability({{"speculative", J::array({lookup, J{{"method", "mtp"}}})}}, &m, res);
+    check(a.status == Availability::kError && a.reason.find("unknown speculative method \"mtp\"") != std::string::npos,
+          "an unknown method in a list -> error");
+    a = spec_availability({{"speculative", J::array({lookup, J{{"method", "dflash2"}}})}}, &m, res);
+    check(a.status == Availability::kError && a.reason.find("needs a \"draft\"") != std::string::npos,
+          "dflash2 without a draft in a list -> error");
+    a = spec_availability({{"speculative", J::array({lookup, J{{"method", "dflash2"}, {"draft", "Missing"}}})}}, &m, res);
+    check(a.status == Availability::kUnavailable && a.reason.find("is not installed") != std::string::npos && a.method == "lookup,dflash2",
+          "one listed drafter that is not installed makes the whole stack unavailable: " + a.reason);
+    open_qwen36::Manifest nov = m;
+    nov.verify.width = 0;
+    a = spec_availability({{"speculative", J::array({lookup, dflash2})}}, &nov, res);
+    check(a.status == Availability::kUnavailable && a.reason == "the kernel set has no verify program, which method \"lookup\" needs",
+          "no verify program -> unavailable, naming the first method: " + a.reason);
+    a = spec_availability({{"speculative", J::array({lookup, dflash2})}}, nullptr, res);
+    check(a.status == Availability::kUnavailable && a.reason == "no open kernel set was found", "a list with no kernel set -> unavailable");
+    a = spec_availability({{"speculative", 7}}, &m, res);
+    check(a.status == Availability::kError, "a `speculative` that is neither an object nor a list -> error");
+    fs::remove_all(root);
+}
+
 void loop_tests() {
     FakeCore c;
     std::mt19937 rng(11);
@@ -429,6 +547,8 @@ int main() {
     drafter_tests();
     availability_tests();
     draft_tests();
+    stack_tests();
+    list_tests();
     loop_tests();
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "ALL OK", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;

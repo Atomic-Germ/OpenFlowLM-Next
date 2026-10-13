@@ -119,8 +119,7 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L, const n
             throw std::runtime_error("open_qwen36: speculative decode for " + config.model_name + ": " + av.reason);
         if (av.ok()) {
             method = av.method;
-            drafter_ = spec::make_drafter(method);   // dflash2 builds its own once the weights are resident
-            if (method == "dflash2") draft_ = av.draft;
+            avail_ = av;   // the drafters are built once the weights are resident (open_drafter)
             spec_on_ = true;
         } else {
             std::fprintf(stderr, "open_qwen36: speculative decode is not available for %s: %s; decoding normally\n",
@@ -148,9 +147,22 @@ void Engine::load_open_weights() {
 }
 
 void Engine::open_drafter() {
-    if (!spec_on_ || draft_.dir.empty()) return;
+    if (!spec_on_) return;
     drafter_.reset();
-    drafter_ = std::make_unique<dflash2::Proposer>(*core_, draft_.dir, draft_.kernel_dir, cfg_.verbose);
+    dflash2::StackOptions opt;
+    const std::string lm = utils::getenv_oflm("OFLM_OPEN_LOOKUP_MIN");
+    if (!lm.empty()) opt.lookup_min = std::atoi(lm.c_str());
+    opt.eager = utils::getenv_oflm("OFLM_OPEN_STACK_EAGER") == "1";
+    const std::string fill = utils::getenv_oflm("OFLM_OPEN_DRAFT_FILL");
+    if (!fill.empty()) opt.fill_rows = std::strtoul(fill.c_str(), nullptr, 10);
+    const std::string deepen = utils::getenv_oflm("OFLM_OPEN_DRAFT_DEEPEN");
+    if (!deepen.empty()) opt.deepen_after = std::strtoul(deepen.c_str(), nullptr, 10);
+    drafter_ = dflash2::make_stack(*core_, avail_, opt, cfg_.verbose);
+}
+
+std::string Engine::speculative_report() {
+    auto* s = dynamic_cast<spec::Stacked*>(drafter_.get());
+    return s ? s->report() : std::string();
 }
 
 buffer<bf16> Engine::logits_view() { return logits_view_of(core_->logits()); }

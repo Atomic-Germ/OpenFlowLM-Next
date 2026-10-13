@@ -115,7 +115,11 @@ struct Args {
     int spec_width = 0;             // --spec-width N: positions per verify pass (0 = the kernel set's, else 4)
     bool spec_ref = false;          // --spec-ref: the reference verifier even when the set has a verify program
     bool spec_log = false;          // --spec-log: one line per pass
-    std::string spec_method = "lookup";   // --spec-method M: this CLI has no registry entry to read the method from
+    std::string spec_method = "lookup";   // --spec-method M[,M]: this CLI has no registry entry to read the methods from
+    int lookup_min = 0;             // --lookup-min N: the shortest suffix match lookup proposes from (default: 2, 4 in front of dflash2)
+    size_t draft_deepen = 0;        // --draft-deepen N: refill the cold cache with the whole window after N drafts (default 4)
+    size_t draft_fill = 0;          // --draft-fill N: put at most the last N prompt positions into a cold drafter cache (0 = its window)
+    bool stack_eager = false;       // --stack-eager: the draft model catches up every pass lookup drafted
     int verify_check = 0;           // --verify-check N: N greedy positions by step(), then by verify() passes, compared
     int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
     int verify_n = 0;               // --verify-n n: the bench's positions a pass (default: the kernel set's width)
@@ -228,6 +232,10 @@ Args parse(int argc, char** argv) {
         else if (k == "--spec-ref") { a.spec = true; a.spec_ref = true; }
         else if (k == "--spec-log") a.spec_log = true;
         else if (k == "--spec-method") { a.spec = true; a.spec_method = val(); }
+        else if (k == "--lookup-min") a.lookup_min = std::atoi(val().c_str());
+        else if (k == "--stack-eager") a.stack_eager = true;
+        else if (k == "--draft-fill") a.draft_fill = std::strtoul(val().c_str(), nullptr, 10);
+        else if (k == "--draft-deepen") a.draft_deepen = std::strtoul(val().c_str(), nullptr, 10);
         // The server has a host gap right here that the CLI does not: between the last
         // prefill dispatch and the first decode one it samples, detokenises and writes
         // the first SSE chunk to a socket. Every dx timeout so far has landed on that
@@ -264,7 +272,8 @@ Args parse(int argc, char** argv) {
     return a;
 }
 
-std::unique_ptr<open_qwen36::dflash2::Proposer> g_proposer;   // --spec-method dflash2: built once, after the weights load
+std::unique_ptr<open_qwen36::spec::Drafter> g_drafter;   // built once, after the weights load
+open_qwen36::dflash2::Proposer* g_proposer = nullptr;   // its dflash2 member, if it has one
 
 // greedy tokens do not depend on the draft, so this prints the same `token <id>` lines as the plain loop
 std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
@@ -276,8 +285,7 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     if (W < 2) { std::fprintf(stderr, "--spec-width must be >= 2\n"); std::exit(2); }
     std::fprintf(stderr, "speculative decode: width %zu, method %s, %s\n", W, a.spec_method.c_str(),
                  fast ? "the kernel set's verify pass" : "reference verify (step + checkpoint/restore)");
-    const std::unique_ptr<sp::Drafter> own = g_proposer ? nullptr : sp::make_drafter(a.spec_method);
-    sp::Drafter* const drafter = g_proposer ? static_cast<sp::Drafter*>(g_proposer.get()) : own.get();
+    sp::Drafter* const drafter = g_drafter.get();
     const open_qwen36::dflash2::Proposer::Stats ps0 = g_proposer ? g_proposer->stats() : open_qwen36::dflash2::Proposer::Stats{};
     std::vector<size_t> accept_hist(W + 1, 0);
     double propose_ms = 0;
@@ -330,6 +338,7 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     std::fprintf(stderr, "spec: tokens per pass histogram:");
     for (size_t m = 1; m <= W; ++m) std::fprintf(stderr, " %zu:%zu", m, accept_hist[m]);
     std::fprintf(stderr, "\nspec: proposing %.0f ms in all (%.1f ms a pass)\n", propose_ms, st.passes ? propose_ms / st.passes : 0.0);
+    if (auto* sk = dynamic_cast<sp::Stacked*>(drafter)) std::fprintf(stderr, "spec: stack drafted by: %s\n", sk->report().c_str());
     if (g_proposer) {
         const auto& ps = g_proposer->stats();
         const double n = static_cast<double>(std::max<size_t>(1, ps.drafts - ps0.drafts));
@@ -791,8 +800,15 @@ int main(int argc, char** argv) {
         Core core(a.cfg);
         open_qwen36::spec::Availability spec_av;
         if (a.spec) {
-            nlohmann::json entry = {{"speculative", {{"method", a.spec_method}}}};
-            if (!a.draft_dir.empty()) entry["speculative"]["draft"] = a.draft_dir;
+            nlohmann::json list = nlohmann::json::array();
+            for (size_t i = 0; i <= a.spec_method.size();) {
+                const size_t j = std::min(a.spec_method.find(',', i), a.spec_method.size());
+                nlohmann::json item = {{"method", a.spec_method.substr(i, j - i)}};
+                if (item["method"] == "dflash2" && !a.draft_dir.empty()) item["draft"] = a.draft_dir;
+                list.push_back(item);
+                i = j + 1;
+            }
+            nlohmann::json entry = {{"speculative", list}};
             spec_av = open_qwen36::spec::spec_availability(
                 entry, &core.manifest(),
                 [&](const std::string& d) { return open_qwen36::spec::resolve_draft(d, "", a.draft_kernels); });
@@ -804,9 +820,14 @@ int main(int argc, char** argv) {
         }
         core.load_weights();
         if (!a.taps.empty()) core.set_taps(a.taps);
-        if (a.spec && spec_av.method == "dflash2")
-            g_proposer = std::make_unique<open_qwen36::dflash2::Proposer>(core, spec_av.draft.dir, spec_av.draft.kernel_dir,
-                                                                           a.cfg.verbose);
+        if (a.spec) {
+            open_qwen36::dflash2::StackOptions so;
+            so.lookup_min = a.lookup_min;
+            so.eager = a.stack_eager;
+            so.fill_rows = a.draft_fill;
+            so.deepen_after = a.draft_deepen;
+            g_drafter = open_qwen36::dflash2::make_stack(core, spec_av, so, a.cfg.verbose, &g_proposer);
+        }
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (!a.draft_run.empty()) return draft_gate(core, a);

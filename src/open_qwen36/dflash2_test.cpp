@@ -288,6 +288,24 @@ static void attention_tests() {
     }
 }
 
+static void cold_fill_tests() {
+    bool deepen = true;
+    ColdFill f;
+    CHECK(f.window(2048, &deepen) == 2048 && !deepen, "cold 0: always the whole window");
+    f.cold = 256;
+    f.after = 3;
+    CHECK(f.window(2048, &deepen) == 256 && !deepen, "a cold cache takes the last 256");
+    CHECK(f.window(200, &deepen) == 200 && !deepen, "a window smaller than the cold fill is taken whole");
+    f.drafted();
+    f.drafted();
+    CHECK(f.window(2048, &deepen) == 256 && !deepen, "two drafts of three: still small");
+    f.drafted();
+    CHECK(f.window(2048, &deepen) == 2048 && deepen, "the third draft: refill with the whole window");
+    CHECK(f.window(2048, &deepen) == 2048 && !deepen, "the refill is asked for once");
+    f.went_cold();
+    CHECK(f.window(2048, &deepen) == 256 && !deepen && f.drafts == 0, "a new request is cold again");
+}
+
 static void sync_tests() {
     auto all = [](long) { return true; };
     std::vector<int> fed(100);
@@ -335,6 +353,7 @@ static void sync_tests() {
 int main() {
     attention_tests();
     sync_tests();
+    cold_fill_tests();
     silu_tests();
     hadamard_tests();
     walk_tests();

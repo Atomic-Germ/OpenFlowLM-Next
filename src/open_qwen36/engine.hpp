@@ -50,6 +50,8 @@ public:
     int get_current_context_length() override;
     int checkpoint() override;
     int restore() override;
+    /// For a stack of drafters: which of them drafted how many passes since the last call.
+    std::string speculative_report() override;
     /// Declines (empty) when OFLM_OPEN_SPEC is off or not available for this model, after an image (M-RoPE), or near the KV capacity.
     std::vector<int> forward_speculative(int last, int max_emit, const std::function<int(buffer<bf16>&)>& pick,
                                          const std::function<bool(int)>& stop) override;
@@ -96,8 +98,8 @@ private:
     std::vector<int> fed_;           ///< every token the core has consumed, position i at index i
     std::vector<int> fed_snap_;      ///< fed_ at checkpoint()
     std::unique_ptr<spec::Drafter> drafter_;
-    spec::DraftInfo draft_;          ///< the drafter container, for a method that has one (dflash2)
-    void open_drafter();             ///< builds the container's drafter on the resident core (turns the taps on)
+    spec::Availability avail_;       ///< the declared methods, their drafter container
+    void open_drafter();             ///< builds the declared drafters on the resident core (dflash2 turns the taps on)
     /// A kernel that timed out or aborted leaves the hardware context dead:
     /// every later submission fails. Mark the engine and rebuild it (contexts
     /// + weights, ~90 s) before the next request instead of failing forever.
