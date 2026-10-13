@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -36,6 +37,22 @@ from gguf_inspect import inspect, GGUFReport  # noqa: E402
 
 # Module import for the internals under test below.
 _inspect = importlib.import_module("gguf_inspect.inspect")
+
+
+def _find_repo_file(*parts: str) -> Path | None:
+    """Walk up from this file to the repository root and return `*parts`.
+
+    tests/test_inspect.py lives at utilities/gguf-utils/gguf-inspect/tests/, so
+    four parents up is the repo root. Searching upward rather than hard-coding
+    the depth keeps the drift test working if the tool is ever moved. Returns
+    None instead of raising: the caller decides, and raising here would run at
+    import time and take the whole module's skip with it.
+    """
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent.joinpath(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
 
 # GGUF value-type ids used by the fixture writer.
 _GGUF_UINT32, _GGUF_STRING, _GGUF_ARRAY = 4, 8, 9
@@ -213,6 +230,46 @@ class PureLogicTests(unittest.TestCase):
         for bad in ("Q2_K", "Q3_K", "Q5_K", "Q8_K", "IQ4_NL", "Q5_0", "Q5_1"):
             self.assertNotIn(bad, _inspect._RUNTIME_QUANT_TYPES)
             self.assertNotIn(bad, _inspect._RUNTIME_TYPES)
+
+    def test_quant_allowlist_tracks_pools_cpp(self):
+        # The allowlist is written down TWICE: pools.cpp decides what the NPU can
+        # actually pack, and _RUNTIME_QUANT_TYPES is what gguf-inspect tells a
+        # user before they try. Nothing tied them together, so widening the C++
+        # gate (a new dtype support) would leave the planner calling perfectly
+        # loadable files unloadable -- both files reading correctly in review,
+        # nothing failing CI. This derives one from the other.
+        # Fail rather than skip: a checkout without pools.cpp means this guard cannot
+        # do its job, and a silent skip would leave the drift unguarded while
+        # the suite still reported green.
+        pools_cpp = _find_repo_file("src", "open_qwen36", "pools.cpp")
+        self.assertIsNotNone(
+            pools_cpp,
+            "cannot find src/open_qwen36/pools.cpp above " + str(Path(__file__).parent) +
+            "; this test exists to keep it in sync with inspect.py")
+        pools = pools_cpp.read_text(encoding="utf-8")
+        start = pools.find("const bool kq")
+        self.assertNotEqual(start, -1, "pools.cpp no longer has 'const bool kq' -- "
+                                        "update this test along with the allowlist")
+        # The allowlist is exactly two constructs: the `kq` union, and the
+        # `if (!kq && t.type != ...)` guard beside it. Bound the region by the
+        # guard's statement terminator, not by a newline -- a guard that wraps
+        # across a line (which is how it grows when someone adds a dtype) would
+        # otherwise be cut in half and the new dtype would slip past unnoticed.
+        # The region does reach into the fail() message that follows, but its
+        # literals carry no `GgufFile::Type::` prefix and cannot be matched.
+        # It must stop BEFORE `has_min`, which names Q4_1 for an unrelated
+        # reason (block size) and would make this test pass for the wrong one.
+        guard = pools.find("if (!kq", start)
+        self.assertNotEqual(guard, -1, "pools.cpp's std_perm_gguf guard changed shape")
+        terminator = pools.find(";", guard)
+        self.assertNotEqual(terminator, -1, "pools.cpp's std_perm_gguf guard has no terminator")
+        region = pools[start:terminator]
+        cxx = frozenset(re.findall(r"GgufFile::Type::(\w+)", region))
+        self.assertTrue(cxx, "no types parsed out of pools.cpp -- the allowlist moved")
+        self.assertNotIn("has_min", region, "the parsed region drifted past the allowlist")
+        self.assertEqual(_inspect._RUNTIME_QUANT_TYPES, cxx,
+                         "inspect.py's _RUNTIME_QUANT_TYPES has drifted from pools.cpp; "
+                         "if pools.cpp just gained a dtype, add it here too")
 
     def test_layernorm_float_types_are_not_blockers(self):
         # A GGUF's norm weights are f32 by default. Flagging them as unsupported

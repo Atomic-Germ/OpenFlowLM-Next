@@ -62,6 +62,18 @@ at its pinned revision, and can be pointed elsewhere with `GGUF_TEST_QWEN`,
 so the suite is green on CI where no model is cached.
 
 The suite also runs a `PureLogicTests` group that needs no model at all: it writes
-a minimal synthetic GGUF and checks the dtype allowlist, the candidate-tag
-derivation and the source/snapshot split. Those run everywhere, CI included, and
-are what keeps the metadata logic covered without a multi-gigabyte download.
+a minimal synthetic GGUF and checks the candidate-tag derivation, the
+source/snapshot split, and the dtype allowlist. Those run everywhere, CI
+included, and are what keeps the metadata logic covered without a
+multi-gigabyte download.
+
+One of them, `test_quant_allowlist_tracks_pools_cpp`, parses the allowlist out
+of `src/open_qwen36/pools.cpp` and asserts it equals `_RUNTIME_QUANT_TYPES`.
+That set is written down in both places on purpose — `pools.cpp` decides what
+the NPU can pack, and `inspect.py` is what tells a user before they try — and
+nothing else tied them together. Without this test, adding a dtype to the C++
+gate leaves `gguf-inspect` calling perfectly loadable files unloadable: both
+files read correctly in review and CI stays green. **If that test fails after a
+change to `pools.cpp`, the fix is to update `_RUNTIME_QUANT_TYPES`, not to
+weaken the test** — unless the C++ side is genuinely wrong, in which case fix
+that first.
