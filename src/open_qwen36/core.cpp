@@ -3154,6 +3154,11 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
     float* Kf = BlockScratch::fit(ds_.K, rows * kvw);
     float* Vf = BlockScratch::fit(ds_.V, rows * kvw);
     float* Qr = BlockScratch::fit(ds_.q, T * qw);
+    // y arrives [N, T], or [T, N] token rows from a bfp16 step (y_rows_)
+    auto to_rows = [&](const float* y, size_t Nn, float* out) {
+        if (y_rows_) std::memcpy(out, y, Nn * T * 4);
+        else host::transpose(y, Nn, T, out);
+    };
 
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row, row_elems = row / 2;
@@ -3186,7 +3191,15 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
                    auto tt = std::chrono::steady_clock::now();
                    const host::TransposePart parts[3] = {{q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}};
-                   host::transpose_parts(y, T, parts, 3);
+                   if (y_rows_) {
+#pragma omp parallel for
+                       for (long long t2 = 0; t2 < static_cast<long long>(T); ++t2)
+                           for (const auto& pt : parts)
+                               std::memcpy(pt.dst + static_cast<size_t>(t2) * pt.width, y + static_cast<size_t>(t2) * nq3 + pt.off,
+                                           pt.width * 4);
+                   } else {
+                       host::transpose_parts(y, T, parts, 3);
+                   }
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    const size_t t_real = std::min(T, N - b * T), p0 = pos0 + b * T;
@@ -3261,7 +3274,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
                    float* yo = BlockScratch::fit(bs_.d_o, T * hid);
-                   host::transpose(y, hid, T, yo);
+                   to_rows(y, hid, yo);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    auto t1 = std::chrono::steady_clock::now();
@@ -3278,7 +3291,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b) -> const float* { return xm_all + b * T * hid; },
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
-                   host::transpose(y, ff, T, g_all + b * T * ff);
+                   to_rows(y, ff, g_all + b * T * ff);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                });
@@ -3287,7 +3300,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
                    float* yu = BlockScratch::fit(bs_.d_up, T * ff);
-                   host::transpose(y, ff, T, yu);
+                   to_rows(y, ff, yu);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    auto t1 = std::chrono::steady_clock::now();
@@ -3305,7 +3318,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
                    float* yd = BlockScratch::fit(bs_.d_down, T * hid);
-                   host::transpose(y, hid, T, yd);
+                   to_rows(y, hid, yd);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    auto t1 = std::chrono::steady_clock::now();
@@ -3839,12 +3852,15 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
         timing_.part1_ms += ms_since(ts);
         if (b + 1 < B) cur = launch(b + 1);
         const float* y = yb.map<const float*>();
+        bool rows_out = false;
         if (bfp) {
             // the c-tiled [T, n_pad] result back to the [N, T] the stages after the GEMM read
             ts = std::chrono::steady_clock::now();
             std::vector<float>& un = split_y_[step[b & 1]->args[2]];
             if (un.size() < N * T) un.resize(N * T);
-            host::bfp16_untile_c(y, T, s.n_pad, bt, N, un.data());
+            rows_out = N % bt.n == 0;
+            if (rows_out) host::bfp16_untile_rows(y, T, s.n_pad, bt, N, un.data());
+            else host::bfp16_untile_c(y, T, s.n_pad, bt, N, un.data());
             timing_.part1_ms += ms_since(ts);
             timing_.gemm_tr_ms += ms_since(ts);
             y = un.data();
@@ -3862,7 +3878,9 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
             timing_.gemm_tr_ms += ms_since(ts);
             y = o;
         }
+        y_rows_ = rows_out;
         post(b, y);
+        y_rows_ = false;
     }
 }
 

@@ -62,3 +62,11 @@ an idle realtime context, and the gate then never opens.** Close the camera app,
 - The mmul probe (`utilities/aie-probes/mmul_rate_probe.*`): `asm volatile("")` crashes Peano's IRTranslator ("unable to
   translate instruction: call"); `aie::mmul<8,8,8,int8,uint4>` does not instantiate.
 - A bfp16 block with a saturating +128 mantissa decodes lower than it encoded; re-encoding a decoded operand is not a fixed point.
+
+## Result (2026-10-13/14, no gate, FrameServer idle context present)
+
+GEMM at 256 tokens, 10.6-12.1 TFLOPS on the four Granite shapes, rel_fro 0 against the decoded-operand product. Logits against the
+bf16 route: corr min 0.995 (mean 0.9996), 80-token greedy identical on six prompts, perplexity ratio 0.9975. pp512 229 -> 434
+tok/s, pp2048 144 -> 227. The route is now host-bound (GEMMs 167 of 1307 ms at pp512). Numbers and procedure: OPEN-PREFILL-BFP16.
+The mmul probe says int8 8x8x8 is 0.56 ns an mmul against 4.4 (bf16 4x8x8) and 3.5 (bfp16 in an unpipelined loop): an int8
+GEMM remains the faster ceiling, if the per-32-k rescale or a per-row weight requantisation can be paid for.
