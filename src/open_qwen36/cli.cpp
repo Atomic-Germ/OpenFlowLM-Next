@@ -252,7 +252,7 @@ Args parse(int argc, char** argv) {
         }
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
-    if (!a.draft_dir.empty() && a.ids.empty()) a.ids = {0};
+    if (!a.draft_run.empty() && a.ids.empty()) a.ids = {0};
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
@@ -264,6 +264,8 @@ Args parse(int argc, char** argv) {
     return a;
 }
 
+std::unique_ptr<open_qwen36::dflash2::Proposer> g_proposer;   // --spec-method dflash2: built once, after the weights load
+
 // greedy tokens do not depend on the draft, so this prints the same `token <id>` lines as the plain loop
 std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     namespace sp = open_qwen36::spec;
@@ -274,7 +276,11 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     if (W < 2) { std::fprintf(stderr, "--spec-width must be >= 2\n"); std::exit(2); }
     std::fprintf(stderr, "speculative decode: width %zu, method %s, %s\n", W, a.spec_method.c_str(),
                  fast ? "the kernel set's verify pass" : "reference verify (step + checkpoint/restore)");
-    const std::unique_ptr<sp::Drafter> drafter = sp::make_drafter(a.spec_method);
+    const std::unique_ptr<sp::Drafter> own = g_proposer ? nullptr : sp::make_drafter(a.spec_method);
+    sp::Drafter* const drafter = g_proposer ? static_cast<sp::Drafter*>(g_proposer.get()) : own.get();
+    const open_qwen36::dflash2::Proposer::Stats ps0 = g_proposer ? g_proposer->stats() : open_qwen36::dflash2::Proposer::Stats{};
+    std::vector<size_t> accept_hist(W + 1, 0);
+    double propose_ms = 0;
     sp::ReferenceVerify<Core> ref(core);
     sp::CoreVerify<Core> cv(core);
     sp::Stats st;
@@ -288,7 +294,9 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     while (out.size() < static_cast<size_t>(a.max_tokens)) {
         const size_t left = static_cast<size_t>(a.max_tokens) - out.size();
         std::vector<int> ids{tok};
+        const auto tq = clock::now();
         for (int d : drafter->propose(hist, tok, std::min(W - 1, left - 1))) ids.push_back(d);
+        propose_ms += std::chrono::duration<double, std::milli>(clock::now() - tq).count();
         const auto tp = clock::now();
         const size_t before = out.size();
         size_t m = 1;
@@ -304,6 +312,7 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
         const double ms = std::chrono::duration<double, std::milli>(clock::now() - tp).count();
         pass_ms[ids.size() > 1] += ms;
         st.add(ids.size(), m);
+        ++accept_hist[std::min(m, W)];
         if (a.spec_log)
             std::fprintf(stderr, "  pass @%d: %zu positions, %zu kept, %.1f ms\n", core.position() - static_cast<int>(m),
                          ids.size(), m, ms);
@@ -318,6 +327,18 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
                  " plain steps %.0f ms, drafted passes %.0f ms\n",
                  st.passes, st.drafted, st.positions, st.accepted, st.passes ? double(st.emitted) / st.passes : 0.0,
                  pass_ms[0], pass_ms[1]);
+    std::fprintf(stderr, "spec: tokens per pass histogram:");
+    for (size_t m = 1; m <= W; ++m) std::fprintf(stderr, " %zu:%zu", m, accept_hist[m]);
+    std::fprintf(stderr, "\nspec: proposing %.0f ms in all (%.1f ms a pass)\n", propose_ms, st.passes ? propose_ms / st.passes : 0.0);
+    if (g_proposer) {
+        const auto& ps = g_proposer->stats();
+        const double n = static_cast<double>(std::max<size_t>(1, ps.drafts - ps0.drafts));
+        std::fprintf(stderr,
+                     "spec: dflash2 %zu drafts (%zu skipped, %zu cache restarts), %zu cache rows; per draft: block pass %.1f ms,"
+                     " cache rows %.1f ms (gathering the taps %.2f ms)\n",
+                     ps.drafts - ps0.drafts, ps.skipped - ps0.skipped, ps.restarts - ps0.restarts, ps.rows - ps0.rows,
+                     (ps.draft_ms - ps0.draft_ms) / n, (ps.inject_ms - ps0.inject_ms) / n, (ps.stage_ms - ps0.stage_ms) / n);
+    }
     return out;
 }
 
@@ -758,20 +779,27 @@ int main(int argc, char** argv) {
     try {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);
+        open_qwen36::spec::Availability spec_av;
         if (a.spec) {
-            const open_qwen36::spec::Availability av =
-                open_qwen36::spec::spec_availability({{"speculative", {{"method", a.spec_method}}}}, &core.manifest());
-            if (!av.ok()) {
+            nlohmann::json entry = {{"speculative", {{"method", a.spec_method}}}};
+            if (!a.draft_dir.empty()) entry["speculative"]["draft"] = a.draft_dir;
+            spec_av = open_qwen36::spec::spec_availability(
+                entry, &core.manifest(),
+                [&](const std::string& d) { return open_qwen36::spec::resolve_draft(d, "", a.draft_kernels); });
+            if (!spec_av.ok()) {
                 std::fprintf(stderr, "--spec: speculative decode is not available with %s: %s\n", a.cfg.kernel_dir.c_str(),
-                             av.reason.c_str());
+                             spec_av.reason.c_str());
                 return 2;
             }
         }
         core.load_weights();
         if (!a.taps.empty()) core.set_taps(a.taps);
+        if (a.spec && spec_av.method == "dflash2")
+            g_proposer = std::make_unique<open_qwen36::dflash2::Proposer>(core, spec_av.draft.dir, spec_av.draft.kernel_dir,
+                                                                           a.cfg.verbose);
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-        if (!a.draft_dir.empty()) return draft_gate(core, a);
+        if (!a.draft_run.empty()) return draft_gate(core, a);
         if (a.bench) {
             core.bench_dispatch(a.bench_layer, a.bench);
             std::printf("DONE\n");

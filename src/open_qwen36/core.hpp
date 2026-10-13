@@ -283,6 +283,8 @@ public:
     size_t tap_width() const { return tap_ring_.width(); }
     /// Position `pos`'s taps (f32, valid until the next pass), or nullptr: off, never run, out of the window, or a row accept() dropped.
     const float* tap_row(long pos) const { return tap_ring_.row(pos); }
+    /// Forget every held row (the caller knows they are not the history restore() went back to).
+    void clear_taps() { tap_ring_.clear(); }
     /// Bring-up: the decode buffer after the last step, f32 [hidden].
     void read_residual(float* dst);
 

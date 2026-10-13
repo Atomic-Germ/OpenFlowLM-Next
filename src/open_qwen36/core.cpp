@@ -3170,7 +3170,7 @@ void Core::restore(const Snapshot& s) {
     mrope_pos_ = s.mrope_pos;
     mrope_on_ = s.mrope_on;
     vs_.drop();
-    tap_ring_.clear();
+    tap_ring_.truncate(s.pos);
 }
 
 void Core::kv_row(int layer, int row, bool value, uint16_t* out) {

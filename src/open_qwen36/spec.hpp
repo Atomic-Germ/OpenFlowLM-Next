@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -209,9 +211,10 @@ struct Stats {
 struct Method {
     const char* name;
     bool needs_verify;   // the kernel set's verify program (OPEN-DECODE-SPECULATIVE-VERIFY)
+    bool needs_draft;    // a drafter container named by the entry's `draft` (OPEN-REGISTRY-SPECULATIVE)
 };
 inline const std::vector<Method>& known_methods() {
-    static const std::vector<Method> m{{"lookup", true}};
+    static const std::vector<Method> m{{"lookup", true, false}, {"dflash2", true, true}};
     return m;
 }
 
@@ -220,16 +223,60 @@ inline std::unique_ptr<Drafter> make_drafter(const std::string& method) {
     return nullptr;
 }
 
+// A drafter container on disk: what spec_availability needs to know about it without loading weights.
+struct DraftInfo {
+    std::string dir, kernel_dir, why;    // `why` says what is missing when `dir` or `kernel_dir` is empty
+    size_t hidden = 0, vocab = 0;
+    std::vector<int> tap_layers;         // the target layers (0-based) whose output the drafter reads
+};
+using DraftResolver = std::function<DraftInfo(const std::string& draft)>;
+
+// `draft` is a directory, or a name under `models_root` (the registry's `draft`); the kernel set is
+// `kernel_override`, else <dir>/open_kernels (where oflm-add links it)
+inline DraftInfo resolve_draft(const std::string& draft, const std::string& models_root, const std::string& kernel_override = "") {
+    namespace fs = std::filesystem;
+    DraftInfo d;
+    fs::path dir(draft);
+    if (!fs::is_directory(dir) && !models_root.empty()) dir = fs::path(models_root) / draft;
+    if (!fs::is_directory(dir)) {
+        d.why = "the drafter container \"" + draft + "\" is not installed (oflm add <model> --speculative dflash2 --draft-model <dir>)";
+        return d;
+    }
+    std::ifstream f(dir / "config.json");
+    const nlohmann::json c = f ? nlohmann::json::parse(f, nullptr, false) : nlohmann::json();
+    if (!c.is_object() || c.value("model_type", "") != "dflash2" || !c.contains("target_layer_ids") ||
+        !c["target_layer_ids"].is_array()) {
+        d.why = dir.string() + " is not a DFlash 2 drafter container (config.json model_type)";
+        return d;
+    }
+    d.hidden = c.value("hidden_size", size_t{0});
+    d.vocab = c.value("vocab_size", size_t{0});
+    d.tap_layers = c["target_layer_ids"].get<std::vector<int>>();
+    const fs::path k = kernel_override.empty() ? dir / "open_kernels" : fs::path(kernel_override);
+    std::ifstream mf(k / "manifest.json");
+    const nlohmann::json m = mf ? nlohmann::json::parse(mf, nullptr, false) : nlohmann::json();
+    if (!m.is_object() || m.value("family", "") != "dflash2") {
+        d.why = "the drafter " + dir.filename().string() + " has no dflash2 kernel set (looked in " + k.string() + ")";
+        return d;
+    }
+    d.dir = dir.string();
+    d.kernel_dir = k.string();
+    return d;
+}
+
 struct Availability {
     enum Status { kAvailable, kUnavailable, kError };
     Status status = kUnavailable;
     std::string method;
     std::string reason;
+    DraftInfo draft;   // set when the method has a drafter container
     bool ok() const { return status == kAvailable; }
 };
 
-// `entry` is the model's registry entry; `manifest` its kernel set's, null when none was found
-inline Availability spec_availability(const nlohmann::json& entry, const Manifest* manifest) {
+// `entry` is the model's registry entry; `manifest` its kernel set's, null when none was found;
+// `resolve` finds the drafter container a method with one names
+inline Availability spec_availability(const nlohmann::json& entry, const Manifest* manifest,
+                                      const DraftResolver& resolve = nullptr) {
     Availability a;
     const auto it = entry.is_object() ? entry.find("speculative") : entry.end();
     if (!entry.is_object() || it == entry.end() || it->is_null()) {
@@ -259,6 +306,35 @@ inline Availability spec_availability(const nlohmann::json& entry, const Manifes
     if (m->needs_verify && manifest->verify.width < 2) {
         a.reason = "the kernel set has no verify program, which method \"" + a.method + "\" needs";
         return a;
+    }
+    if (m->needs_draft) {
+        if (!it->contains("draft") || !(*it)["draft"].is_string() || (*it)["draft"].get<std::string>().empty()) {
+            a.status = Availability::kError;
+            a.reason = "method \"" + a.method + "\" needs a \"draft\" naming the drafter container";
+            return a;
+        }
+        if (!resolve) {
+            a.reason = "method \"" + a.method + "\" needs a drafter container and this caller cannot look for one";
+            return a;
+        }
+        a.draft = resolve((*it)["draft"].get<std::string>());
+        if (a.draft.dir.empty()) {
+            a.reason = a.draft.why;
+            return a;
+        }
+        // the verify pass writes the taps; the drafter reads them, so its geometry must be the target's
+        if (a.draft.hidden != manifest->hidden || a.draft.vocab != manifest->vocab) {
+            a.reason = "the drafter " + (*it)["draft"].get<std::string>() + " was trained for another target (hidden " +
+                       std::to_string(a.draft.hidden) + ", vocab " + std::to_string(a.draft.vocab) + "; this model has " +
+                       std::to_string(manifest->hidden) + ", " + std::to_string(manifest->vocab) + ")";
+            return a;
+        }
+        for (int l : a.draft.tap_layers)
+            if (l < 0 || static_cast<size_t>(l) >= manifest->layers.size()) {
+                a.reason = "the drafter taps layer " + std::to_string(l) + " but this model has " +
+                           std::to_string(manifest->layers.size()) + " layers";
+                return a;
+            }
     }
     a.status = Availability::kAvailable;
     return a;

@@ -26,6 +26,7 @@
 #include "open_qwen36/core.hpp"
 #include "open_qwen36/dflash2_host.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/spec.hpp"
 
 namespace open_qwen36 {
 namespace dflash2 {
@@ -58,6 +59,10 @@ public:
     void load_weights();
     /// Empty the cache (a new request).
     void reset();
+    /// Empty the cache and begin it at position `pos` (a prompt longer than the window starts late).
+    void restart(long pos);
+    /// The first cached position.
+    long base() const { return base_pos_; }
     /// taps [n][tap_width] for target positions cached() .. cached() + n - 1, in order.
     void inject(const float* taps, size_t n);
     /// The cache holds positions [0, cached()); a draft's block starts there.
@@ -111,6 +116,35 @@ private:
     /// out [8][N] = x [8][K] @ W^T: x through H/32 per 1024 block, the tables, one dispatch, the sum.
     void run_gemv(const std::string& op, xrt::bo& w, const float* x, float* out);
     void write_kv(int layer, long pos, const float* k, const float* v);
+};
+
+/// OPEN-DRAFT-DFLASH2 as an engine's spec::Drafter: keeps the drafter's cache in step with the history the
+/// engine hands it, from the taps the target's own passes left (Core::tap_row), and proposes k tokens.
+class Proposer : public spec::Drafter {
+public:
+    struct Stats {
+        size_t drafts = 0, skipped = 0, restarts = 0, rows = 0;
+        double draft_ms = 0, inject_ms = 0, stage_ms = 0;   ///< the block pass; the cache rows; gathering the taps
+        PassTiming last;                                    ///< the last block pass's breakdown
+    };
+
+    /// Turns the target's taps on (its weights must be loaded) and loads the drafter's weights.
+    Proposer(Core& target, const std::string& model_dir, const std::string& kernel_dir, bool verbose = true);
+
+    /// `next` sits at position fed.size(): the cache is brought to the history first.
+    std::vector<int> propose(const std::vector<int>& fed, int next, size_t k) override;
+    void observe(const int*, size_t) override {}   // the next propose() reads what the pass left from the taps
+
+    const Stats& stats() const { return stats_; }
+    dflash2::Drafter& drafter() { return *d_; }
+
+private:
+    Core& core_;
+    std::unique_ptr<dflash2::Drafter> d_;
+    std::vector<int> ids_;          ///< the token at each cached position, from d_->base()
+    std::vector<float> stage_;
+    Stats stats_;
+    static constexpr size_t kStageRows = 64;
 };
 
 }  // namespace dflash2
