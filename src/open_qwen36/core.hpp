@@ -273,6 +273,8 @@ public:
     /// Row j's logits from the last step_rows(want_logits = true).
     const float* rows_logits(size_t j);
     double rows_ms() const { return rows_ms_; }
+    struct RowsPhase { double embed_ms = 0, patch_ms = 0, submit_ms = 0, blocked_ms = 0, layers_ms = 0, head_ms = 0, total_ms = 0; };
+    const RowsPhase& rows_phase() const { return rows_phase_; }
 
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
@@ -457,6 +459,7 @@ private:
 
     std::vector<float> logits_host_;
     double rows_ms_ = 0;
+    RowsPhase rows_phase_;
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the

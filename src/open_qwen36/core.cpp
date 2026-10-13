@@ -3836,6 +3836,7 @@ void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) 
         throw std::runtime_error("open_qwen36: rows " + std::to_string(pos_) + "+" + std::to_string(L) +
                                  " pass the context capacity " + std::to_string(cfg_.max_ctx));
     const auto t0 = std::chrono::steady_clock::now();
+    rows_phase_ = RowsPhase{};
     xrt::bo& xr = buffer("rows_xres", 0);
     float* x = xr.map<float*>();
     for (size_t j = 0; j < L; ++j) {
@@ -3844,19 +3845,27 @@ void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) 
         file_->bf16_row(w_->embed_tensor, static_cast<size_t>(ids[j]), hid, x + j * hid);
     }
     xr.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hid * 4, 0);
+    rows_phase_.embed_ms = ms_since(t0);
+    const auto tp = std::chrono::steady_clock::now();
     Kern& k = kerns_.at(draft ? man_.rows.lora_kernel : man_.rows.kernel);
     stream_patch::attn_rows_apply(k.iw(), k.attn_rows, static_cast<uint64_t>(pos_), k.geom);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     // One stream on per-layer buffers: nothing is patched between layers, so layer l + 1 can queue behind l.
     const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab", "lora"};
+    rows_phase_.patch_ms = ms_since(tp);
+    const auto tl = std::chrono::steady_clock::now();
     Inflight prev;
     for (int l = 0; l < nl_; ++l) {
         Inflight f = start_run(k, args, l);
-        if (prev.active()) wait_run(prev);
+        rows_phase_.submit_ms += f.submit_ms;
+        if (prev.active()) rows_phase_.blocked_ms += wait_run(prev).second;
         prev = std::move(f);
     }
-    if (prev.active()) wait_run(prev);
+    if (prev.active()) rows_phase_.blocked_ms += wait_run(prev).second;
+    rows_phase_.layers_ms = ms_since(tl);
+    const auto th = std::chrono::steady_clock::now();
     run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_hact", "rows_out"}, 0);
+    rows_phase_.head_ms = ms_since(th);
     xrt::bo& out = buffer("rows_out", 0);
     const size_t lb = L * w_->vocab * 4, cores = man_.rows.head_cores, el = L * 64;
     read_back(out, cores * el * 4, lb);
@@ -3868,7 +3877,7 @@ void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) 
         argmax[j] = tok;
     }
     if (want_logits) read_back(out, lb, 0);
-    rows_ms_ = ms_since(t0);
+    rows_phase_.total_ms = rows_ms_ = ms_since(t0);
 }
 
 const float* Core::rows_logits(size_t j) {
