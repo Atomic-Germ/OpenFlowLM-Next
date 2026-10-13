@@ -73,6 +73,9 @@ if os.environ.get("LX_NULL_GEMV") == "1":    # probe only (attnknobs.PROBE_VARS 
     GL_FLAGS.append("-DGEMV_NULL")
 NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"     # probes: the stream and fifos unchanged, the arithmetic gone
 NULL_LN = os.environ.get("DXL_NULL_LN") == "1"
+W_DEPTH = int(os.environ.get("DXL_WDEPTH", 2))
+# fewer accumulator spills in the tile loop (154 -> 140 bundles a k-block); scheduling only, no arithmetic
+GEMV_SCHED = ["-mllvm", "-aie-aggressive-realloc", "-mllvm", "-aie-gpr-realloc"]
 
 
 def bt(total, off, n):
@@ -131,7 +134,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     f_job = ef("dxl_job", HERE / "dxl_job.cc", [table_ty, rtp_ty, i32, jp_ty], GL_FLAGS)
     f_prep = ef("dxl_prep_job", HERE / "dxl_prep_job.cc", [x_ty, tab_ty, i32, jp_ty], GL_FLAGS)
     f_gemv = ef("dxl_gemv_job", HERE / "dxl_gemv_job.cc",
-                [elem, tab_ty, acc_ty, jp_ty, i32, i32, i32], GL_FLAGS)
+                [elem, tab_ty, acc_ty, jp_ty, i32, i32, i32], GL_FLAGS + GEMV_SCHED)
     f_out = ef("dxl_out_job", HERE / "dxl_out_job.cc", [acc_ty, y_ty, jp_ty, i32], GL_FLAGS)
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
@@ -154,7 +157,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                   OS + [f"-DDXL_KVW={KVW}"]) if KV_ONE else None)
     f_count = ef("dxl_attn_count", HERE / "dxl_attn_count.cc", [pb_ty, i32], OS)
 
-    of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+    of_w = [ObjectFifo(elem, name=f"w{c}", depth=W_DEPTH) for c in range(N_CORES)]
     of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
@@ -493,5 +496,5 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + [(LN / "ln.h").read_bytes(), (LN / "ln_y.cc").read_bytes(), (LN / "ln_xn.cc").read_bytes(),
                    (LINL / "ln_nr.cc").read_bytes(), (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(),
                    (DESIGNS.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode(), str(LR).encode(),
-                   str(DRAFT).encode(), repr(GL_FLAGS).encode()])
+                   str(DRAFT).encode(), repr(GL_FLAGS).encode(), repr(GEMV_SCHED).encode(), str(W_DEPTH).encode()])
 SPECIALIZE = {"srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
