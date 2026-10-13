@@ -119,6 +119,9 @@ struct Args {
     int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
     int verify_n = 0;               // --verify-n n: the bench's positions a pass (default: the kernel set's width)
     int verify_probe = 0;           // --verify-probe L (with OFLM_OPEN_VERIFY_STOP=L): act of layers < L, verify vs step
+    std::vector<int> taps;          // --taps L,L,...: keep the residual after these layers (OPEN-DECODE-TAPS)
+    std::string taps_out;           // --taps-out PATH: the ring's rows after the run, f32 [rows][taps * hidden], PATH.txt says which
+    std::string residual_out;       // --residual-out PATH: the decode buffer after every step(), f32 [steps][hidden]
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -198,6 +201,16 @@ Args parse(int argc, char** argv) {
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else if (k == "--det-step") a.det_step = std::atoi(val().c_str());
         else if (k == "--verify-check") a.verify_check = std::atoi(val().c_str());
+        else if (k == "--taps") {
+            std::string v = val();
+            if (v == "dflash2") v = "5,19,33,47,61";
+            for (size_t i = 0; i < v.size();) {
+                const size_t c = v.find(',', i);
+                a.taps.push_back(std::atoi(v.substr(i, c - i).c_str()));
+                i = c == std::string::npos ? v.size() : c + 1;
+            }
+        } else if (k == "--taps-out") a.taps_out = val();
+        else if (k == "--residual-out") a.residual_out = val();
         else if (k == "--bench-verify") a.bench_verify = std::atoi(val().c_str());
         else if (k == "--verify-n") a.verify_n = std::atoi(val().c_str());
         else if (k == "--verify-probe") a.verify_probe = std::atoi(val().c_str());
@@ -294,17 +307,34 @@ void verify_check(Core& core, const Args& a) {
     const size_t V = core.vocab();
     auto snap = core.checkpoint();
     std::vector<int> tokens{argmax(core.logits(), core.real_vocab())};
-    std::vector<std::vector<float>> ref;
+    std::vector<std::vector<float>> ref, ref_taps;
+    const size_t TW = core.tap_width();
+    const int p_start = core.position();
+    int tap_bad = 0;
     for (int i = 0; i < n; ++i) {
         core.step(tokens.back(), true);
+        if (TW) {
+            const float* t = core.tap_row(p_start + i);
+            if (!t) { std::fprintf(stderr, "  TAPS missing after step at position %d\n", p_start + i); ++tap_bad; ref_taps.emplace_back(TW); }
+            else ref_taps.emplace_back(t, t + TW);
+        }
         ref.push_back(core.logits());
         tokens.push_back(argmax(core.logits(), core.real_vocab()));
     }
     core.restore(snap);
     const int p0 = core.position();
-    int bad = 0, passes = 0, checked = 0;
+    int bad = tap_bad, passes = 0, checked = 0;
     double vms = 0, sms = 0;
     int nv = 0, ns = 0;
+    long tap_rows = 0;
+    auto cmp_taps = [&](int i, const char* what) {
+        if (!TW) return;
+        ++tap_rows;
+        const float* t = core.tap_row(p0 + i);
+        if (t && std::memcmp(t, ref_taps[i].data(), TW * 4) == 0) return;
+        std::fprintf(stderr, "  TAPS MISMATCH %s position %d (+%d)%s\n", what, p0 + i, i, t ? "" : ": none held");
+        ++bad;
+    };
     auto cmp = [&](const std::vector<float>& got, int i, const char* what) {
         ++checked;
         if (std::memcmp(got.data(), ref[i].data(), V * 4) == 0) return;
@@ -330,6 +360,7 @@ void verify_check(Core& core, const Args& a) {
             sms += core.last_timing().total_ms;
             ++ns;
             cmp(core.logits(), i, "step");
+            cmp_taps(i, "step");
             ++i;
             continue;
         }
@@ -345,12 +376,19 @@ void verify_check(Core& core, const Args& a) {
             char what[32];
             std::snprintf(what, sizeof what, "verify[%d]", j);
             cmp(core.verify_logits(j), i + j, what);
+            cmp_taps(i + j, what);
             if (am[j] != tokens[i + j + 1]) {
                 std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i + j, am[j], tokens[i + j + 1]);
                 ++bad;
             }
         }
         core.accept(wrong);
+        if (TW)
+            for (int j = wrong; j < W; ++j)
+                if (core.tap_row(p0 + i + j)) {
+                    std::fprintf(stderr, "  TAPS held for dropped row %d of the pass at position %d\n", j, p0 + i);
+                    ++bad;
+                }
         i += wrong;
         if (core.position() != p0 + i) {
             std::fprintf(stderr, "  POSITION after accept: %d, want %d\n", core.position(), p0 + i);
@@ -358,8 +396,8 @@ void verify_check(Core& core, const Args& a) {
         }
     }
     std::fprintf(stderr, "verify check: %d positions from %d, %d verify passes (%.1f ms mean), %d steps (%.1f ms mean), "
-                         "%d logit rows compared: %s (%d bad)\n",
-                 i, p0, passes, nv ? vms / nv : 0.0, ns, ns ? sms / ns : 0.0, checked, bad ? "FAIL" : "PASS", bad);
+                         "%d logit rows and %ld tap rows compared: %s (%d bad)\n",
+                 i, p0, passes, nv ? vms / nv : 0.0, ns, ns ? sms / ns : 0.0, checked, tap_rows, bad ? "FAIL" : "PASS", bad);
     std::printf(bad ? "VERIFY CHECK FAIL\n" : "VERIFY CHECK PASS\n");
     g_verify_bad = bad;
 }
@@ -415,6 +453,31 @@ void bench_verify(Core& core, const Args& a) {
     stat(a2, (vn + "-after-step").c_str());
     stat(a1, "step1-after-verify");
     core.dump_step_trace("--bench-verify");
+}
+
+void append_residual(Core& core, const Args& a) {
+    if (a.residual_out.empty()) return;
+    std::vector<float> r(core.manifest().hidden);
+    core.read_residual(r.data());
+    std::FILE* f = std::fopen(a.residual_out.c_str(), core.position() == 1 ? "wb" : "ab");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", a.residual_out.c_str()); return; }
+    std::fwrite(r.data(), 4, r.size(), f);
+    std::fclose(f);
+}
+
+void dump_taps(Core& core, const Args& a) {
+    const long hi = core.position();
+    long lo = hi;
+    while (lo > 0 && core.tap_row(lo - 1)) --lo;
+    std::FILE* f = std::fopen(a.taps_out.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", a.taps_out.c_str()); return; }
+    for (long p = lo; p < hi; ++p) std::fwrite(core.tap_row(p), 4, core.tap_width(), f);
+    std::fclose(f);
+    if (std::FILE* m = std::fopen((a.taps_out + ".txt").c_str(), "w")) {
+        std::fprintf(m, "first_pos %ld rows %ld taps %zu hidden %zu\n", lo, hi - lo, core.tap_count(), core.manifest().hidden);
+        std::fclose(m);
+    }
+    std::fprintf(stderr, "taps: positions [%ld, %ld) -> %s\n", lo, hi, a.taps_out.c_str());
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -492,6 +555,7 @@ std::vector<int> request(Core& core, const Args& a) {
         bool last = i + 1 == a.ids.size();
         bool want = a.prefill_logits || last;
         core.step(a.ids[i], want);
+        append_residual(core, a);
         if (!a.dump_prefix.empty() && want) dump_pos(a.dump_prefix, static_cast<int>(i), core.logits());
         if (!a.dump_prefix.empty() && last) dump(a.dump_prefix, dumped++, core.logits());  // preserve the original _t<i> convention
     }
@@ -558,6 +622,7 @@ std::vector<int> request(Core& core, const Args& a) {
         std::fflush(stdout);
         if (n + 1 == a.max_tokens) break;
         core.step(tok, true);
+        append_residual(core, a);
         if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
         const auto& tm = core.last_timing();
         std::fprintf(stderr,
@@ -604,6 +669,7 @@ int main(int argc, char** argv) {
             }
         }
         core.load_weights();
+        if (!a.taps.empty()) core.set_taps(a.taps);
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {
@@ -662,6 +728,7 @@ int main(int argc, char** argv) {
             return bad ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
+        if (!a.taps_out.empty() && a.verify_check == 0) dump_taps(core, a);
         if (a.verify_check > 0) return g_verify_bad ? 1 : 0;
         for (const std::string& d : a.dump_act) dump_act_slice(core, d);   // all from the same last step
         int reps = a.twice ? 2 : a.repeat;
