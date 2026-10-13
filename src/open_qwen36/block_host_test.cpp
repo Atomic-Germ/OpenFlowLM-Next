@@ -450,6 +450,12 @@ int main(int argc, char** argv) {
         for (size_t n = 0; n < 1920; ++n)
             for (size_t r = 0; r < M; ++r) ok = ok && un[n * M + r] == static_cast<float>(r * N + n);
         check(ok, "bfp16_untile_c: the c-tiled output back to [N, T], padding rows dropped");
+        std::vector<float> rows(M * 1920);
+        host::bfp16_untile_rows(c.data(), M, N, Bfp16Tiling{}, 1920, rows.data());
+        bool okr = true;
+        for (size_t n = 0; n < 1920; ++n)
+            for (size_t r = 0; r < M; ++r) okr = okr && rows[r * 1920 + n] == un[n * M + r];
+        check(okr, "bfp16_untile_rows: token rows equal the transpose of the [N, T] untile");
     }
 
     std::printf("%s\n", failures ? "FAIL" : "PASS");

@@ -230,6 +230,19 @@ void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint
             bfp16_encode_block(x + static_cast<size_t>(r) * K + cb * 8, out + bfp16_a_offset(static_cast<size_t>(r), cb, K, t));
 }
 
+void bfp16_untile_rows(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* out) {
+    if (n_real % t.n) throw std::runtime_error("open_qwen36: bfp16_untile_rows: n_real is not whole tiles");
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+#pragma omp parallel for
+    for (long long rr = 0; rr < static_cast<long long>(M); ++rr) {
+        const size_t r = static_cast<size_t>(rr);
+        const float* base = c + (r / rb) * J * blk + (r % rb) * t.n;
+        for (size_t ct = 0; ct < n_real / t.n; ++ct)
+            std::memcpy(out + r * n_real + ct * t.n, base + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk,
+                        t.n * sizeof(float));
+    }
+}
+
 void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y) {
     const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
 #pragma omp parallel for
