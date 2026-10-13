@@ -4329,6 +4329,91 @@ the verify image (2026-10-07, `open_kernels_v1`: step minimum 155.7 / 155.8 / 15
 155.6 ms, clean A/B, 3 rounds). Cost at ctx ~512 (`--bench-verify 10`, clean, min): a 2-position
 pass 190.4-190.8 ms against a step of 158.2-159.9 ms. History: `plans/archive/bonsai2-speculative.md`.
 
+### OPEN-DECODE-TAPS: the target's residual at declared layers, kept for the drafter
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp` `set_taps()` / `tap_row()` and the hooks in `step_impl`, `verify`, `accept`, `step_gemm_prompt`, `step_block_moe`; `src/open_qwen36/tap_ring.hpp`; `cli.cpp` `--taps` / `--taps-out`)
+**Verification:** test (the ring, `src/open_qwen36/taps_test.cpp`, ctest `OPEN-DECODE-TAPS`, run by `build.cmd`) + manual (the three routes on the NPU, below)
+**Tests:** `src/open_qwen36/taps_test.cpp`
+
+A drafter that conditions on the target's hidden states (OPEN-DRAFT-DFLASH2: five taps per position)
+needs the target's residual stream at a few layers for every position the target runs. `Core::set_taps(layers,
+window = 2048)` turns that on: the residual **after** each listed 0-based layer has finished (its attention
+and FFN adds both in), as f32 `[hidden]`, for every position a decode step, a verify pass or a block prefill
+runs. `tap_row(pos)` returns position `pos`'s taps, the listed layers back to back in the order given
+(`tap_width() = tap_count() * hidden` floats), or nullptr. The layer ids are the drafter's
+`target_layer_ids` (Ternary Bonsai 2 27B: 5, 19, 33, 47, 61; llama.cpp stores these as the inputs of
+layers 6, 20, 34, 48, 62, which is the same tensor). The residual is the engine's own, unrotated.
+
+- **A ring of the last `window` positions.** Row p % window holds position p. A position is held once
+  every tap of its pass is written and until a later position takes its row. Nothing is held for a
+  position that was never run, that is older than the window, or whose pass did not finish.
+- **No kernel changes.** Every layer is one dispatch writing `xres` (`vxres` for a verify pass) in
+  place, so a tap is a host copy between two dispatches. A step or verify pass therefore queues no
+  dispatch behind a tap layer (the next layer would overwrite the residual) and waits for it, reads the
+  residual back and copies it out; with taps off the walk is the one it always was and the kernel set is
+  untouched.
+- **A verify row is a step's.** Row j of `verify(ids, n)` holds, byte for byte, the taps a `step()` at that
+  position holds (the pass is bit-identical, OPEN-DECODE-SPECULATIVE-VERIFY). `accept(m)` takes back rows
+  m.. of the last verify pass: `tap_row` of those positions is nullptr until a later pass writes them.
+- **Block prefill** writes the taps of the last `min(prompt, window)` positions: both schedules
+  (layer-major `step_gemm_prompt`, block-major `step_block_moe`) copy the layer's output rows after the
+  layer. These come from the bfp16 GEMM route and differ numerically from the decode route's, like its
+  logits do. The dense-family block route (`step_gemm_block_layer`) refuses taps.
+- `reset()` and `restore()` empty the ring: after either, the caller re-reads the taps it needs.
+- **Cost.** Taps off: nothing (a flag test, no kernel change). Taps on: five host waits and copies of
+  20 KB per row per step or verify pass (about 2 ms a pass), and one 20 KB-per-row copy per tap layer in a prefill.
+
+**Acceptance criteria (test, `taps_test.cpp`):**
+- A ring of 3 taps x 6 floats and a window of 8: after 20 one-position passes, positions 12..19 hold
+  exactly the values written, positions 0..11, 20 and -1 hold nothing.
+- A 4-position verify pass then `drop(2)`: positions 20, 21 held, 22, 23 not; a later 3-position pass from
+  22 holds its own rows and the kept ones; `drop(3)` drops nothing; `drop` after a plain step, or twice,
+  changes nothing.
+- A pass begun and never ended holds nothing for its rows and leaves the others; `clear()` empties the ring.
+- A prefill of 20 positions from 5 into a window of 8 writes positions 17..24 and evicts the rows the earlier
+  positions held; a prefill shorter than the window keeps the positions before it.
+- No taps (`configure(0, ...)`) is off and holds nothing.
+
+**Verification (manual):**
+1. **Step vs the engine's own prefix (the capture is the residual).** `open_qwen36_cli --model <Bonsai lmhead
+   container> --kernels <set> --ids-file short.ids --max-tokens 1 --taps dflash2 --taps-out full.bin`, then for
+   each L in 5, 19, 33, 47, 61 the same with `--layers L+1 --residual-out prefix_L.bin` (no `--taps`): the
+   prefix run's residual after every prompt step must equal `full.bin`'s tap for L, byte for byte.
+2. **Step vs verify.** `--ids-file short.ids --verify-check 48 --taps dflash2` and `--ids-file prompt512.ids
+   --gemm-block --verify-check 48 --taps dflash2`: every verify row j before the wrong draft, and every plain
+   step, holds the taps of the reference step at its position (memcmp), and no tap is held for a row accept()
+   dropped. The run prints `VERIFY CHECK PASS` and the tap row count.
+3. **Against llama.cpp (the convention).** Feed the engine a PrismML llama.cpp run's prompt and greedy tokens
+   (`--ids`, `--taps-out`, step route) and compare with the `.taps` dump of the same ids (`tf3.exe`, `DACC_DUMP`):
+   cosine per position and tap above 0.999 for layers 5, 19 and 33; the two deeper taps carry both engines'
+   numerics (a few rows lower, see the result).
+4. **Block prefill.** `--gemm-block --taps dflash2 --taps-out blk.bin` against the step route's on the same ids:
+   report cosine per tap (the prefill route's own drift). A prompt longer than the window (`first_pos` in
+   `blk.bin.txt` = prompt - 2048) checks the slice against llama.cpp's rows.
+5. **Cost.** `--bench-verify N --verify-n n` with and without `--taps dflash2` (interleaved, on a quiet box:
+   no other NPU job, `--taps` the only difference) and prefill of prompt512 and a 2600-token prompt with
+   `--gemm-block` with and without.
+
+**Result 2026-10-12 (`open_kernels_w4h`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`, taps 5, 19, 33, 47, 61).**
+- Step vs the prefix runs (1): byte-identical at all five taps, 20 positions of `short.ids`.
+- Step vs verify (2): `--verify-check 48 --taps dflash2` on `short.ids` and on `prompt512.ids --gemm-block`: 47 logit
+  rows and 47 tap rows each memcmp-identical, 17 verify passes (n = 2..4, wrong drafts at rotating positions),
+  no tap held for a dropped row.
+- llama.cpp (3), PrismML runs of chat_1, reason_1 (200 positions each) and code_1, doc_1 (640 each), step route:
+  per-position cosine at layers 5 / 19 / 33 never below 0.9999 / 0.9999 / 0.9992 (code_1 layer 33: 0.9997); at layers 47 / 61 the mean is
+  0.9998-0.9999 and 0-14 of 640 rows are under 0.999 (worst 0.934 / 0.954, on ordinary tokens whose massive
+  channel 3994 differs by 10-40% between the two engines). The convention is the layer output: the same
+  comparison one layer early is not close.
+- Block prefill (4), layer-major: on `short.ids` cosine against the step route is 0.9999 at every tap; on
+  `prompt512` 0.9999 at layers 5 / 19, then 36, 131 and 117 of 512 rows under 0.999 at layers 33 / 47 / 61 (means
+  0.9996 / 0.9964 / 0.9954, the bfp16 GEMM route's drift, growing with position). A 2600-token prefill holds
+  positions 552..2599 and those rows match llama.cpp's (layer 61 mean 0.9992). Through the D0 drafter reference
+  (k = 7), the drafts from the block route's taps equal the step route's in 70 of 71 positions of prompt512 (first
+  token 71 of 71); the step route's taps against llama.cpp's give 51 of 54 identical drafts on code_1.
+- Cost (5), clean rounds, no other NPU or GPU job, system CPU 28-38%: taps off is the pre-taps CLI (verify of 4 positions
+  251.4 ms vs 251.0-251.6). Taps on adds about 2 ms a pass: verify of 2 +1.8..+3.8 ms (of ~192), of 3 +0.0..+1.2 (of
+  ~225), of 4 +2.0..+2.3 (of ~251), step +0.7..+2.9 (of ~162): about 1%. Prefill of prompt512 and of 2600 tokens: within
+  run-to-run noise (4.43-4.71 s and 25.5-25.8 s, taps on and off interleaved).
+
 ### OPEN-DECODE-SPECULATIVE: speculative greedy decode, opt-in and declared per model, with the same output
 **Applies to:** openflowlm-next (`src/open_qwen36/spec.hpp`, `cli.cpp`, `engine.cpp`; `src/include/causal_lm.hpp` `forward_speculative`; `src/common/AutoModel/automodel.cpp` `_spec_*`, `speculative_unavailable` and the decode loops of `_shared_generate` and `modeling_qwen3_5vl.cpp`; `src/src/main.cpp` and `src/include/utils/vm_args.hpp` `--spec`)
 **Verification:** test (the drafter, the accept rule and `spec_availability`, `src/open_qwen36/spec_test.cpp`) + manual (the hardware gate, the speed, and the `--spec` refusal and log line, below)

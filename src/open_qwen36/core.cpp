@@ -673,6 +673,7 @@ void Core::reset() {
     mrope_on_ = false;
     mrope_pos_ = 0;
     pos_ = 0;
+    tap_ring_.clear();
 }
 
 xrt::bo& Core::buffer(const std::string& name, int layer) {
@@ -1741,6 +1742,18 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
     const bool pipe = submit_ahead_ > 0 && !deepstack;
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
+    const bool taps = tap_ring_.on();
+    int tap_pending = -1;                   // a tap layer whose last dispatch is in tail_in, residual not yet copied
+    if (taps) tap_ring_.begin(pos_, 1);
+    auto tap_copy = [&](int l) {
+        xrt::bo& r = buffer("xres", 0);
+        read_back(r, man_.hidden * 4, 0);
+        tap_ring_.put(static_cast<size_t>(tap_index_[l]), pos_, r.map<const float*>());
+    };
+    auto tap_flush = [&] {
+        if (tap_pending >= 0) tap_copy(tap_pending);
+        tap_pending = -1;
+    };
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
         const bool shape_ok = !prog.empty() && prog.front().op == "run" && prog.back().op == "run";
@@ -1750,6 +1763,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 const auto [elapsed, blocked] = wait_run(tail_in);
                 timing_.part1_ms += blocked;
                 timing_.dispatch_ms += elapsed;
+                tap_flush();
             }
             int nrun = 0;
             for (const Step& s : prog) {
@@ -1762,6 +1776,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                     route(k, l, s.act_off);
                 }
             }
+            if (taps && tap_on(l)) tap_copy(l);
             if (deepstack && l < n_deepstack) {
                 read_back(xres, man_.hidden * 4, 0);
                 float* r = xres.map<float*>();
@@ -1780,6 +1795,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             const auto [elapsed, blocked] = wait_run(tail_in);
             timing_.part1_ms += blocked;
             timing_.dispatch_ms += elapsed;
+            tap_flush();
         }
         if (!head.active()) {
             head = start_run(kerns_.at(prog.front().kernel), prog.front().args, l);
@@ -1819,8 +1835,9 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             timing_.part1_ms += tail_in.submit_ms;
             timing_.dispatch_ms += tail_in.submit_ms;
         }
-        // (3) and the next layer's first dispatch, queued behind it
-        if (l + 1 < nl_) {
+        if (taps && tap_on(l)) tap_pending = l;
+        // (3) and the next layer's first dispatch, queued behind it (not past a tap: it would overwrite xres)
+        if (l + 1 < nl_ && tap_pending < 0) {
             const std::vector<Step>& next = types_[l + 1]->program;
             const bool next_ok = !next.empty() && next.front().op == "run" && next.back().op == "run";
             Kern& nk = next_ok ? kerns_.at(next.front().kernel) : *tail_in.k;
@@ -1836,7 +1853,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     // image's tail stream, OPEN-DECODE-ONE-CONTEXT-DENSE) level 1 does, exactly as it queues
     // one layer behind the next.
     Inflight tail0;
-    if (want_logits && tail_in.active() && !man_.tail.empty() && man_.tail.front().op == "run" &&
+    if (want_logits && tap_pending < 0 && tail_in.active() && !man_.tail.empty() && man_.tail.front().op == "run" &&
         (submit_ahead_ >= 2 ||
          (submit_ahead_ >= 1 && kerns_.at(man_.tail.front().kernel).ctx == tail_in.k->ctx))) {
         tail0 = start_run(kerns_.at(man_.tail.front().kernel), man_.tail.front().args, 0);
@@ -1846,7 +1863,9 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         const auto [elapsed, blocked] = wait_run(tail_in);
         timing_.part1_ms += blocked;
         timing_.dispatch_ms += elapsed;
+        tap_flush();
     }
+    if (taps) tap_ring_.end(pos_, 1, false);
     if (want_logits) {
         auto t1 = std::chrono::steady_clock::now();
         size_t first = 0;
@@ -2295,6 +2314,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
         return;
     }
 
+    if (tap_ring_.on()) throw std::runtime_error("open_qwen36: taps are not supported on the dense block route");
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
 
@@ -2374,13 +2394,19 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
     std::vector<float> xres(T * hid);
     for (size_t t = 0; t < T; ++t) file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[t]), hid, xres.data() + t * hid);
     moe_stage_resize(T);
+    const bool taps = tap_ring_.on();
+    const size_t keep = std::min(t_real, tap_ring_.window());
+    if (taps) tap_ring_.begin(pos_ + static_cast<long>(t_real - keep), keep);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
         if (kind == "linear") block_layer_linear(l, xres.data(), T, t_real, 0, true, true);
         else if (kind == "full") block_layer_full(l, xres.data(), T, t_real, static_cast<size_t>(pos_), 0, true);
         else throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no block route");
         block_layer_moe(l, T, t_real, xres.data());
+        if (taps && tap_on(l))
+            for (size_t t = t_real - keep; t < t_real; ++t) tap_ring_.put(static_cast<size_t>(tap_index_[l]), pos_ + static_cast<long>(t), xres.data() + t * hid);
     }
+    if (taps) tap_ring_.end(pos_ + static_cast<long>(t_real - keep), keep, false);
     pos_ += static_cast<int>(t_real);
     block_logits_.clear();
     if (block_logits_all_)
@@ -2430,6 +2456,9 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     moe_stage_resize(TOT);
     timing_.setup_ms += ms_since(tsetup);
     timing_.part1_ms += ms_since(tsetup);
+    const bool taps = tap_ring_.on();
+    const size_t keep = std::min(N, tap_ring_.window());
+    if (taps) tap_ring_.begin(static_cast<long>(pos0 + N - keep), keep);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
         for (size_t b = 0; b < B; ++b) {
@@ -2438,7 +2467,10 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
             else block_layer_full(l, xres.data() + row0 * hid, T, t_real, pos0 + row0, row0, b == 0);
         }
         block_layer_moe(l, TOT, N, xres.data());
+        if (taps && tap_on(l))
+            for (size_t t = N - keep; t < N; ++t) tap_ring_.put(static_cast<size_t>(tap_index_[l]), static_cast<long>(pos0 + t), xres.data() + t * hid);
     }
+    if (taps) tap_ring_.end(static_cast<long>(pos0 + N - keep), keep, false);
     pos_ += static_cast<int>(N);
     block_logits_.clear();
     if (block_logits_all_)
@@ -3008,6 +3040,8 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
     timing_.patch_ms = ms_since(tp);
     // the layer walk, each layer's dispatch queued behind the previous one (one context)
     Inflight prev;
+    const bool taps = tap_ring_.on();
+    if (taps) tap_ring_.begin(pos0, n);
     for (int l = 0; l < nl_; ++l) {
         if (verify_stop_ >= 0 && l >= verify_stop_) break;     // bring-up: a prefix of the walk, no tail
         if (verify_from_ > 0 && l < verify_from_) continue;      // bring-up: start the walk at a later layer
@@ -3022,7 +3056,19 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
             }
             prev = std::move(cur);
         }
+        if (taps && tap_on(l)) {
+            // the next layer must not be queued yet: it rewrites vxres in place
+            if (prev.active()) {
+                const auto [elapsed, blocked] = wait_run(prev);
+                timing_.part0_ms += blocked;
+                timing_.dispatch_ms += elapsed;
+                prev.k = nullptr;
+            }
+            read_back(vx, n * man_.hidden * 4, 0);
+            for (size_t j = 0; j < n; ++j) tap_ring_.put(static_cast<size_t>(tap_index_[l]), pos0 + static_cast<long>(j), vx.map<const float*>() + j * man_.hidden);
+        }
     }
+    if (taps) tap_ring_.end(pos0, n, true);
     auto t1 = std::chrono::steady_clock::now();
     for (const Step& s : vtail) {
         if (verify_stop_ >= 0) break;
@@ -3067,6 +3113,7 @@ const std::vector<float>& Core::verify_logits(size_t i) const {
 
 void Core::accept(size_t m) {
     const unsigned before = vs_.cur;
+    tap_ring_.drop(m);
     pos_ = vs_.accept(m);
     if (vs_.cur != before) slots_dirty_ = true;
 }
@@ -3123,6 +3170,7 @@ void Core::restore(const Snapshot& s) {
     mrope_pos_ = s.mrope_pos;
     mrope_on_ = s.mrope_on;
     vs_.drop();
+    tap_ring_.clear();
 }
 
 void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
@@ -3142,6 +3190,31 @@ void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {
                                  ") is outside the layer's " + std::to_string(bytes) + "-byte act buffer");
     read_back(act_[layer], n, off);
     std::memcpy(dst, act_[layer].map<uint8_t*>() + off, n);
+}
+
+// ---- taps (OPEN-DECODE-TAPS)
+
+void Core::set_taps(const std::vector<int>& layers, size_t window) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: set_taps before load_weights");
+    std::vector<int> index(layers.empty() ? 0 : nl_, -1);
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (layers[i] < 0 || layers[i] >= nl_)
+            throw std::runtime_error("open_qwen36: tap layer " + std::to_string(layers[i]) + " is outside the " +
+                                     std::to_string(nl_) + " layers running");
+        if (index[layers[i]] >= 0) throw std::runtime_error("open_qwen36: tap layer " + std::to_string(layers[i]) + " listed twice");
+        index[layers[i]] = static_cast<int>(i);
+    }
+    if (!layers.empty() && window < std::max<size_t>(vw_, 1))
+        throw std::runtime_error("open_qwen36: tap window " + std::to_string(window) + " is shorter than a verify pass");
+    tap_layers_ = layers;
+    tap_index_ = std::move(index);
+    tap_ring_.configure(layers.size(), man_.hidden, window);
+}
+
+void Core::read_residual(float* dst) {
+    xrt::bo& xres = buffer("xres", 0);
+    read_back(xres, man_.hidden * 4, 0);
+    std::memcpy(dst, xres.map<const uint8_t*>(), man_.hidden * 4);
 }
 
 }  // namespace open_qwen36
