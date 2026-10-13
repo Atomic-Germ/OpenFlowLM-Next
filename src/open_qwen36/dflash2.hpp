@@ -43,6 +43,7 @@ struct PassTiming {
     double total_ms = 0, gemv_ms = 0, head_ms = 0, attn_ms = 0, select_ms = 0, host_ms = 0;
     double prep_ms = 0, sync_ms = 0, reduce_ms = 0;   ///< of host_ms: the tables, the y read-back, the sum over K slices
     int dispatches = 0;
+    std::map<std::string, double> op_ms;   ///< dispatch time (start to done) by op
 };
 
 class Drafter {

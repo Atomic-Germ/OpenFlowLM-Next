@@ -655,7 +655,16 @@ int draft_gate(Core& core, const Args& a) {
                                  "host around gemv %.2f (tables %.2f, y read-back %.2f, sum %.2f), selector %.2f, %d dispatches\n",
                          r, dr.cached(), t.total_ms, t.gemv_ms, t.head_ms, t.attn_ms, t.host_ms, t.prep_ms, t.sync_ms,
                          t.reduce_ms, t.select_ms, t.dispatches);
+            std::string ops;
+            for (const auto& [name, ms] : t.op_ms) ops += " " + name + " " + std::to_string(ms).substr(0, 5);
+            std::fprintf(stderr, "  per op (ms):%s\n", ops.c_str());
             (void)d;
+        }
+        for (int r = 0; r < a.draft_bench && n_taps >= dr.cached() + 8; ++r) {
+            const auto ti = std::chrono::steady_clock::now();
+            dr.inject(&taps[static_cast<size_t>(dr.cached()) * tw], 8);
+            std::fprintf(stderr, "bench inject of 8 rows: %.2f ms (fc + K|V for every layer)\n",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ti).count());
         }
     }
     auto med = [](std::vector<double> v) {

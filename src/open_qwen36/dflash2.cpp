@@ -250,6 +250,7 @@ void Drafter::run_gemv(const std::string& op, xrt::bo& w, const float* x, float*
     const auto t4 = std::chrono::steady_clock::now();
     ++timing_.dispatches;
     timing_.gemv_ms += run_ms;
+    timing_.op_ms[op] += run_ms;
     timing_.prep_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
     timing_.sync_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
     timing_.reduce_ms += std::chrono::duration<double, std::milli>(t4 - t3).count();

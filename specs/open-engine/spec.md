@@ -4485,3 +4485,133 @@ manifest.
 - A kernel set without a verify program and `--speculative lookup`: refused, the message naming
   the missing verify program, and no registry written.
 - A kernel set without a verify program and no flag: no `speculative` field.
+
+### OPEN-DRAFT-DFLASH2: the DFlash 2 block drafter runs on the NPU
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2.{hpp,cpp}`, `dflash2_host.{hpp,cpp}`, `cli.cpp`
+`--draft`, `open_kernels/designs/gemv_t2n/`, `open_kernels/recipes/dflash2.py`, `utilities/dflash2_ref.py`)
+**Verification:** manual (the drafts against the reference); the walk and the GEMV tables have their own
+`test` requirements below
+
+The ternary DFlash 2 drafter for Ternary Bonsai 2 (z-lab's design, naklitechie's Bonsai tune, made ternary in
+the 1024-block Hadamard basis by `utilities/dflash2_train.py`) shall run with every matrix on the NPU and the
+rest on the host, borrowing the target's embedding and its rotated t2 lm head (`lmpool`):
+
+- **Injection, once per committed target position p:** the target's residual after its layers
+  `target_layer_ids` (0-based, unrotated), concatenated, through `fc` and `hidden_norm`; then every layer's
+  K = rope(k_norm(Wk g), p) and V = Wv g into the drafter's cache, rounded to f16. Rows older than the
+  sliding window (2048) are dropped.
+- **A draft:** the block [the last committed token, MASK x 7] at positions p0 .. p0 + 7, embedded with the
+  target's embedding; five layers of norm -> conv_proj -> dynamic 2-tap conv (inside the block only) ->
+  q|k|v -> q/k norm, NeoX RoPE (theta 1e7, all 128 dims) -> attention over the cached rows with p0 + t - p <
+  2048 and every block row -> o -> conv -> residual -> norm -> conv_proj -> conv -> gate|up -> silu * up ->
+  down -> conv -> residual; the final norm; the head on the block rows; top-16 per row and the selector
+  lattice; the greedy walk (OPEN-DRAFT-DFLASH2-WALK). The block is always eight rows and a draft of k tokens
+  is the walk's first k.
+- **The matrices** run on `gemv_t2n` (OPEN-GEMV-T2N), one hardware context for the drafter, one instruction
+  stream per shape: fc 5120 x 25600, every layer's K|V for injection at once 10240 x 5120, conv_proj
+  1280 x 5120, q|k|v 6144 x 5120, o 5120 x 4096, gate|up 34816 x 5120, down 5120 x 17408, the head
+  248320 x 5120.
+
+The drafter needs no exactness: a different numeric only moves acceptance. So the gate is agreement with
+the reference, not byte identity.
+
+**Verification (manual):**
+1. Taps: `tf3.exe` (d01's teacher-forcing tool over PrismML llama.cpp, HIP) with the fine-tuned drafter,
+   `DACC_DUMP` on, over the 20 prompts (dacc's `prompts/*.txt`, 512 tokens each): every position's taps and
+   the target's greedy trajectory.
+2. Reference: `python utilities/dflash2_ref.py drafts --run <run> --drafter <ft.gguf> --target <PQ2_0.gguf>
+   --pids <20> --stride 2 --out ref.jsonl` (an 8-row block per step, the walk's 7 tokens and margins).
+3. NPU: `open_qwen36_cli --model <Bonsai container> --kernels <its set> --layers 1 --draft <drafter container>
+   --draft-kernels <dflash2 set> --draft-run <run> --draft-pids <20> --draft-stride 2 --draft-out npu.jsonl`.
+4. `python utilities/dflash2_ref.py compare --run <run> --npu npu.jsonl --ref ref.jsonl --k 3 7`: at k = 3
+   and k = 7, at least 99% of drafts identical in all k tokens once near-ties are excepted (a selector
+   margin under 0.1 at the first differing row, or a top-16 boundary swap), and teacher-forced tokens per
+   pass within 2% of the reference's.
+5. Time one pass (k = 7, the 8-row block): `--draft-bench N`, with nothing else heavy running (CPU under 15% and
+   no other NPU process: another session's NPU context or CPU job moves every number by 2-20x).
+
+**Result 2026-10-12** (fine-tuned t2 drafter `nakli-tft-2a`, steps 0, 4, 8 .. of each prompt's 512-token greedy
+trajectory, llama.cpp taps; 2495 drafts): k = 3 2485 identical in all 3 tokens (99.60%), the other 10 near-ties,
+so 100% excluding them; k = 7 2455 identical (98.40%), 34 near-ties and 6 others (rows 5-7, selector margins
+0.19-2.96 on the reference side), so 99.76% excluding near-ties; teacher-forced tokens per pass NPU 3.1651 against
+the reference's 3.1671 at k = 3 and 4.6709 against 4.6737 at k = 7 (-0.06% both). A drafter pass (8 rows, 31
+dispatches) on a quiet box (CPU 9-16%, no other NPU process, two rounds of 8 passes, steady to 1%): 42.1-42.6 ms:
+matrices 30.3 ms (head 11.3, gate|up 8.5, down 4.7, conv_proj 2.2, q|k|v 2.1, o 1.7), host tables and sums 4.8,
+attention at 27 rows of context 2.1, selector 0.9, norms / convs / SiLU / embedding the remaining ~4. Injecting
+8 committed rows (fc + every layer's K|V) takes 5.9-6.4 ms. The cost model's 15.4 ms (t2 weights 9 ms + head 6.4)
+assumed the DMA floor; the big matrices run at 25-30 GB/s, not 52, because eight tokens take two mmul quads per
+code block (twice the head's compute, `gemv_t2n.cc` is ~424 bundles per 128-K group of a chunk), and the 20 small
+dispatches are bound by the ~0.2 ms dispatch cost.
+
+### OPEN-DRAFT-DFLASH2-WALK: the selector walk picks the draft path
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2_host.cpp` `walk`)
+**Verification:** test
+**Tests:** `src/open_qwen36/dflash2_test.cpp` (`walk_tests`, `top16_tests`)
+
+The lattice of a draft holds, per draft row i, the head's top 16 candidates (descending, the lower id first
+on a tie) and score[i][p][s] = next[cand_s] . (prev[pred_p] * gate_i) + logit[cand_s], where row 0's only
+predecessor is the anchor. The walk shall be common/speculative.cpp's greedy one (beam 1, p_min 0): row 0
+reads predecessor column 0, row i reads the column of the slot row i - 1 chose, the highest score wins and
+the lowest slot on a tie, one token per row.
+
+**Acceptance criteria:**
+- A larger score in another predecessor column of row 0 is not read; row 1 reads column s0, the slot row 0
+  chose, whatever column 0 holds.
+- Two equal best scores in a row: the lower slot wins.
+- The margins along the walk are the winner's score minus the best other slot's in the column read.
+- top16 returns the 16 largest values descending, the lower id first on a tie.
+
+### OPEN-GEMV-T2N: eight rows through a ternary GEMV, on the host's tables
+**Applies to:** openflowlm-next (`open_kernels/designs/gemv_t2n/`, `src/open_qwen36/dflash2_host.cpp`
+`build_records`, `build_tables`, `reduce_y`)
+**Verification:** test (the host tables and the y layout, against a CPU model of the kernel's contract) and
+manual (the kernel on the NPU)
+**Tests:** `src/open_qwen36/dflash2_test.cpp` (`table_tests`)
+
+`gemv_t2n` shall compute Y[8, N] = X[8, K] W[N, K]^T on the t2 pool (OPEN-QUANT-T2's 2176 B chunks in
+std_perm band order) for every shape the drafter has, on one xclbin: eight cores, each with its own weight
+stream (lm_head_t2's dataflow), work split into items of (64-row bands, a K slice of at most 8 k-tiles) by
+`t2n_plan.plan`, which both the design and the manifest use. The host builds, per (k-tile, 128-group, token
+quad), int16 values at one shift for the quad, each token's integer group sum and the shift; the
+mmul<4, 8, 8, int16, uint8>'s four rows are the quad's tokens, field j's product is 4^j sum(x code), and
+(C_j >> 2j) - sum(x) is the product with (code - 1), exact in int32. Items over different K slices of a band
+are partial sums the host adds.
+
+**Acceptance criteria:**
+- Tables built from x [8][K] and fed through the kernel's contract on the CPU, then `reduce_y`, give
+  W x within 1e-4 of each row's magnitude (fp64 reference), rows of different scales included, with K split
+  into slices and bands over items.
+
+**Verification (manual):** `designs/gemv_t2n/make_test.py --n N --k K` (random ternary weights, eight rows at
+scales up to e^+-3 apart), `run_kernel.exe test/run.cfg`, `make_test.py --compare`: cosine above 0.99999 on
+every row against the fp64 product of the table's own values, at every shape the drafter runs.
+
+### OPEN-CONVERT-DFLASH2: q4nx-build converts the ternary DFlash 2 drafter
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/dflash2.py`, `cli.py` `--dflash2-drafter`)
+**Verification:** test
+**Tests:** `utilities/q4nx-build/tests/test_dflash2.py`
+
+`q4nx-build -i <drafter.gguf> --dflash2-drafter --target-gguf <target PQ2_0.gguf> [--drafter-codes <ckpt.pt>]
+-o <dir>` shall write `model.q4nx` and `config.json` (model_type `dflash2`): fc and every layer's q, k, v, o,
+gate, up, down and both conv_proj as exact-ternary q4_1 in the Hadamard basis (q = code, d = s, m = -s, the
+converter's own chunk layout), norms and conv_base as f32, the selector tables as bf16, and the target's
+5120-wide signs folded into the output norm and the selector gate's columns (the borrowed head reads
+H(s * hn), the gate reads hn). The codes come from the trainer's checkpoint when given (checked against the
+GGUF), else from the GGUF's bf16 weights, whose W Hn recovers them; a GGUF that is not ternary in that basis
+is refused. `target_layer_ids` is the tap convention (the output of 0-based layer L), one less than the
+layer numbers llama.cpp's GGUF lists.
+
+**Acceptance criteria:**
+- `pack_q4_1` gives byte for byte what the converter's `_pack_q4nx` gives for the same (d, -d, codes), and
+  decodes by the pool law (`(r >> 4) * 4096 + k * 16 + (r & 15)`, d at g * 32 + r, m = d with the sign bit
+  flipped).
+- bf16(((codes - 1) s) Hn) gives back the codes and the bf16 scales exactly; a dense matrix is refused.
+
+**Result 2026-10-12:** `make_test.py --n 6144 --k 5120` (10 items over 3 K slices): cosine 1.000000000, maxrel
+2.55e-6, the argmax of every row equal; one core program of 4,240 of 16,384 B serves all eight shapes (the eight
+xclbins differ only in build stamps). **Not done, and why:** four cores a column (the weight stream split over
+them in the memtile) would make the kernel DMA-bound instead of compute-bound, but a round's fill
+[group][k-tile][band][4,352 B] is five loops against the shim's four (and its inner run must stay under 1,023
+32-bit words), so it needs either a drafter-specific pack order or a K split across the column's cores with an
+on-chip sum.
+
