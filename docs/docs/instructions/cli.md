@@ -334,6 +334,24 @@ oflm serve llama3.2:1b --prefill-chunk-len 8192
 
 ---
 
+### 🪶 Trade Prefill Speed for Memory
+
+Some models' kernels carry two ways to process a prompt. `--prefill-mode lean` loads the one that uses less memory and processes prompts more slowly; `fast` is the default. On Qwen3.6-35B, `lean` uses about 1.1 GiB less RAM and prefills about 20% slower (116 against 145 tokens/s on a 1024-token prompt). Models with only one way ignore the flag and say so in the log. The mode is picked when the model loads, so changing it means restarting.
+
+For **CLI mode**:
+
+```shell
+oflm run qwen3.6-moe:35b-a3b --prefill-mode lean
+```
+
+For **Server mode**:
+
+```shell
+oflm serve qwen3.6-moe:35b-a3b --prefill-mode lean
+```
+
+---
+
 ### 🎙️ ASR (Automatic Speech Recognition)
 
 **Requirement:** The ASR model (e.g., `whisper-v3:turbo`) must run **with an LLM loaded concurrently**. Enabling `--asr 1` starts Whisper in the background **while** your chosen LLM loads.

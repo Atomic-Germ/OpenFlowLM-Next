@@ -70,3 +70,28 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      # gguf-inspect's tests need the GGUF reader. The in-tree vendored copy
+      # (third_party/Guanaco/llama.cpp) is not a submodule of this repository,
+      # so install the reader from upstream llama.cpp instead. It goes in a
+      # throwaway venv of its own: `pip install llama.cpp` pulls transformers,
+      # tokenizers and protobuf along and will happily downgrade them, and the
+      # project's own ironvenv must keep the exact versions mlir-aie/Peano need.
+      - name: Install the GGUF reader for gguf-inspect
+        run: |
+          python3 -m venv /tmp/gguf-tools
+          /tmp/gguf-tools/bin/pip install --upgrade pip
+          /tmp/gguf-tools/bin/pip install \
+            "git+https://github.com/ggml-org/llama.cpp"
+          /tmp/gguf-tools/bin/python -c \
+            "import gguf; assert gguf.GGUFReader is not None; print('gguf reader ok')"
+
+      # These are pure metadata tests (no NPU, no model download): the pinned
+      # multi-GB snapshots are absent here, so those cases skip, while the
+      # snapshot-free cases still run and cover the dtype allowlist, the
+      # candidate-tag derivation and the provenance split.
+      - name: Test gguf-inspect
+        run: |
+          /tmp/gguf-tools/bin/pip install pytest
+          /tmp/gguf-tools/bin/python -m pytest \
+            utilities/gguf-utils/gguf-inspect/tests/ -v

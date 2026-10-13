@@ -647,6 +647,14 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     # row block -- and the C tiler then rejects the design outright
     # ("tensor does not divide evenly into tile groups in dimension 0").
     tb_n_rows = min(tb_max_n_rows // 2, M // m // n_aie_rows)
+    # Full C-drain groups must divide the row-block count. Phi-4 attention
+    # has M=3*256=768 (three row blocks), so the default two-block group
+    # does not fit even though each individual tile does. Pick the largest
+    # divisor within the requested limit; fills and drains use this same size.
+    if tb_n_rows < 1:
+        raise ValueError("tb_max_n_rows must allow at least one row block per half")
+    while (M // m // n_aie_rows) % tb_n_rows:
+        tb_n_rows -= 1
     # NPUE-M7 (research/notes/0005 section 5b): the C-drain tap repeats over row
     # blocks with stride m*n_aie_rows*N elements, and the DMA stride field is
     # 20 bits ([1:1048576], INCLUSIVE -- measured: N=4096 at exactly 2^20
