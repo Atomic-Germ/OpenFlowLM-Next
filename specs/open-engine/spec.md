@@ -4388,7 +4388,10 @@ layers 6, 20, 34, 48, 62, which is the same tensor). The residual is the engine'
   (layer-major `step_gemm_prompt`, block-major `step_block_moe`) copy the layer's output rows after the
   layer. These come from the bfp16 GEMM route and differ numerically from the decode route's, like its
   logits do. The dense-family block route (`step_gemm_block_layer`) refuses taps.
-- `reset()` and `restore()` empty the ring: after either, the caller re-reads the taps it needs.
+- `reset()` empties the ring. `restore(s)` drops the rows of positions from `s.pos` on and keeps the ones
+  before it, which are the snapshot's only if the history that led here shares the snapshot's prefix:
+  the caller that cannot tell clears them (`clear_taps()`; `Engine::restore` does, when its token
+  history disagrees with the snapshot's, OPEN-DRAFT-DFLASH2-SYNC).
 - **Cost.** Taps off: nothing (a flag test, no kernel change). Taps on: five host waits and copies of
   20 KB per row per step or verify pass (about 2 ms a pass), and one 20 KB-per-row copy per tap layer in a prefill.
 
@@ -4399,6 +4402,7 @@ layers 6, 20, 34, 48, 62, which is the same tensor). The residual is the engine'
   22 holds its own rows and the kept ones; `drop(3)` drops nothing; `drop` after a plain step, or twice,
   changes nothing.
 - A pass begun and never ended holds nothing for its rows and leaves the others; `clear()` empties the ring.
+- `truncate(pos)` drops the rows from `pos` on and keeps the ones before it.
 - A prefill of 20 positions from 5 into a window of 8 writes positions 17..24 and evicts the rows the earlier
   positions held; a prefill shorter than the window keeps the positions before it.
 - No taps (`configure(0, ...)`) is off and holds nothing.
@@ -4456,16 +4460,21 @@ it on and off**, token for token: a wrong draft token only shortens the pass.
 
 - **Opt-in.** Off by default. `open_qwen36_cli --spec` (`--spec-method M`, default `lookup`;
   `--spec-width N`, default the kernel set's verify width, else 4; `--spec-ref` forces the
-  reference verifier; `--spec-log` prints one line per pass). In the app, `OFLM_OPEN_SPEC=1` or
+  reference verifier; `--spec-log` prints one line per pass; `--spec-method dflash2` also takes
+  `--draft <drafter container>` and `--draft-kernels <its kernel set>`, and the run's `spec:` lines then
+  give the tokens-per-pass histogram, the drafter's block pass and cache-row times, and the last block
+  pass's breakdown). In the app, `OFLM_OPEN_SPEC=1` or
   `oflm serve|run --spec` (which sets the variable); `OFLM_OPEN_SPEC_WIDTH` overrides the width
   (>= 2), `OFLM_OPEN_SPEC_REF=1` forces the reference verifier.
 - **Declared per model.** Speculative decode runs only for a model whose registry entry declares
   a method (`"speculative": {"method": "lookup"}`, written by `oflm add`,
   OPEN-REGISTRY-SPECULATIVE) that this build knows and whose kernel set can serve it: `lookup`
-  needs the verify program. `spec::spec_availability(entry, manifest)` decides, and gives one of
-  three answers: available; unavailable, with the reason (the entry declares no method, no open
-  kernel set was found, the set has no verify program); or an error for a method this build does
-  not know, naming the ones it does. Without the flag or the variable the field is not read.
+  needs the verify program; `dflash2` needs it too, plus the drafter container the entry's `draft`
+  names, with its own kernel set. `spec::spec_availability(entry, manifest, resolve)` decides, and
+  gives one of three answers: available; unavailable, with the reason (the entry declares no method,
+  no open kernel set was found, the set has no verify program, the drafter is not installed or was
+  trained for another target); or an error for a method this build does not know, or a `dflash2`
+  with no `draft`, naming what is wrong. Without the flag or the variable the field is not read.
   - `oflm run|serve <model> --spec` checks the model it names before the NPU is touched (the
     registry entry and the kernel manifest; no weights) and refuses to start unless it is
     available: `[ERROR] --spec: speculative decode is not available for <tag>: <reason>`, exit 1.
@@ -4486,11 +4495,15 @@ it on and off**, token for token: a wrong draft token only shortens the pass.
   argmax, to the app.)
 - **The drafter** sits behind `spec::Drafter`: `propose` up to k tokens to follow the token the
   pass will feed, given every token the engine has fed, and `observe` the tokens a pass kept;
-  `make_drafter(method)` builds the declared one. Method `lookup`, the only one so far, is
+  `make_drafter(method)` builds the declared one. Method `lookup` is
   prompt lookup over every token the engine has fed (prompt and output): the longest suffix of
   length 4 down to 2 that occurred earlier, its most recent earlier occurrence, and the tokens
   that followed it, cut at the end of the history. No suffix of length >= 2 recurs: no draft,
-  and the pass is a plain step. There is no draft model and no MTP head.
+  and the pass is a plain step. Method `dflash2` (OPEN-DRAFT-DFLASH2, `dflash2::Proposer`) turns
+  the target's own taps into drafts: it turns the taps on (OPEN-DECODE-TAPS) when the engine loads,
+  brings its cache to the history before every draft (OPEN-DRAFT-DFLASH2-SYNC) and proposes
+  `verify_width() - 1` tokens; it is built by the engine, not by `make_drafter`, because it needs the
+  core. No hook is needed for a new request, a rewind or a restore: the next `propose` repairs the cache.
 - **Nothing is fed that plain decode would not have fed.** A pass ends after EOS and at the
   request's remaining length (and the context limit), so the engine's context after a request
   equals plain decode's; tokens a pass produced are handed out before a cancel is honoured.
@@ -4521,11 +4534,11 @@ per-position attention rows):
 - A native verify costs one step per position run.
 - `spec_availability`: `{"speculative": {"method": "lookup"}}` with a manifest whose verify
   width is 2 -> available, method `lookup`; no `speculative` field, or `null` -> unavailable,
-  "the registry entry declares no speculative method"; `{"method": "dflash2"}` -> error
-  "unknown speculative method "dflash2" (this build knows: lookup)"; a `speculative` without a
+  "the registry entry declares no speculative method"; `{"method": "mtp"}` -> error
+  "unknown speculative method "mtp" (this build knows: lookup, dflash2)"; a `speculative` without a
   `method` -> error naming `lookup`; `lookup` with a manifest without a verify program ->
   unavailable, "the kernel set has no verify program, which method "lookup" needs"; no kernel
-  set -> unavailable.
+  set -> unavailable. The `dflash2` cases are OPEN-REGISTRY-SPECULATIVE's.
 - `make_drafter("lookup")` proposes `[7,8,9]` from fed `[5,6,7,8,9,5]` and next `6`;
   `make_drafter` of a method this build lacks builds nothing.
 
@@ -4554,26 +4567,30 @@ per-position attention rows):
    at load, a greedy request answers, and no `speculative decode: T tokens` line follows. (d)
    `open_qwen36_cli --spec-method mtp` exits 2 naming `lookup`; `--spec` against a kernel set
    without a verify program exits 2 naming the missing verify program.
+5. **Method `dflash2`.** Install the drafter: `oflm add <Bonsai container> --tag <tag> --speculative
+   dflash2 --draft-model <drafter container>` (the container from `q4nx-build --dflash2-drafter`, its kernel
+   set built by `export_qwen36_kernels.py`; OPEN-REGISTRY-SPECULATIVE). (a) CLI gate with `--spec
+   --spec-method dflash2 --draft <drafter container> --draft-kernels <its set> --spec-width N`, N = 2, 3, 4,
+   the six cases of gate 1: tokens identical to the run without `--spec`. The `spec:` lines give the
+   tokens-per-pass histogram, the drafter's block pass and cache-row times. (b) Serve gate 2 through the
+   entry above, with `--spec`: content identical to the plain run; a `temperature 0.7` request does not
+   speculate; `oflm serve <undeclared tag> --spec` is refused as in 4(b), and so is the drafter with its
+   kernel set missing. (c) Speed as gate 3, per class, against `--spec-method lookup` and no speculation, at
+   widths 2 to 4, with the CPU sampled around every run and busy rounds dropped.
 
-**Result 2026-10-08 (the same container, `open_kernels_v6`).** Both gates PASS: identical tokens on
-all six CLI cases (`short` and `prompt512` also equal their reference lists), identical content on
-all four serve prompts through the variable and two through `--spec`, and a `temperature 0.7`
-request does not speculate. Speed, three rounds under the timing lock, all CLEAN, 256 generated
-tokens, median decode tok/s off -> on:
-
-- CLI: code 5.85 -> 9.19 (1.57x), doc 5.91 -> 7.03 (1.19x), reasoning 6.41 -> 6.96 (1.09x),
-  chat 6.34 -> 6.46 (1.02x).
-- `oflm serve`: code 5.81 -> 8.74 (1.50x), doc 5.85 -> 6.54 (1.12x), reasoning 6.36 -> 6.66
-  (1.05x), chat 6.34 -> 6.55 (1.03x).
-
-Chat sits near breakeven: its drafts are accepted about one time in three, and a rejected draft
-costs the pass's extra ~32 ms, and an accepted one saves a step less that, ~125 ms. History:
+**Results** (CLI, 256 tokens, 3 clean rounds, decode tok/s, spec off -> on; the tokens are identical on all six
+CLI cases and the serve prompts, and a `temperature 0.7` request does not speculate). Lookup at width 2 on
+`open_kernels_v6` (2026-10-08): code 5.85 -> 9.19 (1.57x), doc 1.19x, reasoning 1.09x, chat 1.02x. Method
+`dflash2` at width 4 on `open_kernels_w4h` (2026-10-13): chat 6.06 -> 9.43 (1.56x), code 5.59 -> 9.76
+(1.75x), doc 5.61 -> 9.01 (1.61x), reasoning 6.06 -> 9.74 (1.61x); `oflm serve` 1.26x / 1.43x / 1.46x / 1.53x
+on its own prompts. Prompt lookup at width 4 beats it on code (12.84 tok/s, 2.30x). The per-width,
+per-pass and serve tables and the history are in `plans/archive/bonsai2-dflash2.md` and
 `plans/archive/bonsai2-speculative.md`.
 
 ### OPEN-REGISTRY-SPECULATIVE: `oflm add` declares a model's speculative method from its kernel set
-**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `speculative_field`, `choose_open_kernels`, `--speculative`)
-**Verification:** test
-**Tests:** `utilities/oflm-add/tests/test_speculative.py`
+**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `speculative_field`, `choose_open_kernels`, `install_draft`, `--speculative`, `--draft-model`; `src/open_qwen36/spec.hpp` `resolve_draft`, `spec_availability`)
+**Verification:** test (`oflm add`'s entry and install, the engine's availability rule)
+**Tests:** `utilities/oflm-add/tests/test_speculative.py`, `src/open_qwen36/spec_test.cpp`
 
 Speculative decode (OPEN-DECODE-SPECULATIVE) has two declarations with two owners. The kernel
 manifest says what the kernels can do: its `verify` block (OPEN-DECODE-SPECULATIVE-VERIFY), and
@@ -4590,9 +4607,25 @@ drafter the model uses:
 written only when the kernel set has what it needs (`lookup`: a verify program); otherwise the
 command is refused, naming what is missing, before the registry is written. Re-adding a model
 rewrites its entry, this field included. Later methods -- an MTP head inside the container
-(`{"method": "mtp"}`), a draft checkpoint trained for the target (`{"method": "dflash2", "draft":
-"<tag>"}`), a separate draft model -- are further values here, each with what it needs from the
-manifest.
+(`{"method": "mtp"}`), a separate draft model -- are further values here, each with what it needs
+from the manifest.
+
+**Method `dflash2`** (OPEN-DRAFT-DFLASH2) is written as `{"method": "dflash2", "draft": "<name>"}`, where
+`<name>` is the directory of the drafter container under the models root (a directory path also
+resolves). `oflm add <model> --speculative dflash2 --draft-model <drafter container dir>` (or
+`--draft-model` alone) shall, before it writes the registry: require the target's kernel set to have a
+verify program; require the drafter to be a drafter container (`config.json` with `model_type` `dflash2`,
+`model.q4nx`) trained for this target (the same `hidden_size` and `vocab_size`, tap layers that exist in
+its `num_hidden_layers`); find the drafter's own open kernel set by its `spec_hash`, like any model's
+(kernels belong to families), and refuse with the `export_qwen36_kernels.py` command when none is
+installed. Then it copies the drafter container beside the model, links the set at
+`<drafter dir>/open_kernels`, and writes the entry. The engine resolves `draft` the same way
+(`spec::resolve_draft`: a directory, else a name beside the model; the kernel set is
+`<drafter dir>/open_kernels`, or `OFLM_OPEN_DRAFT_KERNELS_DIR`), and `spec_availability` answers
+available only when the entry names a `draft`, the container and its dflash2 kernel set are there, the
+kernel set has a verify program, and the drafter's hidden size, vocabulary and tap layers fit the
+target; otherwise unavailable with the reason, so `oflm serve --spec` refuses before loading weights.
+No second registry: the drafter has no model entry of its own.
 
 **Acceptance criteria:**
 - A kernel set with a verify program and no flag: the entry has `"speculative": {"method": "lookup"}`.
@@ -4600,10 +4633,25 @@ manifest.
 - A kernel set without a verify program and `--speculative lookup`: refused, the message naming
   the missing verify program, and no registry written.
 - A kernel set without a verify program and no flag: no `speculative` field.
+- `--speculative dflash2 --draft-model D` (and `--draft-model D` alone): the entry has `{"method":
+  "dflash2", "draft": "<D's name>"}`, D's `config.json` and `model.q4nx` are beside the model, and
+  `<D>/open_kernels` resolves to the drafter's kernel set.
+- Refused, no registry written: dflash2 on a kernel set without a verify program; a drafter whose hidden
+  size differs from the target's; a drafter that taps layer 99 of a 64-layer target; a drafter with no
+  installed kernel set (the message carries the build command); `--speculative dflash2` without
+  `--draft-model`; `--draft-model` with `--speculative lookup`; a drafter whose `model_type` is not `dflash2`.
+- `spec_availability` (`spec_test.cpp`): dflash2 with a verify program, a named drafter that is installed with
+  a dflash2 kernel set and a matching hidden size / vocabulary / tap layers -> available, with the resolved
+  directories; no `draft` -> error naming it; a drafter that is not installed -> unavailable, "is not
+  installed"; no verify program, another hidden size, a tap layer past the target's last layer, or a caller
+  with no way to look for a drafter -> unavailable. `resolve_draft` resolves a name beside the models, a
+  directory path, and refuses a container of another model type, a kernel set of another family, and a
+  missing directory, each with its reason.
 
 ### OPEN-DRAFT-DFLASH2: the DFlash 2 block drafter runs on the NPU
-**Applies to:** openflowlm-next (`src/open_qwen36/dflash2.{hpp,cpp}`, `dflash2_host.{hpp,cpp}`, `cli.cpp`
-`--draft`, `open_kernels/designs/gemv_t2n/`, `open_kernels/recipes/dflash2.py`, `utilities/dflash2_ref.py`)
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2.{hpp,cpp}` (`Drafter`, and `Proposer`, its `spec::Drafter`),
+`dflash2_host.{hpp,cpp}`, `engine.cpp`, `cli.cpp` `--draft` / `--spec-method dflash2`,
+`open_kernels/designs/gemv_t2n/`, `open_kernels/recipes/dflash2.py`, `utilities/dflash2_ref.py`)
 **Verification:** manual (the drafts against the reference); the walk and the GEMV tables have their own
 `test` requirements below
 
@@ -4627,6 +4675,14 @@ rest on the host, borrowing the target's embedding and its rotated t2 lm head (`
   1280 x 5120, q|k|v 6144 x 5120, o 5120 x 4096, gate|up 34816 x 5120, down 5120 x 17408, the head
   248320 x 5120.
 
+- **In the engine** (method `dflash2` of OPEN-DECODE-SPECULATIVE) the drafter is a second hardware context on the
+  target's device, built when the weights are resident, which also turns the target's taps on
+  (OPEN-DECODE-TAPS; the drafter's `target_layer_ids`, a ring of its window). Each pass the engine hands it the
+  history and the token to feed; `Proposer::propose` brings the cache to that history (OPEN-DRAFT-DFLASH2-SYNC)
+  and returns `verify_width() - 1` tokens from the 8-row block, cut at the first id the tokenizer does not
+  have. A token it cannot embed (outside the real vocabulary) is no anchor: no draft, a plain step. The verify
+  pass decides every token, so the output is the target's, whatever the drafter says.
+
 The drafter needs no exactness: a different numeric only moves acceptance. So the gate is agreement with
 the reference, not byte identity.
 
@@ -4644,19 +4700,16 @@ the reference, not byte identity.
    pass within 2% of the reference's.
 5. Time one pass (k = 7, the 8-row block): `--draft-bench N`, with nothing else heavy running (CPU under 15% and
    no other NPU process: another session's NPU context or CPU job moves every number by 2-20x).
+6. In the engine: OPEN-DECODE-SPECULATIVE's verification item 5 (tokens identical to spec off at widths 2-4, the
+   speed per class). `--draft-run` (with `--draft-pids`) selects the gate above; `--draft <dir>` with `--spec
+   --spec-method dflash2` drafts for a real decode.
 
-**Result 2026-10-12** (fine-tuned t2 drafter `nakli-tft-2a`, steps 0, 4, 8 .. of each prompt's 512-token greedy
-trajectory, llama.cpp taps; 2495 drafts): k = 3 2485 identical in all 3 tokens (99.60%), the other 10 near-ties,
-so 100% excluding them; k = 7 2455 identical (98.40%), 34 near-ties and 6 others (rows 5-7, selector margins
-0.19-2.96 on the reference side), so 99.76% excluding near-ties; teacher-forced tokens per pass NPU 3.1651 against
-the reference's 3.1671 at k = 3 and 4.6709 against 4.6737 at k = 7 (-0.06% both). A drafter pass (8 rows, 31
-dispatches) on a quiet box (CPU 9-16%, no other NPU process, two rounds of 8 passes, steady to 1%): 42.1-42.6 ms:
-matrices 30.3 ms (head 11.3, gate|up 8.5, down 4.7, conv_proj 2.2, q|k|v 2.1, o 1.7), host tables and sums 4.8,
-attention at 27 rows of context 2.1, selector 0.9, norms / convs / SiLU / embedding the remaining ~4. Injecting
-8 committed rows (fc + every layer's K|V) takes 5.9-6.4 ms. The cost model's 15.4 ms (t2 weights 9 ms + head 6.4)
-assumed the DMA floor; the big matrices run at 25-30 GB/s, not 52, because eight tokens take two mmul quads per
-code block (twice the head's compute, `gemv_t2n.cc` is ~424 bundles per 128-K group of a chunk), and the 20 small
-dispatches are bound by the ~0.2 ms dispatch cost.
+**Result 2026-10-12/13.** Against the reference (fine-tuned t2 drafter, llama.cpp taps): k = 3 99.60% of 2495
+drafts identical (100% excluding near-ties), k = 7 98.40% (99.76%), tokens per pass within 0.06%; the shipped
+FT-3 weights 373/373 on three prompts. A drafter pass is 42 ms on a quiet box (matrices 30.3 of it, the 248k head
+11.3) plus 6 ms to put 8 committed rows into the cache. In the engine: 47 ms and 7 ms at a short context, 69 ms
+and 7 ms at a full window (host attention), the prompt's rows going in once at ~0.85 ms a row. Per-pass
+breakdown, the DMA-floor analysis and the end-to-end tables: `plans/archive/bonsai2-dflash2.md`.
 
 ### OPEN-DRAFT-DFLASH2-WALK: the selector walk picks the draft path
 **Applies to:** openflowlm-next (`src/open_qwen36/dflash2_host.cpp` `walk`)
@@ -4675,6 +4728,28 @@ the lowest slot on a tie, one token per row.
 - Two equal best scores in a row: the lower slot wins.
 - The margins along the walk are the winner's score minus the best other slot's in the column read.
 - top16 returns the 16 largest values descending, the lower id first on a tie.
+
+### OPEN-DRAFT-DFLASH2-SYNC: the drafter's cache follows the engine's history
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2_host.hpp` `plan_sync`, `dflash2.cpp` `Proposer`, `core.cpp` and `engine.cpp` `restore`)
+**Verification:** test (`plan_sync`) + manual (the end-to-end gates of OPEN-DECODE-SPECULATIVE, item 5)
+**Tests:** `src/open_qwen36/dflash2_test.cpp` (`sync_tests`)
+
+Before every draft whose anchor token sits at position P = (tokens fed), the drafter's cache shall hold, for
+the positions [max(0, P - 2048), P) of the history, the taps the target wrote at each, and nothing else.
+`plan_sync(cached, base, fed, window, has_taps)` decides from the token ids the cache holds: keep the longest
+prefix that still equals `fed`; take the taps of the positions after it from the target (`Core::tap_row`),
+at most a window's worth; a position whose taps the target has lost (a prompt longer than its tap ring, an
+image prompt, a rewind past the ring) restarts the cache after it; with no taps for the last position and
+nothing cached there is no draft and the pass is a plain step. So nothing has to tell the drafter about a
+new request, a prompt cache `restore`, a sampled stretch it did not draft in, or a rejected draft: the next
+`propose` repairs the cache from the history. Rows go in by 64, eight to a cache dispatch pair.
+
+**Acceptance criteria (`dflash2_test.cpp`):** an empty cache takes every position; a cache that is the
+history takes only the new rows; one that is up to date takes none; a different token at 60 rewinds it
+to 60; a request that rewound below the cache drops the rest; a 5000-token history injects the last 2048
+only, restarting a cache that ended before the window and extending one inside it; a position the target
+lost restarts the cache after it, unless the cache already covers it; no taps for the last position with
+nothing cached, or an empty history, gives no draft; a cache that begins late is extended from its end.
 
 ### OPEN-GEMV-T2N: eight rows through a ternary GEMV, on the host's tables
 **Applies to:** openflowlm-next (`open_kernels/designs/gemv_t2n/`, `src/open_qwen36/dflash2_host.cpp`
