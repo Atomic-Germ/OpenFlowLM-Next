@@ -467,10 +467,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         log(std::string("prefill schedule: ") +
             (layer_major_ok() ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
                                                     : "layer-major (the whole prompt through each layer)") +
-                                    (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
+                                    (stage_major_active() ? ", stage-major inside it (the next block's GEMM overlaps the host)"
                                                      : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
                               : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
                                                             : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
+}
+
+// gemm_phase tiles x plainly and reads y [N, T]; a rotated or token-major route (OPEN-HADAMARD, OPEN-GEMM-T2) needs gemm_run's transforms
+bool Core::stage_major_active() const {
+    if (!stage_major_on_ || !layer_major_ok() || w_->hadamard_block) return false;
+    for (int l = 0; l < nl_; ++l) {
+        const GemmBlockProgram& gb = types_[l]->gemm_block;
+        if (gb.y_tn || gb.x_bfp || gb.x_tile_k != 64) return false;
+    }
+    return true;
 }
 
 bool Core::layer_major_ok() const {
@@ -760,7 +770,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         }
     }
     // a "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU uses the other
-    if (stage_major_on_ && layer_major_ok())
+    if (stage_major_active())
         for (int l = 0; l < nl_; ++l) {
             const GemmBlockProgram& gb = types_[l]->gemm_block;
             for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
@@ -3005,7 +3015,7 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     timing_.part1_ms += ms_since(tsetup);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
-        if (stage_major_on_) {
+        if (stage_major_active()) {
             if (kind == "linear") layer_linear_staged(l, xres.data(), B, T, N);
             else layer_full_staged(l, xres.data(), B, T, N, pos0);
             block_layer_moe(l, TOT, N, xres.data());
