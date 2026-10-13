@@ -480,6 +480,8 @@ bool Core::host_attn_fits() const {
         const LayerType& lt = *types_[l];
         const GemmBlockProgram& gb = lt.gemm_block;
         if (gb.kind != "dense" || gb.attn_block.present() || gb.sandwich || gb.act != "silu") return false;
+        const size_t hd = w_->hf_config_check.contains("head_dim") ? w_->hf_config_check.at("head_dim").get<size_t>() : 0;
+        if (hd == 0 || hd % 8 || w_->rotary_dim != hd) return false;
         const auto k = w_->kernels.find(gb.attn_kernel);
         if (k == w_->kernels.end() || k->second.window != 0) return false;
         for (const PackOp& op : lt.consts)
@@ -491,11 +493,13 @@ bool Core::host_attn_fits() const {
 
 bool Core::layer_major_ok() const {
     if (!layer_major_on_ || !gemm_block_t_) return false;
+    bool moe = nl_ > 0, dense = nl_ > 0;
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
-        if (kind != "linear" && kind != "full") return false;
+        moe = moe && (kind == "linear" || kind == "full");
+        dense = dense && kind == "dense";
     }
-    return nl_ > 0;
+    return moe || (dense && host_attn_on_ && stage_major_on_ && !host_attn_decode_on_);
 }
 
 Core::~Core() {
@@ -2984,7 +2988,11 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
 // slot, so the result is bit-for-bit the block-major one.
 void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     apply_thread_budget();
-    if (!layer_major_ok()) throw std::runtime_error("open_qwen36: step_gemm_prompt on a kernel set without a MoE block route");
+    if (!layer_major_ok()) throw std::runtime_error("open_qwen36: step_gemm_prompt on a kernel set without a layer-major block route");
+    if (types_[0]->gemm_block.kind == "dense") {
+        step_gemm_prompt_dense(ids, want_logits);
+        return;
+    }
     if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
@@ -3026,6 +3034,333 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
             block_logits_.push_back(logits_host_);
         }
     if (want_logits) tail_logits(xres.data() + (N - 1) * hid);
+    timing_.total_ms = ms_since(t0);
+}
+
+// OPEN-PREFILL-HOST-ATTN: the dense kind layer-major, each GEMM step over every block so the NPU runs b + 1 while the host works b
+namespace {
+float dot_f32(const float* a, const float* b, size_t n) {
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    size_t j = 0;
+    for (; j + 16 <= n; j += 16) {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j + 8), _mm256_loadu_ps(b + j + 8), a1);
+    }
+    for (; j + 8 <= n; j += 8) a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j), a0);
+    a0 = _mm256_add_ps(a0, a1);
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    return _mm_cvtss_f32(s);
+}
+
+// s[r] = (q . K[r]) * scale for r in [0, n), four keys to a pass so the horizontal sums amortise; returns the max
+float scores_f32(const float* K, size_t stride, const float* q, size_t hd, size_t n, float scale, float* s) {
+    float mx = -1e30f;
+    size_t r = 0;
+    for (; r + 4 <= n; r += 4) {
+        const float* k0 = K + r * stride;
+        __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+        for (size_t j = 0; j < hd; j += 8) {
+            const __m256 qj = _mm256_loadu_ps(q + j);
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + j), qj, a0);
+            a1 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + stride + j), qj, a1);
+            a2 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + 2 * stride + j), qj, a2);
+            a3 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + 3 * stride + j), qj, a3);
+        }
+        const __m256 h = _mm256_hadd_ps(_mm256_hadd_ps(a0, a1), _mm256_hadd_ps(a2, a3));
+        const __m128 d = _mm_add_ps(_mm256_castps256_ps128(h), _mm256_extractf128_ps(h, 1));
+        const __m128 v = _mm_mul_ps(d, _mm_set1_ps(scale));
+        _mm_storeu_ps(s + r, v);
+        for (size_t i = 0; i < 4; ++i) mx = std::max(mx, s[r + i]);
+    }
+    for (; r < n; ++r) {
+        s[r] = dot_f32(K + r * stride, q, hd) * scale;
+        mx = std::max(mx, s[r]);
+    }
+    return mx;
+}
+
+// s[i] = exp(s[i] - mx) in place, Cephes' single-precision polynomial (rel. error ~1e-7); returns the sum in fp64
+double exp_sum_f32(float* s, size_t n, float mx) {
+    const __m256 vmx = _mm256_set1_ps(mx), log2e = _mm256_set1_ps(1.44269504088896341f);
+    const __m256 c1 = _mm256_set1_ps(0.693359375f), c2 = _mm256_set1_ps(-2.12194440e-4f), lo = _mm256_set1_ps(-87.3f);
+    const __m256 p0 = _mm256_set1_ps(1.9875691500E-4f), p1 = _mm256_set1_ps(1.3981999507E-3f),
+                 p2 = _mm256_set1_ps(8.3334519073E-3f), p3 = _mm256_set1_ps(4.1665795894E-2f),
+                 p4 = _mm256_set1_ps(1.6666665459E-1f), p5 = _mm256_set1_ps(5.0000001201E-1f), one = _mm256_set1_ps(1.f);
+    double total = 0;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x = _mm256_max_ps(_mm256_sub_ps(_mm256_loadu_ps(s + i), vmx), lo);
+        const __m256 fx = _mm256_round_ps(_mm256_mul_ps(x, log2e), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        x = _mm256_sub_ps(_mm256_sub_ps(x, _mm256_mul_ps(fx, c1)), _mm256_mul_ps(fx, c2));
+        __m256 y = _mm256_fmadd_ps(p0, x, p1);
+        y = _mm256_fmadd_ps(y, x, p2);
+        y = _mm256_fmadd_ps(y, x, p3);
+        y = _mm256_fmadd_ps(y, x, p4);
+        y = _mm256_fmadd_ps(y, x, p5);
+        y = _mm256_fmadd_ps(_mm256_mul_ps(y, x), x, _mm256_add_ps(x, one));
+        const __m256i e = _mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(fx), _mm256_set1_epi32(127)), 23);
+        y = _mm256_mul_ps(y, _mm256_castsi256_ps(e));
+        _mm256_storeu_ps(s + i, y);
+        alignas(32) float t[8];
+        _mm256_store_ps(t, y);
+        for (int k = 0; k < 8; ++k) total += t[k];
+    }
+    for (; i < n; ++i) {
+        s[i] = std::exp(s[i] - mx);
+        total += s[i];
+    }
+    return total;
+}
+
+void axpy_f32(float* out, float a, const float* v, size_t n) {
+    const __m256 va = _mm256_set1_ps(a);
+    for (size_t j = 0; j < n; j += 8)
+        _mm256_storeu_ps(out + j, _mm256_fmadd_ps(va, _mm256_loadu_ps(v + j), _mm256_loadu_ps(out + j)));
+}
+
+void rmsnorm_rows_d(const double* x, size_t T, size_t hid, const uint16_t* w, double eps, size_t groups, float* out) {
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        const double* row = x + static_cast<size_t>(t) * hid;
+        float* orow = out + static_cast<size_t>(t) * hid;
+        const size_t gw = hid / groups;
+        for (size_t gi = 0; gi < groups; ++gi) {
+            const double* grp = row + gi * gw;
+            double ss = 0;
+            for (size_t k = 0; k < gw; ++k) ss += grp[k] * grp[k];
+            const double rms = std::sqrt(ss / static_cast<double>(gw) + eps);
+            for (size_t k = 0; k < gw; ++k)
+                orow[gi * gw + k] = static_cast<float>((grp[k] / rms) * static_cast<double>(bf16_to_f32(w[gi * gw + k])));
+        }
+    }
+}
+}  // namespace
+
+void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t T, size_t N, size_t pos0) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const size_t hid = w_->hidden, qw = gb.qw, kvw = gb.kvw, ff = gb.ff, nq3 = qw + 2 * kvw, TOT = B * T;
+    const size_t hd = w_->hf_config_check.at("head_dim").get<size_t>();
+    const size_t nh = qw / hd, kvh = kvw / hd, grp = nh / kvh, half = w_->rotary_dim / 2;
+    if (qw != nh * hd || kvw != kvh * hd || nh % kvh || half * 2 != hd || hd % 8 || hd > 256 ||
+        half != w_->rope_inv_freq.size())
+        throw std::runtime_error("open_qwen36: host attention: this model's attention geometry is not the full-rotary "
+                                 "no-qknorm dense shape this path implements");
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    const double* inv_freq = w_->rope_inv_freq.data();
+    float* og_all = BlockScratch::fit(ds_.og, TOT * qw);
+    float* xm_all = BlockScratch::fit(ds_.xm, TOT * hid);
+    float* g_all = BlockScratch::fit(ds_.gate, TOT * ff);
+    double* res1 = BlockScratch::fit(ds_.res1, TOT * hid);
+    const size_t rows = pos0 + TOT;                    // padding tokens write no cache row, the map may still hold them
+    float* Kf = BlockScratch::fit(ds_.K, rows * kvw);
+    float* Vf = BlockScratch::fit(ds_.V, rows * kvw);
+    float* Qr = BlockScratch::fit(ds_.q, T * qw);
+
+    xrt::bo& st = state_[l];
+    const size_t row = lt.state_row, row_elems = row / 2;
+    uint16_t* kv = st.map<uint16_t*>();
+    auto ts = std::chrono::steady_clock::now();
+    if (pos0 > 0) read_back(st, pos0 * row, 0);
+    timing_.state_ms += ms_since(ts);
+    if (pos0 > 0) {
+#pragma omp parallel for
+        for (long long r = 0; r < static_cast<long long>(pos0); ++r)
+            for (size_t j = 0; j < kvw; ++j) {
+                Kf[static_cast<size_t>(r) * kvw + j] = bf16_to_f32(kv[static_cast<size_t>(r) * row_elems + j]);
+                Vf[static_cast<size_t>(r) * kvw + j] = bf16_to_f32(kv[static_cast<size_t>(r) * row_elems + kvw + j]);
+            }
+    }
+    const double mid0 = timing_.mid_ms;
+
+    gemm_phase(l, gb.program[0], B, T, hid, nq3,
+               [&](size_t b) -> const float* {
+                   auto tn = std::chrono::steady_clock::now();
+                   float* xn = BlockScratch::fit(bs_.xn, T * hid);
+                   rmsnorm_rows_d(xres.data() + b * T * hid, T, hid, ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xn);
+                   timing_.part1_ms += ms_since(tn);
+                   timing_.prenorm_ms += ms_since(tn);
+                   return xn;
+               },
+               [&](size_t b, const float* y) {
+                   float* q = BlockScratch::fit(bs_.part[0], T * qw);
+                   float* k = BlockScratch::fit(bs_.part[1], T * kvw);
+                   float* v = BlockScratch::fit(bs_.part[2], T * kvw);
+                   auto tt = std::chrono::steady_clock::now();
+                   const host::TransposePart parts[3] = {{q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}};
+                   host::transpose_parts(y, T, parts, 3);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   const size_t t_real = std::min(T, N - b * T), p0 = pos0 + b * T;
+                   auto t0 = std::chrono::steady_clock::now();
+                   // one cos/sin table per token for every head; k and v go through their bf16 cache row
+#pragma omp parallel for
+                   for (long long tt2 = 0; tt2 < static_cast<long long>(t_real); ++tt2) {
+                       const size_t t = static_cast<size_t>(tt2), p = p0 + t;
+                       float cs[128], sn[128];
+                       for (size_t i = 0; i < half; ++i) {
+                           const double a = static_cast<double>(p) * inv_freq[i];
+                           cs[i] = static_cast<float>(std::cos(a));
+                           sn[i] = static_cast<float>(std::sin(a));
+                       }
+                       for (size_t h = 0; h < nh; ++h) {
+                           const float* src = q + t * qw + h * hd;
+                           float* dst = Qr + t * qw + h * hd;
+                           for (size_t i = 0; i < half; ++i) {
+                               dst[i] = src[i] * cs[i] - src[i + half] * sn[i];
+                               dst[i + half] = src[i + half] * cs[i] + src[i] * sn[i];
+                           }
+                       }
+                       uint16_t* kr = kv + p * row_elems;
+                       for (size_t h = 0; h < kvh; ++h) {
+                           const float* src = k + t * kvw + h * hd;
+                           for (size_t i = 0; i < half; ++i) {
+                               const uint16_t lo = f32_to_bf16(src[i] * cs[i] - src[i + half] * sn[i]);
+                               const uint16_t hi = f32_to_bf16(src[i + half] * cs[i] + src[i] * sn[i]);
+                               kr[h * hd + i] = lo;
+                               kr[h * hd + i + half] = hi;
+                               Kf[p * kvw + h * hd + i] = bf16_to_f32(lo);
+                               Kf[p * kvw + h * hd + i + half] = bf16_to_f32(hi);
+                           }
+                       }
+                       for (size_t j = 0; j < kvw; ++j) {
+                           const uint16_t vb = f32_to_bf16(v[t * kvw + j]);
+                           kr[kvw + j] = vb;
+                           Vf[p * kvw + j] = bf16_to_f32(vb);
+                       }
+                   }
+                   float* og = og_all + b * T * qw;
+                   std::memset(og + t_real * qw, 0, (T - t_real) * qw * 4);
+                   // causal softmax(q . K / sqrt(hd)) V per (head, token): fp32 dots, fp64 denominator
+                   const long long pairs = static_cast<long long>(nh * t_real);
+#pragma omp parallel
+                   {
+                       std::vector<float> s(p0 + t_real);
+                       float acc[256];
+#pragma omp for schedule(dynamic, 8)
+                       for (long long pr = 0; pr < pairs; ++pr) {
+                           const size_t h = static_cast<size_t>(pr) / t_real, t = static_cast<size_t>(pr) % t_real, p = p0 + t;
+                           const float* qv = Qr + t * qw + h * hd;
+                           const size_t off = (h / grp) * hd;
+                           const float mx = scores_f32(Kf + off, kvw, qv, hd, p + 1, scale, s.data());
+                           const double denom = exp_sum_f32(s.data(), p + 1, mx);
+                           const float inv = static_cast<float>(1.0 / denom);
+                           std::fill(acc, acc + hd, 0.f);
+                           for (size_t r = 0; r <= p; ++r) axpy_f32(acc, s[r] * inv, Vf + r * kvw + off, hd);
+                           std::memcpy(og + t * qw + h * hd, acc, hd * 4);
+                       }
+                   }
+                   timing_.part1_ms += ms_since(t0);
+                   timing_.mid_ms += ms_since(t0);
+               });
+    ts = std::chrono::steady_clock::now();
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, N * row, pos0 * row);
+    timing_.state_ms += ms_since(ts);
+    timing_.attn_ms += timing_.mid_ms - mid0;
+
+    gemm_phase(l, gb.program[1], B, T, qw, hid,
+               [&](size_t b) -> const float* { return og_all + b * T * qw; },
+               [&](size_t b, const float* y) {
+                   auto tt = std::chrono::steady_clock::now();
+                   float* yo = BlockScratch::fit(bs_.d_o, T * hid);
+                   host::transpose(y, hid, T, yo);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   auto t1 = std::chrono::steady_clock::now();
+                   const double* xr = xres.data() + b * T * hid;
+                   double* r1 = res1 + b * T * hid;
+#pragma omp parallel for
+                   for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
+                       r1[i] = xr[i] + static_cast<double>(yo[i]);
+                   rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
+                   timing_.part1_ms += ms_since(t1);
+                   timing_.tail_ms += ms_since(t1);
+               });
+    gemm_phase(l, gb.program[2], B, T, hid, ff,
+               [&](size_t b) -> const float* { return xm_all + b * T * hid; },
+               [&](size_t b, const float* y) {
+                   auto tt = std::chrono::steady_clock::now();
+                   host::transpose(y, ff, T, g_all + b * T * ff);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+               });
+    gemm_phase(l, gb.program[3], B, T, hid, ff,
+               [&](size_t b) -> const float* { return xm_all + b * T * hid; },
+               [&](size_t b, const float* y) {
+                   auto tt = std::chrono::steady_clock::now();
+                   float* yu = BlockScratch::fit(bs_.d_up, T * ff);
+                   host::transpose(y, ff, T, yu);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   auto t1 = std::chrono::steady_clock::now();
+                   float* h = g_all + b * T * ff;
+#pragma omp parallel for
+                   for (long long i = 0; i < static_cast<long long>(T * ff); ++i) {
+                       const double g = static_cast<double>(h[i]), u = static_cast<double>(yu[i]);
+                       h[i] = static_cast<float>((g / (1.0 + std::exp(-g))) * u);
+                   }
+                   timing_.part1_ms += ms_since(t1);
+                   timing_.tail_ms += ms_since(t1);
+               });
+    gemm_phase(l, gb.program[4], B, T, ff, hid,
+               [&](size_t b) -> const float* { return g_all + b * T * ff; },
+               [&](size_t b, const float* y) {
+                   auto tt = std::chrono::steady_clock::now();
+                   float* yd = BlockScratch::fit(bs_.d_down, T * hid);
+                   host::transpose(y, hid, T, yd);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   auto t1 = std::chrono::steady_clock::now();
+                   double* xo = xres.data() + b * T * hid;
+                   const double* r1 = res1 + b * T * hid;
+#pragma omp parallel for
+                   for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
+                       xo[i] = r1[i] + static_cast<double>(yd[i]);
+                   timing_.part1_ms += ms_since(t1);
+                   timing_.tail_ms += ms_since(t1);
+               });
+}
+
+void Core::step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits) {
+    apply_thread_budget();
+    if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+    const size_t T = gemm_block_t_, hid = w_->hidden;
+    const size_t N = ids.size(), B = (N + T - 1) / T, TOT = B * T;
+    if (static_cast<size_t>(pos_) + N > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: prompt of " + std::to_string(N) + " at position " + std::to_string(pos_) +
+                                 " is past the context capacity of " + std::to_string(cfg_.max_ctx));
+    for (int tok : ids)
+        if (tok < 0 || static_cast<size_t>(tok) >= w_->vocab) throw std::runtime_error("open_qwen36: token id out of range");
+    const size_t pos0 = static_cast<size_t>(pos_);
+    auto tsetup = std::chrono::steady_clock::now();
+    std::vector<double> xres(TOT * hid);
+    {
+        std::vector<float> row(hid);
+        for (size_t t = 0; t < TOT; ++t) {
+            embedding_row(static_cast<size_t>(ids[std::min(t, N - 1)]), row.data());
+            for (size_t c = 0; c < hid; ++c) xres[t * hid + c] = static_cast<double>(row[c]);
+        }
+    }
+    timing_.setup_ms += ms_since(tsetup);
+    timing_.part1_ms += ms_since(tsetup);
+    for (int l = 0; l < nl_; ++l) layer_dense_staged(l, xres, B, T, N, pos0);
+    pos_ += static_cast<int>(N);
+    block_logits_.clear();
+    std::vector<float> row(hid);
+    if (block_logits_all_)
+        for (size_t t = 0; t < N; ++t) {
+            for (size_t c = 0; c < hid; ++c) row[c] = static_cast<float>(xres[t * hid + c]);
+            tail_logits(row.data());
+            block_logits_.push_back(logits_host_);
+        }
+    if (want_logits) {
+        for (size_t c = 0; c < hid; ++c) row[c] = static_cast<float>(xres[(N - 1) * hid + c]);
+        tail_logits(row.data());
+    }
     timing_.total_ms = ms_since(t0);
 }
 

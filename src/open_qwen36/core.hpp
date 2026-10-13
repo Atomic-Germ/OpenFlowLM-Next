@@ -455,6 +455,12 @@ private:
         std::vector<float> xn, og, h, q, gate;
     };
     StageScratch ss_;
+    /// The dense kind's layer-major rows: residual after attention, normed rows, silu(gate) * up, host K / V windows.
+    struct DenseScratch {
+        std::vector<float> og, xm, gate, K, V, q;
+        std::vector<double> res1;
+    };
+    DenseScratch ds_;
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
@@ -644,6 +650,9 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
     void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);
+    /// The dense kind over the whole prompt (OPEN-PREFILL-HOST-ATTN): host attention, each GEMM step over every block.
+    void step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits);
+    void layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t T, size_t N, size_t pos0);
     /// Block b's residual, post-norm and router after the out / o GEMM, into moe_ at row b * T.
     void staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres);
     /// ffn_block's two GEMMs as two phases over the layer's rows; a dense FFN writes the output into xres.
