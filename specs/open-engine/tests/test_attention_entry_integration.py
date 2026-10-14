@@ -22,7 +22,7 @@ def test_attention_entry_stream_and_scratch_preserve_fp32():
     assert r.attn.XN_F32 and r.attn.XN_ELEMS == 5
     assert l.AA_QG-l.AA_XN == 5120*4
     assert l.AA_BYTES == 274432
-    assert l.A_QKV-l.A_XN == 3*4096  # linear attention entry stays BF16
+    assert l.A_QKV-l.A_XN == 5*4096  # linear entry also preserves FP32
     assert r.ffn.XN_ELEMS == 3
 
 

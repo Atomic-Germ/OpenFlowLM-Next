@@ -399,7 +399,7 @@ This checker uses retained `--capture-boundaries` snapshots. It carries its own
 FP64 `[head, key, value]` state from zero across every recorded position, taking
 Q/K/V, decay and beta from the captured DeltaNet records. Captured previous
 states never feed the reference. It checks both updated state and recurrent
-output, all padded state rows, and the bit-exact BF16 conv-history shift from
+output, all padded state rows, and the bit-exact manifest-declared BF16/FP32 conv-history shift from
 captured QKV projections. Every declared linear layer and position is required,
 with at least two positions, exact buffer sizes, finite values, compatible
 manifest/build identity and a complete zero-state input. JSON records hashes
@@ -437,7 +437,7 @@ preparation arithmetic. Glue retains normalized maximum error <1e-4 and cosine
 are included unchanged. All declared linear layers/positions are required,
 with finite, exactly sized captures, a zero-state input and verified export
 identity. JSON pins incoming residuals, activation/state buffers, and effective
-FP64 weights. Runtime arithmetic and kernels are unchanged.
+FP64 weights. These checkers do not modify runtime arithmetic or kernels.
 
 Three CPU rounding experiments round entry norm, conv history, or both to BF16.
 Their predicted states/outputs are compared both to captures and to the primary
@@ -448,7 +448,8 @@ override a failed composed-state comparison.
 
 ### Isolated FP32 linear-entry replay
 
-`utilities/linear-entry-replay/` compares the production BF16 entry with a
+The historical experiment at checkout `46c845a` uses
+`utilities/linear-entry-replay/` to compare BF16 entry with a
 private full-lx FP32 norm → QKV/Z/alpha/beta candidate. It reuses the independent
 DeltaNet preparation/composed-state checker above, forcing retained incoming
 residuals while carrying conv/recurrent history across positions. The BF16
@@ -470,7 +471,7 @@ full-depth propagation or promote the candidate into production.
 
 ### Isolated FP32 conv-history replay
 
-`utilities/conv-history-replay/` keeps FP32 entry in both variants and compares
+At checkout `46c845a`, `utilities/conv-history-replay/` keeps FP32 entry in both variants and compares
 BF16 versus FP32 conv history. The candidate processes each conv tile in two
 512-channel halves, retaining the existing FIFO depths and weights. Its state
 buffer grows by 61440 bytes; its recurrent-state offset grows by the same amount.
@@ -486,3 +487,26 @@ primary reference and all numerical bounds are unchanged. Replaying the control
 must reproduce the previous FP32-entry captures and oracle rows before candidate
 results can be accepted; full-depth propagation and head diagnostics remain
 separate validation requirements.
+
+
+### Production FP32 DeltaNet entry and history
+
+The validated wide dense geometry (hidden 5120, 16 key heads, 48 value heads,
+head dimension 128, four conv taps, split norm/down) now preserves FP32 entry
+norm through QKV/Z/alpha/beta preparation and stores conv history in FP32.
+Other geometries retain their existing storage. The manifest explicitly declares
+`linear_entry_dtype` and `linear_conv_dtype`; the shared checkers select storage
+from these fields while keeping the unrounded FP64 primary reference.
+
+Linear activation scratch is 393216 bytes. State is 3317760 bytes, with
+recurrent state beginning at byte 122880. Native host prefill follows the same
+history dtype, including short-block carry, and rejects inconsistent manifest
+offsets and sizes. Rebuild the full kernel export and regenerate decode fixtures
+for this ABI; model weights and pool packing do not change. The historical
+isolated replay builders reject the integrated recipe.
+
+See the [production integration skill](../../.opencode/skill/open-qwen38-fp32-linear-integration/SKILL.md)
+for build, resource audits and full-depth checks. Host scalar/vector arithmetic
+uses explicit multiply-then-add compiler semantics so legacy and FP32 tests
+remain comparable. Host unit tests do not establish full model block-prefill
+parity; resident runtime/reset and serving acceptance require separate checks.

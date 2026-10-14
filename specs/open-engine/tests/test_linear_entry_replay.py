@@ -12,10 +12,40 @@ from recipes.load import load_spec
 sys.path.remove(str(ROOT/'utilities/linear-entry-replay'))
 
 
+@pytest.fixture
+def retained_linear_recipe(monkeypatch):
+    from dataclasses import replace
+    import linear_common as mod
+    original=mod.recipe
+    def retained(s):
+        r=original(s)
+        if r.linear.XN_F32:
+            r=replace(r,linear=replace(r.linear,XN_F32=False,CONV_F32=False,XN_SIDE_ELEMS=3),
+                      layout=replace(r.layout,A_BYTES=385024,STATE_S_OFF=61440,STATE_BYTES=3256320))
+        return r
+    monkeypatch.setattr(mod,'recipe',retained)
+
+
+@pytest.fixture
+def retained_linear_source():
+    # Only historical anchors are needed; never reinterpret integrated production.
+    return '\n'.join(['HERE = Path(__file__).parent', 'OG_ELEMS = D.OG_ELEMS',
+        'XL.ln_worker(of_lni, of_lno, tl, L)',
+        'X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, QKV_PC + Z_PC, "linear")',
+        'lno.drain(a_act, tap=bt(A_BYTES, A_XN, ELN), wait=True, group=tg_ln)',
+        'K = X.kernels(inc, t)',
+        '        pipe = Pipeline(3)', '        for tt in range(NT):', '            pass',
+        '        pipe.finish()                                    # the records are in DDR'])
+
+
+def test_integrated_recipe_is_refused_by_historical_replay():
+    with pytest.raises(ValueError):geometry(spec(),'fp32')
+
+
 def spec():return load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json')
 
 
-def test_fp32_entry_appends_scratch_and_streams_five_ab_blocks():
+def test_fp32_entry_appends_scratch_and_streams_five_ab_blocks(retained_linear_recipe):
     g=geometry(spec(),'fp32');b=geometry(spec(),'bf16')
     assert g['act_bytes']==b['act_bytes']+20480
     assert g['norm_offset']==b['act_bytes'] and g['norm_bytes']==20480
@@ -24,9 +54,9 @@ def test_fp32_entry_appends_scratch_and_streams_five_ab_blocks():
     assert g['state_bytes']==b['state_bytes']
 
 
-def test_render_switches_all_entry_consumers_without_touching_production():
+def test_render_switches_all_entry_consumers_without_touching_production(retained_linear_recipe,retained_linear_source):
     p=ROOT/'open_kernels/designs/layer_x/lx.py';before=p.read_bytes()
-    s=render_design(spec())
+    s=render_design(spec(),source=retained_linear_source)
     assert 'entry_fp32=True' in s and '"linear", fp32=True)' in s
     assert 'A_XN = A_BYTES' in s and 'A_XN, HID * 4)' in s
     assert 'install_glue(XL)' in s and 'AB_TILES = XL.AB_TILES' in s
@@ -34,7 +64,7 @@ def test_render_switches_all_entry_consumers_without_touching_production():
     assert source_hash(spec(),'fp32')!=source_hash(spec(),'bf16')
 
 
-def test_changed_anchor_is_refused():
+def test_changed_anchor_is_refused(retained_linear_recipe):
     with pytest.raises(ValueError,match='anchor'):render_design(spec(),source='new upstream')
 
 
@@ -50,8 +80,8 @@ def test_private_translation_units_follow_recipe_and_reject_stale_files(tmp_path
     with pytest.raises(ValueError,match='generated'):verify_generated(tmp_path,spec())
 
 
-def test_design_uses_private_kernel_entries():
-    s=render_design(spec())
+def test_design_uses_private_kernel_entries(retained_linear_recipe,retained_linear_source):
+    s=render_design(spec(),source=retained_linear_source)
     assert 'private_kernels(X, inc, t, Path(__file__).parent / "generated")' in s
 
 

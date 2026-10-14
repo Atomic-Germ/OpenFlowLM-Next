@@ -19,7 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from decode_bundle import load_bundle
 from decode_reference import load_reference, sfx
-from deltanet_state import conv_values, finite, read_boundaries, step_reference, compare_sequence, metric as recurrence_metric
+from deltanet_state import linear_dtypes, conv_values, finite, read_boundaries, step_reference, compare_sequence, metric as recurrence_metric
 from ffn_front import metric, MAXREL
 from q4nx import Q4NX, bf16_to_f32, f32_to_bf16
 from recipes.load import spec_from_model_dir
@@ -147,11 +147,15 @@ def score_sequence(spec, weights, inputs, captures, *, conv_dtype='bf16'):
     return rows
 
 
-def read_entry(data, offsets, hidden):
+def read_entry(data, offsets, hidden, *, norm_dtype="bfloat16"):
+    if norm_dtype not in ("bfloat16", "float32"):
+        raise ValueError("unsupported linear entry dtype")
+    size = 4 if norm_dtype == "float32" else 2
     off = offsets.A_XN
-    if hidden <= 0 or len(data) != offsets.A_BYTES or off < 0 or off % 2 or off+hidden*2 > len(data):
+    if hidden <= 0 or len(data) != offsets.A_BYTES or off < 0 or off % size or off+hidden*size > len(data):
         raise ValueError('invalid linear entry buffer/region')
-    return finite(bf16_to_f32(np.frombuffer(data,'<u2',count=hidden,offset=off)))
+    a = np.frombuffer(data, '<f4' if size == 4 else '<u2', count=hidden, offset=off)
+    return finite(a if size == 4 else bf16_to_f32(a))
 
 
 def load_weights(model, spec, layer):
@@ -177,7 +181,7 @@ def load_weights(model, spec, layer):
 def check(model_dir, kernel_dir, out):
     spec = spec_from_model_dir(model_dir)
     if spec.family != 'qwen35' or not norm_split(spec):
-        raise ValueError('requires qwen35 split norm with retained BF16 linear entry')
+        raise ValueError('requires qwen35 split norm with retained linear entry')
     meta = load_reference(out)
     selected = load_bundle(kernel_dir,manifest(spec,max_ctx=meta['max_ctx']))
     if any(meta[k] != selected[k] for k in ('build_key','spec_hash')):
@@ -187,6 +191,7 @@ def check(model_dir, kernel_dir, out):
     layers = [l for l in range(meta['layers']) if spec.layer_types[l] == LINEAR]
     if not layers:
         raise ValueError('fixture has no linear layers')
+    norm_dtype, conv_dtype = linear_dtypes(selected)
     offsets = layout(spec,max_ctx=meta['max_ctx'])
     model = Q4NX(model_dir/'model.q4nx')
     results, hashes, weight_hashes = [], {}, {}
@@ -210,10 +215,10 @@ def check(model_dir, kernel_dir, out):
                 raise ValueError('wrong residual capture size')
             inputs.append(finite(np.frombuffer(data,'<f4')))
             act = read(f'y_act{layer}{suffix}.bin')
-            c = read_boundaries(act,read(f'y_state{layer}{suffix}.bin'),spec,offsets)
-            c['xn'] = read_entry(act,offsets,spec.hidden)
+            c = read_boundaries(act,read(f'y_state{layer}{suffix}.bin'),spec,offsets,conv_dtype=conv_dtype)
+            c['xn'] = read_entry(act,offsets,spec.hidden,norm_dtype=norm_dtype)
             captures.append(c)
-        results.extend(dict(layer=layer,**r) for r in score_sequence(spec,weights,inputs,captures))
+        results.extend(dict(layer=layer,**r) for r in score_sequence(spec,weights,inputs,captures,conv_dtype=conv_dtype))
         weight_hashes.update(digests)
         del weights
     return dict(version=1, passed=all(r['passed'] for r in results), scope=__doc__.strip(),

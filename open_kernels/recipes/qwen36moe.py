@@ -351,12 +351,22 @@ class Linear:
     AB_LANES: int = 32
     AB_ROWS: int = 64
     GLUE_HALF_OUTER: bool = False
+    XN_F32: bool = False
+    CONV_F32: bool = False
 
 
 def paired_attention(spec: ModelSpec) -> bool:
     """The validated wide dense Qwen attention geometry uses paired KV and FP32 OG."""
     return (spec.family == "qwen35" and spec.hidden == 5120 and
             (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (24, 4, 256, 64))
+
+
+def linear_fp32(spec: ModelSpec) -> bool:
+    """Validated wide dense DeltaNet entry and conv-history storage."""
+    return (spec.family == "qwen35" and spec.hidden == 5120 and
+            (spec.lin_key_heads, spec.lin_value_heads, spec.lin_key_dim,
+             spec.lin_value_dim, spec.conv_kernel) == (16, 48, 128, 128, 4) and
+            norm_split(spec) and bool(down_split(spec)))
 
 
 def attention_entry_fp32(spec: ModelSpec) -> bool:
@@ -840,7 +850,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
                   GLUE_SIDE_BYTES=glue_side, SIDE_ALPHA=side.off["alpha"], SIDE_BETA=side.off["beta"],
                   SIDE_SMALL=side.off["small"], SIDE_CONV=side.off["conv"])
         a = _Alloc()
-        a.add("xn", F.XN_ELEMS * ELEM)
+        a.add("xn", roundup(hid * (4 if linear_fp32(spec) else 2), ELEM))
         a.add("qkv", nch * 4)
         a.add("z", vw * 4)
         a.add("vec", spec.lin_value_heads * DN_RECORD_FLOATS * 4)
@@ -858,7 +868,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
                   A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_OUT2B=a.off.get("out2b", 0),
                   A_BYTES=roundup(a.n, ELEM))
         s_head = C.DN_PAD * C.DN_DIM * 4
-        s_off = (spec.conv_kernel - 1) * nch * 2
+        s_off = (spec.conv_kernel - 1) * nch * (4 if linear_fp32(spec) else 2)
         kv.update(S_ROWS=C.DN_PAD, S_HEAD_BYTES=s_head, STATE_S_OFF=s_off,
                   STATE_BYTES=s_off + spec.lin_value_heads * s_head)
     else:
@@ -961,9 +971,10 @@ def linear(spec: ModelSpec) -> Linear | None:
     tile = 1024                                     # dn_glue's channel tile
     key_width = spec.lin_key_heads * spec.lin_key_dim
     lanes = ab_lanes(spec)
-    xn_elems = roundup(spec.hidden * 2, ELEM) // ELEM
+    fp32 = linear_fp32(spec)
+    xn_elems = roundup(spec.hidden * (4 if fp32 else 2), ELEM) // ELEM
     return Linear(
-        AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes),
+        AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes), XN_F32=fp32, CONV_F32=fp32,
         GLUE_HALF_OUTER=glue_fills(xn_elems, False) > LIMITS["shim_fills"],
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=spec.hidden // BAND_ROWS // n,
         QKV_DIM=nch, VW=vw,
@@ -973,7 +984,7 @@ def linear(spec: ModelSpec) -> Linear | None:
         RECORD_BYTES=DN_RECORD_FLOATS * 4, O_HEAD_BYTES=spec.lin_value_dim * 4,
         OUT_K=vw, QKV_K=spec.hidden,
         OG_ELEMS=roundup(vw * 2, ELEM) // ELEM,
-        XN_SIDE_ELEMS=roundup(spec.hidden * 2, ELEM) // ELEM,
+        XN_SIDE_ELEMS=xn_elems,
     )
 
 
@@ -1323,6 +1334,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
             **({"out_split": True} if split else {}),
             "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,
+            **({"conv_dtype": "float32"} if linear_fp32(spec) else {}),
             **m2, **(ffn_of(LINEAR) if dense else {}),
         }
     if spec.has_full:

@@ -167,7 +167,9 @@ void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
 
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
                     const float* Wa, const float* Wb, const float* A, const float* dtb, const float* nw,
-                    uint16_t* conv_state, float* S, float* og, double* phase_ms) {
+                    void* history, float* S, float* og, double* phase_ms) {
+    auto* conv_state = static_cast<uint16_t*>(history);
+    auto* conv_fp32 = static_cast<float*>(history);
     const auto tp0 = std::chrono::steady_clock::now();
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     if (g.value_heads % g.key_heads || g.t_real > g.T || g.s_rows < dim || g.lanes < g.value_heads)
@@ -183,7 +185,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     const size_t pre = g.taps - 1;
     std::vector<float> carry(pre * nch);
     for (size_t r = 0; r < pre; ++r)
-        for (size_t j = 0; j < nch; ++j) carry[r * nch + j] = bf16_to_f32(conv_state[r * nch + j]);
+        for (size_t j = 0; j < nch; ++j) carry[r * nch + j] = g.conv_f32 ? conv_fp32[r * nch + j] : bf16_to_f32(conv_state[r * nch + j]);
     std::vector<float> Q(R * key_w), Kk(R * key_w), V(R * vw), decay(R * g.value_heads), beta(R * g.value_heads);
 #pragma omp parallel
     {
@@ -211,8 +213,8 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
                     size_t j = 0;
                     for (; j + 8 <= nch; j += 8)
                         _mm256_storeu_ps(c.data() + j, _mm256_add_ps(_mm256_loadu_ps(c.data() + j),
-                                                                     _mm256_mul_ps(_mm256_loadu_ps(cw + j), bf16r8(v + j))));
-                    for (; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
+                                                                     _mm256_mul_ps(_mm256_loadu_ps(cw + j), (g.conv_f32 ? _mm256_loadu_ps(v + j) : bf16r8(v + j)))));
+                    for (; j < nch; ++j) c[j] += cw[j] * (g.conv_f32 ? v[j] : bf16r(v[j]));
                 }
             }
             for (size_t j = 0; j < nch; ++j) c[j] = silu(c[j]);
@@ -266,10 +268,16 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     for (size_t r = 0; r < pre; ++r) {
         const long long s = static_cast<long long>(R) - static_cast<long long>(pre) + static_cast<long long>(r);
         if (s < 0) {
-            std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
+            if (g.conv_f32)
+                std::copy(conv_fp32 + (R + r) * nch, conv_fp32 + (R + r + 1) * nch, conv_fp32 + r * nch);
+            else
+                std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
         } else {
             const float* row = qkv + static_cast<size_t>(s) * nch;
-            for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(row[j]);
+            for (size_t j = 0; j < nch; ++j) {
+                if (g.conv_f32) conv_fp32[r * nch + j] = row[j];
+                else conv_state[r * nch + j] = f32_to_bf16(row[j]);
+            }
         }
     }
 

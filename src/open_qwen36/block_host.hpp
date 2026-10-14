@@ -37,6 +37,7 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
 
 struct DeltaGeom {
+    bool conv_f32 = false; ///< FP32 history; legacy BF16 is the default
     size_t T = 0, t_real = 0, hid = 0;
     size_t key_heads = 0, value_heads = 0, head_dim = 0, taps = 0;
     size_t lanes = 0;       ///< columns of the packed alpha / beta projection (the value heads, padded)
@@ -47,13 +48,13 @@ struct DeltaGeom {
 /// The linear-attention layer's middle over a block. qkv [T, 2*key_w + vw] and z [T, vw]
 /// are the fused projection's outputs (pre-activation), xn [T, hid] the normed layer
 /// input; convw [taps, nch], Wa / Wb [hid, lanes], A / dtb [value_heads], nw [head_dim].
-/// conv_state [taps-1, nch] (bf16) and S [value_heads, s_rows, head_dim] (f32) are the
+/// conv_state [taps-1, nch] (FP32 when conv_f32, otherwise BF16) and S [value_heads, s_rows, head_dim] (f32) are the
 /// layer's state, updated in place through the first t_real tokens. og [T, vw] out
 /// (zero past t_real). phase_ms, if given, gets the two halves' wall time: the
 /// per-token one then the delta rule.
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
                     const float* Wa, const float* Wb, const float* A, const float* dtb, const float* nw,
-                    uint16_t* conv_state, float* S, float* og, double* phase_ms = nullptr);
+                    void* conv_state, float* S, float* og, double* phase_ms = nullptr);
 
 struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;

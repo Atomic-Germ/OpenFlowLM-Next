@@ -106,4 +106,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build isolated FP32 conv history with half-tile streams and validate causal state against a byte-exact BF16-history control.</description>
     <location>.opencode/skill/open-qwen38-fp32-conv-history/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-fp32-linear-integration</name>
+    <description>Build and validate production FP32 DeltaNet entry/history, its state ABI and host carry, and full-depth decode with independent boundary gates.</description>
+    <location>.opencode/skill/open-qwen38-fp32-linear-integration/SKILL.md</location>
+  </skill>
 </available_skills>

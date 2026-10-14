@@ -6,6 +6,7 @@ import pytest
 import deltanet_state as state
 import deltanet_inputs as inputs
 from recipes.load import load_spec
+from test_linear_entry_replay import retained_linear_recipe,retained_linear_source
 
 ROOT=Path(__file__).resolve().parents[3]
 
@@ -49,7 +50,7 @@ def test_fp32_history_shared_preparation_oracle():
     assert all(r['composed_state']['maxrel']==0 for r in rows)
 
 
-def test_private_history_geometry_and_design(monkeypatch):
+def test_private_history_geometry_and_design(monkeypatch,retained_linear_recipe,retained_linear_source):
     monkeypatch.syspath_prepend(str(ROOT/'utilities/conv-history-replay'))
     from history_common import geometry,render_design
     s=load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json')
@@ -57,7 +58,7 @@ def test_private_history_geometry_and_design(monkeypatch):
     assert a['act_bytes']==b['act_bytes']==405504
     assert a['state_bytes']==b['state_bytes']+61440==3317760
     assert a['state_offset']==122880 and a['conv_dtype']=='fp32'
-    code=render_design(s)
+    code=render_design(s,source=retained_linear_source)
     assert 'install_history(XL)' in code and 'history_sequence(' in code
     assert 'STATE_S_OFF *= 2' in code
     with pytest.raises(ValueError):render_design(s,source='changed upstream')
