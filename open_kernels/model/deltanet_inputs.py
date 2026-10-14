@@ -19,7 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from decode_bundle import load_bundle
 from decode_reference import load_reference, sfx
-from deltanet_state import finite, read_boundaries, step_reference, compare_sequence, metric as recurrence_metric
+from deltanet_state import conv_values, finite, read_boundaries, step_reference, compare_sequence, metric as recurrence_metric
 from ffn_front import metric, MAXREL
 from q4nx import Q4NX, bf16_to_f32, f32_to_bf16
 from recipes.load import spec_from_model_dir
@@ -93,13 +93,13 @@ def record_metrics(got, ref, strict=False):
     return result
 
 
-def score_sequence(spec, weights, inputs, captures):
+def score_sequence(spec, weights, inputs, captures, *, conv_dtype='bf16'):
     validate_weights(spec, weights)
     if len(inputs) < 2 or len(inputs) != len(captures):
         raise ValueError('incomplete multi-token position coverage')
     # This also validates full capture shapes, records, finite values, padding,
     # conv storage and the independent recurrence conditioned on captured records.
-    recurrence = compare_sequence(captures)
+    recurrence = compare_sequence(captures, conv_dtype=conv_dtype)
     history = np.zeros((spec.conv_kernel-1,spec.lin_qkv_dim),np.float64)
     observed_history = history.copy()
     state = np.zeros((spec.lin_value_heads,128,128),np.float64)
@@ -115,7 +115,7 @@ def score_sequence(spec, weights, inputs, captures):
         rec, history = records_reference(spec,exact,qkv,history,weights)
         state, output = step_reference(state,rec)
         local, _ = records_reference(spec,xn,c['qkv'],observed_history,weights)
-        observed_history = bf16_to_f32(c['conv']).astype(np.float64)
+        observed_history = conv_values(c['conv'], conv_dtype)
         fields = record_metrics(c['records'],rec)
         local_fields = record_metrics(c['records'],local,strict=True)
         primary = dict(norm=metric(xn,exact), qkv=metric(c['qkv'],qkv),

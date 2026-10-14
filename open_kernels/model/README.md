@@ -467,3 +467,22 @@ Only one layer's weight pool is needed at a time. Numerical failures retain
 complete JSON and return exit status 1; diagnostic rounding never replaces the
 unrounded primary reference. This experiment does not establish corrected
 full-depth propagation or promote the candidate into production.
+
+### Isolated FP32 conv-history replay
+
+`utilities/conv-history-replay/` keeps FP32 entry in both variants and compares
+BF16 versus FP32 conv history. The candidate processes each conv tile in two
+512-channel halves, retaining the existing FIFO depths and weights. Its state
+buffer grows by 61440 bytes; its recurrent-state offset grows by the same amount.
+The production export is unchanged. See the
+[conv-history skill](../../.opencode/skill/open-qwen38-fp32-conv-history/SKILL.md)
+for build, resource audit, causal replay and comparison commands.
+
+Shared `read_boundaries`, `compare_sequence` and `score_sequence` APIs accept
+an explicit `conv_dtype='fp32'` for this private ABI. Their default remains BF16;
+misdeclared dtype, malformed buffers and non-finite history fail. Both storage
+formats require bit-exact history shifts, including signed zero. The unrounded
+primary reference and all numerical bounds are unchanged. Replaying the control
+must reproduce the previous FP32-entry captures and oracle rows before candidate
+results can be accepted; full-depth propagation and head diagnostics remain
+separate validation requirements.

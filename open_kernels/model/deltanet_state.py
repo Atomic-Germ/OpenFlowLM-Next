@@ -73,15 +73,28 @@ def step_reference(state, records):
     return finite(updated), finite(output)
 
 
-def read_boundaries(act, state, spec, offsets):
+def conv_storage(conv_dtype):
+    if conv_dtype not in ('bf16', 'fp32'):
+        raise ValueError('unsupported conv history dtype')
+    return np.dtype('<u2' if conv_dtype == 'bf16' else '<f4')
+
+
+def conv_values(values, conv_dtype):
+    if values.dtype != conv_storage(conv_dtype):
+        raise ValueError('conv history dtype mismatch')
+    return finite(bf16_to_f32(values) if conv_dtype == 'bf16' else values)
+
+
+def read_boundaries(act, state, spec, offsets, *, conv_dtype='bf16'):
     """Read complete production buffers; retain raw BF16 conv bits for equality."""
+    storage = conv_storage(conv_dtype)
     heads, channels = spec.lin_value_heads, spec.lin_qkv_dim
     taps = spec.conv_kernel-1
     if (spec.lin_key_dim != DIM or spec.lin_value_dim != DIM or heads <= 0 or
             spec.lin_key_heads <= 0 or heads % spec.lin_key_heads or
             channels != (2*spec.lin_key_heads+heads)*DIM or taps <= 0 or
             offsets.S_ROWS < DIM or offsets.S_HEAD_BYTES != offsets.S_ROWS*DIM*4 or
-            offsets.STATE_S_OFF != taps*channels*2 or
+            offsets.STATE_S_OFF != taps*channels*storage.itemsize or
             offsets.STATE_BYTES != offsets.STATE_S_OFF+heads*offsets.S_HEAD_BYTES):
         raise ValueError('unsupported DeltaNet geometry/state layout')
     if len(act) != offsets.A_BYTES or len(state) != offsets.STATE_BYTES:
@@ -98,17 +111,18 @@ def read_boundaries(act, state, spec, offsets):
     return dict(records=region(act, offsets.A_VEC, heads*RECORD_FLOATS, '<f4').reshape(heads, RECORD_FLOATS),
                 output=region(act, offsets.A_O, heads*DIM, '<f4').reshape(heads, DIM),
                 qkv=region(act, offsets.A_QKV, channels, '<f4'),
-                conv=region(state, 0, taps*channels, '<u2').reshape(taps, channels),
+                conv=region(state, 0, taps*channels, storage.str).reshape(taps, channels),
                 state=region(state, offsets.STATE_S_OFF, heads*offsets.S_ROWS*DIM, '<f4')
                 .reshape(heads, offsets.S_ROWS, DIM))
 
 
-def compare_sequence(captures):
+def compare_sequence(captures, *, conv_dtype='bf16'):
+    storage = conv_storage(conv_dtype)
     if len(captures) < 2:
         raise ValueError('multi-token DeltaNet validation requires at least two positions')
     heads = captures[0]['records'].shape[0]
     reference = np.zeros((heads, DIM, DIM), np.float64)
-    conv = np.zeros_like(captures[0]['conv'], dtype=np.uint16)
+    conv = np.zeros_like(captures[0]['conv'], dtype=storage)
     results = []
     for token, capture in enumerate(captures):
         got = finite(capture['state']); output = finite(capture['output'])
@@ -116,16 +130,17 @@ def compare_sequence(captures):
         if (got.ndim != 3 or got.shape[0] != heads or got.shape[1] < DIM or got.shape[2] != DIM or
                 output.shape != (heads, DIM) or conv.ndim != 2 or not all(conv.shape) or
                 qkv.shape != (conv.shape[1],) or capture['conv'].shape != conv.shape or
-                capture['conv'].dtype != np.uint16):
+                capture['conv'].dtype != storage):
             raise ValueError('inconsistent DeltaNet sequence shapes/dtypes')
-        finite(bf16_to_f32(capture['conv']))
+        conv_values(capture['conv'], conv_dtype)
         reference, expected_output = step_reference(reference, capture['records'])
-        conv = np.vstack([conv[1:], f32_to_bf16(qkv.astype(np.float32))])
-        finite(bf16_to_f32(conv))
+        new = qkv.astype(np.float32)
+        conv = np.vstack([conv[1:], f32_to_bf16(new) if conv_dtype == 'bf16' else new])
+        conv_values(conv, conv_dtype)
         state_score = metric(got[:, :DIM], reference)
         output_score = metric(output, expected_output)
         padding_ok = bool(np.all(got[:, DIM:] == 0))
-        conv_ok = bool(np.array_equal(capture['conv'], conv))
+        conv_ok = bool(capture['conv'].tobytes() == conv.tobytes())
         head_rows = [dict(head=h, state=metric(got[h, :DIM], reference[h]),
                           output=metric(output[h], expected_output[h])) for h in range(heads)]
         results.append(dict(token=token, passed=state_score['passed'] and output_score['passed'] and padding_ok and conv_ok,
