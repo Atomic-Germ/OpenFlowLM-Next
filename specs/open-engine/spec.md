@@ -4129,6 +4129,58 @@ of 5; the route line reads `(lean)` or `(fast)`, and the turns of 169-953 tokens
 route. The set is 13 MB on disk, against 11 MB with one route. Details:
 `specs/open-engine/plans/archive/prefill-mode.md`.
 
+### OPEN-PREFILL-BFP16: the dense block prefill on bfp16 operands, opt in
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_bfp16/`, `open_kernels/recipes/{dense,pack,manifest}.py`, `src/open_qwen36/{bfp16.hpp,pools,manifest,block_host,core}.cpp`)
+**Verification:** manual (needs the NPU and the Granite-4.2-3B-NPU2 container); the packers, the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_bfp16.py`, `pools_test.cpp`, `block_host_test.cpp`, `manifest_test.cpp`)
+
+The plain dense shape of OPEN-PREFILL-HOST-ATTN (Granite) may prefill its five projection GEMMs on `designs/gemm_bfp16`
+instead of `gemm_q4_prefill`: bfp16ebs8 x bfp16ebs8 -> fp32, eight K values sharing an exponent byte, 512 MACs an mmul
+instruction against the bf16 route's 256, one xclbin for every shape. The weights are the container's q4_1, dequantised and
+encoded to bfp16 at load by the `bfp16_gemm` pack op (rows padded to a multiple of 1024 with zero blocks); the activations are
+encoded per GEMM on the host and the c-tiled fp32 result is untiled to token rows. Nothing in the container or q4nx-build
+changes. The route is the `bfp16` entry of `gemm_block_variants` (manifest_version 4) and is chosen with
+`OFLM_OPEN_PREFILL_MODE=bfp16` / `open_qwen36_cli --prefill-mode bfp16`. **bf16 stays the default.** It runs layer-major with host
+attention only and refuses to load otherwise; `oflm --prefill-mode` does not accept it yet.
+
+Why bfp16 and not int8 (the question this requirement answers): the q4_1 weight carries a scale and a min per (row, 32 k), so an
+int8 product needs an int32 rescale every 32 k or a second, per-row weight quantisation; bfp16 has the per-8-k exponent in
+the hardware for both operands.
+
+**Acceptance criteria** (the threshold, with the measurement that justifies it below). On Granite-4.2-3B-NPU2, the bfp16 route
+against the default route through `--gemm-block`, every position's logits:
+- corr >= 0.995 at every position, and an argmax flip only where the default route's top-2 margin is under 0.2 logits;
+- the 80-token greedy continuation of each `utilities/uno-ref/prompts.jsonl` prompt identical;
+- teacher-forced perplexity on a real text within 1 % of the default route's;
+- prefill at 512 tokens faster than the default route's.
+
+**Procedure:** `utilities/dense-decode-probe/prefill_mode_check.py --cli open_qwen36_cli.exe --model <Granite dir> --kernels <set>`
+(random ids, chat prompts, decode, perplexity, timing), after the one-shape check of each GEMM:
+`designs/gemm_bfp16/make_test.py make` / `run_kernel.exe` / `make_test.py compare` (kernel against the product of the decoded
+operands: rel_fro 0).
+
+**Result 2026-10-13/14 (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode).** Measured with no NPU gate: the shared lock was
+removed on purpose, and the Windows FrameServer camera context (svchost, idle) was present throughout; host CPU load was 15-30 %
+from the user's own work, so the timings are not quiet-box numbers.
+- *The mmul itself* (`utilities/aie-probes/mmul_rate_probe.py`, one core, operands in L1, a 2x2 expansion of four mmuls a loop turn,
+  3M-turn differences): native bf16 4x8x8 4.4 ns an mmul (58 GMAC/s); int8 8x8x8 0.56 ns (920 GMAC/s, 7.9x the bf16 mmul);
+  bfp16 8x8x8 3.5 ns in the probe (147 GMAC/s, 2.5x; the probe's block-vector pops are not pipelined, the GEMM below reaches
+  about 270 GMAC/s a core); bf16 8x8x8 through bfp16 emulation 3.3 ns. int8 is the fastest mmul by a wide margin, and not
+  built into a GEMM here.
+- *The GEMM*, 256 tokens, Granite's four distinct shapes (min of five, run_kernel): N 4096 K 2560 0.445 ms (12.1 TFLOPS counting the
+  padded N); N 3072 K 2560 0.352 ms (11.4); N 8192 K 2560 1.012 ms (10.6); N 3072 K 8192 1.201 ms (10.7). Every shape matches the product
+  of its decoded operands exactly (rel_fro 0) and the float product to 8.7e-3. `gemm_q4_prefill` runs the same shapes at 2.3-2.5 TFLOPS.
+- *Accuracy*, route against route: 512 random ids, corr min 0.99815 mean 0.99958, argmax 485/512 (all 27 flips at margins
+  under 0.1 logits), top-5 sets equal at 82.6 %; six chat/code/math/reasoning prompts of 23-44 tokens: corr min 0.99519
+  (math) and 0.99801-0.99833 on the rest, mean 0.99945-0.99962, argmax 21-43 of 23-44 with every flip at a margin of 0.173 or
+  less; all six 80-token greedy continuations identical; perplexity on 511 tokens of README.md 20.723 (default) against 20.671
+  (bfp16), ratio 0.9975, mean KL(default || bfp16) 0.0028 nats. The threshold above is set just under the worst measured
+  value of each; it is a threshold for "indistinguishable at the level the default route is from a bf16 reference", not a
+  claim about a larger text set, which was not run.
+- *Prefill*, three runs a mode alternating, min: 512 tokens 2233 ms (229 tok/s) default against 1181 ms (434 tok/s) bfp16, 1.9x;
+  2048 tokens 14265 ms (144 tok/s) against 9032 ms (227 tok/s), 1.6x. At 512 the GEMMs are 167 ms of the 1307 ms; the rest is the host
+  (attention 216 ms, activation encode 103, untile and row copies 370, norms, SwiGLU, residuals), so the route is now host-bound
+  and a further gain is in the host stages, not the array.
+
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`

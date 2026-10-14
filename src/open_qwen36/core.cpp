@@ -200,13 +200,14 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
     // OPEN-PREFILL-MODE: swapped in before the kernel list and the packing, so the other route costs nothing
-    if (cfg_.prefill_mode != "fast" && cfg_.prefill_mode != "lean")
-        throw std::runtime_error("open_qwen36: prefill mode '" + cfg_.prefill_mode + "' is not fast or lean");
-    bool has_lean = false;
-    for (const auto& [name, t] : man_.layer_types) has_lean = has_lean || t.gemm_block_variants.count("lean");
-    man_.select_prefill_route(cfg_.prefill_mode == "lean" ? "lean" : "");
-    if (has_lean) prefill_route_ = cfg_.prefill_mode;
-    else if (cfg_.prefill_mode == "lean") log("this kernel set has one prefill route; lean changes nothing");
+    if (cfg_.prefill_mode != "fast" && cfg_.prefill_mode != "lean" && cfg_.prefill_mode != "bfp16")
+        throw std::runtime_error("open_qwen36: prefill mode '" + cfg_.prefill_mode + "' is not fast, lean or bfp16");
+    bool has_variants = false;
+    for (const auto& [name, t] : man_.layer_types) has_variants = has_variants || !t.gemm_block_variants.empty();
+    const bool found = man_.select_prefill_route(cfg_.prefill_mode == "fast" ? "" : cfg_.prefill_mode);
+    if (has_variants) prefill_route_ = cfg_.prefill_mode;
+    if (cfg_.prefill_mode != "fast" && !found)
+        log("this kernel set has no " + cfg_.prefill_mode + " prefill route; " + cfg_.prefill_mode + " changes nothing");
     fs::path md(cfg_.model_dir);
     // ---- the weight file: the shipped container (model.q4nx) or a GGUF
     // (model.gguf, the direct path). When both exist the shipped container
@@ -468,6 +469,14 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
                                                      : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
                               : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
                                                             : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
+    // the bfp16 GEMM is wired into the staged GEMM phase only (OPEN-PREFILL-BFP16)
+    if (gemm_block_t_ && !layer_major_ok())
+        for (const auto& t : types_)
+            for (const Step& st : t->gemm_block.program)
+                if (st.fmt == "bfp16")
+                    throw std::runtime_error("open_qwen36: the bfp16 prefill route runs layer-major with host attention and "
+                                             "stage-major GEMMs only; one of OFLM_OPEN_LAYER_MAJOR / OFLM_OPEN_HOST_ATTN / "
+                                             "OFLM_OPEN_STAGE_MAJOR is off, or this model's attention is not that shape");
 }
 
 bool Core::host_attn_fits() const {
@@ -3145,6 +3154,11 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
     float* Kf = BlockScratch::fit(ds_.K, rows * kvw);
     float* Vf = BlockScratch::fit(ds_.V, rows * kvw);
     float* Qr = BlockScratch::fit(ds_.q, T * qw);
+    // y arrives [N, T], or [T, N] token rows from a bfp16 step (y_rows_)
+    auto to_rows = [&](const float* y, size_t Nn, float* out) {
+        if (y_rows_) std::memcpy(out, y, Nn * T * 4);
+        else host::transpose(y, Nn, T, out);
+    };
 
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row, row_elems = row / 2;
@@ -3177,7 +3191,15 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
                    auto tt = std::chrono::steady_clock::now();
                    const host::TransposePart parts[3] = {{q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}};
-                   host::transpose_parts(y, T, parts, 3);
+                   if (y_rows_) {
+#pragma omp parallel for
+                       for (long long t2 = 0; t2 < static_cast<long long>(T); ++t2)
+                           for (const auto& pt : parts)
+                               std::memcpy(pt.dst + static_cast<size_t>(t2) * pt.width, y + static_cast<size_t>(t2) * nq3 + pt.off,
+                                           pt.width * 4);
+                   } else {
+                       host::transpose_parts(y, T, parts, 3);
+                   }
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    const size_t t_real = std::min(T, N - b * T), p0 = pos0 + b * T;
@@ -3252,7 +3274,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
                    float* yo = BlockScratch::fit(bs_.d_o, T * hid);
-                   host::transpose(y, hid, T, yo);
+                   to_rows(y, hid, yo);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    auto t1 = std::chrono::steady_clock::now();
@@ -3269,7 +3291,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b) -> const float* { return xm_all + b * T * hid; },
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
-                   host::transpose(y, ff, T, g_all + b * T * ff);
+                   to_rows(y, ff, g_all + b * T * ff);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                });
@@ -3278,7 +3300,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
                    float* yu = BlockScratch::fit(bs_.d_up, T * ff);
-                   host::transpose(y, ff, T, yu);
+                   to_rows(y, ff, yu);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    auto t1 = std::chrono::steady_clock::now();
@@ -3296,7 +3318,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                [&](size_t b, const float* y) {
                    auto tt = std::chrono::steady_clock::now();
                    float* yd = BlockScratch::fit(bs_.d_down, T * hid);
-                   host::transpose(y, hid, T, yd);
+                   to_rows(y, hid, yd);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
                    auto t1 = std::chrono::steady_clock::now();
@@ -3775,7 +3797,13 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
 void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                       const std::function<const float*(size_t)>& prep,
                       const std::function<void(size_t, const float*)>& post) {
-    const size_t rows = s.split ? 2 * N : N;
+    const bool bfp = s.fmt == "bfp16";
+    const Bfp16Tiling bt;
+    if (bfp && (T % (bt.m * bt.rows) || K % bt.k))
+        throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": T=" + std::to_string(T) + " K=" + std::to_string(K) +
+                                 " do not tile for the bfp16 GEMM");
+    const size_t rows = s.split ? 2 * N : (bfp ? s.n_pad : N);
+    const size_t x_bytes = bfp ? T * K / 8 * BFP16_BLOCK_BYTES : K * T * 2;
     Step twin = s;
     twin.args[1] += "#1";
     twin.args[2] += "#1";
@@ -3783,7 +3811,7 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
     for (const Step* p : step) {
         xrt::bo& xb = buffer(p->args[1], 0);
         xrt::bo& yb = buffer(p->args[2], 0);
-        if (xb.size() < K * T * 2 || yb.size() < rows * T * 4)
+        if (xb.size() < x_bytes || yb.size() < rows * T * 4)
             throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals " + p->args[1] + " / " +
                                      p->args[2] + " are smaller than [" + std::to_string(K) + "] x " +
                                      std::to_string(T) + " -> [" + std::to_string(rows) + "]");
@@ -3793,11 +3821,12 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
         xrt::bo& xb = buffer(step[b & 1]->args[1], 0);
         const float* x = prep(b);
         auto t0 = std::chrono::steady_clock::now();
-        host::tile_x(x, T, K, xb.map<uint16_t*>());
+        if (bfp) host::bfp16_pack_a(x, T, K, bt, xb.map<uint8_t*>());
+        else host::tile_x(x, T, K, xb.map<uint16_t*>());
         timing_.part1_ms += ms_since(t0);
         timing_.gemm_tile_ms += ms_since(t0);
         auto ts = std::chrono::steady_clock::now();
-        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, x_bytes, 0);
         timing_.sync_ms += ms_since(ts);
         timing_.part1_ms += ms_since(ts);
     };
@@ -3823,6 +3852,19 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
         timing_.part1_ms += ms_since(ts);
         if (b + 1 < B) cur = launch(b + 1);
         const float* y = yb.map<const float*>();
+        bool rows_out = false;
+        if (bfp) {
+            // the c-tiled [T, n_pad] result back to the [N, T] the stages after the GEMM read
+            ts = std::chrono::steady_clock::now();
+            std::vector<float>& un = split_y_[step[b & 1]->args[2]];
+            if (un.size() < N * T) un.resize(N * T);
+            rows_out = N % bt.n == 0;
+            if (rows_out) host::bfp16_untile_rows(y, T, s.n_pad, bt, N, un.data());
+            else host::bfp16_untile_c(y, T, s.n_pad, bt, N, un.data());
+            timing_.part1_ms += ms_since(ts);
+            timing_.gemm_tr_ms += ms_since(ts);
+            y = un.data();
+        }
         if (s.split) {
             // gemm_run's fold, into host memory and never back into the mapped y
             ts = std::chrono::steady_clock::now();
@@ -3836,7 +3878,9 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
             timing_.gemm_tr_ms += ms_since(ts);
             y = o;
         }
+        y_rows_ = rows_out;
         post(b, y);
+        y_rows_ = false;
     }
 }
 

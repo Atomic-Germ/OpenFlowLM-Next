@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -863,6 +864,18 @@ int main() {
         std::printf("      bf16_gemm fnv1a q8 = 0x%016llx, q4_1 = 0x%016llx\n", static_cast<unsigned long long>(g8),
                     static_cast<unsigned long long>(g4));
         check(g8 == 0xa1e333116f424dafull && g4 == 0x7018cee99915f0b9ull, "bf16_gemm: byte-identical to the NumPy packer");
+    }
+
+    // ---- bfp16_gemm (OPEN-PREFILL-BFP16): the q4_1 chunks twice, a [128, 1536] tensor at row 256 of a 1024-row weight
+    {
+        const size_t R = 128, K = 1536, N_TOTAL = 1024;
+        std::vector<uint8_t> two(out.begin(), out.begin() + 12 * 5120);
+        two.insert(two.end(), out.begin(), out.begin() + 12 * 5120);
+        std::vector<uint8_t> dst(N_TOTAL * K / 8 * open_qwen36::BFP16_BLOCK_BYTES, 0);
+        open_qwen36::pools::bfp16_gemm_pack(two.data(), R, K, 256, N_TOTAL, dst.data());
+        const uint64_t gb = fnv1a(dst.data(), dst.size());
+        std::printf("      bfp16_gemm fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gb));
+        check(gb == 0xb7aece12e88c13afull, "bfp16_gemm: byte-identical to the NumPy packer");
     }
 
     // ---- transpose: [32, 64] of 2-byte values
