@@ -242,9 +242,6 @@ You can bypass the AMD bloatware entirely by faking the Vitis environment:
 
 1. **Install the standalone MicroBlaze compiler and required packages:**
    ```bash
-   # On Ubuntu / Debian:
-   sudo apt-get install gcc-microblaze-linux-gnu uuid-dev ocl-icd-opencl-dev
-
    # On RHEL / CentOS / Rocky Linux:
    sudo dnf install -y \
      gcc-microblaze-linux-gnu \
@@ -265,12 +262,17 @@ You can bypass the AMD bloatware entirely by faking the Vitis environment:
      libswscale-free-devel \
      libswresample-free-devel \
      readline-devel \
+     libdrm-devel \
+     boost-devel \
+     rapidjson-devel \
+     systemtap-sdt-devel \
      rust \
      cargo \
      git \
      cmake \
      ninja-build
    ```
+
    *(Note: Ensure you install `ocl-icd-devel` rather than alternative OpenCL development headers, or the build may fail on OpenCL runtime hooks).*
 
 2. **Create a fake Vitis directory structure:**
@@ -287,8 +289,9 @@ You can bypass the AMD bloatware entirely by faking the Vitis environment:
 4. **Point your environment to the fake path before building:**
    ```bash
    export XILINX_VITIS=~/fake_vitis
-   cd xdna-driver/xrt/build
-   build.sh -npu
+   git clone https://github.com/Xilinx/XRT.git --recursive
+   cd XRT/build
+   ./build.sh -npu -cmake-flags DXRT_ENABLE_USDT=OFF -j $(nproc)
    ```
 
 CMake will now find the required compiler binaries, allowing you to compile the ERT firmware smoothly without ever touching the official AMD installer.
