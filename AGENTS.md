@@ -101,4 +101,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build isolated full-lx FP32 norm-to-QKV/Z/alpha/beta and compare against a byte-exact production control with causal conv/recurrent state.</description>
     <location>.opencode/skill/open-qwen38-fp32-linear-entry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-fp32-conv-history</name>
+    <description>Build isolated FP32 conv history with half-tile streams and validate causal state against a byte-exact BF16-history control.</description>
+    <location>.opencode/skill/open-qwen38-fp32-conv-history/SKILL.md</location>
+  </skill>
 </available_skills>
