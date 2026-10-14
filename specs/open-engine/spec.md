@@ -1514,6 +1514,40 @@ the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, 
 - All six identical to decode; geometric-mean speedup 1.13x. `--rows-check 17`: ROWS PASS on Granite and K2-3.7B.
 - Verify pass 67.0 -> 64.2 ms; the cycle is 2.7-2.73 decode steps (was 2.88). Nulling the GEMV leaves 57 ms and the prep 61 ms, so 10 and 6 ms of core compute are still exposed.
 
+**Result 2026-10-14, combined tree (`perf/granite-npu-combined`: Uno decode kernels + host-attention prefill + bfp16 route in one kernel set, one `manifest.json`; every row `dibs run --measure`, CLEAN; `utilities/granite-combined-bench`):**
+
+Short context, six prompts x 128 tokens (`uno_bench.py`; the prompt prefilled one token at a time), tokens a cycle as before:
+
+| prompt | tokens a cycle | Uno tok/s | plain decode tok/s | speedup |
+|---|---|---|---|---|
+| chat | 2.42 | 17.17 | 20.25 | 0.85x |
+| chat2 | 2.61 | 18.58 | 20.54 | 0.90x |
+| code | 3.20 | 22.74 | 20.31 | 1.12x |
+| code2 | 3.20 | 22.76 | 20.20 | 1.13x |
+| math | 3.76 | 26.66 | 20.26 | 1.32x |
+| reason | 3.46 | 24.50 | 19.98 | 1.23x |
+
+- All six identical to decode; mean 3.04 tokens a cycle, geometric-mean speedup **1.08x**. The same sweep with the prompt prefilled by `--gemm-block` (bf16 route) is 3.02 tokens a cycle, 1.06x, and with `--gemm-block --prefill-mode bfp16` 3.05, 1.08x; all identical. The prefill route moves the cache by a few bf16 ulps, so math (3.66 on the bf16 block route, 3.76 otherwise) and reason (3.56 on bfp16, 3.46 otherwise) shift by 0.1 tokens a cycle.
+- Against the 2026-10-13 table above the Uno speeds are the same within 2 % (chat 16.90 -> 17.17, code 22.36 -> 22.74) and plain decode is 6 % faster (19.0 -> 20.2), so the ratio is 1.08x, not 1.13x. The cycle costs 2.85 decode steps on chat (was 2.73): the gain over the earlier table is in plain decode, not in the cycle.
+- `--rows-check 17` prints `ROWS PASS` on the combined set (every row, 0 of 100352 logits differ).
+
+At depth: the prompt is real repo text cut to the exact token count (chat: spec prose and a summarize request; code: python designs and a Fibonacci request), prefilled with `--gemm-block` on the named route, then 128 tokens by Uno and 128 by plain decode from the same cache. One run each; every one identical to decode.
+
+| context | prompt | prefill route | tokens a cycle | Uno tok/s | plain tok/s | speedup |
+|---|---|---|---|---|---|---|
+| 1024 | chat | bf16 | 2.67 | 14.36 | 13.73 | 1.05x |
+| 1024 | code | bf16 | 3.28 | 17.28 | 14.18 | 1.22x |
+| 1024 | chat | bfp16 | 2.72 | 14.74 | 14.04 | 1.05x |
+| 1024 | code | bfp16 | 3.12 | 16.77 | 14.08 | 1.19x |
+| 2048 | chat | bf16 | 2.78 | 12.11 | 10.69 | 1.13x |
+| 2048 | code | bf16 | 3.12 | 13.34 | 10.74 | 1.24x |
+| 2048 | chat | bfp16 | 2.72 | 11.88 | 10.75 | 1.11x |
+| 2048 | code | bfp16 | 3.20 | 13.99 | 10.71 | 1.31x |
+
+- Plain decode falls from 20.3 tok/s (short) to 13.7 at 1024 and 10.7 at 2048 tokens of context (attention grows with position, OPEN-ATTN-CONTEXT); Uno's gain holds, since its verify and draft rows carry the same window: 1.05-1.22x at 1024, 1.11-1.31x at 2048, the code prompts ahead of chat as at short context.
+- The route is limited by `pos + L > max_ctx` (the manifest's 4096, `core.cpp` `step_rows`): a row pass within L = 4 of the capacity is refused by name. Nothing near it was run; 2048 + 128 is half the capacity.
+- `--uno` now takes `--gemm-block`. Its plain-decode reference prefills all but the last token that way and steps the last one, as Uno's seed row is stepped; with the whole prompt block-prefilled instead, the two start from caches that differ by a few bf16 ulps in the seed's K/V and the 1024-token chat prompt read DIFFERS at token 27.
+
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,
@@ -4180,6 +4214,26 @@ from the user's own work, so the timings are not quiet-box numbers.
   2048 tokens 14265 ms (144 tok/s) against 9032 ms (227 tok/s), 1.6x. At 512 the GEMMs are 167 ms of the 1307 ms; the rest is the host
   (attention 216 ms, activation encode 103, untile and row copies 370, norms, SwiGLU, residuals), so the route is now host-bound
   and a further gain is in the host stages, not the array.
+
+**Result 2026-10-14, combined tree (`perf/granite-npu-combined`, one kernel set with the Uno kernels and both prefill routes; HX PRO 370, performance mode; each unit under `dibs run --measure` and CLEAN, a NOISY unit rerun; three runs a cell, the mode order alternating):**
+
+| prefill, tok/s (min / median) | bf16 route (default) | bfp16 route | bfp16 / bf16 (median) |
+|---|---|---|---|
+| pp512 | 162 / 179 | 329 / 331 | 1.85x |
+| pp1024 | 184 / 189 | 297 / 312 | 1.65x |
+| pp2048 | 145 / 148 | 222 / 240 | 1.62x |
+
+| plain decode after the prompt, tok/s (min / median, 128 tokens, 3 runs) | bf16 prefill | bfp16 prefill |
+|---|---|---|
+| 512 tokens of context | 15.56 / 15.80 | 15.91 / 16.09 |
+| 1024 | 13.69 / 13.69 | 13.64 / 13.67 |
+| 2048 | 10.69 / 10.70 | 10.63 / 10.69 |
+
+- The decode rate does not depend on the prefill route (the K/V cache is the host attention's either way); it falls with context, 15.8 -> 13.7 -> 10.7.
+- The bfp16 route keeps its lead at 2048 tokens (1.62x) and is faster at every length, so the acceptance criterion "faster at 512" holds with margin. The default route's pp512 here (179 median, min 162) is below the 220-229 tok/s OPEN-PREFILL-HOST-ATTN recorded on 2026-10-13, and its run-to-run spread is wide (162-183); the code of that route is unchanged by the merge, so this is the box's state that day (the bfp16 route's spread is 329-350), not a measured regression, and it is not explained. An earlier pass of the same matrix, NOISY (a browser tab), gave a default pp512 of 195-228 and bfp16 355-400; those are not quoted.
+- Accuracy on the combined set, `prefill_mode_check.py --cases random,chat,decode,ppl` (not a timing claim): 512 random ids corr min 0.998151 mean 0.999580, argmax 485/512 with all 27 flips at top-2 margins under 0.1; six prompts corr min 0.995189 (math) and 0.998008-0.998333 on the rest, every flip at a margin of 0.173 or less; all six 80-token greedy continuations identical; perplexity 20.7226 against 20.6713 (ratio 0.9975), mean KL 0.00276 nats. Every criterion above holds, identical to the pre-merge figures.
+- bfp16 prefill followed by Uno decode (`uno_bench.py --gemm-block --prefill-mode bfp16`, six prompts x 128): all six identical to plain decode, 3.05 tokens a cycle, 1.08x (CLEAN, OPEN-FAMILY-GRANITE-UNO has the table and the 1024 / 2048 results).
+- The merge of `perf/granite-prefill-int8` into `perf/granite-uno-core-compute` had no textual conflict (`dense.py`, `core.cpp`, `spec.md` all merged cleanly: the two routes' hunks are in different functions). One exporter run builds the union, the four bfp16 xclbins beside `dxl` / `dxl_lora` / `lmhl`, and the `manifest_test`, `pools_test`, `block_host_test` and `gguf_pack_test` binaries pass on it.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)

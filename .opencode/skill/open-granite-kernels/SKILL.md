@@ -106,6 +106,29 @@ Granite also closes **both** roles with `<|end_of_text|>`, so the turn end and
 the eos are the same token — the other three families have a separate pair, and
 `chat.py`'s Granite branch says so explicitly.
 
+## The combined kernel set (Uno decode + bf16 and bfp16 prefill)
+
+One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dx_attn`, `dx_f32`, `ln`,
+`lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four `gemm_bfp16_n*_k*`, `dxl`, `dxl_lora` and `lmhl`, with one
+`manifest.json` (manifest_version 4). `dxl`'s weight fifo depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed.
+
+```powershell
+cd C:\dev\mlir-aie; . .\iron_env.ps1
+cd <repo>      # (Get-Process -Id $PID).PriorityClass = 'BelowNormal' first; one build at a time
+python open_kernels\export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <repo>\src\xclbins\Granite-4.2-3B-NPU2\open_kernels
+```
+
+About 2 h at BelowNormal on this box, the `dxl` / `dxl_lora` builds being the long ones. Then `open_qwen36_cli --kernels <set>`; pass it
+explicitly, `C:\models\Granite-4.2-3B-NPU2\open_kernels` is a symlink to an old tree. `--prefill-mode bfp16` picks the bfp16 route.
+`--uno N --gemm-block` prefills the prompt as blocks before the Uno cycle, so a 1024 / 2048-token context costs seconds, not a
+token-at-a-time prefill. The plain-decode reference inside `--uno` prefills all but the last token the same way and steps the last
+one, so both sides start from one cache (block-prefilling the seed's row instead differs in bf16 and flips near-tie argmaxes: Uno
+then reads DIFFERS at token 27).
+
+Measuring: `utilities/granite-combined-bench/matrix.py` runs prefill / decode / Uno-at-depth / the six-prompt sweep as small units, each
+under `dibs run --measure`, rerunning a NOISY unit. A stray CPU-bound process (an orphaned `find`, a browser tab) makes every unit
+NOISY; read which process `dibs` names before retrying.
+
 ## Result — 2026-09-06, mlir-aie 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301
 
 Correctness, 4-layer slice: logits corr **0.999998 / 0.999990**, same argmax
