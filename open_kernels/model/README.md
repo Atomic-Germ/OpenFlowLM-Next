@@ -445,3 +445,25 @@ reference. These are diagnostic estimates; they never replace primary gates
 or demonstrate a hardware fix. A numerical failure produces complete JSON and
 exit status 1. Passing full-depth residuals or conditioned recurrence does not
 override a failed composed-state comparison.
+
+### Isolated FP32 linear-entry replay
+
+`utilities/linear-entry-replay/` compares the production BF16 entry with a
+private full-lx FP32 norm → QKV/Z/alpha/beta candidate. It reuses the independent
+DeltaNet preparation/composed-state checker above, forcing retained incoming
+residuals while carrying conv/recurrent history across positions. The BF16
+control must reproduce all activation, residual and state captures bytewise
+and match the retained oracle results. Input, weight, binary and generated
+source hashes pin both variants. Generated kernel entries come directly from
+the recipe in a private directory, so stale global translation units cannot
+silently change the experiment.
+
+The FP32 candidate appends 20 KiB of activation scratch; model weights, the
+production export and state layout are unchanged. Conv history remains BF16.
+Preparation, serial hardware execution, resource auditing and comparison
+commands are documented in
+[the linear-entry skill](../../.opencode/skill/open-qwen38-fp32-linear-entry/SKILL.md).
+Only one layer's weight pool is needed at a time. Numerical failures retain
+complete JSON and return exit status 1; diagnostic rounding never replaces the
+unrounded primary reference. This experiment does not establish corrected
+full-depth propagation or promote the candidate into production.

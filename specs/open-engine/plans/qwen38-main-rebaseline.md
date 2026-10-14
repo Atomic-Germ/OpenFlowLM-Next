@@ -34,7 +34,23 @@ All 288 retained activation/state captures match the previous audit. The host
 suite passes **1168 tests, with 47 skipped**, including 38 new recurrence tests.
 No runtime/kernel change, new NPU run or full-model load was needed.
 
-Independent input-record preparation and composed state accuracy, head-output
+An independent input-record/composed-state checker now exposes additional
+precision failures: **121/144 cases PASS**, state **133/144 PASS** with worst
+error **0.0100545744**, output **134/144 PASS** with worst **0.0317001700**.
+Its primary FP64 norm/projections, conv history and recurrent state are
+unrounded, conditioned only on incoming layer residuals. Q/K/V fields have
+2/5/5 failures under the 0.005 bound. Conditioned glue passes all 144 cases
+at <1e-4 and cosine >0.99999; it cannot override the composed failures.
+
+CPU diagnostics separately round entry norm, conv history, or both to BF16.
+Both together reproduce the NPU state/output comparisons within 0.005 in all
+144 cases, but do not constitute a hardware correction. Entry rounding alone
+causes up to 0.0335971623 output error relative to the exact reference; history
+rounding alone causes up to 0.0054568534 state error. The checker returns exit
+status 1, pins 433 inputs and 336 effective weights, and uses one layer's
+weights at a time. Its 30 new tests bring the suite to **1198 passed, 47 skipped**.
+
+DeltaNet precision corrections and their hardware validation, head-output
 diagnostics, remaining primitive/projection gates, prefill, serving and final
 performance/resource acceptance remain open. This is not complete model support.
 
@@ -1140,3 +1156,25 @@ JSON and logs pin both runs. The integrated export's build key is unchanged:
 Next independently validate the captured multi-token DeltaNet state. Remaining
 all-layer primitive/projection, prefill, serving and final acceptance gates are
 not implied by the passing tail or reset checks.
+
+### Isolated FP32 linear-entry validation (2026-10-14)
+
+The private full-lx candidate preserves FP32 norm through QKV/Z and alpha/beta,
+appending 20480 bytes of act scratch. Conv history stays BF16 and the production
+export is unchanged. Its builder generates recipe-specific translation units in
+a private directory and verifies their hashes, removing dependence on stale
+GEMV entries. Rolled AB loops fit all 11 cores: maximum .text 15248 and L1 buffer
+end 64384 bytes; stack remains 6144 bytes.
+
+Both variants complete 144 NPU dispatches. The BF16 control reproduces 432
+captures bytewise and every retained oracle row. FP32 passes 143/144 cases
+versus 121/144 for BF16. All output and Q/K/V/decay/beta checks pass; worst
+composed output error falls from 0.0317001700 to 0.0044733739. One state fails
+at L57/T1: 0.0054339342 against 0.005. Conditioned glue/recurrence pass 144/144;
+95/6912 head-output diagnostics remain failing. Acceptance bounds are unchanged.
+
+The CPU history-rounding diagnostic predicts a 0.0054568534 state effect at
+L57/T1 and matches the candidate there within 0.0002856729. This supports the
+next isolated higher-precision conv-history experiment, not a production PASS.
+Tests: 12 new TDD cases; full host suite 1210 passed, 47 skipped. Reproduction is
+in the linear-entry skill, with evidence under Models/qwen38-27b/linear-entry-replay.
