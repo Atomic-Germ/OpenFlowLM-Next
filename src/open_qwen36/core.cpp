@@ -3075,12 +3075,12 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
-    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
     double phase[2] = {0, 0};
     host::deltanet_block(g, qkv, z, xn, hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
-                         hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                         hc.dtb.data(), hc.nw.data(), sp,
                          reinterpret_cast<float*>(sp + gb.state_s_off), og, phase);
     timing_.dn_conv_ms += phase[0];
     timing_.dn_rule_ms += phase[1];
@@ -3511,7 +3511,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
     host::DeltaGeom g;
     g.T = T; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
-    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     // DeltaNet still goes block by block in order: S and the conv rows chain through it
     gemm_phase(l, gb.program[0], B, T, hid, nch + vw,
                [&](size_t b) -> const float* {
@@ -3534,7 +3534,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
                    auto t0 = std::chrono::steady_clock::now();
                    double phase[2] = {0, 0};
                    host::deltanet_block(g, qkv, z, xn_all + b * T * hid, hc.convw.data(), hc.Wa.data(), hc.Wb.data(),
-                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), sp,
                                         reinterpret_cast<float*>(sp + gb.state_s_off), og_all + b * T * vw, phase);
                    timing_.dn_conv_ms += phase[0];
                    timing_.dn_rule_ms += phase[1];

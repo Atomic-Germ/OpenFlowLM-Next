@@ -21,7 +21,7 @@ def geometry(spec,mode):
     r=recipe(spec);l=r.layout;d=r.linear
     if (mode not in ('bf16','fp32') or spec.family!='qwen35' or spec.hidden!=5120 or
             spec.lin_value_heads!=48 or not r.ln_split or not r.ffn.XM_F32 or not r.ffn.DOWN_SPLIT or
-            d is None or d.AB_LANES!=64 or not d.GLUE_HALF_OUTER):
+            d is None or d.XN_F32 or d.CONV_F32 or d.AB_LANES!=64 or not d.GLUE_HALF_OUTER):
         raise ValueError('requires Qwen H5120/48-head split FP32 FFN with BF16 linear entry')
     fp=mode=='fp32'
     return dict(mode=mode,hidden=spec.hidden,production_act_bytes=l.A_BYTES,

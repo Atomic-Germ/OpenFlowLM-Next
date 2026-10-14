@@ -193,6 +193,12 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     if ((kv_dtype != "bfloat16" && !m.attn_kv_pair) ||
         og_dtype != (m.attn_kv_pair ? "float32" : "bfloat16"))
         fail(lw, "unsupported attention cache/output dtype combination");
+    const std::string linear_entry = lay.value("linear_entry_dtype", "bfloat16");
+    const std::string linear_conv = lay.value("linear_conv_dtype", "bfloat16");
+    if ((linear_entry != "bfloat16" && linear_entry != "float32") ||
+        (linear_conv != "bfloat16" && linear_conv != "float32"))
+        fail(lw, "unsupported linear entry/history dtype");
+    m.linear_conv_f32 = linear_conv == "float32";
     m.attn.kv_row = m.kv_row;
     m.attn.ptab_row = m.ptab_row;
 
@@ -416,6 +422,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
+                    const std::string conv_dtype = gj.value("conv_dtype", "bfloat16");
+                    if (conv_dtype != (m.linear_conv_f32 ? "float32" : "bfloat16"))
+                        fail(gw, "conv dtype disagrees with the linear state ABI");
+                    g.conv_f32 = m.linear_conv_f32;
+                    if (g.conv_kernel < 2 || g.state_s_off != (g.conv_kernel - 1) * g.qkv_dim * (g.conv_f32 ? 4 : 2) ||
+                        g.s_rows < g.head_dim || g.s_head_bytes != g.s_rows * g.head_dim * 4 ||
+                        t.state_bytes != g.state_s_off + g.value_heads * g.s_head_bytes)
+                        fail(gw, "linear state offsets/size disagree with conv dtype and recurrence geometry");
                     g.out_split = gj.value("out_split", false);
                     // the flag predates per-step `split` and means the same thing for the out step
                     if (g.out_split) g.program.at(1).split = true;

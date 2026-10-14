@@ -12,6 +12,13 @@ weight pools. Every layer uses retained incoming residuals, with causal conv
 and recurrent state across positions. It does not test corrected full-depth
 propagation, runtime/reset, serving or prefill.
 
+## Historical checkout
+
+This isolated experiment requires checkout `46c845a`. The current production
+recipe integrates FP32 linear entry/history, so the private builder refuses it.
+Use the production linear-integration skill for a new export; do not relabel
+retained captures or modify their provenance to bypass this guard.
+
 ## Build and resource audit
 
 Use native Python 3.14, mlir-aie 1.4.2 and Peano

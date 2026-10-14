@@ -47,6 +47,8 @@ from layout import (A_BYTES, A_O, A_OG, A_OUT, A_QKV, A_RES, A_ROUT, A_VEC, A_XM
                     POOL_BYTES, POOL_GATE, POOL_K, POOL_O, POOL_Q, POOL_QKV, POOL_V, POOL_Z,
                     PTAB_BYTES, PTAB_ROW, STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES, R, SPEC)
 import xcommon as X  # noqa: E402
+import sys
+import linear_fp32 as LF
 
 HERE = Path(__file__).parent
 GLUE = HERE.parent / "dn_glue"
@@ -117,7 +119,8 @@ if D is not None:
     # core holds ONE 4 KB half at a time, so the projection is walked half by half). A tile is one
     # 4 KB element -- 64 rows at 32 lanes, 32 at 64 -- a half carries up to 2048 rows, and at HID
     # 2560 the two halves are 32 and 8 tiles.
-    AB_TILES = [min(ELEM // 2, HID - h * (ELEM // 2)) // D.AB_ROWS for h in range(XN_ELEMS)]
+    XN_BLOCK = ELEM // (4 if D.XN_F32 else 2)
+    AB_TILES = [min(XN_BLOCK, HID - h * XN_BLOCK) // D.AB_ROWS for h in range(XN_ELEMS)]
     assert sum(AB_TILES) == AB_ELEMS, (AB_TILES, AB_ELEMS)
     AB_WIDE = D.AB_LANES > 32                               # more than 32 value heads: glue_ab_w.cc's 64-lane tile
     HALF_OUTER = D.GLUE_HALF_OUTER                          # three xn halves: carry each once, for both accumulators
@@ -148,7 +151,8 @@ def glue_post_types():
     # The glue core's private copy of the layer-entry norm output. On the dense path it is
     # ONE 4 KB element (the projection is re-streamed per half): bf16[HID] costs the core
     # 8 192 B at HID 4096, 2 560 B more than it has.
-    g["fxn"] = np.ndarray[(ELEM // 2 if DENSE else HID,), np.dtype[bfloat16]]
+    g["fxn"] = (np.ndarray[(ELEM // 4,), np.dtype[np.float32]] if D.XN_F32 else
+                np.ndarray[(ELEM // 2 if DENSE else HID,), np.dtype[bfloat16]])
     return g
 
 
@@ -176,6 +180,15 @@ def glue_post_kernels(inc, g):
                                   arg_types=[u8_4k, fxn, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
                  ExternalFunction("glue_copy_xn", source_file=str(GLUE / "glue_copy.cc"),
                                   arg_types=[u8_4k, fxn], include_dirs=inc, **GLUE_FLAGS))
+    if D.XN_F32:
+        k["ab"] = ExternalFunction("linear_ab_fp32", source_file=str(GLUE / "glue_ab_fp32.cc"),
+            arg_types=[u8_4k, fxn, facc, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS)
+        k["copy"] = ExternalFunction("linear_copy_fp32", source_file=str(GLUE / "glue_copy_fp32.cc"),
+            arg_types=[u8_4k, fxn, np.int32], include_dirs=inc, **GLUE_FLAGS)
+    if D.CONV_F32:
+        k["conv"] = ExternalFunction("history_conv", source_file=str(GLUE / "glue_conv_fp32.cc"),
+            arg_types=[u8_2k]*4 + [u8_4k]*2 + [u8_2k]*3 + [fqk, fvt, np.int32, np.int32, np.int32],
+            include_dirs=inc, **GLUE_FLAGS)
     k["post"] = ExternalFunction("post_fn", source_file=str(POST / "post.cc"), arg_types=[u8_4k, u8_4k, nw_ty, u8_2k],
                                  include_dirs=inc)
     k["post_copy"] = ExternalFunction("post_copy_nw", source_file=str(POST / "post_copy.cc"), arg_types=[u8_4k, nw_ty],
@@ -193,7 +206,9 @@ def glue_post_fifos(g):
 
 
 def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall, fconv, femit, fcopy):
-    if DENSE and HALF_OUTER:
+    if D.XN_F32:
+        LF.ab_sequence(sin, xn, acc_a, acc_b, fab, fcopy, X.band_range)
+    elif DENSE and HALF_OUTER:
         # Three halves: each is carried once and both accumulators' tiles for it follow,
         # 3 side fills a half instead of 4 (recipes/qwen36moe.py glue_fills). Same sums.
         for h, ntiles in enumerate(AB_TILES):
@@ -231,6 +246,9 @@ def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall
     sm = sin.acquire(1)
     fsmall(sm, acc_a, acc_b, decay, beta)
     sin.release(1)
+    if D.CONV_F32:
+        LF.conv_sequence(sys.modules[__name__], sin, ain, oout, qk, vt, decay, beta, fconv, femit)
+        return
     for base, ntiles in ((0, KEY_TILES), (KEY_TILES, VALUE_TILES)):
         for tt in range_(ntiles):
             ww = sin.acquire(CONVW_ELEMS)

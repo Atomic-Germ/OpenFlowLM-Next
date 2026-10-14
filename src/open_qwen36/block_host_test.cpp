@@ -86,14 +86,16 @@ void rms_vec(const float* x, size_t d, const float* w, double eps, float* out) {
 // alpha / beta loops have to match bit for bit.
 void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z, const float* xn,
                      const float* convw, const float* Wa, const float* Wb, const float* A, const float* dtb,
-                     const float* nw, uint16_t* conv_state, float* S, float* og) {
+                     const float* nw, void* history, float* S, float* og) {
+    auto* conv_state=static_cast<uint16_t*>(history);
+    auto* conv_fp32=static_cast<float*>(history);
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     const size_t grp = g.value_heads / g.key_heads, R = g.t_real, pre = g.taps - 1;
     const float inv_sqrt = 1.0f / std::sqrt(static_cast<float>(dim));
     std::fill(og, og + g.T * vw, 0.f);
 
     std::vector<float> carry(pre * nch);
-    for (size_t i = 0; i < carry.size(); ++i) carry[i] = bf16_to_f32(conv_state[i]);
+    for (size_t i = 0; i < carry.size(); ++i) carry[i] = g.conv_f32 ? conv_fp32[i] : bf16_to_f32(conv_state[i]);
     std::vector<float> Q(R * key_w), Kk(R * key_w), V(R * vw), decay(R * g.value_heads), beta(R * g.value_heads);
     std::vector<float> c(nch), al(g.lanes), be(g.lanes);
     for (size_t t = 0; t < R; ++t) {
@@ -106,7 +108,7 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
                 for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * v[j];
             } else {
                 const float* v = qkv + static_cast<size_t>(s) * nch;
-                for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
+                for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * (g.conv_f32 ? v[j] : bf16r(v[j]));
             }
         }
         for (size_t j = 0; j < nch; ++j) c[j] = silu(c[j]);
@@ -138,10 +140,14 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
     for (size_t r = 0; r < pre; ++r) {
         const long long s = static_cast<long long>(R) - static_cast<long long>(pre) + static_cast<long long>(r);
         if (s < 0) {
-            std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
+            if (g.conv_f32) std::copy(conv_fp32 + (R+r)*nch, conv_fp32 + (R+r+1)*nch, conv_fp32 + r*nch);
+            else std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
         } else {
             const float* row = qkv + static_cast<size_t>(s) * nch;
-            for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(row[j]);
+            for (size_t j = 0; j < nch; ++j) {
+                if(g.conv_f32) conv_fp32[r*nch+j]=row[j];
+                else conv_state[r*nch+j]=f32_to_bf16(row[j]);
+            }
         }
     }
     std::vector<float> tv(dim), delta(dim), o(dim), on(dim);
@@ -286,6 +292,30 @@ int main(int argc, char** argv) {
             check(same, "deltanet_block: the scalar loops' bits exactly, at nch " + std::to_string(nch) +
                             " and lanes " + std::to_string(g.lanes));
         }
+    }
+
+    // FP32 history preserves low bits across short and split blocks.
+    {
+        host::DeltaGeom g;
+        g.T=4; g.t_real=4; g.hid=2; g.key_heads=1; g.value_heads=1;
+        g.head_dim=3; g.taps=4; g.lanes=1; g.s_rows=3; g.conv_f32=true;
+        const size_t nch=9, vw=3;
+        std::vector<float> q(4*nch), z(4*vw,1.f), x(8,1.f), cw(4*nch,.25f);
+        for(size_t i=0;i<q.size();++i) q[i]=1.001f+float(i)*.0001f;
+        float wa[2]={.1f,.2f}, wb[2]={.2f,.1f}, a[1]={-.5f}, dt[1]={0}, nw[3]={1,1,1};
+        std::vector<float> c(3*nch,.0031f), cs=c, st(9,0.f), sts=st, out(4*vw), outs(4*vw);
+        auto cref=c, sref=st; std::vector<float> oref(out.size());
+        deltanet_scalar(g,q.data(),z.data(),x.data(),cw.data(),wa,wb,a,dt,nw,cref.data(),sref.data(),oref.data());
+        host::deltanet_block(g,q.data(),z.data(),x.data(),cw.data(),wa,wb,a,dt,nw,c.data(),st.data(),out.data());
+        check(c==cref && maxrel(st,sref)<1e-6 && maxrel(out,oref)<1e-6, "FP32 conv and recurrence match scalar oracle");
+        for(size_t t=0;t<4;++t) {
+            auto one=g; one.T=one.t_real=1;
+            host::deltanet_block(one,q.data()+t*nch,z.data()+t*vw,x.data()+t*2,cw.data(),
+                                wa,wb,a,dt,nw,cs.data(),sts.data(),outs.data()+t*vw);
+            if(t==0) check(cs[0]==.0031f && cs[2*nch]==q[0], "FP32 short history shift retains low bits");
+        }
+        check(c==cs && std::equal(c.begin(),c.end(),q.begin()+nch), "FP32 block history equals exact final rows");
+        check(maxrel(st,sts)<1e-6 && maxrel(out,outs)<1e-6, "FP32 whole/split block carry parity");
     }
 
     // ---- the attention stage

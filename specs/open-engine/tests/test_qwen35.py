@@ -453,8 +453,8 @@ def test_the_27b_glue_is_64_lanes_and_walks_half_outer(monkeypatch):
     D = Q35.recipe(s).linear
     assert (D.AB_LANES, D.AB_ROWS, D.GLUE_HALF_OUTER) == (64, 32, True)
     assert D.AB_ELEMS == 5120 * 64 * 2 // 4096 == 160
-    assert Q35.ab_tiles_per_half(s) == [64, 64, 32] and sum(Q35.ab_tiles_per_half(s)) == D.AB_ELEMS
-    assert Q35.glue_side_fills(s) == 11
+    assert Q35.ab_tiles_per_half(s) == [32]*5 and sum(Q35.ab_tiles_per_half(s)) == D.AB_ELEMS
+    assert Q35.glue_side_fills(s) == 17
     # one record per value head: 6 value tiles of 8, against 4 key tiles; 3 value heads a key head
     assert (D.NT, D.VALUE_TILE0, D.HEADS_PER_TILE) == (10, 4, 8)
     assert (D.NT - D.VALUE_TILE0) * D.HEADS_PER_TILE == D.NHEAD == 48

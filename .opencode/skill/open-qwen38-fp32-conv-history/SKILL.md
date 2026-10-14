@@ -10,6 +10,13 @@ FP32 entry norm through QKV/Z/alpha/beta. Only the candidate changes conv-histor
 storage and its MAC input handling. This is a forced-input full-lx replay,
 not full-depth propagation or production integration.
 
+## Historical checkout
+
+This isolated experiment requires checkout `46c845a`. The current production
+recipe integrates FP32 linear entry/history, so the private builder refuses it.
+Use the production linear-integration skill for a new export; do not relabel
+retained captures or modify their provenance to bypass this guard.
+
 ## Build
 
 Run from the repository root using native Python 3.14, mlir-aie 1.4.2 and Peano

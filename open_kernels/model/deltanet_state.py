@@ -150,6 +150,15 @@ def compare_sequence(captures, *, conv_dtype='bf16'):
     return results
 
 
+def linear_dtypes(manifest):
+    layout = manifest.get('layout', {})
+    entry = layout.get('linear_entry_dtype', 'bfloat16')
+    conv = layout.get('linear_conv_dtype', 'bfloat16')
+    if entry not in ('bfloat16', 'float32') or conv not in ('bfloat16', 'float32'):
+        raise ValueError('unsupported linear entry/history dtype')
+    return entry, 'fp32' if conv == 'float32' else 'bf16'
+
+
 def check(model_dir, kernel_dir, out):
     spec = spec_from_model_dir(model_dir)
     if spec.family != 'qwen35':
@@ -163,6 +172,7 @@ def check(model_dir, kernel_dir, out):
     layers = [l for l in range(meta['layers']) if spec.layer_types[l] == LINEAR]
     if not layers:
         raise ValueError('fixture has no DeltaNet layers')
+    _, conv_dtype = linear_dtypes(selected)
     offsets = layout(spec, max_ctx=meta['max_ctx'])
     hashes = {}
 
@@ -176,9 +186,9 @@ def check(model_dir, kernel_dir, out):
         raise ValueError('fixture must start with complete zeroed DeltaNet state')
     results = []
     for layer in layers:
-        captures = [read_boundaries(read(f'y_act{layer}{sfx(t)}.bin'), read(f'y_state{layer}{sfx(t)}.bin'), spec, offsets)
+        captures = [read_boundaries(read(f'y_act{layer}{sfx(t)}.bin'), read(f'y_state{layer}{sfx(t)}.bin'), spec, offsets, conv_dtype=conv_dtype)
                     for t in range(meta['tokens'])]
-        results.extend(dict(layer=layer, **r) for r in compare_sequence(captures))
+        results.extend(dict(layer=layer, **r) for r in compare_sequence(captures, conv_dtype=conv_dtype))
     return dict(version=1, passed=all(r['passed'] for r in results), scope=__doc__.strip(),
                 conditioning='captured DeltaNet records and QKV projection outputs',
                 reference_carry='independent FP64 state from zero; no captured-state feedback',

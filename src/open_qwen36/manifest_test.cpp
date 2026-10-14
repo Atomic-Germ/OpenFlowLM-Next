@@ -103,6 +103,35 @@ int main(int argc, char** argv) {
         try { Manifest::parse(j, "bad entry dtype"); check(false, "bad entry dtype accepted"); }
         catch (const std::runtime_error&) { check(true, "bad entry dtype refused"); }
     }
+    // Linear entry/history dtypes are an explicit ABI, not optional hints.
+    for (const char* field : {"linear_entry_dtype", "linear_conv_dtype"}) {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"][field] = "float16";
+        try { Manifest::parse(j, "bad linear dtype"); check(false, "bad linear dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad linear dtype refused"); }
+    }
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt=j["layer_types"]["linear_attention"];
+        if (lt.contains("gemm_block")) {
+            auto& gb=lt["gemm_block"];
+            const auto old_off=gb["state_s_off"].get<uint64_t>();
+            j["layout"]["linear_entry_dtype"]="float32";
+            j["layout"]["linear_conv_dtype"]="float32";
+            gb["conv_dtype"]="float32"; gb["state_s_off"]=2*old_off;
+            lt["buffers"]["state"]["bytes"]=lt["buffers"]["state"]["bytes"].get<uint64_t>()+old_off;
+            try { auto m=Manifest::parse(j,"FP32 linear state"); check(m.linear_conv_f32,"FP32 state accepted"); }
+            catch (const std::exception& e) { check(false,e.what()); }
+            for(int bad=0;bad<3;++bad) {
+                auto b=j; auto& t=b["layer_types"]["linear_attention"];
+                if(bad==0) t["gemm_block"].erase("conv_dtype");
+                if(bad==1) t["gemm_block"]["state_s_off"]=old_off;
+                if(bad==2) t["buffers"]["state"]["bytes"]=1;
+                try { Manifest::parse(b,"bad FP32 state"); check(false,"incompatible linear state accepted"); }
+                catch(const std::runtime_error&) { check(true,"incompatible linear state refused"); }
+            }
+        }
+    }
     // ---- what the recipe wrote for the 27B
     // Only exercise the new pack-op schema; this synthetic manifest is not a
     // claim that a 48-head kernel has been built or validated.
