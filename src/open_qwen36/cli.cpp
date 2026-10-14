@@ -286,7 +286,9 @@ int uno(Core& core, const Args& a, int n) {
     const size_t P = a.ids.size();
     std::mt19937 rng(0);
     std::uniform_int_distribution<int> noise(1, static_cast<int>(core.uno_noise_bound()) - 1);   // the adapter's [1, N)
-    for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
+    const bool block = a.gemm_block && core.layer_major_ok();
+    if (block && P > 1) core.step_gemm_prompt(std::vector<int>(a.ids.begin(), a.ids.end() - 1), false);
+    else for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
     std::vector<int> out, hist(L, 0), dr(L), vr(L), am(L), av(L);
     int seed = a.ids[P - 1];
     size_t cycles = 0;
@@ -335,7 +337,10 @@ int uno(Core& core, const Args& a, int n) {
     for (int t : out) std::printf("token %d\n", t);
     // plain decode from the same prompt
     core.seek(0);
-    for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    // the seed's own row is a decode row on both sides, so the two start from the same cache
+    if (block && P > 1) core.step_gemm_prompt(std::vector<int>(a.ids.begin(), a.ids.end() - 1), false);
+    else for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
+    core.step(a.ids[P - 1], true);
     std::vector<int> ar;
     const auto t1 = clock::now();
     double st_total = 0, st_lm = 0, st_embed = 0, st_patch = 0;
