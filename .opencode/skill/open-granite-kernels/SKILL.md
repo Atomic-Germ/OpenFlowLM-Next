@@ -147,6 +147,40 @@ pp2048 317 / 332, against the five-step route's 501 / 537, 423 / 423, 231 / 268 
 512 / 2048. Host attention is two thirds of pp2048. The skill for the route itself is `open-gemm-bfp16`; the numbers and the
 accuracy gates are OPEN-PREFILL-BFP16-FFN.
 
+## All the overnight tracks on one set (2026-10-15, `perf/granite-overnight`)
+
+The union of D2 (ring + `dxh`), D1 (windows + 16 attention cores), D3 (per-cycle speculation), P2 (glu FFN) and P1
+(`attn_fa`) is one export (above) and one CLI. What had to change to make them one `dx`: the og joins. D1's 16 og streams
+joined 6 + 6 + 4 in memtiles 2..4, and D2's weight ring pins S2MM channel 0 of every memtile, so a join there has 5 inputs:
+dx.py joins 4 + 4 + 4 + 4 on memtiles 2..5 when the ring is on (drains on shim columns 2..5, 14 of 16 S2MM). Program memory
+did not move (fullest core 12,768 B); `dx` and `dxh` differ only in build stamps.
+
+Gates for a merged `dx` (each one caught something on some track; run them all):
+1. `utilities/decode-gates/decode_gates.py logits --sets <decode-depth set> <union> --prompt 70` and `--prompt 2100`:
+   20 of 20 logit files byte-identical.
+2. 96 greedy tokens on the six uno-ref prompts and chat / code at 1024 / 2048 against the base set, with
+   `OFLM_OPEN_ATTN_FA=0` on the union for the block-prefilled ones (the base has no `attn_fa`; with it the cache differs by
+   bf16 ulps and the gate would test the prefill, not decode).
+3. `--rows-check 17` at 70 / 1030 / 2060 tokens: ROWS PASS.
+4. `prefill_mode_check.py --arms fast:host,fast:npu` at 512 (random, ppl, chat, decode) and 2048 (random, ppl), and
+   `--arms fast:host,bfp16:npu` for the opt-in route.
+5. The spec matrix (`spec_lookup.py bench`, modes uno and adaptive) prints SPEC IDENTICAL on every run.
+
+Measuring with nothing else on the box: `utilities/granite-combined-bench/controlled.py` around every unit (calibrate once:
+24.08 tok/s, 1.5 % spread), each unit one `dibs run --measure --tag <you>`. While a unit of yours holds the machine every
+Bash command of yours waits (the hook), so drive the whole matrix from one background script and read its logs with the
+file tools.
+
+Result (CLEAN, controlled, min / median tok/s; full table in OPEN-FAMILY-GRANITE-UNO): plain decode tg128 23.87 / 22.46 /
+21.10 / 18.92 at 0 / 512 / 1024 / 2048 against Vulkan Q4_1's 23.7 / 23.5 / 23.2 / 22.6 in the same sitting; bfp16 prefill
+with `attn_fa` 736 / 820 / 727 at pp512 / 1024 / 2048 against Vulkan's 871 / 824 / 732; the default bf16 route ~250. A
+verify pass is now 1.5-1.7 decode steps, so Uno alone loses on chat; adaptive spec stays >= ~1.0x and reaches 2.39x
+(`fix_py`, 48 tok/s).
+
+Traps of the night: a sibling agent's `run_kernel.exe` on the NPU inside a CLEAN unit (only `controlled.py`'s NPU watch
+caught it; one tg128 rep read 10.3 tok/s), and the user's desktop waking up (`msedgewebview2.exe`, `code.exe` in dibs's
+NOISY verdicts) — the iGPU's numbers drop first (Vulkan pp512 877 -> 651 an hour later), so bracket Vulkan early.
+
 ## Result — 2026-09-06, mlir-aie 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301
 
 Correctness, 4-layer slice: logits corr **0.999998 / 0.999990**, same argmax
