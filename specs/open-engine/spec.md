@@ -216,7 +216,7 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 
 | family | geometry | step @ 2048, shipped -> fast | greedy agreement |
 |---|---|---|---|
-| Granite-4.2-3B (hd 64) | 5 x 8, RB 4 | 1216 s TTFT -> 59 s on 1005 tokens | fp64 replica, coherent chat |
+| Granite-4.2-3B (hd 64) | 5 x 8, RB 4 | 1216 s TTFT -> 59 s on 1005 tokens; step @ 2048 91.1 -> 78.7 ms with the score tree (46 ms at 0, 2026-10-14 below) | fp64 replica, coherent chat |
 | Qwen3-4B (hd 128) | 4 x 8, RB 4 | 5050 -> 258 ms (19.6x) | 300/300, corr min 0.99993 |
 | Llama-3.1-8B (hd 128) | 4 x 8, RB 4 | 4024 -> 427 ms (loaded box) | 54, then a 0.008-logit near-tie |
 | Hy-MT2-7B (hd 128) | 4 x 8, RB 4 | 3395 -> 165 ms (20.6x) | 43, then a 0.05-logit near-tie |
@@ -308,6 +308,29 @@ continuation is 64/64 identical to RB 2's. Teacher-forced over 64 positions at R
 the routed experts flipping on near-ties, as recorded for this family's first
 fast-attention pass.
 
+**Measured (2026-10-14, Granite 4.2 3B plain decode against depth -- OPEN-ATTN-SCORE-TREE):**
+Plain decode fell from 20.7 tok/s to 10.7 at 2048 tokens of context while llama.cpp on the 890M's Vulkan stayed at 23-24, and the
+OPEN-ATTN-CONTEXT bound ("within 2x of position 0") held only barely: a step at 2048 cost 1.96x a step at 0 (91.1 / 46.4 ms), and
+1.72x after the score tree (78.7 / 45.8). The tok/s figures are the 128-token decode, which adds the host's sampling to a step. The profile is one decode step at
+`--at-position` P (`OFLM_OPEN_STEP_TRACE=1 ... --bench-decode 5 --bench-step 10`, 21 steps, `dibs run --measure` CLEAN), the
+pipelined schedule, minimum wall and minimum per-dispatch time:
+
+| position | wall before | wall after | one `dx` dispatch before | one `dx` dispatch after | `lm` | `ln` | host embed / patch / route |
+|---|---|---|---|---|---|---|---|
+| 0 | 46.4 ms | 45.8 | 1.081 ms | 1.082 | 3.6 | 0.21 | 0.03 / 0.00 / 0.00 |
+| 1024 | 69.2 | 62.2 | 1.663 | 1.491 | 3.6 | 0.21 | 0.03 / 0.00 / 0.00 |
+| 2048 | 91.1 | 78.7 | 2.212 | 1.929 | 3.6 | 0.22 | 0.03 / 0.00 / 0.00 |
+
+Everything that grows with the position is inside the 40 `dx` dispatches: 21.7 us per step per position before (0.54 us a layer),
+16.2 after (0.41) (medians 46.9 / 91.4 before and 46.4 / 79.6 after; the 21 steps of a run spread within 1 ms). One `dx` dispatch at
+2048, change by change: 2.212 ms, `h / 5` as a 32-bit multiply 2.092, the rolled tree 2.057, four rows unrolled with the 32-lane
+exponential 1.996, the rescale exponential only when a max rose 1.929. Nothing host-side scales (no KV copy or re-upload: the cache is a resident buffer and a step patches two words and
+a position record), and the window is read to `pos`, not to a fixed stride. The attention is on the NPU, in `dx`: 5 cores x 8 heads, RB 4.
+At 2048 one layer's growth of 1.12 ms splits as the window stream alone 0.28 ms (`ATTN_NULL`), the score phase 0.41, the softmax
+0.19, the value accumulation 0.24 (`ATTN_ABL` 1 / 2 / 3); `ATTN_REPEAT=3` prices the arithmetic at 0.83 ms a pass before the tree (0.59 after), so stream and
+arithmetic add. The score loop ran 8 times a block, a trip count the bundle count of the function leaves out, and called `__muldi3` for
+`h / 5` each time; the tree removes both.
+
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
 Until an og element was NHL wide, ACORES was the largest divisor of `NH / HPO`,
@@ -382,6 +405,46 @@ at that position, so it is **quadratic in the prompt length** -- 1005 tokens
 took 1216 s before the fix. On a short prompt it reads as a flat per-token cost
 and is invisible. Nothing here batches a prompt; that is untouched, and it is
 now the dominant term for any document-shaped input.
+
+### OPEN-ATTN-SCORE-TREE: Granite's attention score phase is a tree, bit-identical to the loop it replaced
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `recipes/attnknobs.py` `tree8()`, `designs/dense/dx.py`, `designs/dxl/dxl.py`)
+**Verification:** manual (the NPU and the model container; every number below is `dibs run --measure` CLEAN)
+
+On the 8-heads-a-core block kernel (Granite 4.2 3B: head dim 64, 40 heads over 5 cores, RB 4) the score phase shall reduce a
+block's 32 head x row dot products as one tree whose levels pair lanes the way `aie::reduce_add` does (`ATTN_TREE8`, with
+`ATTN_T8_UNROLL` 4 rows on `dx` and 1 on `dxl`, `ATTN_EXP32`, `ATTN_KVH_MUL`), evaluate the softmax rescale's exponential only for a
+block that raised a running max, and the result shall be bit-identical to the kernel without it.
+- Plain decode at depth is cheaper per position: Granite's growth per layer per position falls from 0.54 to 0.41 us (16.2 us per step
+  at 2048; the table in OPEN-ATTN-CONTEXT, 2026-10-14).
+- Every other family's attention translation units preprocess token-identical to the base (`utilities/attn_pp_identical.sh`,
+  58 of 58 including Granite with `ATTN_TREE8=0`).
+- `ATTN_TREE8=0` / `1` forces it off / on for an A/B build; it is a probe variable in the build key (OPEN-BUILD-CACHE), as is
+  `ATTN_REPEAT` (the block computed n times, a pricing probe).
+
+**Acceptance criteria:**
+- A set built with the tree and the same set without it, `open_qwen36_cli --dump-logits` over 70 prompt tokens + 20 decoded, and over
+  2100 + 20 (one token at a time, so the window is 2100 rows): all 20 logit files byte-identical in both.
+- Ten prompts (the six of `utilities/uno-ref/prompts.jsonl`, and the 1024 / 2048-token chat and code prompts of
+  `utilities/granite-combined-bench`) x 96 greedy tokens: every token list identical to the base kernel's.
+- `open_qwen36_cli --rows-check 17` on the set prints `ROWS PASS` (0 of 100352 logits differ for every row), which holds `dxl` to `dx`.
+- `specs/open-engine/tests/test_attn_geometry.py::test_score_tree_is_granite_only`.
+
+**Procedure (manual):** build `dx` with `ATTN_TREE8=0` and without it (`export_qwen36_kernels.py --only dx --out <dir>`, ~75 s each), overlay
+`dx/final.xclbin` + `dx/insts.bin` on a copy of the union set, and run the criteria above against each. Profile with
+`OFLM_OPEN_STEP_TRACE=1 open_qwen36_cli --ids 100264 --at-position P --bench-decode 5 --bench-step 10` at P = 0, 1024, 2048.
+
+**Where the cost sits, and what is left (2026-10-14):** one `dx` dispatch
+per layer carries everything that grows with position; the host's embed / patch / route and the `ln` / `lm` dispatches are flat. At
+2048 one layer's growth (1.12 ms) is the window stream alone 0.28 (an `ATTN_NULL` build), the score phase 0.41, the softmax 0.19 and
+the value accumulation 0.24 (`ATTN_ABL` 1 / 2 / 3), and the stream and the arithmetic **add**. A deeper `ain` ring cannot overlap
+them: the lowered ring is the largest acquire plus one (9 buffers of 1 KB for an 8-element block) whatever depth the design declares
+(10 and 24 lowered alike; `lni` 5 -> 6, `x` 2 -> 3), so the DMA has one spare buffer while the core holds eight. Copying each block
+into local buffers and releasing the fifo before computing (so the ring refills during the arithmetic) was bit-identical and slower,
+2.080 against 1.986 ms a dispatch at 2048 (both with the rolled tree: the copy overflows program memory beside the unrolled one, which
+reads 1.929), so the copy cost what it was expected to (~0.1 ms) and bought nothing: the 0.28 ms is not DMA wait; the per-block acquire / release and pointer selection is the suspect (RB 2 costs 0.2 ms a layer
+more), unmeasured. The score loop ran 8 times a block and called `__muldi3` for `h / 5` each time. Still open: that per-block cost,
+the stream's volume (2 KB a position broadcast to every core, of which a core needs a quarter to three eighths), and the arithmetic's
+spills (358 vector stores in the 795-bundle score block).
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
@@ -1544,9 +1607,45 @@ At depth: the prompt is real repo text cut to the exact token count (chat: spec 
 | 2048 | chat | bfp16 | 2.72 | 11.88 | 10.75 | 1.11x |
 | 2048 | code | bfp16 | 3.20 | 13.99 | 10.71 | 1.31x |
 
-- Plain decode falls from 20.3 tok/s (short) to 13.7 at 1024 and 10.7 at 2048 tokens of context (attention grows with position, OPEN-ATTN-CONTEXT); Uno's gain holds, since its verify and draft rows carry the same window: 1.05-1.22x at 1024, 1.11-1.31x at 2048, the code prompts ahead of chat as at short context.
+- (Before the score tree; the next result has the rebuilt kernels.) Plain decode falls from 20.3 tok/s (short) to 13.7 at 1024 and 10.7 at 2048 tokens of context (attention grows with position, OPEN-ATTN-CONTEXT); Uno's gain holds, since its verify and draft rows carry the same window: 1.05-1.22x at 1024, 1.11-1.31x at 2048, the code prompts ahead of chat as at short context.
 - The route is limited by `pos + L > max_ctx` (the manifest's 4096, `core.cpp` `step_rows`): a row pass within L = 4 of the capacity is refused by name. Nothing near it was run; 2048 + 128 is half the capacity.
 - `--uno` now takes `--gemm-block`. Its plain-decode reference prefills all but the last token that way and steps the last one, as Uno's seed row is stepped; with the whole prompt block-prefilled instead, the two start from caches that differ by a few bf16 ulps in the seed's K/V and the 1024-token chat prompt read DIFFERS at token 27.
+
+**Result 2026-10-14, decode depth (`perf/granite-decode-depth`: OPEN-ATTN-SCORE-TREE on `dx` and `dxl`; `utilities/granite-combined-bench/matrix.py --lengths 0,512,1024,2048 --routes fast`, one binary, before = the combined tree's `dx` / `dxl`, after = the same set with `dx`, `dxl` and `dxl_lora` rebuilt; every row `dibs run --measure --tag ctx-decode`, CLEAN, the before and after runs back to back; an earlier "after" matrix on the tree without the conditional rescale exponential read 20.80 / 17.52 / 15.12 / 11.92 tok/s at 0 / 512 / 1024 / 2048):**
+
+Plain decode, 128 tokens after N tokens of context (`--gemm-block` bf16 prefill; N = 0 is one prompt token), 3 runs, min / median tok/s:
+
+| context | before | after | change (median) | llama.cpp Vulkan on the 890M (not re-measured here) |
+|---|---|---|---|---|
+| 0 | 20.66 / 20.67 | 20.84 / 20.84 | +0.8 % | 24.2 |
+| 512 | 16.70 / 16.72 | 17.69 / 17.86 | +6.8 % | not recorded |
+| 1024 | 13.66 / 14.01 | 15.46 / 15.52 | +10.8 % | 23.1 |
+| 2048 | 10.65 / 10.67 | 12.30 / 12.35 | +15.7 % | 23.3 |
+
+Uno on the same kernels (one run each, 128 tokens, both sides from one cache, every one identical to plain decode):
+
+| context | prompt | tokens a cycle | Uno before -> after | plain before -> after | speedup before -> after |
+|---|---|---|---|---|---|
+| 1024 | chat | 2.67 | 14.34 -> 15.20 | 14.14 -> 15.51 | 1.01x -> 0.98x |
+| 1024 | code | 3.28 | 17.81 -> 18.79 | 14.19 -> 15.52 | 1.25x -> 1.21x |
+| 2048 | chat | 2.78 | 12.14 -> 13.16 | 10.77 -> 12.37 | 1.13x -> 1.06x |
+| 2048 | code | 3.12 -> 3.20 (see below) | 13.62 -> 14.76 | 10.71 -> 12.38 | 1.27x -> 1.19x |
+
+Six prompts x 128 tokens at short context (`uno_bench.py`, token-at-a-time prefill), before -> after: 3.04 tokens a cycle both ways, every
+prompt identical to decode; Uno 17.26 -> 17.30 (chat), 18.66 -> 18.76, 22.68 -> 22.91, 22.80 -> 22.91, 26.77 -> 26.91, 24.58 -> 24.71 tok/s;
+plain decode 20.73 / 20.75 / 20.61 / 20.64 / 20.58 / 20.20 -> 20.66 / 20.77 / 20.60 / 20.69 / 20.62 / 20.47; geometric-mean speedup 1.06x -> 1.07x.
+(A second "after" run of the sweep, on the tree without the conditional exponential, read the chat row's plain decode as 18.68 in a CLEAN run,
+an outlier among five figures at 20.6-20.8; that run's 1.08x is not quoted.)
+
+- `dx` (rows unrolled 4) gained 7-16 % of plain decode at 512-2048, `dxl` (rolled, the program memory leaves no room for more) 5-8 % of Uno;
+  so Uno's ratio over plain decode fell by 0.03-0.08 at depth while both sped up.
+- The code prompt at 2048 read 3.12 tokens a cycle (41 cycles) in four runs of the matrix (the combined tree's, this branch's before and
+  after, and a `dxl`-only check) and 3.20 (40 cycles) in this branch's last two matrix runs and in six runs of a separate script (3 each of
+  the base kernels and the final ones: all 3.20). So the acceptance is not a property of the kernels here; the output is identical to decode
+  every time. The cause is not isolated (it may be the process, the host block prefill, or the dibs wrapper).
+- The slope is not gone. At 2048 plain decode is still ~1.9x slower than Vulkan: 78.7 ms a step against 45.8 at context 0 (81 / 48 ms a
+  token at 12.35 / 20.84 tok/s); what remains is the window stream (0.28 ms a layer at 2048) plus the arithmetic, 0.59 ms a pass with the
+  tree before the conditional exponential (`ATTN_REPEAT` 3 against 1, OPEN-ATTN-SCORE-TREE).
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,

@@ -105,9 +105,9 @@ def main() -> int:
         elif a.mode == "decode":
             res = {}
             for n in lengths:
-                ids = body_ids(tok, "prose", n)
+                ids = body_ids(tok, "prose", n) if n else [100264]
                 for r in routes:
-                    txt = run_cli(a, r, ids, ["--gemm-block", "--max-tokens", str(a.tokens + 1), "--repeat", str(a.reps)], tmp)
+                    txt = run_cli(a, r, ids, ["--gemm-block"] * bool(n) + ["--max-tokens", str(a.tokens + 1), "--repeat", str(a.reps)], tmp)
                     for i, m in enumerate(DECODE.finditer(txt)):
                         res.setdefault((r, n), []).append(float(m[3]))
                         emit(out, {"mode": "decode", "route": r, "n": n, "rep": i, "steps": int(m[1]), "ms_tok": float(m[2]), "tok_s": float(m[3])})

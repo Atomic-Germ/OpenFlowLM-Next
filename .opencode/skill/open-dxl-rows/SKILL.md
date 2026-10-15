@@ -29,6 +29,8 @@ decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DEC
     pos0 + j with the pb counts meta gives that position, skips the rest (`dxl_attn_skip`:
     pb[6] = pb[0] + L - j - pb[1], which also covers position 0's dummy row), then adds its own
     row with `attn_step_new`. Bit-identical to decode by construction.
+  - Granite's groups compile the same bit-identical score tree as `dx` (`attnknobs.tree8`, OPEN-ATTN-SCORE-TREE), with the row loop
+    rolled to fit program memory: 12,320 B per core (13,520 with the KV pack) of 16,384; unrolling by 4 overflows it and by 2 crashes the backend.
   - Each group's core 0 packs its new K|V row (`dxl_kvpack`) into a memtile join (Tile(1, 1)).
     One drain writes all L rows, and it finishes before the window fill is issued.
   - Each group's four og elements join in a memtile (Tile(2 + g, 1)) into one 8 KB row: one

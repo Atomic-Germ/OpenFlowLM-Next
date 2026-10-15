@@ -24,6 +24,7 @@ sys.path.insert(0, str(DESIGNS.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
+from recipes.attnknobs import TREE8_STACK, tree8, tree8_flags  # noqa: E402
 from recipes import dxl as DXR  # noqa: E402
 from recipes.dxl import JMAX, NF, Z_ROW, job_table, jobs  # noqa: E402
 
@@ -55,9 +56,13 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():
-    if _k not in ("ATTN_RB", "ATTN_FAST"):
+    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8"):
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+T8 = tree8(SPEC, G.NHL, G.RB, G.HD)           # the same bit-identical score tree as dx (OPEN-ATTN-SCORE-TREE)
+if T8:
+    ATTN_FLAGS.extend(tree8_flags(1))
+ASTACK = TREE8_STACK if T8 else 0x1800
 # Every DDR-bound stream leaves the compute rows through row 2's south ports, 4 a column. A group's core 0 drains
 # its own KV row; where og, KV, y and ln outflows overrun them (Granite's 5 cores a group: 33), group 0's core 0
 # packs all L rows from the prologues it otherwise skips.
@@ -361,7 +366,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                       Buffer(pb_ty, name="pb_kv"), Buffer(brow, name="kout_kv"), Buffer(brow, name="vout_kv"),
                       Buffer(pb_ty, name="cnt_kv"), f_kvrow] if (KV_ONE and kv_core(g, c)) else [])
             workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + outs + abufs(g, c) + afns + kvall,
-                                  tile=att_tiles[g][c], stack_size=0x1800))
+                                  tile=att_tiles[g][c], stack_size=ASTACK))
 
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_lora, lni, lno, w_prods, x_prod, y_conss,
                  ain_p, kv_c, og_cs):

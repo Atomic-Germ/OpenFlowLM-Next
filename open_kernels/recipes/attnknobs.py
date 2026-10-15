@@ -26,7 +26,7 @@ from .spec import ModelSpec
 # LX_NULL_DN / LX_NULL_GEMV (designs/layer_x/xcommon.py) are the same kind of knob on the
 # main cores: LX_NULL_DN compiles the DeltaNet arithmetic away, LX_NULL_GEMV the q4/q8 GEMV
 # tile body, both leaving every stream, fifo and DMA -- and so insts.bin -- byte-identical.
-PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV", "DXL_NULL_PREP", "DXL_NULL_LN")
+PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV", "DXL_NULL_PREP", "DXL_NULL_LN", "ATTN_TREE8", "ATTN_REPEAT")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 
@@ -66,6 +66,23 @@ BLOCK_ONLY_MEASURED = ("qwen36moe",)
 # unchanged -- stage 2.9).
 FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3",
                   "qwen2", "lfm2", "k2")
+# Measured bit-identical (OPEN-ATTN-SCORE-TREE); ATTN_TREE8=0 / 1 forces it off / on for an A/B build.
+TREE8_MEASURED = ("granite",)
+TREE8_STACK = 0x3000       # the tree spills past the usual 0x1800 stack, and the overrun reads back as NaN
+
+
+def tree8_flags(unroll: int) -> list[str]:
+    # 4 rows unrolled fit dx's attention core, only 1 fits dxl's beside its skip and pack kernels.
+    return ["-DATTN_TREE8=1", f"-DATTN_T8_UNROLL={unroll}", "-DATTN_EXP32=1", "-DATTN_KVH_MUL=1"]
+
+
+def tree8(spec: ModelSpec, nhl: int, rb: int, hd: int) -> bool:
+    forced = os.environ.get("ATTN_TREE8")
+    if forced is not None:
+        return forced == "1"
+    return spec.family in TREE8_MEASURED and nhl == 8 and rb == 4 and hd == 64
+
+
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):
 # six columns for the split, whatever the head count.
 MAX_ATTN_CORES = 6
