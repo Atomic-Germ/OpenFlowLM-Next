@@ -141,6 +141,58 @@ int main(int argc, char** argv) {
         check(top, "attn_apply: the padded window never reads past the position's own row");
         check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
     }
+    {
+        // OPEN-ATTN-KVSLICE: five per-core window fills (each a BD write then its DDR patch on arg 3 below one row,
+        // compiled for 4 rows of 192 words), the new row's drain at one row and the record on arg 5.
+        std::vector<uint32_t> w(4, 0);
+        auto bd = [&](uint32_t reg, uint32_t len) {
+            std::vector<uint32_t> op(12, 0);
+            op[0] = 1; op[2] = reg; op[4] = len;
+            w.insert(w.end(), op.begin(), op.end());
+        };
+        auto patch = [&](uint32_t reg, uint32_t arg, uint32_t off) {
+            std::vector<uint32_t> op(12, 0);
+            op[0] = 0x81; op[6] = reg; op[8] = arg; op[10] = off;
+            w.insert(w.end(), op.begin(), op.end());
+        };
+        const uint32_t offs[5] = {0, 128, 384, 512, 640};
+        bd(0x100, 512); patch(0x104, 3, 2048);
+        for (int c = 0; c < 5; ++c) { bd(0x200 + 0x20 * c, 768); patch(0x204 + 0x20 * c, 3, offs[c]); }
+        patch(0x300, 5, 1024u | 0x80000000u);
+        stream_patch::AttnGeometry g;
+        g.kvslice = 4;
+        auto tab = stream_patch::attn_table(w, "kvslice test", g);
+        size_t lens = 0, bases = 0;
+        for (const auto& p : tab) { lens += p.kind == 0 && p.row_words == 192; bases += p.kind == 3; }
+        check(tab.size() == 12 && lens == 5 && bases == 5, "attn_table kvslice: five window fills of 192 words a row");
+        bool ok = true;
+        for (uint64_t pos : {0ull, 1ull, 3ull, 4ull, 5ull, 1023ull, 2048ull}) {
+            std::vector<uint32_t> iw = w;
+            stream_patch::attn_apply(iw.data(), tab, pos, g);
+            const uint64_t nf = pos ? pos : 1, pad = 4 * ((nf + 3) / 4);
+            for (const auto& p : tab) {
+                const uint64_t want = p.kind == 0 ? pad * 192 : p.kind == 1 ? pos * 2048 : p.kind == 2 ? (pos * 1024) | 0x80000000u : p.base;
+                ok = ok && iw[p.word] == static_cast<uint32_t>(want);
+            }
+        }
+        check(ok, "attn_apply kvslice: each fill streams nf padded to whole blocks from its own offset, the row and record as before");
+        bool refused_plain = false;
+        try { stream_patch::attn_table(w, "kvslice test", stream_patch::AttnGeometry{}); }
+        catch (const std::runtime_error& e) { refused_plain = std::string(e.what()).find("unexpected kv transfer") != std::string::npos; }
+        check(refused_plain, "attn_table: per-core fills without the manifest's kvslice are refused");
+    }
+    refused_manifest(argv[1], "kvslice 4 needs the attnpos patch table, rb 1", "kvslice beside a blocked walk refused",
+                     [](json& j) { j["kernels"]["ax0"]["kvslice"] = 4; });
+    refused_manifest(argv[1], "kvslice 3", "kvslice of 3 rows refused",
+                     [](json& j) { j["kernels"]["ax0"]["rb"] = 1; j["kernels"]["ax0"]["kvslice"] = 3; });
+    {
+        json j;
+        std::ifstream(argv[1]) >> j;
+        j["kernels"]["ax0"]["rb"] = 1;
+        j["kernels"]["ax0"]["kvslice"] = 4;
+        check(Manifest::parse(j, "kvslice").kernels.at("ax0").kvslice == 4 && m.kernels.at("ax0").kvslice == 0,
+              "manifest: kvslice read on an attnpos kernel, absent means 0");
+    }
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
     check(lin.consts_bytes == 11882496 && lin.act_bytes == 190464 && lin.state_kind == "linear" && lin.state_bytes == 2342912, "linear layer buffers");
