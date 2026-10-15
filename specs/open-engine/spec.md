@@ -4680,7 +4680,7 @@ attention output is read back (`core.cpp`, the `launch` lambda of the NPU-attent
 3. Timing: pp512 / 1024 / 2048, `OFLM_OPEN_PREFILL_PREP=0/1` interleaved with a control, under `dibs run --measure`
    (`utilities/dense-decode-probe/prefill_ab.py` with a `::ENV=VAL` variant suffix).
 
-**Result 2026-10-15 (Granite-4.2-3B-NPU2, bfp16 route, the union set of `perf/granite-overnight` 152f5e2 plus the rebuilt
+**Result 2026-10-15, first version (Granite-4.2-3B-NPU2, bfp16 route, the union set of `perf/granite-overnight` 152f5e2 plus the rebuilt
 `af*` family and `afp`; the unit printed CLEAN before and after, control = the union tree's own CLI and set, pp512, 3 runs).**
 - *The kernel* (step 1, p0 256, seed 0): Q (hi + lo) rel_fro 8.2e-6 against the numpy fp32 pipeline, K rows 99.83 % of bytes
   equal (the rest one bf16 ulp), V 100 %, records intact, PASS. Program memory of the shared core: 14128 of 16384 B (attention
@@ -4753,6 +4753,22 @@ before and after each unit except where noted).**
   count; the "old prep" column reproduces the earlier -5..-8 % at pp512, which is the check that the units agree. Process CPU
   seconds (load included) were within 10 % between off and on at every length (pp2048: 34.1 off, 32.1 new prep).
   The pp2048 unit that printed NOISY after (a browser process) was discarded and rerun.
+- *Stage split* (one run each, ms; off -> new prep). pp512: host 220.5 -> 149.1 (qkv copy 28.5, rope+kv 14.3, Q pack 24.6,
+  Q/cache syncs 4.6 gone), NPU prep dispatches 135.6 (80 of them, the first of each layer carrying the switch into the
+  `af` context that attention used to carry: attention 205.5 -> 82.9). pp2048: host 995.1 -> 725.3, prep 249.7 (320
+  dispatches, 0.78 ms each), attention 1217 -> 925.
+- *Gates* (new kernels, this branch's CLI): decode logits byte-identical to the d17c353 set (20 of 20 at 70 and at 2100 prompt
+  tokens); the six uno-ref prompts greedy over 96 tokens identical (`OFLM_OPEN_ATTN_FA=0`); `--rows-check 17` ROWS PASS at
+  70 / 1030 / 2060; `--uno 64` UNO IDENTICAL; `--spec 128` SPEC IDENTICAL in adaptive and uno modes. Prefill, bfp16 route with
+  prep against the default (bf16) route: corr min 0.997523 / mean 0.999590 at 512 (argmax 484 of 512, flips at margins up to
+  0.189), min 0.985897 / mean 0.999549 at 2048 (argmax 1948 of 2048); perplexity ratio 1.0000 at 512 (20.7142 vs 20.7152) and
+  0.9981 at 2048, KL 0.00291 / 0.00222 nats; the six chat prompts 64-token greedy continuations identical (flip margins
+  0.173 and a few smaller at single positions of the teacher-forced runs); prep against the host glue on the same route:
+  corr min 0.996661 / mean 0.999792 (15 flips of 512, margins up to 0.133). `pytest specs`: 895 passed, 146 skipped;
+  `build.cmd` C++ tests pass.
+- *Not verified:* prompts starting at a non-zero position (multi-turn), `oflm serve`, `oflm-test`, a prompt of 4096 tokens.
+  Host CPU seconds were measured as whole-process CPU (model load included), not around the prefill alone. Recommendation:
+  make prep the default for the bfp16 route (it is level or faster at every measured length), after the multi-turn case.
 
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
