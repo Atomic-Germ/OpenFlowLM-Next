@@ -324,9 +324,12 @@ Q4_0-native chunk (`GEMV_Q4_0_NATIVE`, `LMHEAD_Q4_0=1`: 4608 B, no m plane, m = 
 (`utilities/decode-gates/q4_0_head_probe.py`); re-checked with a control, 2.828 / 2.865 against 3.078 / 3.202 ms min /
 median (8-10% for 10% fewer bytes). A model-wide Q4_0 layout would take ~8-10% off every layer's stream (estimate:
 41.4 -> ~37.5-38 ms at position 0). Quality on the repo-docs corpus (llama.cpp Vulkan, KLD against bf16 over
-24 x 512 tokens): Q4_0 0.155, Q4_1 0.158, Q4_K_M 0.124. Not a default: a proposal. The night's llama.cpp Vulkan tg128
-(b10944, CLEAN, three sittings) read 17-18 tok/s for Q4_1 against 24.2 the afternoon before on the same binary and
-file: the iGPU's state moves that much, so compare to Vulkan in one sitting or not at all.
+24 x 512 tokens): Q4_0 0.155, Q4_1 0.158, Q4_K_M 0.124. Not a default: a proposal.
+
+**Against llama.cpp Vulkan (b10944, the 890M), one sitting, NPU controls around each model.** Q4_1 tg128 23.55 +- 0.15,
+at d2048 22.21 +- 0.17; Q4_0 23.14 / 21.91; this path 23.2-23.4 at ctx 0 in the same unit and 13.19 at 2048. Earlier
+units without a control read Vulkan at 17-18 tok/s on the same binary and file, most likely a sibling's NPU run inside
+the unit: compare to Vulkan in one sitting with a control, or not at all.
 
 ## Rules
 
