@@ -173,3 +173,6 @@ Traps:
   breaks the tie. Serve a second time with `OFLM_SPECULATIVE` unset for the reference instead.
 - The app's AVX2 greedy scan kept the lower *lane* on a tie, not the lower id (fixed with OPEN-SPEC-LOOKUP); a served
   speculative reply could split from plain decode there.
+- Granite's server ignores a request's `"think": false` (its AutoModel has no `enable_think` parameter and does not
+  pass `enable_thinking` to the template), so a served whole-file edit reasons first and lookup gains 1.15x there,
+  not the CLI's 3.1x (the CLI prompts render the template with `enable_thinking=False`).

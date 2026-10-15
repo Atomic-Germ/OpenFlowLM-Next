@@ -1583,7 +1583,8 @@ Random histories (a small alphabet, so matches are common) agree with the rule r
 4. Served: `spec_lookup.py serve-launch --oflm <oflm.exe> --registry <model_list.json> --models-root <root> --kernels
    <set> --env OFLM_SPECULATIVE=1 --out a.json`, the same without `--env` into `b.json` (plain decode), then
    `serve-compare a.json b.json`: a greedy request, the same cut by `max_tokens`, and the same streamed equal plain
-   decode's reply, on a chat prompt (thinking on) and a whole-file bug fix (thinking off); a sampled request replies.
+   decode's reply, on a chat prompt and a whole-file bug fix (sent with `"think": false`, which Granite's server ignores
+   today); a sampled request replies.
    Not `presence_penalty 1e-6` for the reference: at an exact bf16 tie the penalty picks the token.
 5. Capacity: `--max-ctx 96 --spec 68` from a 26-token prompt, `--spec-mode uno` and `lookup`: the last cycles fall back to
    plain steps (a Uno cycle last at position 90, a lookup pass at 91), `SPEC IDENTICAL`.
@@ -1596,7 +1597,11 @@ Random histories (a small alphabet, so matches are common) agree with the rule r
   13 lookup and 18 Uno cycles (untimed: the machine was busy).
 - Served (`oflm serve`, `OFLM_SPECULATIVE=1` against unset): the chat reply (133 tokens, to its end) and the bug fix
   (200, cut by `max_tokens`), their 37-token cuts and their streamed forms are identical to plain decode's; sampled
-  requests reply.
+  requests reply. Measured (one `dibs run --measure` unit, both servers, CLEAN; the server's own decode tok/s): chat
+  20.18 against 20.37 (0.99x, as the CLI's 0.97x), the bug fix 15.93 against 13.89 (1.15x). The bug fix is not the
+  CLI's 3.1x because the server ran it with thinking on: Granite's AutoModel takes no `enable_think` parameter and its
+  template is not given `enable_thinking`, so the request's `"think": false` is ignored and the reply reasons about the
+  bug instead of returning the file (not fixed here; the other thinking families pass it).
 - The numbers are in OPEN-FAMILY-GRANITE-UNO.
 
 ### OPEN-FAMILY-GRANITE-UNO: Granite 4.2 3B's Uno drafter
