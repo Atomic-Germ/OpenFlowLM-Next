@@ -80,6 +80,7 @@ and rewrites the manifest (version 5). Engine build: `src/open_qwen36/build.cmd`
    `run_kernel.exe`, `make_test.py compare-glu` -> H's bytes (>= 99.9 %) and shared exponents (>= 99.99 %) against the host
    encode of silu(g) * u, down(H) rel_fro. A build without `hold()` reads 0.99722 / 0.99715 and FAILs.
 3. The model: `utilities\dense-decode-probe\prefill_mode_check.py` (random ids, chat prompts, greedy decode, perplexity, timing).
+4. Speed: `utilities\dense-decode-probe\prefill_ab.py` under one `dibs run --measure` (variants interleaved, a `--control`).
 
 Every NPU run, timed or not, goes under `dibs run --measure --tag <you> ...` (CLEAN before and after): `dibs` treats one
 session's tracks as one holder, so a `dibs run npu` job can land inside another track's timed unit. `lock.py` is gone on
