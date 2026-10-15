@@ -422,6 +422,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_READ_FENCE")) g_read_fence = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_STEP_TRACE")) step_trace_ = std::atoi(env);
     if (const char* env = std::getenv("OFLM_OPEN_SPIN_US")) spin_us_ = std::atoi(env);
+    if (const char* env = std::getenv("OFLM_OPEN_RUN_REUSE")) run_reuse_ = std::atoi(env) != 0;
     // OPEN-DECODE-PIPELINE. Level 1 keeps the next layer's first dispatch in flight behind
     // this layer's last one only when the two share a hardware context; level 2 crosses
     // contexts as well (see step_impl for the ordering invariant and what proves it).
@@ -869,7 +870,7 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
     return it->second;
 }
 
-Core::Inflight Core::start_run(Kern& k, const std::vector<std::string>& args, int layer) {
+Core::Inflight Core::start_run(Kern& k, const std::vector<std::string>& args, int layer, bool reuse) {
     Inflight f;
     f.k = &k;
     f.layer = layer;
@@ -883,7 +884,14 @@ Core::Inflight Core::start_run(Kern& k, const std::vector<std::string>& args, in
     f.ctx_change = last_dispatched_ && last_dispatched_->ctx != k.ctx;
     last_dispatched_ = &k;
     ++dispatches_;
-    f.r = xrt::run(*k.k);
+    // building and freeing a run per dispatch cost ~0.1 ms a token, part of it at the step boundary with the array idle
+    xrt::run* kept = reuse ? &k.runs[layer] : nullptr;
+    if (kept && *kept) {
+        f.r = *kept;
+    } else {
+        f.r = xrt::run(*k.k);
+        if (kept) *kept = f.r;
+    }
     f.r.set_arg(0, kOpcode);
     f.r.set_arg(1, *k.instr);
     f.r.set_arg(2, static_cast<int>(k.words.size()));
@@ -1989,7 +1997,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             timing_.dispatch_ms += elapsed;
         }
         if (!head.active()) {
-            head = start_run(kerns_.at(prog.front().kernel), prog.front().args, l);
+            head = start_run(kerns_.at(prog.front().kernel), prog.front().args, l, run_reuse_);
             timing_.part0_ms += head.submit_ms;
             timing_.dispatch_ms += head.submit_ms;
         }
@@ -2022,7 +2030,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                     route(kerns_.at(s.kernel), l, s.act_off);
                 }
             }
-            tail_in = start_run(kerns_.at(prog.back().kernel), prog.back().args, l);
+            tail_in = start_run(kerns_.at(prog.back().kernel), prog.back().args, l, run_reuse_);
             timing_.part1_ms += tail_in.submit_ms;
             timing_.dispatch_ms += tail_in.submit_ms;
         }
@@ -2032,7 +2040,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             const bool next_ok = !next.empty() && next.front().op == "run" && next.back().op == "run";
             Kern& nk = next_ok ? kerns_.at(next.front().kernel) : *tail_in.k;
             if (next_ok && (submit_ahead_ >= 2 || nk.ctx == tail_in.k->ctx)) {
-                head = start_run(nk, next.front().args, l + 1);
+                head = start_run(nk, next.front().args, l + 1, run_reuse_);
                 timing_.part0_ms += head.submit_ms;
                 timing_.dispatch_ms += head.submit_ms;
             }
@@ -2043,7 +2051,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     if (want_logits && submit_ahead_ >= 1 && tail_in.active() && !w_->tail.empty() &&
         w_->tail.front().op == "run" &&
         (submit_ahead_ >= 2 || kerns_.at(w_->tail.front().kernel).ctx == tail_in.k->ctx)) {
-        tail0 = start_run(kerns_.at(w_->tail.front().kernel), w_->tail.front().args, 0);
+        tail0 = start_run(kerns_.at(w_->tail.front().kernel), w_->tail.front().args, 0, run_reuse_);
         timing_.dispatch_ms += tail0.submit_ms;
     }
     if (tail_in.active()) {
