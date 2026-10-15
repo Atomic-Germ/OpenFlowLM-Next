@@ -483,7 +483,8 @@ of one kv head share every K and V row they load, and give logits byte-identical
   (rows 4 and 5; the 2-head cores compile attn.h at `ATTN_NHL=2` under prefixed symbols). The score tree is TREE8's over head
   pairs of one K row, the value pass covers all of a core's heads per head-dim slice with every head's chain in its old order,
   and the per-head rescale test is skipped when no head of the block raised its max. The two kv heads of an aligned slice
-  share one window stream (4 streams of 512 B a position); the og elements join in memtiles (at most 6 inputs each).
+  share one window stream (4 streams of 512 B a position); the og elements join in memtiles (at most 6 inputs each, 4
+  where OPEN-DECODE-STREAM's weight ring holds the memtile's S2MM channel 0: 4 x 4 on memtiles 2..5).
 - **The manifest's `kvslice`** (rows an element) tells `attnpos` / `attnrows` the layout (OPEN-MANIFEST): every KV transfer
   below one row is a window fill, its BD length patched to the padded rows times its own per-row words, its offset to its base
   plus `start * kv_row`; the KV buffer keeps `kvslice - 1` rows of slack.

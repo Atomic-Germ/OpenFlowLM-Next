@@ -108,14 +108,16 @@ the eos are the same token — the other three families have a separate pair, an
 
 ## The combined kernel set (Uno decode + bf16 and bfp16 prefill)
 
-One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dxh` (the head, a second stream
-over `dx`'s image), `dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four bfp16
-streams (`gemm_bfp16_n4096_k2560`, `_n3072_k2560`, `_n16384_k2560_glu`, `_n3072_k8192_h`: OPEN-PREFILL-BFP16-FFN's fused
-gate|up and down-from-H), `dxl`, `dxl_lora` and `lmhl`, with one `manifest.json` (manifest_version 5). `dxl`'s weight fifo
-depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and
-`lm_head_q4_f32` stay for the GGUF-direct section's tail. To refresh only the bfp16 streams, copy a full set and run the
-exporter with `--out <copy> --only <the four names>` (~2 min); an engine that reads manifest_version 4 refuses the result
-by name.
+One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step (34 sets): `dx` (memtile weight ring,
+early weight issue, per-core KV windows, 16 attention cores by kv head), `dxh` (the head, a second stream over `dx`'s image),
+`dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four bfp16 streams
+(`gemm_bfp16_n4096_k2560`, `_n3072_k2560`, `_n16384_k2560_glu`, `_n3072_k8192_h`: OPEN-PREFILL-BFP16-FFN's fused gate|up and
+down-from-H), `dxl`, `dxl_lora` (per-core windows), `lmhl`, and the prefill attention `af256` .. `af4096` (16 streams over one
+xclbin, OPEN-PREFILL-ATTN-FA), with one `manifest.json` (manifest_version 5). `dxl`'s weight fifo depth (`DXL_WDEPTH`)
+defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and `lm_head_q4_f32` stay for the
+GGUF-direct section's tail. To refresh only some sets, copy a full set and run the exporter with `--out <copy> --only
+<names>` (bfp16 streams ~2 min, `dx,dxh` ~4 min; always `dx` and `dxh` together); an engine that reads manifest_version 4
+refuses a v5 set by name.
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1
@@ -123,8 +125,9 @@ cd <repo>      # (Get-Process -Id $PID).PriorityClass = 'BelowNormal' first; one
 python open_kernels\export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <repo>\src\xclbins\Granite-4.2-3B-NPU2\open_kernels
 ```
 
-About 13 min at BelowNormal on a quiet box (2026-10-15: `dx` / `dx_f32` / `dxl` / `dxl_lora` ~85-125 s each, the GEMMs 16-35 s;
-the "2 h" once noted here was a box busy with other builds). Then `open_qwen36_cli --kernels <set>`; pass it
+About 17 min at BelowNormal on a quiet box for all 34 sets (2026-10-15 union: `dx` / `dxh` / `dx_f32` 113-120 s each,
+`dxl` / `dxl_lora` ~85 s, the GEMMs 18-34 s, each `af` stream 11-15 s; the "2 h" once noted here was a box busy with other
+builds). Then `open_qwen36_cli --kernels <set>`; pass it
 explicitly, `C:\models\Granite-4.2-3B-NPU2\open_kernels` is a symlink to an old tree. `--prefill-mode bfp16` picks the bfp16 route.
 `--uno N --gemm-block` prefills the prompt as blocks before the Uno cycle, so a 1024 / 2048-token context costs seconds, not a
 token-at-a-time prefill. The plain-decode reference inside `--uno` prefills all but the last token the same way and steps the last
@@ -263,7 +266,9 @@ Traps met on the way:
 - **Every KV transfer below one row is a window fill** only when the manifest says `kvslice`; an engine without the key
   refuses the stream ("unexpected kv transfer"), which is the point: a kvslice `dx` under a plain patch would stream a quarter
   of the window and compute garbage, not fail.
-- **A memtile join takes at most 6 inputs** (6 S2MM channels): 16 og streams join as 6 + 6 + 4 on memtiles (2..4, 1).
+- **A memtile join takes at most 6 inputs** (6 S2MM channels): 16 og streams join as 6 + 6 + 4 on memtiles (2..4, 1). With
+  `dx`'s weight ring on (OPEN-DECODE-STREAM pins S2MM channel 0 of every memtile) a join has 5, and dx.py joins 4 + 4 + 4 + 4
+  on memtiles (2..5, 1).
 - **Two head counts in one design** need two ExternalFunction sets; without `symbol_prefix` the MLIR symbols collide. Each
   core links only its own objects, so the shared inline bodies (`attn_rowb_impl`, `vexpN`) do not meet at link time.
 - **`attn_row_impl` must index the same way for the window rows and the new row**: the tail rows come from the slice, the
