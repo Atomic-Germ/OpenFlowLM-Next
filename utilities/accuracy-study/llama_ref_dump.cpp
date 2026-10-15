@@ -14,7 +14,7 @@
 #include "ggml-backend.h"
 
 int main(int argc, char** argv) {
-    std::string model, list, out;
+    std::string model, list, out, backends;
     int n_decode = 64, ngl = 0, threads = 8, first = 0, count = 1 << 30, n_ctx = 2304;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i], v = argv[i + 1];
@@ -27,9 +27,14 @@ int main(int argc, char** argv) {
         else if (k == "--first") first = std::atoi(v.c_str());
         else if (k == "--count") count = std::atoi(v.c_str());
         else if (k == "--n-ctx") n_ctx = std::atoi(v.c_str());
+        else if (k == "--backends") backends = v;
     }
     if (model.empty() || list.empty() || out.empty()) { std::fprintf(stderr, "usage: see header\n"); return 2; }
-    ggml_backend_load_all();
+    if (backends.empty()) ggml_backend_load_all(); else {
+        void* a = (void*)ggml_backend_load((backends + "/ggml-vulkan.dll").c_str());
+        void* b = (void*)ggml_backend_load((backends + "/ggml-cpu-zen4.dll").c_str());
+        std::fprintf(stderr, "backends: vulkan %p cpu %p, devices %zu\n", a, b, ggml_backend_dev_count());
+    }
     llama_backend_init();
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = ngl;
