@@ -321,8 +321,9 @@ base 1.06x, final 0.95x geomean, all identical.
 **Bytes.** The weight stream is now within ~1% of the 8-stream rate, so the next ctx-0 lever is fewer bytes. A
 Q4_0-native chunk (`GEMV_Q4_0_NATIVE`, `LMHEAD_Q4_0=1`: 4608 B, no m plane, m = -8 d in-register) streams the head in
 2.739 ms against 3.046 for the same blocks in 5120 B chunks, 52.8 against 52.7 GB/s, bit-identical
-(`utilities/decode-gates/q4_0_head_probe.py`). A model-wide Q4_0 layout would take ~10% off every layer's stream
-(estimate: 41.4 -> ~37.5 ms at position 0). Quality on the repo-docs corpus (llama.cpp Vulkan, KLD against bf16 over
+(`utilities/decode-gates/q4_0_head_probe.py`); re-checked with a control, 2.828 / 2.865 against 3.078 / 3.202 ms min /
+median (8-10% for 10% fewer bytes). A model-wide Q4_0 layout would take ~8-10% off every layer's stream (estimate:
+41.4 -> ~37.5-38 ms at position 0). Quality on the repo-docs corpus (llama.cpp Vulkan, KLD against bf16 over
 24 x 512 tokens): Q4_0 0.155, Q4_1 0.158, Q4_K_M 0.124. Not a default: a proposal. The night's llama.cpp Vulkan tg128
 (b10944, CLEAN, three sittings) read 17-18 tok/s for Q4_1 against 24.2 the afternoon before on the same binary and
 file: the iGPU's state moves that much, so compare to Vulkan in one sitting or not at all.
