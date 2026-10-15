@@ -118,7 +118,8 @@ cd <repo>      # (Get-Process -Id $PID).PriorityClass = 'BelowNormal' first; one
 python open_kernels\export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <repo>\src\xclbins\Granite-4.2-3B-NPU2\open_kernels
 ```
 
-About 2 h at BelowNormal on this box, the `dxl` / `dxl_lora` builds being the long ones. Then `open_qwen36_cli --kernels <set>`; pass it
+About 13 min at BelowNormal on a quiet box (2026-10-15: `dx` / `dx_f32` / `dxl` / `dxl_lora` ~85-125 s each, the GEMMs 16-35 s;
+the "2 h" once noted here was a box busy with other builds). Then `open_qwen36_cli --kernels <set>`; pass it
 explicitly, `C:\models\Granite-4.2-3B-NPU2\open_kernels` is a symlink to an old tree. `--prefill-mode bfp16` picks the bfp16 route.
 `--uno N --gemm-block` prefills the prompt as blocks before the Uno cycle, so a 1024 / 2048-token context costs seconds, not a
 token-at-a-time prefill. The plain-decode reference inside `--uno` prefills all but the last token the same way and steps the last
@@ -224,7 +225,8 @@ The stream and the head split were done next (OPEN-ATTN-KVSLICE, the section bel
 
 ## Attention by kv head, each core on its own window (2026-10-15, OPEN-ATTN-KVSLICE)
 
-Two bit-identical changes, both on by default for Granite (`attnknobs.KVSLICE_MEASURED`, `KVCORES_MEASURED`):
+Two bit-identical changes, both on by default for Granite (`attnknobs.KVSLICE_MEASURED`, `KVCORES_MEASURED` = 2,
+`DXL_KVSLICE_MEASURED` for the windows in `dxl`):
 
 - **KVSLICE**: each attention core streams only its kv heads of the cached rows on its own shim MM2S channel, as one 3-D BD
   over the row-major cache (`[rows][K | V][KVS x 128 B]`, compiled for one 4-row block and sized per token by `attnpos`). A
