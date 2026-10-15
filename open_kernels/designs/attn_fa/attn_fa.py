@@ -66,6 +66,8 @@ PREP_NKV = int(os.environ.get("AF_PREP_NKV", -1))
 PREP_NTBL = int(os.environ.get("AF_PREP_NTBL", 1))
 # two prep passes in flight hang the array (bisected); one at a time
 PREP_INFLIGHT = int(os.environ.get("AF_PREP_INFLIGHT", 1))
+# fills of pass k+1 are queued before pass k's drains are awaited
+PREP_PIPE = int(os.environ.get("AF_PREP_PIPE", 1))
 
 assert CORES * TQ == T
 PREP_TBL_ELEMS = T * 2 * HD * 2     # the block's table, fp32 [256 tokens][cos 32 | sin 32], as bf16 pairs
@@ -283,18 +285,26 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
             b.set(1)
         inflight: list[TaskGroup] = []
 
+        prev: list[tuple[TaskGroup, TaskGroup]] = []
+
         def pass_group(fills, drains, first=False):
-            tg = TaskGroup()
-            if first:
+            tf, td = TaskGroup(), TaskGroup()
+            if first and PREP_NTBL:
                 for g in range(N_GROUPS):
-                    a_prods[g].fill(tb, offset=0, sizes=[T, 2 * HD], strides=[2 * HD, 1], group=tg)
+                    a_prods[g].fill(tb, offset=0, sizes=[T, 2 * HD], strides=[2 * HD, 1], group=tf)
             for fill in fills:
-                fill(tg)
+                fill(tf)
+            if PREP_PIPE and prev:
+                prev[-1][1].finish()
             for drain in drains:
-                drain(tg)
-            inflight.append(tg)
-            if len(inflight) == PREP_INFLIGHT:
-                inflight.pop(0).finish()
+                drain(td)
+            if PREP_PIPE and prev:
+                prev.pop()[0].finish()
+            if not PREP_PIPE:
+                td.finish()
+                tf.finish()
+                return
+            prev.append((tf, td))
 
         if PREP_NQ == 0 and PREP_NTBL:
             pass_group([], [], first=True)
@@ -329,8 +339,9 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
                             kv, offset=kvh * HD + (cc * N_ROWS + r) * TQ * kv_ld, sizes=[2, TQ, HD],
                             strides=[kv_heads * HD, kv_ld, 1], wait=True, group=tg))
             pass_group(fills, drains)
-        for tg in inflight:
-            tg.finish()
+        if prev:
+            prev[-1][1].finish()
+            prev.pop()[0].finish()
 
     a_prods = [A_l3l2[g].prod(tile=Tile(g * GROUP_COLS, 0)) for g in range(N_GROUPS)]
     b_prods = [B_l3l2[g].prod(tile=Tile(g * GROUP_COLS + 1, 0)) for g in range(N_GROUPS)]
