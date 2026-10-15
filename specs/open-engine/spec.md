@@ -4658,19 +4658,23 @@ per prompt and shared by all 40 layers. The core program is attention's, with pr
 dispatch and attention loops of trip count 0 in a prep dispatch (`RTP_TBL`, `RTP_PQ`, `RTP_PKV`), so one xclbin serves all
 streams; each stream takes a fourth buffer, the table, hence `manifest_version` 6 and a rebuilt `af` family.
 
-**Opt in: `OFLM_OPEN_PREFILL_PREP=1`.** It is off by default because it is slower today (results below); off, the host rotates
-and packs as before (the streams still take the fourth buffer). A prompt whose first
-position makes `pos0 * state_row` not a multiple of 4096 (an odd `pos0`), whose last window is wider than `attn_fa.l_max`, or
-on a bf16-route set takes the host path.
+**Opt in: `OFLM_OPEN_PREFILL_PREP=1`.** Off by default while the model gates below are only partly run (glue parity results
+at the end of this requirement: it ties the host at pp512 and wins at pp1024 / pp2048); off, the host rotates and packs as
+before (the streams still take the fourth buffer). A prompt whose first position makes `pos0 * state_row` not a multiple
+of 4096 (an odd `pos0`), whose last window is wider than `attn_fa.l_max`, or on a bf16-route set takes the host path.
+The engine queues a block's prep and attention dispatches back to back and the next block's pair before this block's
+attention output is read back (`core.cpp`, the `launch` lambda of the NPU-attention loop).
 
 **Acceptance criteria (unit):**
 - The Granite emission carries `attn_fa.prep = {kernel: afp, n_pad: 4096}` on `gemm_block` and the `bfp16` variant, stream `afp` on context `af`, build env `AF_MODE=prep`, `AF_QKV_NPAD=4096`, manifest version 6 (`test_prefill_attn_fa.py`).
 - The parser reads the prep stream; a version 5 manifest, an unknown stream and an `n_pad` that is not a whole number of 1024 columns are refused (`manifest_test.cpp`).
 
 **Verification (manual):**
-1. The kernel: `designs/attn_fa/make_prep_test.py make --build <afp build> --out <t> --p0 256`, `run_kernel.exe <t>/run.cfg`,
+1. The kernel: `designs/attn_fa/make_prep_test.py make --build <afp build> --out <t> --p0 256`, `run_kernel.exe <t>/run.cfg`
+   (repeat the `run k q kv y tb` line eight times for steady wall times),
    `make_prep_test.py compare --out <t>`: Q (hi + lo) rel_fro < 1e-4 against the numpy fp32 pipeline, K / V rows rel_fro < 3e-3
-   (bf16 ulp differences only), records intact.
+   (bf16 ulp differences only), records intact; a steady dispatch under 0.9 ms (the host work it replaces costs about that
+   per block).
 2. The model: `prefill_mode_check.py` bfp16 route with and without `OFLM_OPEN_PREFILL_PREP`: corr >= 0.995 at 512 (and report 2048),
    perplexity within 1 %, KL against the host-rotation route, the six greedy continuations; decode logits byte-identical.
 3. Timing: pp512 / 1024 / 2048, `OFLM_OPEN_PREFILL_PREP=0/1` interleaved with a control, under `dibs run --measure`
@@ -4720,6 +4724,35 @@ Variants and why each stops:
 3. Sum-of-squares in the epilogue and encode in the next GEMM's A load: the A path is a DMA straight into the mmul's
    buffers with no compute stage; encoding there means fp32 A tiles (64 x 64 x 4 = 16 KiB a buffer, 2 deep) beside B and C,
    which does not fit.
+
+**Result 2026-10-15, glue parity (`perf/granite-glue-parity`, Granite-4.2-3B-NPU2, bfp16 route, `dibs run --measure` CLEAN
+before and after each unit except where noted).**
+- *Where the time was.* A prep dispatch was 1.25 ms steady in `run_kernel.exe`; an empty one is 0.15 ms, the table pass 0.14,
+  each Q pass 0.09. Ablating the compute (`AF_ABL=8`) gave 0.77 ms, but the split showed it was one routine: dropping the
+  transposes in `af_prep_q` (`AF_ABL=32`) took the dispatch to 0.55 ms, dropping the rope loop (`AF_ABL=16`) changed nothing.
+  `aie::transpose(blk, 8, 8)` ran ~60 us a pass; the dataflow (an 8x broadcast per raw element) was not the cost: splitting
+  a raw head over both input channels (tokens 0-127 on A, 128-255 on B) left the dispatch at 1.31 ms.
+- *What landed.* The Q^T transpose as five `interleave_zip` rounds per 32 x 32 block (`attn_fa.cc`, `af_prep_q`), the next
+  pass's fills queued before the current pass's drains are awaited (`attn_fa.py`, `prep_sequence`, `AF_PREP_PIPE`), and the
+  engine's back-to-back dispatch (above). Kernel output is byte-for-byte what the first version wrote (Q rel_fro 8.06e-6,
+  K 99.87 % bytes equal, V 100 %, records intact); a steady dispatch is **0.47-0.50 ms** (1.25 before, 1.17 with only the
+  pipelining).
+- *Speed, tok/s min / median / max* (3-4 runs a cell, one unit a length, variants interleaved, order reversing; `old` = the
+  d17c353 CLI and set, `new` = this branch's). Prep off (old) / prep on, old / prep on, new kernels with the old CLI /
+  prep on, new CLI and kernels:
+
+| | off | old prep | new kernels, old CLI | new prep |
+|---|---|---|---|---|
+| pp512 | 720 / 739 / 754 | 639 / 669 / 673 | 558 / 732 / 743 | 730 / **739** / 752 |
+| pp1024 | 716 / 784 / 787 | 661 / 692 / 721 | 772 / 789 / 797 | 802 / **808** / 815 |
+| pp2048 | 667 / 696 / 755 | 678 / 680 / 700 | 679 / 755 / 763 | 770 / **773** / 775 |
+
+  Prep is now level with the host path at pp512 and +3 % / +11 % at pp1024 / pp2048. The in-unit control (the old CLI and set,
+  prep off, pp512) read 745 / 677 / 692 / 668 in the four units against the ~658 the earlier session saw in this tree: the
+  box state moves the absolute numbers by up to 13 % between units (the 512 unit read +13 %), so only the in-unit comparisons
+  count; the "old prep" column reproduces the earlier -5..-8 % at pp512, which is the check that the units agree. Process CPU
+  seconds (load included) were within 10 % between off and on at every length (pp2048: 34.1 off, 32.1 new prep).
+  The pp2048 unit that printed NOISY after (a browser process) was discarded and rerun.
 
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
