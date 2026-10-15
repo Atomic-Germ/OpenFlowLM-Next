@@ -320,8 +320,12 @@ static_assert(4 * kHD + 2 * kNH <= kEA,
 // kNHL % kHPO was required while a core had to own WHOLE og elements. It now owns
 // kOGH = min(kNHL, kHPO) heads per element, so the requirement is the weaker one that
 // its heads tile the element evenly -- which holds trivially when kOGH == kNHL.
-static_assert((ATTN_G5 || kNH % kNHL == 0) && kNHL % kOGH == 0,   // G5 may split a kv head's heads 3 + 2
+#if ATTN_G5
+static_assert(kNHL % kOGH == 0, "attn.h: a whole number of og elements");   // G5 may split a kv head's heads 3 + 2
+#else
+static_assert(kNH % kNHL == 0 && kNHL % kOGH == 0,
               "attn.h: the local head count must divide NH and be a whole number of og elements");
+#endif
 
 static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1 ATTN_PTAB2_PARM,
                                   bfloat16 *__restrict qn, bfloat16 *__restrict kn,

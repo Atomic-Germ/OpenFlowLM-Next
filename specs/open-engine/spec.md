@@ -341,6 +341,11 @@ At 2048 one layer's growth of 1.12 ms splits as the window stream alone 0.28 ms 
 arithmetic add. The score loop ran 8 times a block, a trip count the bundle count of the function leaves out, and called `__muldi3` for
 `h / 5` each time; the tree removes both.
 
+**Measured (2026-10-15, Granite 4.2 3B -- OPEN-ATTN-KVSLICE):** per-core windows (the stream off the critical path) and
+attention cores by kv head (16 cores, each kv head's 5 heads as 3 + 2) take a step at 2048 from 79.0 to 58.3 ms against
+46.3 / 47.3 at 0 (`--bench-step`, CLEAN, one sitting): 1.23x of position 0, and the growth per layer per position from
+0.399 to 0.134 us (0.182 at 8 cores of 5 heads). Bit-identical throughout; the tok/s table is in OPEN-ATTN-KVSLICE.
+
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
 Until an og element was NHL wide, ACORES was the largest divisor of `NH / HPO`,
@@ -515,9 +520,11 @@ columns are one sitting, `kvslice` alone an earlier one, whose broadcast row rea
 - The windows alone took the 0.28 ms a layer the stream cost at 2048 (`ATTN_NULL`, OPEN-ATTN-SCORE-TREE); the rest is the
   arithmetic, which the kv-head grouping cuts: a block of 4 rows is ~1,460 Peano bundles at 8 heads (TREE8), ~1,150 at 5 (257
   of them the exponential), ~890 at 3 and ~770 at 2.
-- **KVCORES 2 is not the default.** Its context reloads 8 more core programs at every switch to and from `ln` / `lm`: the first
-  `dx` of a step costs 3.16 ms against 2.22 (broadcast) and 2.48 (KVCORES 1), ~1 ms a token at every depth, which at context 0
-  is a 2 % regression. It wins above ~500 tokens of context; with `dx` alone in its context it would win everywhere.
+- **KVCORES 2 is Granite's default.** Its context reloads 8 more core programs at every switch to and from `ln` / `lm`: the
+  first `dx` of a step costs 3.16 ms against 2.22 (broadcast) and 2.48 (KVCORES 1), ~1 ms of `--bench-step` wall at every
+  depth. In the 128-token decode that leaves context 0 where the broadcast kernel was (the tok/s table below) and gives up
+  what KVCORES 1 gains there (~0.6 %); from 512 tokens on KVCORES 2 is the faster one. With `dx` alone in its context the
+  reload would go and it would win everywhere.
 - Program memory: fullest core 14,128 B at KVCORES 1, 12,768 at 2.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input

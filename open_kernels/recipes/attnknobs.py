@@ -102,8 +102,8 @@ def kv_slices(nh: int, kvh: int, acores: int, share: int = 1, h0s: list[int] | N
     return kvs, [min(a, kvh - kvs) for a, _ in spans]
 
 
-# Granite: 1 (8 cores); 2 (16) is faster at depth but reloads 8 more core programs at each ln / lm context switch (~1 ms a token).
-KVCORES_MEASURED: dict[str, int] = {"granite": 1}
+# Granite: 2 (16 cores); its bigger context reload at each ln / lm switch costs what 1 (8 cores) saves at context 0.
+KVCORES_MEASURED: dict[str, int] = {"granite": 2}
 
 
 def kv_cores(spec: ModelSpec, nh: int, kvh: int, hd: int, rb: int, kvsl: int) -> int:

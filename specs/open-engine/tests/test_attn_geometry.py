@@ -134,7 +134,7 @@ def test_kvslice_is_measured_not_declared(name, rows, unvalidated, monkeypatch):
         assert attnknobs.kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW) == 0
 
 
-@pytest.mark.parametrize("name,cores", [("granite42-3b.json", 1), ("qwen3-4b.json", 0), ("llama31-8b.json", 0)])
+@pytest.mark.parametrize("name,cores", [("granite42-3b.json", 2), ("qwen3-4b.json", 0), ("llama31-8b.json", 0)])
 def test_kv_cores_is_measured_not_declared(name, cores, unvalidated, monkeypatch):
     """Traces: OPEN-ATTN-KVSLICE. Attention cores by kv head (attn.h ATTN_G5) for Granite only: 40 heads over 8 kv heads at
     hd 64, on the KVSLICE window; ATTN_KVCORES forces 0, 1 or 2 for an A/B build and is refused off that geometry."""
@@ -145,10 +145,10 @@ def test_kv_cores_is_measured_not_declared(name, cores, unvalidated, monkeypatch
     G = DR.geometry(spec)
     ks = attnknobs.kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW)
     assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, ks) == cores
-    monkeypatch.setenv("ATTN_KVCORES", "2")
-    assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, ks) == (2 if cores else 0)
+    monkeypatch.setenv("ATTN_KVCORES", "1")
+    assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, ks) == (1 if cores else 0)
     assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, 0) == 0          # no per-core window, no kv-head cores
-    assert DR.probe_env() == {"ATTN_KVCORES": "2"}
+    assert DR.probe_env() == {"ATTN_KVCORES": "1"}
 
 
 def test_attn_fast_is_a_probe_variable(monkeypatch):
