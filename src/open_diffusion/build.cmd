@@ -23,10 +23,15 @@ REM (see ..\open_qwen36\build.cmd).
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
    /DDISABLE_ABI_CHECK=1 /bigobj ^
    /I "%XRT_INCLUDE_DIR%" /I "." /I "..\include" /I "..\..\third_party\stb" ^
-   engine.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   engine.cpp reference.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_diffusion_cli.exe /Fo:out\
 if errorlevel 1 goto :clfail
-echo [open_diffusion] OK -^> out\open_diffusion_cli.exe
+REM the reference preparation alone (host code; specs/open-diffusion/tests/test_reference.py)
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
+   /I "." /I "..\..\third_party\stb" reference.cpp reference_tool.cpp ^
+   /Fe:out\open_diffusion_reference_tool.exe /Fo:out\
+if errorlevel 1 goto :clfail
+echo [open_diffusion] OK -^> out\open_diffusion_cli.exe, out\open_diffusion_reference_tool.exe
 exit /b 0
 
 :noxrt

@@ -68,6 +68,11 @@ std::vector<RegistryFile> registry_files(const nlohmann::json& manifest, const s
             r.size = static_cast<uint64_t>(e->at("size").get<double>());
         const nlohmann::json& src = r.lfs ? e->at("lfs") : *e;
         if (src.contains("oid") && src.at("oid").is_string()) r.oid = src.at("oid").get<std::string>();
+        // an explicit sha256 (GGUF repos) is the strongest statement of the bytes, LFS or not
+        if (e->contains("sha256") && e->at("sha256").is_string()) {
+            r.oid = e->at("sha256").get<std::string>();
+            r.lfs = true;
+        }
         out.push_back(std::move(r));
     }
     return out;
