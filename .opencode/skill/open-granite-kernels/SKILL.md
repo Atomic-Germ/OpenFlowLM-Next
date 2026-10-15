@@ -108,14 +108,16 @@ the eos are the same token — the other three families have a separate pair, an
 
 ## The combined kernel set (Uno decode + bf16 and bfp16 prefill)
 
-One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dxh` (the head, a second stream
-over `dx`'s image), `dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four bfp16
-streams (`gemm_bfp16_n4096_k2560`, `_n3072_k2560`, `_n16384_k2560_glu`, `_n3072_k8192_h`: OPEN-PREFILL-BFP16-FFN's fused
-gate|up and down-from-H), `dxl`, `dxl_lora` and `lmhl`, with one `manifest.json` (manifest_version 5). `dxl`'s weight fifo
-depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and
-`lm_head_q4_f32` stay for the GGUF-direct section's tail. To refresh only the bfp16 streams, copy a full set and run the
-exporter with `--out <copy> --only <the four names>` (~2 min); an engine that reads manifest_version 4 refuses the result
-by name.
+One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step (34 sets): `dx` (memtile weight ring,
+early weight issue, per-core KV windows, 16 attention cores by kv head), `dxh` (the head, a second stream over `dx`'s image),
+`dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four bfp16 streams
+(`gemm_bfp16_n4096_k2560`, `_n3072_k2560`, `_n16384_k2560_glu`, `_n3072_k8192_h`: OPEN-PREFILL-BFP16-FFN's fused gate|up and
+down-from-H), `dxl`, `dxl_lora` (per-core windows), `lmhl`, and the prefill attention `af256` .. `af4096` (16 streams over one
+xclbin, OPEN-PREFILL-ATTN-FA), with one `manifest.json` (manifest_version 5). `dxl`'s weight fifo depth (`DXL_WDEPTH`)
+defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and `lm_head_q4_f32` stay for the
+GGUF-direct section's tail. To refresh only some sets, copy a full set and run the exporter with `--out <copy> --only
+<names>` (bfp16 streams ~2 min, `dx,dxh` ~4 min; always `dx` and `dxh` together); an engine that reads manifest_version 4
+refuses a v5 set by name.
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1
@@ -123,8 +125,9 @@ cd <repo>      # (Get-Process -Id $PID).PriorityClass = 'BelowNormal' first; one
 python open_kernels\export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <repo>\src\xclbins\Granite-4.2-3B-NPU2\open_kernels
 ```
 
-About 13 min at BelowNormal on a quiet box (2026-10-15: `dx` / `dx_f32` / `dxl` / `dxl_lora` ~85-125 s each, the GEMMs 16-35 s;
-the "2 h" once noted here was a box busy with other builds). Then `open_qwen36_cli --kernels <set>`; pass it
+About 17 min at BelowNormal on a quiet box for all 34 sets (2026-10-15 union: `dx` / `dxh` / `dx_f32` 113-120 s each,
+`dxl` / `dxl_lora` ~85 s, the GEMMs 18-34 s, each `af` stream 11-15 s; the "2 h" once noted here was a box busy with other
+builds). Then `open_qwen36_cli --kernels <set>`; pass it
 explicitly, `C:\models\Granite-4.2-3B-NPU2\open_kernels` is a symlink to an old tree. `--prefill-mode bfp16` picks the bfp16 route.
 `--uno N --gemm-block` prefills the prompt as blocks before the Uno cycle, so a 1024 / 2048-token context costs seconds, not a
 token-at-a-time prefill. The plain-decode reference inside `--uno` prefills all but the last token the same way and steps the last
@@ -143,6 +146,40 @@ bfp16 prefill with the glu FFN (2026-10-15, CLEAN with a control, min / median t
 pp2048 317 / 332, against the five-step route's 501 / 537, 423 / 423, 231 / 268 and the default bf16 route's 239 / 187 medians at
 512 / 2048. Host attention is two thirds of pp2048. The skill for the route itself is `open-gemm-bfp16`; the numbers and the
 accuracy gates are OPEN-PREFILL-BFP16-FFN.
+
+## All the overnight tracks on one set (2026-10-15, `perf/granite-overnight`)
+
+The union of D2 (ring + `dxh`), D1 (windows + 16 attention cores), D3 (per-cycle speculation), P2 (glu FFN) and P1
+(`attn_fa`) is one export (above) and one CLI. What had to change to make them one `dx`: the og joins. D1's 16 og streams
+joined 6 + 6 + 4 in memtiles 2..4, and D2's weight ring pins S2MM channel 0 of every memtile, so a join there has 5 inputs:
+dx.py joins 4 + 4 + 4 + 4 on memtiles 2..5 when the ring is on (drains on shim columns 2..5, 14 of 16 S2MM). Program memory
+did not move (fullest core 12,768 B); `dx` and `dxh` differ only in build stamps.
+
+Gates for a merged `dx` (each one caught something on some track; run them all):
+1. `utilities/decode-gates/decode_gates.py logits --sets <decode-depth set> <union> --prompt 70` and `--prompt 2100`:
+   20 of 20 logit files byte-identical.
+2. 96 greedy tokens on the six uno-ref prompts and chat / code at 1024 / 2048 against the base set, with
+   `OFLM_OPEN_ATTN_FA=0` on the union for the block-prefilled ones (the base has no `attn_fa`; with it the cache differs by
+   bf16 ulps and the gate would test the prefill, not decode).
+3. `--rows-check 17` at 70 / 1030 / 2060 tokens: ROWS PASS.
+4. `prefill_mode_check.py --arms fast:host,fast:npu` at 512 (random, ppl, chat, decode) and 2048 (random, ppl), and
+   `--arms fast:host,bfp16:npu` for the opt-in route.
+5. The spec matrix (`spec_lookup.py bench`, modes uno and adaptive) prints SPEC IDENTICAL on every run.
+
+Measuring with nothing else on the box: `utilities/granite-combined-bench/controlled.py` around every unit (calibrate once:
+24.08 tok/s, 1.5 % spread), each unit one `dibs run --measure --tag <you>`. While a unit of yours holds the machine every
+Bash command of yours waits (the hook), so drive the whole matrix from one background script and read its logs with the
+file tools.
+
+Result (CLEAN, controlled, min / median tok/s; full table in OPEN-FAMILY-GRANITE-UNO): plain decode tg128 23.87 / 22.46 /
+21.10 / 18.92 at 0 / 512 / 1024 / 2048 against Vulkan Q4_1's 23.7 / 23.5 / 23.2 / 22.6 in the same sitting; bfp16 prefill
+with `attn_fa` 736 / 820 / 727 at pp512 / 1024 / 2048 against Vulkan's 871 / 824 / 732; the default bf16 route ~250. A
+verify pass is now 1.5-1.7 decode steps, so Uno alone loses on chat; adaptive spec stays >= ~1.0x and reaches 2.39x
+(`fix_py`, 48 tok/s).
+
+Traps of the night: a sibling agent's `run_kernel.exe` on the NPU inside a CLEAN unit (only `controlled.py`'s NPU watch
+caught it; one tg128 rep read 10.3 tok/s), and the user's desktop waking up (`msedgewebview2.exe`, `code.exe` in dibs's
+NOISY verdicts) — the iGPU's numbers drop first (Vulkan pp512 877 -> 651 an hour later), so bracket Vulkan early.
 
 ## Result — 2026-09-06, mlir-aie 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301
 
@@ -263,7 +300,9 @@ Traps met on the way:
 - **Every KV transfer below one row is a window fill** only when the manifest says `kvslice`; an engine without the key
   refuses the stream ("unexpected kv transfer"), which is the point: a kvslice `dx` under a plain patch would stream a quarter
   of the window and compute garbage, not fail.
-- **A memtile join takes at most 6 inputs** (6 S2MM channels): 16 og streams join as 6 + 6 + 4 on memtiles (2..4, 1).
+- **A memtile join takes at most 6 inputs** (6 S2MM channels): 16 og streams join as 6 + 6 + 4 on memtiles (2..4, 1). With
+  `dx`'s weight ring on (OPEN-DECODE-STREAM pins S2MM channel 0 of every memtile) a join has 5, and dx.py joins 4 + 4 + 4 + 4
+  on memtiles (2..5, 1).
 - **Two head counts in one design** need two ExternalFunction sets; without `symbol_prefix` the MLIR symbols collide. Each
   core links only its own objects, so the shared inline bodies (`attn_rowb_impl`, `vexpN`) do not meet at link time.
 - **`attn_row_impl` must index the same way for the window rows and the new row**: the tail rows come from the slice, the

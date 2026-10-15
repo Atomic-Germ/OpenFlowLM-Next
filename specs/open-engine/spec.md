@@ -483,7 +483,8 @@ of one kv head share every K and V row they load, and give logits byte-identical
   (rows 4 and 5; the 2-head cores compile attn.h at `ATTN_NHL=2` under prefixed symbols). The score tree is TREE8's over head
   pairs of one K row, the value pass covers all of a core's heads per head-dim slice with every head's chain in its old order,
   and the per-head rescale test is skipped when no head of the block raised its max. The two kv heads of an aligned slice
-  share one window stream (4 streams of 512 B a position); the og elements join in memtiles (at most 6 inputs each).
+  share one window stream (4 streams of 512 B a position); the og elements join in memtiles (at most 6 inputs each, 4
+  where OPEN-DECODE-STREAM's weight ring holds the memtile's S2MM channel 0: 4 x 4 on memtiles 2..5).
 - **The manifest's `kvslice`** (rows an element) tells `attnpos` / `attnrows` the layout (OPEN-MANIFEST): every KV transfer
   below one row is a window fill, its BD length patched to the padded rows times its own per-row words, its offset to its base
   plus `start * kv_row`; the KV buffer keeps `kvslice - 1` rows of slack.
@@ -1903,6 +1904,79 @@ decode 20.59 / 20.66 / 20.44 / 20.48 / 20.52 / 20.58 -> 20.73 / 20.58 / 20.76 / 
   Uno now trails plain decode at depth on chat (0.86-0.87x) and breaks even on code (0.98-1.05x). This was measured
   against `--uno` (every cycle Uno); a served greedy request takes OPEN-SPEC-LOOKUP's per-cycle choice, which prices
   each method's passes as it runs and takes a plain step where Uno's cycle does not pay.
+
+**Result 2026-10-15, the overnight tracks on one kernel set (`perf/granite-overnight`: OPEN-DECODE-STREAM and
+OPEN-DECODE-ONE-CONTEXT-DENSE's `dx` ring and `dxh` head, OPEN-ATTN-KVSLICE's windows and 16 attention cores, OPEN-SPEC-LOOKUP,
+OPEN-PREFILL-BFP16-FFN, OPEN-PREFILL-ATTN-FA; one `export_qwen36_kernels.py` run, 34 sets, manifest_version 5; one CLI):**
+
+Gates on the union set, all passed:
+- decode against the decode-depth kernels (`utilities/decode-gates/decode_gates.py logits`, one token at a time): the logit
+  files of 70 + 20 and of 2100 + 20 positions byte-identical (20 / 20 each), the tokens identical;
+- 96 greedy tokens identical to the decode-depth kernels on the six uno-ref prompts and the chat / code prompts at 1024 and
+  2048 (block prefill with the host attention on both sides, so the gate is decode's);
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens (a rows pass 64.2 / 76.1 / 89.1 ms, 1.51 / 1.61 / 1.69 decode steps);
+- prefill accuracy (`prefill_mode_check.py`): the default bf16 route with `attn_fa` against its host attention passes every
+  OPEN-PREFILL-BFP16 threshold at 512 (corr min 0.999835, 4 flips at margins <= 0.026, perplexity ratio 0.9996, KL 0.00023,
+  the six 80-token continuations identical) and 2048 (corr min 0.999835, 18 flips at <= 0.041, ratio 0.9989, KL 0.00019),
+  the numbers OPEN-PREFILL-ATTN-FA recorded. The bfp16 route with `attn_fa` against the default route's host attention is
+  where OPEN-PREFILL-BFP16-FFN left it: at 512 corr min 0.997501, perplexity ratio 0.9999, KL 0.00269, every random-id flip
+  under 0.2, but `code2` flips at 0.209 and `chat` differs at token 64 (margin 0.175); at 2048 corr min 0.986806 (fails
+  0.995), one flip at 0.209, ratio 0.9942, KL 0.00211. It stays opt-in.
+
+- every spec run below (`--spec` in modes `uno` and `adaptive`) printed SPEC IDENTICAL.
+
+Timing: every unit one `dibs run --measure --tag integ` that printed CLEAN before and after, inside
+`utilities/granite-combined-bench/controlled.py` (a 32-token context-0 decode on the union set before and after, calibrated
+at 24.08 tok/s, within 5 %, and no other process's NPU submissions); a unit that failed either was rerun and its numbers
+dropped, and so was every unit that overlapped another agent's NPU work at 06:55-07:05. llama.cpp b10944 Vulkan on the 890M
+(`llama-bench -dev Vulkan0 -ngl 99 -r 3`, mean of 3) ran in the same sitting before (06:46-06:53) and after (07:05-07:12)
+the NPU units. tok/s, NPU min / median of 3:
+
+| | pp512 | pp1024 | pp2048 | tg128 @0 | @512 | @1024 | @2048 |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| NPU, bf16 route + `attn_fa` (default) | 234 / 235 | 257 / 258 | 247 / 251 | 23.79 / 23.87 | 22.40 / 22.46 | 21.10 / 21.10 | 18.90 / 18.92 |
+| NPU, bfp16 route + `attn_fa` | 729 / 736 | 798 / 820 | 691 / 727 | (decode is the same kernels) | | | |
+| NPU, bfp16 route, host attention | 649 / 708 | 388 / 461 | 169 / 178 | | | | |
+| Vulkan Q4_1, before / after | 877 / 866 | 823 / 825 | 728 / 737 | 23.62 / 23.78 | 23.45 / 23.49 | 23.19 / 23.11 | 22.52 / 22.64 |
+| Vulkan Q4_0, before / after | 853 / 885 | 807 / 844 | 785 / 788 | 23.49 / 23.55 | 23.02 / 22.96 | 22.94 / 22.73 | 22.11 / 22.24 |
+| Vulkan Q4_K_M, before / after | 697 / 712 | 676 / 692 | 650 / 650 | 18.75 / 18.66 | 18.55 / 18.38 | 18.27 / 18.24 | 18.00 / 17.83 |
+
+- Against Vulkan Q4_1 (the same weights): the bfp16 route with `attn_fa` is 0.84x at pp512 and at parity at 1024 and 2048
+  (0.99x); plain decode is 1.01x at context 0, 0.96x at 512, 0.91x at 1024 and 0.84x at 2048 (it was 0.85 / - / 0.66 /
+  0.52x on the decode-depth set). Against Q4_K_M the NPU is ahead everywhere (decode 1.06-1.28x, bfp16 prefill 1.04-1.20x).
+- The default bf16 route is GEMM-bound at ~250 tok/s whatever the attention; `attn_fa` is what makes the bfp16 route flat
+  in length (host attention: 708 -> 178 tok/s from 512 to 2048, with the spread OPEN-PREFILL-ATTN-FA describes).
+- A same-unit A/B of the bfp16 route with host attention, P2's own CLI and set against the union: pp512 714 against 727
+  median, pp2048 286 against 274. OPEN-PREFILL-BFP16-FFN's 858 at pp512 did not reproduce on either build this morning, so
+  the gap is the machine's state, not the merge.
+- A tg128 token costs 41.9 ms after 0 tokens and 52.9 after 2048 (Vulkan Q4_1: 42.2 and 44.3); `--rows-check`'s single
+  steps read 42.4 / 47.4 / 52.7 ms at 70 / 1030 / 2060.
+
+Speculation on the same set (`utilities/spec-lookup/spec_lookup.py bench`, D3's prompt files, 128 tokens, the lookup
+prompts 256; median of 2 controlled runs for the short and 1024 prompts, 1 for 2048 and the lookup prompts, whose second
+runs met a busy box and were dropped; tokens a cycle in brackets; speed over the run's own plain decode):
+
+| prompt | plain tok/s | Uno tok/s | Uno | adaptive tok/s | adaptive |
+|---|--:|--:|--:|--:|--:|
+| chat | 23.7 | 17.27 (2.42) | 0.74x | 23.49 (1.06) | 0.99x |
+| chat2 | 23.8 | 18.74 (2.61) | 0.79x | 24.11 (1.05) | 1.01x |
+| code | 23.7 | 22.95 (3.20) | 0.97x | 27.94 (1.29) | 1.18x |
+| code2 | 23.6 | 22.96 (3.20) | 0.98x | 25.19 (1.15) | 1.07x |
+| math | 23.7 | 26.94 (3.76) | 1.14x | 26.34 (1.31) | 1.11x |
+| reason | 23.6 | 24.66 (3.46) | 1.05x | 26.54 (1.43) | 1.12x |
+| chat_1024 | 21.0 | 15.65 (2.56) | 0.75x | 20.97 (1.10) | 1.00x |
+| code_1024 | 21.1 | 19.53 (3.20) | 0.92x | 24.40 (1.32) | 1.16x |
+| chat_2048 | 18.8 | 14.04 (2.67) | 0.75x | 19.75 (1.15) | 1.05x |
+| code_2048 | 18.8 | 15.66 (2.98) | 0.83x | 20.67 (1.28) | 1.10x |
+| edit_py | 20.1 | 20.76 (3.61) | 1.03x | 31.43 (2.05) | 1.56x |
+| fix_py | 20.1 | 25.66 (4.49) | 1.28x | 48.03 (4.00) | 2.39x |
+| quote_doc | 20.7 | 21.42 (3.56) | 1.03x | 27.88 (1.72) | 1.35x |
+| qa_doc | 21.4 | 26.09 (4.13) | 1.22x | 32.05 (2.02) | 1.49x |
+
+- Plain decode got faster than the rows pass (a verify pass is now 1.51-1.69 decode steps, against 1.24-1.33 on the
+  decode-depth set), so Uno alone loses everywhere but math, reason and the lookup prompts. The per-cycle choice keeps up:
+  it falls back to plain steps on chat (0.99-1.05x) and gains 1.07-1.18x on code / math / reason and 1.35-2.39x where the
+  reply copies its context (`fix_py` 48.0 tok/s, ~2.1x Vulkan Q4_1's ~23 at that depth).
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
