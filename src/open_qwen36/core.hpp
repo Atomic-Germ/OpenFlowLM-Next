@@ -353,7 +353,7 @@ private:
     ///     only as the probe that established that. Never a default.
     /// OFLM_OPEN_SUBMIT_AHEAD sets it.
     int submit_ahead_ = 0;
-    bool run_reuse_ = true;                    ///< the pipelined walk restarts each layer's run (OFLM_OPEN_RUN_REUSE=0: build anew)
+    bool run_reuse_ = true;                    ///< one-dispatch layers and a shared-context tail restart their run (OFLM_OPEN_RUN_REUSE=0 builds anew)
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
     /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
     /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
