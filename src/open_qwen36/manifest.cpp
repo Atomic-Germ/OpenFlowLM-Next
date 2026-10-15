@@ -164,8 +164,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
     // 4 adds the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16).
     // 5 adds the glu epilogue, steps reading its H operand and the glu pack halves (OPEN-PREFILL-BFP16-FFN).
-    if (m.version < 1 || m.version > 5)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 5)");
+    if (m.version < 1 || m.version > 6)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 6)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -380,6 +380,15 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 }
                 for (size_t rows = 256; rows <= f.l_max; rows += 256)
                     if (!f.kernels.count(rows)) fail(fw, "kernels has no stream for a window of " + std::to_string(rows));
+                if (fj.contains("prep")) {
+                    const json& pj = fj["prep"];
+                    f.prep_kernel = get<std::string>(pj, "kernel", fw + ".prep");
+                    f.prep_npad = get<uint64_t>(pj, "n_pad", fw + ".prep");
+                    if (m.version < 6) fail(fw, "prep needs manifest_version 6; an engine that reads 5 would pass the streams three buffers");
+                    if (!f.qsplit || f.prep_npad == 0 || f.prep_npad % 1024)
+                        fail(fw, "prep needs Q hi / lo and an n_pad that is a whole number of 1024 columns");
+                    if (!m.kernels.count(f.prep_kernel)) fail(fw, "prep names unknown kernel " + f.prep_kernel);
+                }
             }
             if (g.kind == "dense") {
                 // 4 steps: gate|up through the glu epilogue, down reading its H operand (OPEN-PREFILL-BFP16-FFN)

@@ -265,6 +265,14 @@ static inline void pv_t(const bfloat16 *__restrict p, const bfloat16 *__restrict
   }
 }
 
+// the half-split rotation of one token row (dims i and i + 32 pair) by its table row
+static inline void rope_row(const float *__restrict x, const float *__restrict t, vf &r0, vf &r1) {
+  const vf x0 = aie::load_v<32>(x), x1 = aie::load_v<32>(x + 32);
+  const vf c = aie::load_v<32>(t), s = aie::load_v<32>(t + 32);
+  r0 = fsub(fmul(x0, c), fmul(x1, s));
+  r1 = fadd(fmul(x1, c), fmul(x0, s));
+}
+
 alignas(64) static const int32_t k_iota[32] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
                                                16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
 
@@ -401,6 +409,61 @@ void af_fin(float *__restrict o, float *__restrict st) {
     aie::store_v(po, fmul_hl(aie::load_v<32>(po), bh, bl));
     aie::store_v(po + 32, fmul_hl(aie::load_v<32>(po + 32), bh, bl));
   }
+}
+
+// OPEN-PREFILL-GLUE-PREP: the block's rope, scale and Q packing on the array. A raw element is this core's 32 tokens of
+// one head, fp32 [32 tokens][64 dims] as the qkv GEMM left them; the table element is [32 tokens][cos 32 | sin 32].
+void af_ptab(float *__restrict src, float *__restrict dst) {
+  for (int j = 0; j < TQ * HD; j += 32)
+    aie::store_v(dst + j, aie::load_v<32>(src + j));
+}
+
+// qh / ql hold the scaled rotation as bf16 hi / lo, token rows; o gets them transposed ([64 dims][32 tokens]), hi then lo
+void af_prep_q(float *__restrict raw, float *__restrict tbl, bfloat16 *__restrict qh, bfloat16 *__restrict ql,
+               bfloat16 *__restrict o) {
+  SET_ROUNDING();
+  // 1/sqrt(64) and log2(e): the scores come out in the softmax's units
+  const vf qs = aie::broadcast<float, 32>(0.125f * 1.4426950408889634f);
+  for (int t = 0; t < TQ; t++) {
+    vf r0, r1;
+    rope_row(raw + t * HD, tbl + t * HD, r0, r1);
+    r0 = fmul(r0, qs);
+    r1 = fmul(r1, qs);
+    vb h0, l0, h1, l1;
+    split(r0, h0, l0);
+    split(r1, h1, l1);
+    aie::store_v(qh + t * HD, h0);
+    aie::store_v(qh + t * HD + 32, h1);
+    aie::store_v(ql + t * HD, l0);
+    aie::store_v(ql + t * HD + 32, l1);
+  }
+  for (int part = 0; part < 2; part++) {
+    const bfloat16 *__restrict src = part ? ql : qh;
+    bfloat16 *__restrict dst = o + part * TQ * HD;
+    for (int tg = 0; tg < TQ / 8; tg++)
+      for (int dg = 0; dg < HD / 8; dg++) {
+        aie::vector<bfloat16, 64> blk;
+        for (int r = 0; r < 8; r++)
+          blk.insert(r, aie::load_v<8>(src + (tg * 8 + r) * HD + dg * 8));
+        const aie::vector<bfloat16, 64> tr = aie::transpose(blk, 8, 8);
+        for (int d = 0; d < 8; d++)
+          aie::store_v(dst + (dg * 8 + d) * TQ + tg * 8, tr.template extract<8>(d));
+      }
+  }
+}
+
+// o: K rotated then V, bf16 token rows (the cache's layout), 32 tokens each
+void af_prep_kv(float *__restrict rk, float *__restrict rv, float *__restrict tbl, bfloat16 *__restrict o) {
+  SET_ROUNDING();
+  for (int t = 0; t < TQ; t++) {
+    vf r0, r1;
+    rope_row(rk + t * HD, tbl + t * HD, r0, r1);
+    aie::store_v(o + t * HD, to_bf(r0));
+    aie::store_v(o + t * HD + 32, to_bf(r1));
+  }
+  bfloat16 *__restrict ov = o + TQ * HD;
+  for (int j = 0; j < TQ * HD; j += 32)
+    aie::store_v(ov + j, to_bf(aie::load_v<32>(rv + j)));
 }
 
 } // extern "C"

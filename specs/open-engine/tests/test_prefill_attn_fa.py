@@ -39,6 +39,17 @@ def test_granite_carries_attn_fa_on_both_prefill_routes():
     assert lt["buffers"]["state"]["row"] == 2 * 8 * 64 * 2
 
 
+def test_granite_prep_stream_rides_the_attention_context():
+    # OPEN-PREFILL-GLUE-PREP: one more stream of the af context, for the qkv GEMM's padded width, manifest version 6
+    m = manifest(_spec("granite42-3b"))
+    lt = m["layer_types"]["dense"]
+    for gb in (lt["gemm_block"], lt["gemm_block_variants"]["bfp16"]):
+        assert gb["attn_fa"]["prep"] == {"kernel": "afp", "n_pad": 4096}
+    assert m["kernels"]["afp"]["context"] == "af" and m["manifest_version"] == 6
+    env = m["builds"]["afp"]["env"]
+    assert (env["AF_MODE"], env["AF_QKV_NPAD"], env["AF_HEADS"], env["AF_KV_HEADS"], env["AF_KV_LD"]) == ("prep", "4096", "40", "8", "1024")
+
+
 @pytest.mark.parametrize("name", ["qwen3-4b", "llama31-8b", "phi4-mini-4b", "k2-horizon-7b", "gemma3-4b"])
 def test_other_families_carry_no_attn_fa(name):
     m = manifest(_spec(name))

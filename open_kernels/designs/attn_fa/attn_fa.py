@@ -55,10 +55,15 @@ TAU = int(os.environ.get("AF_TAU", 16))
 KDEPTH = int(os.environ.get("AF_KDEPTH", 2))
 VDEPTH = int(os.environ.get("AF_VDEPTH", 1))
 ABL = int(os.environ.get("AF_ABL", 0))            # attn_fa.cc AF_ABL, timing ablations only
-RTP_PASSES, RTP_CHUNKS = 0, 1
-RTP_LEN = 4
+RTP_PASSES, RTP_CHUNKS, RTP_TBL, RTP_PQ, RTP_PKV = 0, 1, 2, 3, 4
+RTP_LEN = 8
+# AF_MODE=prep: the same cores and dataflow, another instruction stream (OPEN-PREFILL-GLUE-PREP)
+MODE = os.environ.get("AF_MODE", "attn")
+PREP_KV_PER_GROUP = 2     # kv heads a group rotates and caches: 8 over 4 groups
 
 assert CORES * TQ == T
+PREP_TBL_ELEMS = T * 2 * HD * 2     # the block's table, fp32 [256 tokens][cos 32 | sin 32], as bf16 pairs
+QKV_NPAD = int(os.environ.get("AF_QKV_NPAD", 4096))   # the qkv GEMM's padded output width, c-tiled by 128 columns
 
 
 def q_head_elems(qsplit: int = QSPLIT) -> int:
@@ -74,7 +79,7 @@ def check_shape(L: int, heads: int, kv_heads: int) -> str | None:
 
 
 @iron.jit(aiecc_flags=["--dynamic-objFifos", "--alloc-scheme=basic-sequential"])
-def attn_fa(Q: In, KV: In, O: Out, *, L: CompileTime[int], heads: CompileTime[int],
+def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: CompileTime[int],
             kv_heads: CompileTime[int], kv_ld: CompileTime[int], max_rows: CompileTime[int]):
     why = check_shape(L, heads, kv_heads)
     assert why is None, why
@@ -102,7 +107,10 @@ def attn_fa(Q: In, KV: In, O: Out, *, L: CompileTime[int], heads: CompileTime[in
     k_sm = Kernel("af_sm", obj, [s_ty, st_ty, o_l1_ty, np.int32, np.int32])
     k_pv = Kernel("af_pv", obj, [s_ty, elem_ty, o_l1_ty, st_ty])
     k_fin = Kernel("af_fin", obj, [o_l1_ty, st_ty])
-    kernels = [k_meta, k_cap, k_init, k_qk, k_sm, k_pv, k_fin]
+    k_ptab = Kernel("af_ptab", obj, [elem_ty, s_ty])
+    k_prep_q = Kernel("af_prep_q", obj, [elem_ty, s_ty, q_ty, q_ty, o_l1_ty])
+    k_prep_kv = Kernel("af_prep_kv", obj, [elem_ty, elem_ty, s_ty, o_l1_ty])
+    kernels = [k_meta, k_cap, k_init, k_qk, k_sm, k_pv, k_fin, k_ptab, k_prep_q, k_prep_kv]
 
     def core_tile(g, i):
         return Tile(g * GROUP_COLS + i // N_ROWS, 2 + i % N_ROWS)
@@ -135,7 +143,7 @@ def attn_fa(Q: In, KV: In, O: Out, *, L: CompileTime[int], heads: CompileTime[in
         tok0 = i * TQ
 
         def core_fn(a_in, b_in, o_out, kern, q_hi, q_lo, s_buf, st, my_rtp, barrier):
-            (meta, cap, init, qk, sm, pv, fin) = kern
+            (meta, cap, init, qk, sm, pv, fin, ptab, prep_q, prep_kv) = kern
             barrier.wait_for_value(1)
             n_pass = my_rtp[RTP_PASSES]
             n_ch = my_rtp[RTP_CHUNKS]
@@ -166,6 +174,31 @@ def attn_fa(Q: In, KV: In, O: Out, *, L: CompileTime[int], heads: CompileTime[in
                     b_in.release(1)
                 fin(o, st)
                 o_out.release(1)
+            # prep dispatch: the block's table once (resident in s_buf), then a pass per query head and per kv head
+            for _ in range_(my_rtp[RTP_TBL]):
+                for e in range(CORES):
+                    x = a_in.acquire(1)
+                    if e == i:
+                        ptab(x, s_buf)
+                    a_in.release(1)
+            for _ in range_(my_rtp[RTP_PQ]):
+                o = o_out.acquire(1)
+                for e in range(CORES):
+                    x = a_in.acquire(1)
+                    if e == i:
+                        prep_q(x, s_buf, q_hi, q_lo, o)
+                    a_in.release(1)
+                o_out.release(1)
+            for _ in range_(my_rtp[RTP_PKV]):
+                o = o_out.acquire(1)
+                for e in range(CORES):
+                    xk = a_in.acquire(1)
+                    xv = b_in.acquire(1)
+                    if e == i:
+                        prep_kv(xk, xv, s_buf, o)
+                    a_in.release(1)
+                    b_in.release(1)
+                o_out.release(1)
             barrier.release_with_value(1)
         return core_fn
 
@@ -186,13 +219,17 @@ def attn_fa(Q: In, KV: In, O: Out, *, L: CompileTime[int], heads: CompileTime[in
     Q_ty = np.ndarray[(heads * qh_elems,), np.dtype[bfloat16]]
     KV_ty = np.ndarray[(max_rows * kv_ld,), np.dtype[bfloat16]]
     O_ty = np.ndarray[(T * qw,), np.dtype[np.float32]]
+    TB_ty = np.ndarray[(PREP_TBL_ELEMS,), np.dtype[bfloat16]]
     qa_rows = (1 + Q_ELEMS) * LKP          # record + Q hi, in 64-wide rows
     qb_rows = Q_ELEMS * LKP
 
-    def sequence(q, kv, o, a_prods, b_prods, o_conses):
+    def sequence(q, kv, o, tb, a_prods, b_prods, o_conses):
         for buf in rtp.values():
             buf[RTP_PASSES] = hpg
             buf[RTP_CHUNKS] = n_chunks
+            buf[RTP_TBL] = 0
+            buf[RTP_PQ] = 0
+            buf[RTP_PKV] = 0
         for b in barriers.values():
             b.set(1)
         inflight: list[TaskGroup] = []
@@ -220,10 +257,77 @@ def attn_fa(Q: In, KV: In, O: Out, *, L: CompileTime[int], heads: CompileTime[in
         for tg in inflight:
             tg.finish()
 
+    # prep: y is the qkv GEMM's c-tiled fp32 output (seen as bf16 pairs), tb the block's table, q gets Q hi / lo in the
+    # pass layout and kv (a window of the cache that starts at the block's first row) gets K rotated and V
+    y_cols = 8
+    y_tiles_per_col = QKV_NPAD // 128 // y_cols
+    y_ty = np.ndarray[(T * QKV_NPAD * 2,), np.dtype[bfloat16]]
+
+    def y_off(ct, half):    # bf16 offset of c-tile ct's column half (64 floats) in the c-tiled y
+        return 2 * (((ct % y_cols) * y_tiles_per_col + ct // y_cols) * T * 128 + half * 64)
+
+    def prep_sequence(q, kv, y, tb, a_prods, b_prods, o_conses):
+        for buf in rtp.values():
+            buf[RTP_PASSES] = 0
+            buf[RTP_CHUNKS] = 0
+            buf[RTP_TBL] = 1
+            buf[RTP_PQ] = hpg
+            buf[RTP_PKV] = PREP_KV_PER_GROUP
+        for b in barriers.values():
+            b.set(1)
+        inflight: list[TaskGroup] = []
+
+        def pass_group(fills, drains, first=False):
+            tg = TaskGroup()
+            if first:
+                for g in range(N_GROUPS):
+                    a_prods[g].fill(tb, offset=0, sizes=[T, 2 * HD], strides=[2 * HD, 1], group=tg)
+            for fill in fills:
+                fill(tg)
+            for drain in drains:
+                drain(tg)
+            inflight.append(tg)
+            if len(inflight) == MAX_INFLIGHT:
+                inflight.pop(0).finish()
+
+        for k in range(hpg):
+            fills, drains = [], []
+            for g in range(N_GROUPS):
+                h = g * hpg + k
+                fills.append(lambda tg, g=g, h=h: a_prods[g].fill(
+                    y, offset=y_off(h // 2, h % 2), sizes=[T, 2 * HD], strides=[2 * 128, 1], group=tg))
+                for cc in range(GROUP_COLS):
+                    col = g * GROUP_COLS + cc
+                    # the column's 4 cores, hi then lo each (2048 bf16), at their slots of the pass's Q regions
+                    drains.append(lambda tg, col=col, h=h, cc=cc: o_conses[col].drain(
+                        q, offset=h * qh_elems + ELEM + cc * N_ROWS * (TQ * HD), sizes=[N_ROWS, 2, TQ * HD],
+                        strides=[TQ * HD, ELEM * Q_ELEMS, 1], wait=True, group=tg))
+            pass_group(fills, drains, first=k == 0)
+        for j in range(PREP_KV_PER_GROUP):
+            fills, drains = [], []
+            for g in range(N_GROUPS):
+                kvh = g * PREP_KV_PER_GROUP + j
+                fills.append(lambda tg, g=g, kvh=kvh: a_prods[g].fill(
+                    y, offset=y_off(qw // 128 + kvh // 2, kvh % 2), sizes=[T, 2 * HD], strides=[2 * 128, 1], group=tg))
+                fills.append(lambda tg, g=g, kvh=kvh: b_prods[g].fill(
+                    y, offset=y_off((qw + kv_heads * HD) // 128 + kvh // 2, kvh % 2), sizes=[T, 2 * HD],
+                    strides=[2 * 128, 1], group=tg))
+                for cc in range(GROUP_COLS):
+                    col = g * GROUP_COLS + cc
+                    drains.append(lambda tg, col=col, kvh=kvh, cc=cc: o_conses[col].drain(
+                        kv, offset=kvh * HD + cc * N_ROWS * TQ * kv_ld, sizes=[N_ROWS, 2, TQ, HD],
+                        strides=[TQ * kv_ld, kv_heads * HD, kv_ld, 1], wait=True, group=tg))
+            pass_group(fills, drains)
+        for tg in inflight:
+            tg.finish()
+
     a_prods = [A_l3l2[g].prod(tile=Tile(g * GROUP_COLS, 0)) for g in range(N_GROUPS)]
     b_prods = [B_l3l2[g].prod(tile=Tile(g * GROUP_COLS + 1, 0)) for g in range(N_GROUPS)]
     o_conses = [O_l2l3[c].cons(tile=Tile(c, 0)) for c in range(N_GROUPS * GROUP_COLS)]
-    rt = Runtime(sequence, [Q_ty, KV_ty, O_ty, a_prods, b_prods, o_conses])
+    if MODE == "prep":
+        rt = Runtime(prep_sequence, [Q_ty, KV_ty, y_ty, TB_ty, a_prods, b_prods, o_conses])
+    else:
+        rt = Runtime(sequence, [Q_ty, KV_ty, O_ty, TB_ty, a_prods, b_prods, o_conses])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

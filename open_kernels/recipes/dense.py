@@ -115,8 +115,7 @@ BLOCK_ATTN_ROPE = ("k2",)
 # against their host attention
 BLOCK_ATTN_FA = ("granite",)
 # Q as a bf16 hi / lo pair; AF_QSPLIT=0 exports the single-bf16 Q experiment (its own kernel set)
-AF_QSPLIT = os.environ.get("AF_QSPLIT", "1") != "0"
-# families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
+AF_QSPLIT = os.environ.get("AF_QSPLIT", "1") != "0"# families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
 # o_proj and the FFN have none on the families listed here. GPT-OSS breaks both halves of
@@ -493,6 +492,10 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
             and spec.num_heads % 4 == 0 and fa_tiers):
         attn_fa = {"hd": 64, "l_max": fa_tiers[-1], "q_head": 4096 * (9 if AF_QSPLIT else 5), "qsplit": AF_QSPLIT,
                    "kernels": {str(Lw): f"af{Lw}" for Lw in fa_tiers}}
+        # OPEN-PREFILL-GLUE-PREP: the bfp16 route's rope, Q packing and cache write as one more stream of the same
+        # context (Q hi / lo only); n_pad is the qkv GEMM's padded width, the c-tiled y it reads
+        if AF_QSPLIT:
+            attn_fa["prep"] = {"kernel": "afp", "n_pad": -(-(qw + 2 * kvw) // BFP16_ROWS) * BFP16_ROWS}
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
@@ -569,6 +572,14 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                                    "env": {"AF_L": str(Lw), "AF_HEADS": str(spec.num_heads),
                                            "AF_KV_HEADS": str(spec.num_kv_heads), "AF_KV_LD": str(L.KV_ROW // 2),
                                            "AF_MAX_ROWS": str(max_ctx), "AF_QSPLIT": str(int(AF_QSPLIT))}}
+        if "prep" in attn_fa:
+            out["kernels"]["afp"] = {"context": "af", "insts": "afp/insts.bin", "build": "afp"}
+            out["builds"]["afp"] = {"design": "attn_fa/attn_fa.py",
+                                    "build_dir": f"attn_fa/build_prep_h{spec.num_heads}_kv{spec.num_kv_heads}{sfx}",
+                                    "env": {"AF_L": "256", "AF_HEADS": str(spec.num_heads),
+                                            "AF_KV_HEADS": str(spec.num_kv_heads), "AF_KV_LD": str(L.KV_ROW // 2),
+                                            "AF_MAX_ROWS": str(max_ctx), "AF_QSPLIT": "1", "AF_MODE": "prep",
+                                            "AF_QKV_NPAD": str(attn_fa["prep"]["n_pad"])}}
     # The T-wide attention scratch: the engine writes every token's q/k/v into it, then
     # shuttles one token's slice in and out of the layer's own `act` around each attention
     # dispatch (core.cpp `shuttle_buf`), and reads all T og rows back out at the end. Shared

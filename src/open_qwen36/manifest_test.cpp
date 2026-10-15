@@ -321,12 +321,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 6}"));
+    json j = json::parse(std::string("{\"manifest_version\": 7}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 6 is refused");
+        check(false, "manifest_version 7 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 6") != std::string::npos, std::string("manifest_version 6 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 7") != std::string::npos, std::string("manifest_version 7 is refused: ") + e.what());
     }
     // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
     auto bf16_weight = [](json& j, int version, bool mixed) {
@@ -624,6 +624,28 @@ int main(int argc, char** argv) {
                 refused_fa("wants hd 64", "attn_fa: a head dim the design does not build is refused", [](json& a) { a["hd"] = 128; });
                 refused_fa("is not the record plus Q hi", "attn_fa: a Q layout that is not the design's is refused",
                            [](json& a) { a["qsplit"] = false; });
+                // OPEN-PREFILL-GLUE-PREP: a prep stream on the same context, manifest_version 6
+                {
+                    json pj = fj;
+                    pj["manifest_version"] = 6;
+                    pj["kernels"]["afp"] = {{"context", "af"}, {"insts", "afp/insts.bin"}};
+                    pj["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"] = {{"kernel", "afp"}, {"n_pad", 4096}};
+                    const AttnFa& pf = Manifest::parse(pj, "attn_fa prep").layer_types.at("dense").gemm_block.attn_fa;
+                    check(pf.has_prep() && pf.prep_kernel == "afp" && pf.prep_npad == 4096, "attn_fa: a prep stream parses");
+                    auto refused_prep = [&](const char* what, const char* label, const std::function<void(json&)>& edit) {
+                        json e = pj;
+                        edit(e);
+                        bool threw = false;
+                        try { Manifest::parse(e, "attn_fa prep edited"); } catch (const std::exception& x) { threw = std::string(x.what()).find(what) != std::string::npos; }
+                        check(threw, label);
+                    };
+                    refused_prep("needs manifest_version 6", "attn_fa prep: a version 5 manifest is refused",
+                                 [](json& e) { e["manifest_version"] = 5; });
+                    refused_prep("unknown kernel", "attn_fa prep: an unknown stream is refused",
+                                 [](json& e) { e["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"]["kernel"] = "nope"; });
+                    refused_prep("whole number of 1024", "attn_fa prep: a width that is not a whole number of 1024 columns is refused",
+                                 [](json& e) { e["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"]["n_pad"] = 3584; });
+                }
             }
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)

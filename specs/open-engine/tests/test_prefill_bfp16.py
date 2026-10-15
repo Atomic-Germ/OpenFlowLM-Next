@@ -97,7 +97,7 @@ def _granite():
 
 def test_granite_manifest_carries_the_bfp16_variant():
     m = manifest(_granite())
-    assert m["manifest_version"] == 5
+    assert m["manifest_version"] == 6      # 5 for the glu steps, 6 for attn_fa's prep stream
     lt = m["layer_types"]["dense"]
     v, base = lt["gemm_block_variants"]["bfp16"], lt["gemm_block"]
     assert all(s.get("fmt") is None for s in base["program"])
