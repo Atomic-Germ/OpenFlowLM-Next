@@ -474,6 +474,7 @@ def run_matrix(a) -> int:
         (out / f"aie-partitions-{int(time.time())}.txt").write_text(r.stdout + r.stderr)
     dibs = shutil.which("dibs.cmd") or shutil.which("dibs") or "dibs"
     units = [u.split(":") for u in a.units.split(";")]
+    expect = json.loads(Path(a.expect).read_text()) if a.expect else {}
     for rep in range(a.rep_from, a.reps):
         for what, tokens, modes in units:
             name = f"{what.replace('+', '-')}_{modes.replace('+', '-')}_r{rep}"
@@ -493,6 +494,12 @@ def run_matrix(a) -> int:
                     subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT)
                 text = log.read_text(encoding="utf-8", errors="replace")
                 clean = "dibs: CLEAN after" in text and (out / f"{name}.part").exists()
+                if clean and expect:     # dibs lets a sibling subagent's NPU run into a CLEAN unit: the plain decode tells
+                    got = [json.loads(l) for l in (out / f"{name}.part").read_text().splitlines() if l.strip()]
+                    hit = [r["name"] for r in got if r.get("decode_tok_s", 0) < 0.95 * expect.get(r.get("name"), 0)]
+                    if hit:
+                        clean = False
+                        text += f"\nslow plain decode on {hit}: shared NPU"
                 if clean:
                     (out / f"{name}.part").replace(out / f"{name}.jsonl")
                     print(f"{name}: CLEAN (try {k + 1})", flush=True)
@@ -705,6 +712,7 @@ def main(argv=None) -> int:
     x.add_argument("--rep-from", type=int, default=0)
     x.add_argument("--tries", type=int, default=6)
     x.add_argument("--gap", type=float, default=75, help="seconds to leave the machine after every unit")
+    x.add_argument("--expect", default="", help="json {prompt: plain tok/s}: a unit 5%% slower is rerun like a NOISY one")
     x.add_argument("--tag", default="d3")
     x.add_argument("--eta", default="5m")
     sv = sub.add_parser("serve")
