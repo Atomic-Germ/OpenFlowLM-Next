@@ -413,7 +413,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             "OFLM_OPEN_HOST_ATTN=0 keeps the dxB dispatches)");
     if (host_attn_on_ && attn_fa_on_ && attn_prep_on_ && types_[0]->gemm_block.attn_fa.has_prep())
         log("gemm-block prep: NPU on the bfp16 route (rope, Q pack and the KV-cache write as a stream of the attention "
-            "context; OFLM_OPEN_PREFILL_PREP=1 puts them on the NPU)");
+            "context; OFLM_OPEN_PREFILL_PREP=0 puts them back on the host)");
     // Stage 2.6 Gate B: opt-in host DECODE route -- the whole decode step through
     // the 2.5 gemm-block chain at T=1 (host attention forced for those calls
     // only) instead of the fused per-layer dx dispatch. Decode-only: the

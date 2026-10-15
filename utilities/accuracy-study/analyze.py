@@ -20,13 +20,6 @@ def logsoftmax(x: np.ndarray) -> np.ndarray:
     return z - np.log(np.exp(z).sum(1, keepdims=True))
 
 
-def load(d: Path, k: int, n: int, V: int | None):
-    raw = np.fromfile(d / f"p{k}_logits.f32", np.float32)
-    if V is None:
-        V = raw.size // n
-    return raw.reshape(n, -1)[:, :V] if raw.size // n >= (V or 0) else raw.reshape(n, -1)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", required=True, type=Path)
@@ -108,6 +101,18 @@ def main() -> int:
     for (x, y) in pair_names:
         kl = np.concatenate(kl_pair[(x, y)])
         print(f"\n{x} vs {y}: KL({x} || {y}) mean {kl.mean():.5f} p99 {np.quantile(kl, .99):.5f}; greedy identical {sum(greedy_pair[(x, y)])}/{N}")
+    if len(names) >= 2:
+        rng = np.random.default_rng(1)
+        x, y = names[0], names[1]
+        dk = np.array([a_.mean() - b_.mean() for a_, b_ in zip(pos_kl[y], pos_kl[x])])
+        dn = np.array(nll[y]) - np.array(nll[x])
+        bs = [dk[rng.integers(0, len(dk), len(dk))].mean() for _ in range(4000)]
+        bn = [dn[rng.integers(0, len(dn), len(dn))].mean() for _ in range(4000)]
+        print(f"\npaired over prompts, {y} minus {x}: mean per-prompt KL {dk.mean():+.5f} (95% CI {np.quantile(bs, .025):+.5f} .. "
+              f"{np.quantile(bs, .975):+.5f}), {y} worse on {int((dk > 0).sum())}/{len(dk)} prompts; mean NLL {dn.mean():+.5f} "
+              f"(95% CI {np.quantile(bn, .025):+.5f} .. {np.quantile(bn, .975):+.5f}), ppl ratio {np.exp(dn.mean()):.5f}")
+        t_x, t_y = np.concatenate(top1[x]), np.concatenate(top1[y])
+        print(f"top-1 agreement with the reference: {x} {100 * t_x.mean():.2f}%, {y} {100 * t_y.mean():.2f}%")
     print("\nper-prompt mean KL (kind, tokens, per route)")
     for k, kind, n, d in per_prompt:
         print(f"  p{k} {kind} {n}: " + ", ".join(f"{r} {v:.5f}" for r, v in d.items()))
