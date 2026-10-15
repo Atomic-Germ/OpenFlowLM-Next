@@ -123,7 +123,8 @@ cd <repo>      # (Get-Process -Id $PID).PriorityClass = 'BelowNormal' first; one
 python open_kernels\export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <repo>\src\xclbins\Granite-4.2-3B-NPU2\open_kernels
 ```
 
-About 2 h at BelowNormal on this box, the `dxl` / `dxl_lora` builds being the long ones. Then `open_qwen36_cli --kernels <set>`; pass it
+About 13 min at BelowNormal on a quiet box (2026-10-15: `dx` / `dx_f32` / `dxl` / `dxl_lora` ~85-125 s each, the GEMMs 16-35 s;
+the "2 h" once noted here was a box busy with other builds). Then `open_qwen36_cli --kernels <set>`; pass it
 explicitly, `C:\models\Granite-4.2-3B-NPU2\open_kernels` is a symlink to an old tree. `--prefill-mode bfp16` picks the bfp16 route.
 `--uno N --gemm-block` prefills the prompt as blocks before the Uno cycle, so a 1024 / 2048-token context costs seconds, not a
 token-at-a-time prefill. The plain-decode reference inside `--uno` prefills all but the last token the same way and steps the last
@@ -133,7 +134,10 @@ then reads DIFFERS at token 27). `--spec N` does the same for the per-cycle choi
 
 Measuring: `utilities/granite-combined-bench/matrix.py` runs prefill / decode / Uno-at-depth / the six-prompt sweep as small units, each
 under `dibs run --measure`, rerunning a NOISY unit. A stray CPU-bound process (an orphaned `find`, a browser tab) makes every unit
-NOISY; read which process `dibs` names before retrying.
+NOISY; read which process `dibs` names before retrying. When other agents share the box, wrap each unit's command in
+`utilities/granite-combined-bench/controlled.py` (a 32-token context-0 decode on the base set before and after, calibrated once
+without a command, plus an `xrt-smi` watch for other processes' NPU submissions) and rerun the unit when it prints `UNIT OFF`:
+`dibs` counts every agent of one Claude session as one holder, so a sibling's `dibs run npu` can run inside your CLEAN unit.
 
 bfp16 prefill with the glu FFN (2026-10-15, CLEAN with a control, min / median tok/s): pp512 819 / 858, pp1024 549 / 554,
 pp2048 317 / 332, against the five-step route's 501 / 537, 423 / 423, 231 / 268 and the default bf16 route's 239 / 187 medians at
@@ -231,10 +235,59 @@ the union set (the manifest needs no edit unless `rb` changes). Check a probe to
 ring lowers to 9 buffers) and the `.text` size (`llvm-size -A elfs_main_core_2_3/*.elf`). A fifo-depth change moves only ~85 bytes
 of the xclbin (the ring's wrap constants), so a near-identical xclbin proves nothing either way.
 
-Not done, and where the rest is: the stream (0.28 ms) is 2 KB a position broadcast to every core, of which a core needs a quarter; a
-stream per core on the five free shim MM2S channels would cut it, at the cost of a 3-D window BD the position patch
-(`stream_patch.hpp attn_table`) does not know. Eight attention cores (one per kv head) would cut the compute by 3/8 but need a memtile
-join for the og drains (the shim S2MM channels are all taken).
+The stream and the head split were done next (OPEN-ATTN-KVSLICE, the section below).
+
+## Attention by kv head, each core on its own window (2026-10-15, OPEN-ATTN-KVSLICE)
+
+Two bit-identical changes, both on by default for Granite (`attnknobs.KVSLICE_MEASURED`, `KVCORES_MEASURED` = 2,
+`DXL_KVSLICE_MEASURED` for the windows in `dxl`):
+
+- **KVSLICE**: each attention core streams only its kv heads of the cached rows on its own shim MM2S channel, as one 3-D BD
+  over the row-major cache (`[rows][K | V][KVS x 128 B]`, compiled for one 4-row block and sized per token by `attnpos`). A
+  fifo element is a whole block, so the ring is two elements and the DMA refills one while the core computes the other; the
+  window is padded to whole blocks and the tail rows still go one at a time (`attn_tailw.cc`). The cache layout does not
+  change, so nothing else reads it differently and no capacity is compiled in.
+- **KVCORES**: cores grouped by kv head so the 5 q heads of one kv head share every K and V row they load (attn.h
+  `ATTN_G5`). `ATTN_KVCORES=1`: 8 cores of 5 heads on row 4; `=2`: 16 cores, a kv head's heads as 3 + 2 (rows 4 and 5,
+  the pair in one column; the 2-head cores compile attn.h at `ATTN_NHL=2` under `symbol_prefix="h2"`). The two kv heads of
+  an aligned slice share one window stream (4 streams of 512 B a position), og joins in memtiles of up to 6 inputs.
+
+Build and check one variant in ~2 min: `export_qwen36_kernels.py --model-dir <model> --only dx --out <copy of the union set>`
+with the knob in the environment (`ATTN_KVSLICE=0|1`, `ATTN_KVCORES=0|1|2`, `ATTN_G5_PVROLL=0|1`, all probe variables), then
+`--dump-logits` over a 70-token prompt one token at a time against the base set: 22 of 22 files byte-identical, or it is wrong.
+
+Traps met on the way:
+- **The window placeholder must be at least two rows.** The lowering drops the stride of a size-1 dimension, and a BD whose
+  length is later patched past it re-reads row 0. dx.py compiles the window for one block (4 rows); `attnpos` takes each
+  fill's per-row words as its compiled length / 4.
+- **Every KV transfer below one row is a window fill** only when the manifest says `kvslice`; an engine without the key
+  refuses the stream ("unexpected kv transfer"), which is the point: a kvslice `dx` under a plain patch would stream a quarter
+  of the window and compute garbage, not fail.
+- **A memtile join takes at most 6 inputs** (6 S2MM channels): 16 og streams join as 6 + 6 + 4 on memtiles (2..4, 1).
+- **Two head counts in one design** need two ExternalFunction sets; without `symbol_prefix` the MLIR symbols collide. Each
+  core links only its own objects, so the shared inline bodies (`attn_rowb_impl`, `vexpN`) do not meet at link time.
+- **`attn_row_impl` must index the same way for the window rows and the new row**: the tail rows come from the slice, the
+  new row from the full scratch row, so `attn_step_new` offsets its pointers by `attn_kvb(h0)` instead of a per-TU macro
+  (PR #105's trap: two same-named bodies, the linker keeps one).
+- **Do not name a helper script `profile.py`**: `transformers` imports `cProfile`, which imports `profile`, and Python finds
+  the script in the caller's directory first.
+- **An Edit of attn.h fails while a build reads it** (EPERM on the rename): wait for the build's compile phase.
+- **`dibs run --measure` does not wait for your own session's `npu` / `build` runs** (nor a sibling agent's in the same
+  session). A decode unit that overlapped this session's own `--rows-check` gate read 6.8 tok/s at context 0 and still said
+  CLEAN. Put gates and measured units in one serial queue, run NPU gates under `--measure` too, and use `controlled.py`.
+
+What the arithmetic costs now (Peano bundles a 4-row block, `utilities/dxl-asm/attn_tu_check.py` + `bb_bundles.py`): 8 heads
+(TREE8) ~1,460; 5 heads (G5) ~1,150 with 257 of them the 32-lane exponential; 3 heads ~890; 2 heads ~770. The exponential is
+latency-bound (a 64-lane one is 292), so it does not shrink with the head count.
+
+Measured 2026-10-15 (every unit `dibs run --measure` CLEAN inside `controlled.py`; OPEN-ATTN-KVSLICE has the tables):
+- `--bench-step` growth a layer a position 0.404 us (broadcast) -> 0.273 (windows) -> 0.177 (KVCORES 1) -> 0.134 (KVCORES 2);
+  a step at 2048 79.2 -> 57.9 ms against 46.1 / 46.9 at 0. KVCORES 2's bigger context costs ~0.8 ms a step at every depth
+  (the first `dx` after a switch 3.23 ms against 2.44 broadcast, 2.72 KVCORES 1).
+- tg128 at 0 / 512 / 1024 / 2048: 20.66 / 17.56 / 15.38 / 12.21 -> 20.63 / 19.30 / 18.46 / 16.78 tok/s (medians); KVCORES 1
+  reads 20.72 at 0 and 15.86 at 2048.
+- Uno at depth gained 7-12 % but plain decode gained more, so Uno now trails it on chat (0.86x at 2048) and breaks even on
+  code (0.98x): `dxl` has the windows only, and its 4 groups x 5 attention cores leave no tiles for 8 cores of 5 heads a group.
 
 ## Decode at context 0: the weight stream and one context (2026-10-15)
 

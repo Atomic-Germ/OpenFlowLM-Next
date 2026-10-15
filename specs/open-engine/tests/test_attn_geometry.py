@@ -98,6 +98,59 @@ def test_score_tree_is_granite_only(name, on, unvalidated, monkeypatch):
     assert DR.probe_env() == {"ATTN_TREE8": "0"}
 
 
+def test_kv_slices_cover_every_core_head():
+    """Traces: OPEN-ATTN-KVSLICE. Granite's 5 cores x 8 heads touch 2 or 3 kv heads each: a 3-head window per core, the start
+    clamped inside the row; at one kv head a core, slices of 2 start aligned so the two cores of a slice read one stream."""
+    from recipes import attnknobs
+    split = [k * 5 + o for k in range(8) for o in (0, 3)]      # Granite at two cores a kv head: its 5 heads as 3 + 2
+    assert attnknobs.kv_slices(40, 8, 5) == (3, [0, 1, 3, 4, 5])
+    assert attnknobs.kv_slices(40, 8, 8, 2) == (2, [0, 0, 2, 2, 4, 4, 6, 6])
+    assert attnknobs.kv_slices(40, 8, 16, 2, split) == (2, [0] * 4 + [2] * 4 + [4] * 4 + [6] * 4)
+    for (nh, kvh, ac, share, h0s) in ((40, 8, 5, 1, None), (40, 8, 8, 2, None), (40, 8, 16, 2, split), (32, 8, 4, 1, None),
+                                      (24, 8, 6, 1, None), (16, 2, 4, 1, None)):
+        kvs, kvb = attnknobs.kv_slices(nh, kvh, ac, share, h0s)
+        grp, h0s = nh // kvh, h0s or [c * (nh // ac) for c in range(ac)]
+        for c in range(ac):
+            heads = range(h0s[c], (h0s + [nh])[c + 1])
+            assert 0 <= kvb[c] and kvb[c] + kvs <= kvh
+            assert all(kvb[c] <= h // grp < kvb[c] + kvs for h in heads), (nh, kvh, ac, c)
+
+
+@pytest.mark.parametrize("name,rows", [("granite42-3b.json", 4), ("qwen3-4b.json", 0), ("qwen25-3b.json", 0), ("gemma3-4b.json", 0)])
+def test_kvslice_is_measured_not_declared(name, rows, unvalidated, monkeypatch):
+    """Traces: OPEN-ATTN-KVSLICE. On for Granite (the manifest's `kvslice` is its block rows), off elsewhere; ATTN_KVSLICE forces it
+    off for an A/B build, and a q / k / v bias (Qwen2.5) or a sliding window (Gemma 3) keeps the broadcast even when forced."""
+    from recipes import attnknobs
+    monkeypatch.delenv("ATTN_KVSLICE", raising=False)
+    spec = load_spec(SPECS / name)
+    G = DR.geometry(spec)
+    assert attnknobs.kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW) == rows
+    assert DR.programs(spec, 4096)["kernels"]["dx"].get("kvslice", 0) == rows
+    monkeypatch.setenv("ATTN_KVSLICE", "0")
+    assert attnknobs.kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW) == 0
+    assert DR.probe_env() == {"ATTN_KVSLICE": "0"}
+    monkeypatch.setenv("ATTN_KVSLICE", "1")
+    if G.QKVB or G.WINDOW:
+        assert attnknobs.kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW) == 0
+
+
+@pytest.mark.parametrize("name,cores", [("granite42-3b.json", 2), ("qwen3-4b.json", 0), ("llama31-8b.json", 0)])
+def test_kv_cores_is_measured_not_declared(name, cores, unvalidated, monkeypatch):
+    """Traces: OPEN-ATTN-KVSLICE. Attention cores by kv head (attn.h ATTN_G5) for Granite only: 40 heads over 8 kv heads at
+    hd 64, on the KVSLICE window; ATTN_KVCORES forces 0, 1 or 2 for an A/B build and is refused off that geometry."""
+    from recipes import attnknobs
+    for v in ("ATTN_KVCORES", "ATTN_KVSLICE"):
+        monkeypatch.delenv(v, raising=False)
+    spec = load_spec(SPECS / name)
+    G = DR.geometry(spec)
+    ks = attnknobs.kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW)
+    assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, ks) == cores
+    monkeypatch.setenv("ATTN_KVCORES", "1")
+    assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, ks) == (1 if cores else 0)
+    assert attnknobs.kv_cores(spec, G.NH, G.KVH, G.HD, G.RB, 0) == 0          # no per-core window, no kv-head cores
+    assert DR.probe_env() == {"ATTN_KVCORES": "1"}
+
+
 def test_attn_fast_is_a_probe_variable(monkeypatch):
     """It changes the compiled kernel, so the build key has to see it (OPEN-BUILD-CACHE)."""
     assert "ATTN_FAST" in DR.PROBE_VARS

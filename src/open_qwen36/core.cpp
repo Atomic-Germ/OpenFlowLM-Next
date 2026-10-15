@@ -551,15 +551,17 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.moe2 = stream_patch::moe2_table(k.words, name, g);
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
-        k.attn = stream_patch::attn_table(k.words, name, w_->attn);
         k.geom = w_->attn;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
+        k.geom.kvslice = d.kvslice;
+        k.attn = stream_patch::attn_table(k.words, name, k.geom);
     } else if (d.patch == "attnrows") {
-        k.attn_rows = stream_patch::attn_rows_table(k.words, name, static_cast<uint32_t>(man_.rows.l), w_->attn);
         k.geom = w_->attn;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
+        k.geom.kvslice = d.kvslice;
+        k.attn_rows = stream_patch::attn_rows_table(k.words, name, static_cast<uint32_t>(man_.rows.l), k.geom);
     }
 }
 
@@ -744,8 +746,11 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         // the kernel masks multiply as exact zeros -- rather than clamped: a shorter stream
         // than the kernel's block count deadlocks the fifo.
         uint64_t kv_slack = 0;
-        for (const auto& [kn, kd] : w_->kernels)
+        for (const auto& [kn, kd] : w_->kernels) {
             if (kd.patch == "attnpos" && kd.rb > 2) kv_slack = std::max<uint64_t>(kv_slack, kd.rb - 2);
+            // a kvslice window padded to whole elements reads up to kvslice - 1 rows past its last real one
+            if (kd.kvslice) kv_slack = std::max<uint64_t>(kv_slack, kd.kvslice - 1);
+        }
         state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)

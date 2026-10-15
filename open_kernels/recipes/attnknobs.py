@@ -27,7 +27,7 @@ from .spec import ModelSpec
 # main cores: LX_NULL_DN compiles the DeltaNet arithmetic away, LX_NULL_GEMV the q4/q8 GEMV
 # tile body, both leaving every stream, fifo and DMA -- and so insts.bin -- byte-identical.
 PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV", "DXL_NULL_PREP", "DXL_NULL_LN", "ATTN_TREE8", "ATTN_REPEAT",
-              "DX_WRING", "DX_WORDER", "DX_ONECTX")
+              "DX_WRING", "DX_WORDER", "DX_ONECTX", "ATTN_KVSLICE", "ATTN_KVCORES", "ATTN_G5_PVROLL", "ATTN_DXL_KVSLICE")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 
@@ -82,6 +82,51 @@ def tree8(spec: ModelSpec, nhl: int, rb: int, hd: int) -> bool:
     if forced is not None:
         return forced == "1"
     return spec.family in TREE8_MEASURED and nhl == 8 and rb == 4 and hd == 64
+
+
+# Measured bit-identical (OPEN-ATTN-KVSLICE): each attention core streams its own kv heads of the window; ATTN_KVSLICE=0 / 1 forces it.
+KVSLICE_MEASURED = ("granite",)
+
+
+def kv_slices(nh: int, kvh: int, acores: int, share: int = 1, h0s: list[int] | None = None) -> tuple[int, list[int]]:
+    """(kv heads a window slice, each core's first kv head), attn.h attn_kvb's rule: clamped inside the row, or with
+    share > 1 aligned so the cores of `share` kv heads read one stream; h0s are the cores' first heads when unequal."""
+    grp = nh // kvh
+    h0s = h0s or [c * (nh // acores) for c in range(acores)]
+    ends = h0s[1:] + [nh]
+    spans = [(h0 // grp, (e - 1) // grp) for h0, e in zip(h0s, ends)]
+    if share > 1:
+        assert all(a == b for a, b in spans) and kvh % share == 0, "kv_slices: sharing needs one kv head a core"
+        return share, [a - a % share for a, _ in spans]
+    kvs = max(b - a + 1 for a, b in spans)
+    return kvs, [min(a, kvh - kvs) for a, _ in spans]
+
+
+# Granite: 2 (16 cores); its bigger context reload at each ln / lm switch costs what 1 (8 cores) saves at context 0.
+KVCORES_MEASURED: dict[str, int] = {"granite": 2}
+
+
+def kv_cores(spec: ModelSpec, nh: int, kvh: int, hd: int, rb: int, kvsl: int) -> int:
+    """Attention cores per kv head: 0 (the head split of attn_cores), 1 or 2 (attn.h ATTN_G5)."""
+    forced = os.environ.get("ATTN_KVCORES")
+    n = int(forced) if forced is not None else KVCORES_MEASURED.get(spec.family, 0)
+    return n if n in (1, 2) and kvsl and kvh == 8 and nh == 5 * kvh and hd == 64 and rb == 4 else 0
+
+
+def kvslice(spec: ModelSpec, acores: int, rb: int, qkv_bias: bool = False, window: int = 0,
+            env: str = "ATTN_KVSLICE", measured: tuple[str, ...] | None = None) -> int:
+    """Rows a per-core window element holds (the manifest's `kvslice`); 0 keeps the broadcast (bias: no free column)."""
+    forced = os.environ.get(env)
+    on = (forced == "1") if forced is not None else spec.family in (KVSLICE_MEASURED if measured is None else measured)
+    return rb if on and acores > 1 and rb > 1 and not qkv_bias and not window else 0
+
+
+# The L-row pass (designs/dxl) joins by its own measurement: ROWS PASS and Uno identical on its kernels.
+DXL_KVSLICE_MEASURED: tuple[str, ...] = ("granite",)
+
+
+def dxl_kvslice(spec: ModelSpec, acores: int, rb: int, qkv_bias: bool = False, window: int = 0) -> int:
+    return kvslice(spec, acores, rb, qkv_bias, window, "ATTN_DXL_KVSLICE", DXL_KVSLICE_MEASURED)
 
 
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):

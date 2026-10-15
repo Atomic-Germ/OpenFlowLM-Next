@@ -226,7 +226,10 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #ifndef ATTN_KVH_MUL
 #define ATTN_KVH_MUL 0
 #endif
-#if ATTN_KVH_MUL || ATTN_TREE8
+#ifndef ATTN_KVS
+#define ATTN_KVS 0       // > 0: the cached rows arrive on this core's own fifo as kv heads [kvb, kvb + ATTN_KVS) of each row, kRB rows an element (dx.py KVSLICE)
+#endif
+#if ATTN_KVH_MUL || ATTN_TREE8 || ATTN_KVS
 static constexpr unsigned kGrp = kNH / kKVH;
 static inline unsigned attn_kvh(unsigned h) {
 #if ATTN_KVH_MUL
@@ -234,6 +237,30 @@ static inline unsigned attn_kvh(unsigned h) {
 #endif
   return h / kGrp;
 }
+#endif
+#if ATTN_KVS
+#if !ATTN_VEXP || ATTN_RB < 2 || ATTN_BLOCK_ONLY
+#error "attn.h: ATTN_KVS is the blocked vector-softmax path (ATTN_VEXP, ATTN_RB > 1) without ATTN_BLOCK_ONLY"
+#endif
+static_assert(ATTN_KVS <= kKVH && ATTN_NHL != ATTN_NH, "attn.h ATTN_KVS: a slice of the kv heads, on split attention");
+#ifndef ATTN_KVB_ALIGN
+#define ATTN_KVB_ALIGN 0     // 1: slices start at multiples of ATTN_KVS, so the cores of one slice share its stream
+#endif
+// The first kv head of this core's window slice; dx.py derives each fill's offset by the same rule (attnknobs.kv_slices).
+static inline unsigned attn_kvb(int h0) {
+  const unsigned k = attn_kvh((unsigned)h0);
+#if ATTN_KVB_ALIGN
+  return k - k % ATTN_KVS;
+#else
+  return k + ATTN_KVS > kKVH ? kKVH - ATTN_KVS : k;
+#endif
+}
+#endif
+#ifndef ATTN_G5
+#define ATTN_G5 0            // 1: the block kernel for 5 heads a core on ONE kv head (Granite at 8 cores): K and V rows shared
+#endif
+#if ATTN_G5 && !(ATTN_KVS && ATTN_NHL <= 5 && ATTN_NHL <= ATTN_NH / ATTN_KVH && ATTN_EXP32 && !ATTN_TREE8)
+#error "attn.h ATTN_G5: up to 5 heads a core, all on one kv head of a KVSLICE window, with ATTN_EXP32 and without ATTN_TREE8"
 #endif
 // The head offset is a kernel ARGUMENT only when attention is actually split.
 // Leaving an unused one in the signature is not free: it perturbs codegen, and
@@ -293,8 +320,12 @@ static_assert(4 * kHD + 2 * kNH <= kEA,
 // kNHL % kHPO was required while a core had to own WHOLE og elements. It now owns
 // kOGH = min(kNHL, kHPO) heads per element, so the requirement is the weaker one that
 // its heads tile the element evenly -- which holds trivially when kOGH == kNHL.
+#if ATTN_G5
+static_assert(kNHL % kOGH == 0, "attn.h: a whole number of og elements");   // G5 may split a kv head's heads 3 + 2
+#else
 static_assert(kNH % kNHL == 0 && kNHL % kOGH == 0,
               "attn.h: the local head count must divide NH and be a whole number of og elements");
+#endif
 
 static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1 ATTN_PTAB2_PARM,
                                   bfloat16 *__restrict qn, bfloat16 *__restrict kn,
@@ -343,6 +374,9 @@ static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *_
   const int32_t real = (p[0] >= p[1]) ? p[1] : 0;
   pb[4] = real / (int32_t)kRB;
   pb[5] = p[1] - pb[4] * (int32_t)kRB;
+#if ATTN_KVS
+  pb[6] = pb[5] > 0;           // the window is padded to whole blocks, so the remainder rows share one more element
+#endif
 #endif
 }
 
@@ -574,7 +608,11 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 #endif                      // program memory (the 35B's ax, 2026-09-08); the loop stays a loop there
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
+#if ATTN_KVS
+    const unsigned kvh = h / (kNH / kKVH) - attn_kvb(h0);   // Kt is the slice; attn_step_new offsets the full new row to match
+#else
     const unsigned kvh = h / (kNH / kKVH);
+#endif
     const bfloat16 *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     // Two accumulators, not one: the hi and lo terms are independent, so this is
@@ -643,7 +681,11 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   AIE_LOOP_UNROLL_FULL      // at HD 256 four heads unrolled over eight head-dim steps overflow
 #endif                      // program memory (the 35B's ax, 2026-09-08); the loop stays a loop there
   for (unsigned hl = 0; hl < kNHL; ++hl) {
+#if ATTN_KVS
+    const unsigned kvh = ((unsigned)h0 + hl) / (kNH / kKVH) - attn_kvb(h0);
+#else
     const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
+#endif
     const bfloat16 *v = Vt + kvh * kHD;
     const bfloat16 bhh = bh[hl], bll = bl[hl];
     float *o = oacc + hl * kHD;
@@ -743,7 +785,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 #define ATTN_NV_PARM
 #define ATTN_NV_ARG
 #endif
-#if ATTN_TREE || ATTN_TREE8
+#if ATTN_TREE || ATTN_TREE8 || ATTN_G5
 // One level of the tree over two vectors that each hold whole items of 2 * step lanes:
 // every item's lanes i and i + step are added, a's items first. reduce_add's own order.
 static inline __attribute__((always_inline)) v32f attn_tree2(const v32f &a, const v32f &b, unsigned step) {
@@ -831,6 +873,81 @@ static inline __attribute__((always_inline)) void attn_pv(float *__restrict o,
 }
 #endif
 #endif
+#if ATTN_G5
+// TREE8's tree over head pairs of one K row (a missing head repeats the last): each sum pairs lanes as reduce_add does
+static constexpr unsigned attn_g5_h(unsigned i) { return i < kNHL ? i : kNHL - 1; }
+static inline __attribute__((always_inline)) void attn_g5_score(const bfloat16 *const *__restrict Kb, const bfloat16 *__restrict q0,
+                                                               unsigned kvl, float *__restrict sv) {
+  const auto pad = aie::mask<kNL>::from_uint32(0xffu & ~((1u << kNHL) - 1u));
+#if ATTN_T8_UNROLL == 2
+  _Pragma("clang loop unroll_count(2)")
+#elif ATTN_T8_UNROLL == 4
+  AIE_LOOP_UNROLL_FULL
+#endif
+  for (unsigned r = 0; r < kRB; ++r) {
+    const bfloat16 *k = Kb[r] + kvl * kHD;
+    const v32f z0 = attn_score2(k, q0, q0 + attn_g5_h(1) * kHD);
+    v32f w0, w1;
+    if constexpr (kNHL > 2) {
+      const v32f z1 = attn_score2(k, q0 + 2 * kHD, q0 + attn_g5_h(3) * kHD);
+      w0 = attn_tree2(z0, z1, 8);                // heads 0..3, 8 lanes each
+    } else {
+      w0 = attn_tree2(z0, z0, 8);
+    }
+    if constexpr (kNHL > 4) {
+      const v32f z2 = attn_score2(k, q0 + 4 * kHD, q0 + 4 * kHD);
+      w1 = attn_tree2(z2, z2, 8);                // head 4 in every item
+    } else {
+      w1 = w0;
+    }
+    const vfN<kNL> s = attn_tree1<16>(attn_tree1<32>(attn_tree2(w0, w1, 4), 2), 1);
+    aie::store_v(sv + r * kNL, aie::select(s, aie::broadcast<float, kNL>(-1e30f), pad));
+  }
+}
+#ifndef ATTN_G5_PVROLL
+#define ATTN_G5_PVROLL 1     // one head-dim slice at a time: five accumulators live, not ten (the unrolled pair spills)
+#endif
+// each head's chain keeps its row order; sharing the V loads lets the heads' independent chains interleave
+static inline __attribute__((always_inline)) void attn_g5_pv(const bfloat16 *const *__restrict Vb, float *__restrict oacc,
+                                                            const bfloat16 *__restrict ph, const bfloat16 *__restrict pl,
+                                                            const bfloat16 *__restrict ah, const bfloat16 *__restrict al,
+                                                            const int32_t *__restrict grew_i, unsigned kvl, bool any) {
+  // a block rarely raises any head's max; one test skips the five per-head tests (each a load and a branch)
+  for (unsigned hl = 0; any && hl < kNHL; ++hl) {
+    if (grew_i[hl] != 0) {
+      float *o = oacc + hl * kHD;
+      const bfloat16 ahh = ah[hl], all = al[hl];
+      ATTN_UNROLL_HD
+      for (unsigned j = 0; j < kHD; j += kV) {
+        accf32 acc = aie::zeros<accfloat, kV>();
+        acc = mac_vs<kV>(acc, aie::load_v<kV>(o + j), ahh, all);
+        aie::store_v(o + j, acc.template to_vector<float>());
+      }
+    }
+  }
+#if ATTN_G5_PVROLL
+  _Pragma("clang loop unroll(disable)")
+#else
+  ATTN_UNROLL_HD
+#endif
+  for (unsigned j = 0; j < kHD; j += kV) {
+    accf32 acc[kNHL];
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned hl = 0; hl < kNHL; ++hl) acc[hl].from_vector(aie::load_v<kV>(oacc + hl * kHD + j));
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned r = 0; r < kRB; ++r) {
+      const vbN<kV> vj = aie::load_v<kV>(Vb[r] + kvl * kHD + j);
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned hl = 0; hl < kNHL; ++hl) {
+        acc[hl] = aie::mac(acc[hl], vj, ph[r * kNL + hl]);
+        acc[hl] = aie::mac(acc[hl], vj, pl[r * kNL + hl]);
+      }
+    }
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned hl = 0; hl < kNHL; ++hl) aie::store_v(oacc + hl * kHD + j, acc[hl].template to_vector<float>());
+  }
+}
+#endif
 __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__restrict Kb,
                                    const bfloat16 *const *__restrict Vb,
                                    const ATTN_QT *__restrict qs, float *__restrict oacc,
@@ -878,6 +995,12 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
     static_assert(kNHL == 8 && kNL == 8, "attn.h ATTN_TREE8: written for 8 heads a core");
     const unsigned hb = kSplit ? (unsigned)h0 : 0u;
     const bfloat16 *q0 = qs + hb * kHD;
+#if ATTN_KVS
+    const unsigned kv0 = attn_kvb(h0);
+#define ATTN_T8_KV(h) (attn_kvh(h) - kv0)
+#else
+#define ATTN_T8_KV(h) attn_kvh(h)
+#endif
 #if ATTN_T8_UNROLL == 2
     _Pragma("clang loop unroll_count(2)")
 #elif ATTN_T8_UNROLL == 4
@@ -887,13 +1010,16 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
       v32f z[4];                                    // level 1: heads (0,1) (2,3) (4,5) (6,7), 16 lanes each
       AIE_LOOP_UNROLL_FULL
       for (unsigned hp = 0; hp < 4; ++hp)
-        z[hp] = attn_score2g(Kb[r] + attn_kvh(hb + 2 * hp) * kHD, Kb[r] + attn_kvh(hb + 2 * hp + 1) * kHD,
+        z[hp] = attn_score2g(Kb[r] + ATTN_T8_KV(hb + 2 * hp) * kHD, Kb[r] + ATTN_T8_KV(hb + 2 * hp + 1) * kHD,
                              q0 + 2 * hp * kHD, q0 + (2 * hp + 1) * kHD);
       const v32f w0 = attn_tree2(z[0], z[1], 8);   // heads 0..3, 8 lanes each
       const v32f w1 = attn_tree2(z[2], z[3], 8);   // heads 4..7
       aie::store_v(sv + r * kNL, attn_tree1<16>(attn_tree1<32>(attn_tree2(w0, w1, 4), 2), 1));
     }
+#undef ATTN_T8_KV
   }
+#elif ATTN_G5
+  attn_g5_score(Kb, qs + (unsigned)h0 * kHD, attn_kvh((unsigned)h0) - attn_kvb(h0), sv);
 #else
 #if ATTN_NHL < 8
   // the padding lanes [kNHL, kNL) of every row: -1e30 never wins a max and exponentiates to 0
@@ -906,7 +1032,9 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
 #endif                      // at HD 256 it overflows program memory even at RB 2 (Gemma3-4B)
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;
-#if ATTN_KVH_MUL
+#if ATTN_KVS
+    const unsigned kvh = attn_kvh(h) - attn_kvb(h0);
+#elif ATTN_KVH_MUL
     const unsigned kvh = attn_kvh(h);
 #else
     const unsigned kvh = h / (kNH / kKVH);
@@ -978,7 +1106,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   aie::store_v(pl, t1);
 
   // a = exp(m - mn): one of (m - mn) and (smax - mn) is zero, so one exp gives both
-#if !ATTN_TREE && !ATTN_TREE8
+#if !ATTN_TREE && !ATTN_TREE8 && !ATTN_G5
 #if ATTN_EXP32
   const vfN<kNL> e = attn_vexp<kNL>(faddN<kNL>(fsubN<kNL>(m, mn), fsubN<kNL>(smax, mn)));
 #else
@@ -986,7 +1114,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
 #endif
 #endif
   const auto grew = aie::gt(smax, m);
-#if ATTN_TREE8
+#if ATTN_TREE8 || ATTN_G5
   // a is 1 in every lane the block did not raise the max of, so the exponential runs only when one did
   vfN<kNL> a = aie::broadcast<float, kNL>(1.0f);
   if (grew.to_uint32() != 0)
@@ -1009,11 +1137,16 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   return;                                    // PROBE ONLY: score + softmax, no value accumulation
 #endif
 
+#if ATTN_G5
+  attn_g5_pv(Vb, oacc, ph, pl, ah, al, grew_i, attn_kvh((unsigned)h0) - attn_kvb(h0), grew.to_uint32() != 0);
+#else
 #if ATTN_RB <= 2 && ATTN_HD <= 128
   AIE_LOOP_UNROLL_FULL      // at RB 4 the fully-unrolled body crashes clang (and does not fit);
 #endif                      // at HD 256 it overflows program memory even at RB 2 (Gemma3-4B)
   for (unsigned hl = 0; hl < kNHL; ++hl) {
-#if ATTN_KVH_MUL
+#if ATTN_KVS
+    const unsigned kvh = attn_kvh((unsigned)h0 + hl) - attn_kvb(h0);
+#elif ATTN_KVH_MUL
     const unsigned kvh = attn_kvh(kSplit ? ((unsigned)h0 + hl) : hl);
 #else
     const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
@@ -1049,6 +1182,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
     }
 #endif
   }
+#endif
 }
 #endif
 
