@@ -4334,6 +4334,34 @@ from the user's own work, so the timings are not quiet-box numbers.
 - bfp16 prefill followed by Uno decode (`uno_bench.py --gemm-block --prefill-mode bfp16`, six prompts x 128): all six identical to plain decode, 3.05 tokens a cycle, 1.08x (CLEAN, OPEN-FAMILY-GRANITE-UNO has the table and the 1024 / 2048 results).
 - The merge of `perf/granite-prefill-int8` into `perf/granite-uno-core-compute` had no textual conflict (`dense.py`, `core.cpp`, `spec.md` all merged cleanly: the two routes' hunks are in different functions). One exporter run builds the union, the four bfp16 xclbins beside `dxl` / `dxl_lora` / `lmhl`, and the `manifest_test`, `pools_test`, `block_host_test` and `gguf_pack_test` binaries pass on it.
 
+### OPEN-PREFILL-BFP16-FFN: the bfp16 route's FFN stays on the NPU from gate|up to down
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_bfp16/{gemm_bfp16.py,mm_bfp_acc.cc,pack.py,make_test.py}`, `open_kernels/recipes/{dense,pack,manifest}.py`, `src/open_qwen36/{bfp16.hpp,block_host.hpp,pools,manifest,core,cli}.cpp`)
+**Verification:** manual (needs the NPU: the harness chain and the model's gates below); the packer twins, the row and slot laws, the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_bfp16.py`, `pools_test.cpp`, `manifest_test.cpp`)
+
+On a SwiGLU family the bfp16 route (OPEN-PREFILL-BFP16) runs its FFN as two dispatches with nothing on the host between them.
+Gate and up are one weight (`ggu_w`, 2 ff rows, 8-row blocks alternating gate and up, n-tile ct holding ff chunk
+(ct % 8) * per_col + ct / 8) on `gemm_bfp16_n{2ff}_k{hidden}_glu`. Each core ends its 64 x 128 tile, while it still holds the
+last K chunk's A buffer, by computing h = silu(gate) * up from the fp32 sums (bf16 hi/lo arithmetic, about 2^-15), encoding h
+to bfp16 (round to nearest even) into that A buffer, which is exactly one 64 x 64 A tile of the down projection, and copying
+it into C where the memtile's 8x8 -> row-major transform makes it the first 1152 words of the core's stream. The shim writes
+each core tile to an H slot of 8199 words (a whole number of bfp16 blocks) at (ff chunk x 4 + row block); down
+(`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
+program (`rtp[0]` the K chunks between the first and the last, `rtp[1]` the epilogue mode), so the route keeps one hardware
+context. The host never holds gate, up or h: no untile, no SiLU, no encode of down's input, and xm is packed once. The qkv,
+o and down outputs are read c-tiled in place by the stage after them (`bfp16_c_row`), not untiled into a copy first. A
+family whose activation is not SiLU keeps the five-step route. Manifest version 5 (`epi: glu`, `a: h`, the `glu` pack halves);
+an engine that reads 4 refuses the set.
+
+**Acceptance criteria:**
+- Harness (`make_test.py make-glu` / `compare-glu`, 256 x 2560 x 16384 then 256 x 8192 x 3072 in one context): H's bytes equal
+  the host encode of silu(g) * u of the decoded operands at 99 % or more, H decoded within 5 % of the host encode's own error,
+  and down(H) equal to the decoded-H x decoded-down product (rel_fro < 1e-4); a plain shape on the same core program rel_fro 0.
+- The model: every OPEN-PREFILL-BFP16 criterion against the default route.
+- Prefill faster than the five-step bfp16 route at 512, 1024 and 2048 tokens (CLEAN, same sitting).
+
+**Procedure:** `designs/gemm_bfp16/make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560 --ff 8192
+--N 3072`, `run_kernel.exe <dir>\run.cfg`, `make_test.py compare-glu --out <dir>`; then OPEN-PREFILL-BFP16's procedure.
+
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`

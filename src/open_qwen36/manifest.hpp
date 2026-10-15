@@ -46,6 +46,7 @@ struct PackOp {
     std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
     uint64_t row0 = 0, n_total = 0;                                     ///< bfp16_gemm: this tensor's first row in the stacked
                                                                         ///< weight, and the weight's padded row count
+    std::string glu;                                                    ///< bfp16_gemm: "gate" | "up" half of OPEN-PREFILL-BFP16-FFN's gate|up
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -61,6 +62,8 @@ struct Step {
     std::string fmt;                         ///< run, block route: "" = the q4_1 / bf16 GEMMs, "bfp16" = gemm_bfp16
                                              ///< (x packed bfp16, y c-tiled with `n_pad` rows)
     uint64_t n_pad = 0;                      ///< fmt bfp16: the weight's rows padded to a whole number of tile groups
+    std::string epi;                         ///< fmt bfp16: "glu" = y is the H operand, silu(gate) * up as the next step's A
+    std::string a_from;                      ///< fmt bfp16: "h" = x is the previous glu step's y, already on the device
     bool split = false;                      ///< run, block route: the weight is a q8 projection's exact q4_1
                                              ///< split, [hi | lo]; the GEMM runs twice the rows and the halves add
 };

@@ -109,8 +109,11 @@ the eos are the same token — the other three families have a separate pair, an
 ## The combined kernel set (Uno decode + bf16 and bfp16 prefill)
 
 One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dx_attn`, `dx_f32`, `ln`,
-`lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four `gemm_bfp16_n*_k*`, `dxl`, `dxl_lora` and `lmhl`, with one
-`manifest.json` (manifest_version 4). `dxl`'s weight fifo depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed.
+`lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four bfp16 streams (`gemm_bfp16_n4096_k2560`, `_n3072_k2560`,
+`_n16384_k2560_glu`, `_n3072_k8192_h`: OPEN-PREFILL-BFP16-FFN's fused gate|up and down-from-H), `dxl`, `dxl_lora` and `lmhl`,
+with one `manifest.json` (manifest_version 5). `dxl`'s weight fifo depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env
+is needed. To refresh only the bfp16 streams, copy a full set and run the exporter with `--out <copy> --only <the four names>`
+(~2 min); an engine that reads manifest_version 4 refuses the result by name.
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1

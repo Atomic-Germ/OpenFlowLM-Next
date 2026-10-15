@@ -84,7 +84,9 @@ void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint1
 /// q4_1 chunks ([rows, cols], 32-row blocks major) -> rows [row0, row0 + rows) of the B operand of gemm_bfp16, an
 /// `n_total`-row weight in bfp16ebs8 (bfp16.hpp; twin: open_kernels/designs/gemm_bfp16/pack.py). Rows it does not
 /// write stay as `dst` holds them: zero blocks are a zero weight.
-void bfp16_gemm_pack(const uint8_t* src, size_t rows, size_t cols, size_t row0, size_t n_total, uint8_t* dst);
+/// glu "gate" | "up": the rows go where bfp16_glu_row puts that half (n_total = 2 ff, row0 0)
+void bfp16_gemm_pack(const uint8_t* src, size_t rows, size_t cols, size_t row0, size_t n_total, uint8_t* dst,
+                     const std::string& glu = "");
 /// Bytes `op` writes at its dst: `nch` chunks of the pool's format, or of the GEMM pool it builds.
 uint64_t op_bytes(const PackOp& op, size_t chunk_bytes);
 /// `nch` Q4_K chunks (4736 B each) -> `nch` q4_1 chunks (5120 B each), in the SAME chunk

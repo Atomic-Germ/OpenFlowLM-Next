@@ -111,6 +111,9 @@ struct StepTiming {
     double moe_read_ms = 0;   ///< xres back
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
     double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
+    /// per layer-major dense GEMM step: the host stage before it, its pack, syncs, NPU wait, untile and the stage after
+    struct GemmStageMs { double prep = 0, pack = 0, sync = 0, wait = 0, untile = 0, post = 0; };
+    GemmStageMs gemm_stage[6];
 };
 
 /// The config.json fields a manifest checks, derived from a GGUF's metadata
@@ -458,10 +461,11 @@ private:
     StageScratch ss_;
     /// The dense kind's layer-major rows: residual after attention, normed rows, silu(gate) * up, host K / V windows.
     struct DenseScratch {
-        std::vector<float> og, xm, gate, K, V, q;
+        std::vector<float> og, xm, gate, K, V, q, xn_next;
         std::vector<double> res1;
     };
     DenseScratch ds_;
+    int xn_ready_ = -1;     ///< the layer whose input norm ds_.xn_next already holds, or -1
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
@@ -643,9 +647,14 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// layer-major one; the cached rows below it are pulled off the device on `first` only.
     void block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t pos0, size_t row0, bool first);
     /// One GEMM step over B blocks: block b + 1 runs on the NPU while post(b, [N, T] y) runs on the host.
+    /// `raw`: a bfp16 step hands post the c-tiled y itself (block_host bfp16_c_row reads it), not token rows.
     void gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                     const std::function<const float*(size_t)>& prep,
-                    const std::function<void(size_t, const float*)>& post);
+                    const std::function<void(size_t, const float*)>& post, int slot = -1, bool raw = false);
+    /// OPEN-PREFILL-BFP16-FFN gate|up then down from H per block; one H buffer, as down(b) ends before gate|up(b + 1) starts
+    void glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
+                   const std::function<const float*(size_t)>& prep,
+                   const std::function<void(size_t, const float*)>& post);
     /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
     void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);

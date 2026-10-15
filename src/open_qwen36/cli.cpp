@@ -395,6 +395,12 @@ std::vector<int> request(Core& core, const Args& a) {
                      tm.moe_prep_ms, tm.moe_patch_ms, tm.moe_run_ms, tm.moe_read_ms,
                      tm.qkv_scatter_ms,
                      tm.total_ms - tm.part0_ms - tm.part1_ms - tm.route_ms - tm.lmhead_ms);
+        for (int s = 0; s < 6; ++s) {
+            const auto& g = tm.gemm_stage[s];
+            if (g.prep + g.pack + g.sync + g.wait + g.untile + g.post > 0)
+                std::fprintf(stderr, "      step %d: prep %.1f, pack %.1f, sync %.1f, wait %.1f, untile %.1f, post %.1f ms\n", s,
+                             g.prep, g.pack, g.sync, g.wait, g.untile, g.post);
+        }
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
                          d.calls, d.ms, d.ms / d.calls, d.min_ms);

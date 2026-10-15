@@ -633,22 +633,43 @@ def bfp16_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                 raise OpRangeError(f"bfp16 route: {wname} has a K that is not a multiple of 64")
             weights[wname] = {"from": "pack", "pack": ops}
             pad_of[wname] = n_pad
+        # OPEN-PREFILL-BFP16-FFN, SwiGLU only: the epilogue computes silu
+        ff = gb["ff"]
+        glu = spec.activation == "silu" and ff % 512 == 0
+        if glu:
+            gu = [dict(o, row0=0, n_total=2 * ff, glu=half)
+                  for o, half in zip(weights.pop("ggate_w")["pack"] + weights.pop("gup_w")["pack"], ("gate", "up"))]
+            weights["ggu_w"] = {"from": "pack", "pack": gu}
+            pad_of["ggu_w"] = 2 * ff
         gb["weights"] = weights
         steps = []
-        for st in gb["program"]:
+        for i, st in enumerate(gb["program"]):
             wname = st["args"][0]
             K = int(st["args"][1].removeprefix("gemm_x_k"))
+            if glu and i == 3:
+                continue                                      # up is inside gate|up
+            if glu and i == 2:
+                wname = "ggu_w"
             n_pad = pad_of[wname]
-            kname = f"gemm_bfp16_n{n_pad}_k{K}"
-            steps.append({"op": "run", "kernel": kname, "args": [wname, f"gbfp_x_k{K}", f"gbfp_y_n{n_pad}"],
-                          "fmt": "bfp16", "n_pad": n_pad})
+            env = {"GB_M": str(T), "GB_K": str(K), "GB_N": str(n_pad)}
+            x, y, opt, tag = f"gbfp_x_k{K}", f"gbfp_y_n{n_pad}", {}, ""
+            if glu and i == 2:
+                y, opt, tag = "gbfp_h", {"epi": "glu"}, "_glu"
+                env["GB_EPI"] = "glu"
+                out["globals"]["gbfp_h"] = (T // 64) * (n_pad // 128) * 8199 * 4   # gemm_bfp16.py H_SLOT_WORDS
+            elif glu and i == 4:
+                x, opt, tag = "gbfp_h", {"a": "h"}, "_h"
+                env["GB_A"] = "h"
+            kname = f"gemm_bfp16_n{n_pad}_k{K}{tag}"
+            steps.append({"op": "run", "kernel": kname, "args": [wname, x, y], "fmt": "bfp16", "n_pad": n_pad, **opt})
             out["contexts"].setdefault("gemmbfp", f"{kname}/final.xclbin")
             out["kernels"][kname] = {"context": "gemmbfp", "insts": f"{kname}/insts.bin", "build": kname}
-            out["globals"][f"gbfp_x_k{K}"] = T * K // 8 * 9
-            out["globals"][f"gbfp_y_n{n_pad}"] = n_pad * T * 4
+            if x != "gbfp_h":
+                out["globals"][x] = T * K // 8 * 9
+            if y != "gbfp_h":
+                out["globals"][y] = n_pad * T * 4
             out["builds"][kname] = {"design": "gemm_bfp16/gemm_bfp16.py",
-                                    "build_dir": f"gemm_bfp16/build_n{n_pad}_k{K}_m{T}{sfx}",
-                                    "env": {"GB_M": str(T), "GB_K": str(K), "GB_N": str(n_pad)}}
+                                    "build_dir": f"gemm_bfp16/build_n{n_pad}_k{K}_m{T}{tag}{sfx}", "env": env}
         gb["program"] = steps
         out["layer_types"][lt] = gb
     return out
