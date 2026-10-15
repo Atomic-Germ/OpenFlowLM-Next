@@ -248,6 +248,11 @@ start-to-done includes its wait behind the one in front, so a layer's cost in th
 penalty) / 40, not that column. `xrt-smi examine -r all` shows Windows' own `WorkloadsSessionHost.exe` contexts on the
 same partition; `-r platform` reports the power mode and no power reading ("Estimated Power: N/A").
 
+**Power mode and a trap.** `--pmode turbo` against `performance` on this step, 3 rounds interleaved, CLEAN: 41.1 / 41.2
+against 41.1 / 41.3 ms min / median, no effect. A first probe read turbo 2x slower, but a performance run in the same
+unit already showed serial dispatches finishing on a ~16 ms grid (`dx` min 1.06, mean 15.6 ms) before turbo was set: a
+transient host-side state, not the mode. When a serial table's mean is many times its min, rerun before reading it.
+
 **The channel map.** `dx`'s weights are 8 streams, one per shim column (`w0..w7` on `Tile(c, 0)`); the second MM2S of
 columns 0, 1, 2 carries `lni`, `x`, `ain`, so 11 of 16 MM2S are used (columns 3..7 have one free each). S2MM: `y0..y7`,
 `lno`, `aout`, `og0..og4` = 15 of 16. The head streams on the same 8 and reaches 51.7-52.5 GB/s, within ~3% of the
@@ -292,7 +297,9 @@ Q4_0-native chunk (`GEMV_Q4_0_NATIVE`, `LMHEAD_Q4_0=1`: 4608 B, no m plane, m = 
 2.739 ms against 3.046 for the same blocks in 5120 B chunks, 52.8 against 52.7 GB/s, bit-identical
 (`utilities/decode-gates/q4_0_head_probe.py`). A model-wide Q4_0 layout would take ~10% off every layer's stream
 (estimate: 41.4 -> ~37.5 ms at position 0). Quality on the repo-docs corpus (llama.cpp Vulkan, KLD against bf16 over
-24 x 512 tokens): Q4_0 0.155, Q4_1 0.158, Q4_K_M 0.124. Not a default: a proposal.
+24 x 512 tokens): Q4_0 0.155, Q4_1 0.158, Q4_K_M 0.124. Not a default: a proposal. The night's llama.cpp Vulkan tg128
+(b10944, CLEAN, three sittings) read 17-18 tok/s for Q4_1 against 24.2 the afternoon before on the same binary and
+file: the iGPU's state moves that much, so compare to Vulkan in one sitting or not at all.
 
 ## Rules
 

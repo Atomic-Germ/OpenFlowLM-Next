@@ -23,6 +23,7 @@ REPO = Path(__file__).resolve().parents[2]
 def logits(a) -> int:
     ids = ",".join(str(1000 + (i * 7919) % 50000) for i in range(a.prompt))
     work = Path(a.work or tempfile.mkdtemp(prefix="decode_gates_"))
+    work.mkdir(parents=True, exist_ok=True)              # the CLI writes no dump into a missing directory, silently
     res = {}
     for n, k in enumerate(a.sets):
         pre = str(work / f"lg{a.prompt}_{n}")
