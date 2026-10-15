@@ -428,7 +428,7 @@ void af_prep_q(float *__restrict raw, float *__restrict tbl, bfloat16 *__restric
   SET_ROUNDING();
   // 1/sqrt(64) and log2(e): the scores come out in the softmax's units
   const vf qs = aie::broadcast<float, 32>(0.125f * 1.4426950408889634f);
-  for (int t = 0; t < TQ; t++) {
+  for (int t = 0; t < ((AF_ABL & 16) ? 0 : TQ); t++) {
     vf r0, r1;
     rope_row(raw + t * HD, tbl + t * HD, r0, r1);
     r0 = fmul(r0, qs);
@@ -441,18 +441,30 @@ void af_prep_q(float *__restrict raw, float *__restrict tbl, bfloat16 *__restric
     aie::store_v(ql + t * HD, l0);
     aie::store_v(ql + t * HD + 32, l1);
   }
-  for (int part = 0; part < 2; part++) {
-    const bfloat16 *__restrict src = part ? ql : qh;
-    bfloat16 *__restrict dst = o + part * TQ * HD;
-    for (int tg = 0; tg < TQ / 8; tg++)
-      for (int dg = 0; dg < HD / 8; dg++) {
-        aie::vector<bfloat16, 64> blk;
-        for (int r = 0; r < 8; r++)
-          blk.insert(r, aie::load_v<8>(src + (tg * 8 + r) * HD + dg * 8));
-        const aie::vector<bfloat16, 64> tr = aie::transpose(blk, 8, 8);
-        for (int d = 0; d < 8; d++)
-          aie::store_v(dst + (dg * 8 + d) * TQ + tg * 8, tr.template extract<8>(d));
+  if (AF_ABL & 32)
+    return;
+  // [token][dim] -> [dim][token] by five zip rounds per 32x32 block (each round rotates the row and column index bits);
+  // block b = {hi, lo} x {dims 0-31, 32-63} ends in its own slot of o, the next slot (the last one qh) is the ping-pong
+  for (int b = 0; b < 4; b++) {
+    const bfloat16 *__restrict src = (b & 2 ? ql : qh) + (b & 1) * 32;
+    bfloat16 *__restrict x = o + b * (TQ * 32);
+    bfloat16 *__restrict y = b < 3 ? x + TQ * 32 : qh;
+    for (int i = 0; i < 16; i++) {
+      const vb lo = aie::load_v<32>(src + i * HD), hi = aie::load_v<32>(src + (i + 16) * HD);
+      const auto z = aie::interleave_zip(lo, hi, 1);
+      aie::store_v(x + 2 * i * 32, z.first);
+      aie::store_v(x + (2 * i + 1) * 32, z.second);
+    }
+    for (int r = 1; r < 5; r++) {
+      const bfloat16 *__restrict from = r & 1 ? x : y;
+      bfloat16 *__restrict to = r & 1 ? y : x;
+      for (int i = 0; i < 16; i++) {
+        const vb lo = aie::load_v<32>(from + i * 32), hi = aie::load_v<32>(from + (i + 16) * 32);
+        const auto z = aie::interleave_zip(lo, hi, 1);
+        aie::store_v(to + 2 * i * 32, z.first);
+        aie::store_v(to + (2 * i + 1) * 32, z.second);
       }
+    }
   }
 }
 
