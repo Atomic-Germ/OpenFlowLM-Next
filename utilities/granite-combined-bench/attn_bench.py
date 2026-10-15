@@ -33,6 +33,8 @@ def run(a, mode: str, attn: str, ids_file: Path) -> dict:
     env.pop("OFLM_OPEN_ATTN_FA", None)
     if attn == "host":
         env["OFLM_OPEN_ATTN_FA"] = "0"
+    if a.dispatch_log:
+        env["OFLM_OPEN_DISPATCH_LOG"] = "1"
     cmd = [str(a.cli), "--model", str(a.model), "--kernels", str(a.kernels), "--ids-file", str(ids_file),
            "--prefill-mode", mode, "--gemm-block", "--max-tokens", "1"]
     p = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -64,6 +66,7 @@ def main() -> int:
     ap.add_argument("--lengths", default="512")
     ap.add_argument("--arms", default="fast:host,fast:npu,bfp16:host,bfp16:npu")
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--dispatch-log", action="store_true", help="per-kernel dispatch times (OFLM_OPEN_DISPATCH_LOG=1)")
     a = ap.parse_args()
     tok = tokenizer(a.model)
     arms = [tuple(x.split(":")) for x in a.arms.split(",")]
