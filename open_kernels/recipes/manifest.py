@@ -30,6 +30,15 @@ GEMM_POOL_MANIFEST_VERSION = 3
 GEMM_POOL_OPS = ("bf16_gemm",)
 # 3 plus the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16)
 BFP16_MANIFEST_VERSION = 4
+# 4 plus OPEN-PREFILL-BFP16-FFN's glu steps and pack halves, which an engine that reads 4 would misrun
+GLU_MANIFEST_VERSION = 5
+
+
+def has_glu_step(layer_types: dict) -> bool:
+    return any(st.get("epi") or st.get("a")
+               for g in routes(layer_types)
+               for key in ("program", "shared_program", "ffn_program")
+               for st in g.get(key, []))
 
 
 def routes(layer_types: dict) -> list[dict]:
@@ -104,6 +113,8 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["manifest_version"] = GEMM_POOL_MANIFEST_VERSION
     if has_bfp16_route(m["layer_types"]):
         m["manifest_version"] = BFP16_MANIFEST_VERSION
+    if has_glu_step(m["layer_types"]):
+        m["manifest_version"] = GLU_MANIFEST_VERSION
     return m
 
 

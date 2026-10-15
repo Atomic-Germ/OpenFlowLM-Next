@@ -45,6 +45,11 @@ void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint
 void bfp16_untile_rows(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* out);
 /// The kernel's c-tiled fp32 output of an M x N product -> y [n_real, M] (the GEMM's own [N, T] order).
 void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y);
+/// Token row r's columns [ct n, ct n + n) of a c-tiled M x N output: a stage reading y once needs no untiled copy
+inline const float* bfp16_c_row(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t r, size_t ct) {
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+    return c + (r / rb) * J * blk + (r % rb) * t.n + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk;
+}
 
 struct DeltaGeom {
     size_t T = 0, t_real = 0, hid = 0;

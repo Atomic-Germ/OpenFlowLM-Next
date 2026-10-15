@@ -224,10 +224,15 @@ void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
 
 void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint8_t* out) {
     if (T % (t.m * t.rows) || K % t.k) throw std::runtime_error("open_qwen36: bfp16_pack_a: T or K does not tile");
+    // a 16-row group's K chunk is one contiguous run of the operand; row-parallel 9-byte writes shared cache lines
+    const size_t nk = K / t.k, kb = t.k / 8;
 #pragma omp parallel for
-    for (long long r = 0; r < static_cast<long long>(T); ++r)
-        for (size_t cb = 0; cb < K / 8; ++cb)
-            bfp16_encode_block(x + static_cast<size_t>(r) * K + cb * 8, out + bfp16_a_offset(static_cast<size_t>(r), cb, K, t));
+    for (long long gk = 0; gk < static_cast<long long>(T / 16 * nk); ++gk) {
+        const size_t r0 = static_cast<size_t>(gk) / nk * 16, c0 = static_cast<size_t>(gk) % nk * kb;
+        uint8_t* o = out + bfp16_a_offset(r0, c0, K, t);
+        for (size_t cb = c0; cb < c0 + kb; ++cb)
+            for (size_t r = r0; r < r0 + 16; ++r, o += BFP16_BLOCK_BYTES) bfp16_encode_block(x + r * K + cb * 8, o);
+    }
 }
 
 void bfp16_untile_rows(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* out) {

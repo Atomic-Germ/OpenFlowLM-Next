@@ -49,6 +49,8 @@ constexpr uint64_t Q4K_POOL_FNV1A = 0xb02083912551d9d3ull;
 // container into a 3072-wide pool (OPEN-PACK-CHUNK-FUSE).
 // specs/open-engine/tests/test_chunk_fuse.py asserts this number on the same bytes.
 constexpr uint64_t FUSE_POOL_FNV1A = 0x21f7e3b732137cb2ull;
+// test_prefill_bfp16.py asserts the same hash of the glu halves (OPEN-PREFILL-BFP16-FFN)
+constexpr uint64_t BFP16_GLU_FNV1A = 0xe608fa0b59e37843ull;
 
 int failures = 0;
 
@@ -876,6 +878,15 @@ int main() {
         const uint64_t gb = fnv1a(dst.data(), dst.size());
         std::printf("      bfp16_gemm fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gb));
         check(gb == 0xb7aece12e88c13afull, "bfp16_gemm: byte-identical to the NumPy packer");
+        // OPEN-PREFILL-BFP16-FFN: the same chunks four times as a [512, 1536] gate and up, halves of a 1024-row glu weight
+        std::vector<uint8_t> four;
+        for (int i = 0; i < 4; ++i) four.insert(four.end(), two.begin(), two.end());
+        std::vector<uint8_t> glu(N_TOTAL * K / 8 * open_qwen36::BFP16_BLOCK_BYTES, 0);
+        open_qwen36::pools::bfp16_gemm_pack(four.data(), 512, K, 0, N_TOTAL, glu.data(), "gate");
+        open_qwen36::pools::bfp16_gemm_pack(four.data(), 512, K, 0, N_TOTAL, glu.data(), "up");
+        const uint64_t gg = fnv1a(glu.data(), glu.size());
+        std::printf("      bfp16_gemm glu fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gg));
+        check(gg == BFP16_GLU_FNV1A, "bfp16_gemm glu: byte-identical to the NumPy packer");
     }
 
     // ---- transpose: [32, 64] of 2-byte values

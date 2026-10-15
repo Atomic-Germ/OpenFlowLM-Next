@@ -779,8 +779,12 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
             const GemmBlockProgram& gb = types_[l]->gemm_block;
             for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
                 for (const Step& s : *prog)
-                    for (const std::string& name : {s.args[1], s.args[2]})
+                    for (int a = 1; a <= 2; ++a) {
+                        // the glu H operand is one buffer (glu_phase)
+                        if ((a == 2 && s.epi == "glu") || (a == 1 && s.a_from == "h")) continue;
+                        const std::string& name = s.args[a];
                         if (!globals_.count(name + "#1")) globals_[name + "#1"] = alloc(w_->globals.at(name));
+                    }
         }
     for (const auto& [name, rg] : w_->per_row_globals) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
@@ -3137,6 +3141,28 @@ void axpy_f32(float* out, float a, const float* v, size_t n) {
         _mm256_storeu_ps(out + j, _mm256_fmadd_ps(va, _mm256_loadu_ps(v + j), _mm256_loadu_ps(out + j)));
 }
 
+// with w, rmsnorm_rows_d's arithmetic at one group while the row is still in cache
+void add_c_rows(const float* y, size_t T, size_t n_pad, size_t hid, const double* src, double* dst, const uint16_t* w,
+                double eps, float* out) {
+    const Bfp16Tiling bt;
+#pragma omp parallel for
+    for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
+        const size_t t = static_cast<size_t>(tt);
+        const double* s = src + t * hid;
+        double* d = dst + t * hid;
+        for (size_t ct = 0; ct < hid / bt.n; ++ct) {
+            const float* c = host::bfp16_c_row(y, T, n_pad, bt, t, ct);
+            for (size_t j = 0; j < bt.n; ++j) d[ct * bt.n + j] = s[ct * bt.n + j] + static_cast<double>(c[j]);
+        }
+        if (!w) continue;
+        double ss = 0;
+        for (size_t k = 0; k < hid; ++k) ss += d[k] * d[k];
+        const double rms = std::sqrt(ss / static_cast<double>(hid) + eps);
+        float* o = out + t * hid;
+        for (size_t k = 0; k < hid; ++k) o[k] = static_cast<float>((d[k] / rms) * static_cast<double>(bf16_to_f32(w[k])));
+    }
+}
+
 void rmsnorm_rows_d(const double* x, size_t T, size_t hid, const uint16_t* w, double eps, size_t groups, float* out) {
 #pragma omp parallel for
     for (long long t = 0; t < static_cast<long long>(T); ++t) {
@@ -3169,7 +3195,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
     const double* inv_freq = w_->rope_inv_freq.data();
     float* og_all = BlockScratch::fit(ds_.og, TOT * qw);
     float* xm_all = BlockScratch::fit(ds_.xm, TOT * hid);
-    float* g_all = BlockScratch::fit(ds_.gate, TOT * ff);
+    float* g_all = gb.program.size() == 4 ? nullptr : BlockScratch::fit(ds_.gate, TOT * ff);
     double* res1 = BlockScratch::fit(ds_.res1, TOT * hid);
     const size_t rows = pos0 + TOT;                    // padding tokens write no cache row, the map may still hold them
     float* Kf = BlockScratch::fit(ds_.K, rows * kvw);
@@ -3180,6 +3206,15 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
         if (y_rows_) std::memcpy(out, y, Nn * T * 4);
         else host::transpose(y, Nn, T, out);
     };
+    // a bfp16 step's c-tiled y read in place by the stage after it, where every range it reads is whole 128-column tiles
+    const Bfp16Tiling bt;
+    const bool raw_qkv = gb.program[0].fmt == "bfp16" && qw % bt.n == 0 && kvw % bt.n == 0;
+    const bool raw_o = gb.program[1].fmt == "bfp16" && hid % bt.n == 0;
+    // OFLM_OPEN_FUSED_NORM=0 runs each residual's norm as its own pass (bit-identical, for the A/B)
+    static const bool fuse_env = [] { const char* e = std::getenv("OFLM_OPEN_FUSED_NORM"); return !e || std::string(e) != "0"; }();
+    const bool fuse = fuse_env && raw_o && gb.norm_groups == 1;
+    const bool fuse_next = fuse && l + 1 < nl_ && types_[l + 1]->gemm_block.norm_groups == 1;
+    float* xn_next = fuse_next ? BlockScratch::fit(ds_.xn_next, TOT * hid) : nullptr;
 
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row, row_elems = row / 2;
@@ -3199,6 +3234,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
 
     gemm_phase(l, gb.program[0], B, T, hid, nq3,
                [&](size_t b) -> const float* {
+                   if (xn_ready_ == l) return ds_.xn_next.data() + b * T * hid;     // the layer before normed it (fuse)
                    auto tn = std::chrono::steady_clock::now();
                    float* xn = BlockScratch::fit(bs_.xn, T * hid);
                    rmsnorm_rows_d(xres.data() + b * T * hid, T, hid, ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xn);
@@ -3212,7 +3248,16 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
                    auto tt = std::chrono::steady_clock::now();
                    const host::TransposePart parts[3] = {{q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}};
-                   if (y_rows_) {
+                   if (raw_qkv) {
+                       const size_t np = gb.program[0].n_pad;
+#pragma omp parallel for
+                       for (long long t2 = 0; t2 < static_cast<long long>(T); ++t2)
+                           for (const auto& pt : parts)
+                               for (size_t c0 = 0; c0 < pt.width; c0 += bt.n)
+                                   std::memcpy(pt.dst + static_cast<size_t>(t2) * pt.width + c0,
+                                               host::bfp16_c_row(y, T, np, bt, static_cast<size_t>(t2), (pt.off + c0) / bt.n),
+                                               bt.n * 4);
+                   } else if (y_rows_) {
 #pragma omp parallel for
                        for (long long t2 = 0; t2 < static_cast<long long>(T); ++t2)
                            for (const auto& pt : parts)
@@ -3284,7 +3329,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    }
                    timing_.part1_ms += ms_since(t0);
                    timing_.mid_ms += ms_since(t0);
-               });
+               }, 0, raw_qkv);
     ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, N * row, pos0 * row);
     timing_.state_ms += ms_since(ts);
@@ -3293,21 +3338,43 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
     gemm_phase(l, gb.program[1], B, T, qw, hid,
                [&](size_t b) -> const float* { return og_all + b * T * qw; },
                [&](size_t b, const float* y) {
-                   auto tt = std::chrono::steady_clock::now();
-                   float* yo = BlockScratch::fit(bs_.d_o, T * hid);
-                   to_rows(y, hid, yo);
-                   timing_.part1_ms += ms_since(tt);
-                   timing_.gemm_tr_ms += ms_since(tt);
-                   auto t1 = std::chrono::steady_clock::now();
                    const double* xr = xres.data() + b * T * hid;
                    double* r1 = res1 + b * T * hid;
+                   auto t1 = std::chrono::steady_clock::now();
+                   if (raw_o) {
+                       add_c_rows(y, T, gb.program[1].n_pad, hid, xr, r1, fuse ? post_ln_w_bf16_[l].data() : nullptr, gb.eps,
+                                  xm_all + b * T * hid);
+                   } else {
+                       auto tt = std::chrono::steady_clock::now();
+                       float* yo = BlockScratch::fit(bs_.d_o, T * hid);
+                       to_rows(y, hid, yo);
+                       timing_.part1_ms += ms_since(tt);
+                       timing_.gemm_tr_ms += ms_since(tt);
+                       t1 = std::chrono::steady_clock::now();
 #pragma omp parallel for
-                   for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
-                       r1[i] = xr[i] + static_cast<double>(yo[i]);
-                   rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
+                       for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
+                           r1[i] = xr[i] + static_cast<double>(yo[i]);
+                   }
+                   if (!fuse)
+                       rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
                    timing_.part1_ms += ms_since(t1);
                    timing_.tail_ms += ms_since(t1);
-               });
+               }, 1, raw_o);
+    if (gb.program.size() == 4) {
+        // OPEN-PREFILL-BFP16-FFN: down's residual pass also norms the next layer's input (fuse)
+        glu_phase(l, gb.program[2], gb.program[3], B, T, hid,
+                  [&](size_t b) -> const float* { return xm_all + b * T * hid; },
+                  [&](size_t b, const float* yd) {
+                      auto t1 = std::chrono::steady_clock::now();
+                      add_c_rows(yd, T, gb.program[3].n_pad, hid, res1 + b * T * hid, xres.data() + b * T * hid,
+                                 fuse_next ? ln_w_bf16_[l + 1].data() : nullptr,
+                                 fuse_next ? types_[l + 1]->gemm_block.eps : 0.0, fuse_next ? xn_next + b * T * hid : nullptr);
+                      timing_.part1_ms += ms_since(t1);
+                      timing_.tail_ms += ms_since(t1);
+                  });
+        xn_ready_ = fuse_next ? l + 1 : -1;
+        return;
+    }
     gemm_phase(l, gb.program[2], B, T, hid, ff,
                [&](size_t b) -> const float* { return xm_all + b * T * hid; },
                [&](size_t b, const float* y) {
@@ -3315,7 +3382,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    to_rows(y, ff, g_all + b * T * ff);
                    timing_.part1_ms += ms_since(tt);
                    timing_.gemm_tr_ms += ms_since(tt);
-               });
+               }, 2);
     gemm_phase(l, gb.program[3], B, T, hid, ff,
                [&](size_t b) -> const float* { return xm_all + b * T * hid; },
                [&](size_t b, const float* y) {
@@ -3333,7 +3400,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    }
                    timing_.part1_ms += ms_since(t1);
                    timing_.tail_ms += ms_since(t1);
-               });
+               }, 3);
     gemm_phase(l, gb.program[4], B, T, ff, hid,
                [&](size_t b) -> const float* { return g_all + b * T * ff; },
                [&](size_t b, const float* y) {
@@ -3350,7 +3417,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                        xo[i] = r1[i] + static_cast<double>(yd[i]);
                    timing_.part1_ms += ms_since(t1);
                    timing_.tail_ms += ms_since(t1);
-               });
+               }, 4);
 }
 
 void Core::step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits) {
@@ -3377,7 +3444,9 @@ void Core::step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits)
     }
     timing_.setup_ms += ms_since(tsetup);
     timing_.part1_ms += ms_since(tsetup);
+    xn_ready_ = -1;
     for (int l = 0; l < nl_; ++l) layer_dense_staged(l, xres, B, T, N, pos0);
+    xn_ready_ = -1;
     pos_ += static_cast<int>(N);
     block_logits_.clear();
     std::vector<float> row(hid);
@@ -3817,7 +3886,9 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
 
 void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                       const std::function<const float*(size_t)>& prep,
-                      const std::function<void(size_t, const float*)>& post) {
+                      const std::function<void(size_t, const float*)>& post, int slot, bool raw) {
+    StepTiming::GemmStageMs dummy;
+    StepTiming::GemmStageMs& gs = slot >= 0 && slot < 6 ? timing_.gemm_stage[slot] : dummy;
     const bool bfp = s.fmt == "bfp16";
     const Bfp16Tiling bt;
     if (bfp && (T % (bt.m * bt.rows) || K % bt.k))
@@ -3840,16 +3911,20 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
     Kern& k = kerns_.at(s.kernel);
     auto stage_in = [&](size_t b) {
         xrt::bo& xb = buffer(step[b & 1]->args[1], 0);
+        auto tp = std::chrono::steady_clock::now();
         const float* x = prep(b);
+        gs.prep += ms_since(tp);
         auto t0 = std::chrono::steady_clock::now();
         if (bfp) host::bfp16_pack_a(x, T, K, bt, xb.map<uint8_t*>());
         else host::tile_x(x, T, K, xb.map<uint16_t*>());
         timing_.part1_ms += ms_since(t0);
         timing_.gemm_tile_ms += ms_since(t0);
+        gs.pack += ms_since(t0);
         auto ts = std::chrono::steady_clock::now();
         xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, x_bytes, 0);
         timing_.sync_ms += ms_since(ts);
         timing_.part1_ms += ms_since(ts);
+        gs.sync += ms_since(ts);
     };
     auto launch = [&](size_t b) {
         Inflight f = start_run(k, step[b & 1]->args, l);
@@ -3865,16 +3940,18 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
         // blocked, not elapsed: only the time the host sat waiting adds to the prefill
         const auto [elapsed, blocked] = wait_run(cur);
         timing_.part0_ms += blocked;
+        gs.wait += blocked;
         if (dispatch_log_) dispatch_stats_[k.name].add(submit + elapsed);
         xrt::bo& yb = buffer(step[b & 1]->args[2], 0);
         auto ts = std::chrono::steady_clock::now();
         read_back(yb, rows * T * 4, 0);
         timing_.sync_ms += ms_since(ts);
         timing_.part1_ms += ms_since(ts);
+        gs.sync += ms_since(ts);
         if (b + 1 < B) cur = launch(b + 1);
         const float* y = yb.map<const float*>();
         bool rows_out = false;
-        if (bfp) {
+        if (bfp && !raw) {
             // the c-tiled [T, n_pad] result back to the [N, T] the stages after the GEMM read
             ts = std::chrono::steady_clock::now();
             std::vector<float>& un = split_y_[step[b & 1]->args[2]];
@@ -3884,6 +3961,7 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
             else host::bfp16_untile_c(y, T, s.n_pad, bt, N, un.data());
             timing_.part1_ms += ms_since(ts);
             timing_.gemm_tr_ms += ms_since(ts);
+            gs.untile += ms_since(ts);
             y = un.data();
         }
         if (s.split) {
@@ -3900,9 +3978,86 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
             y = o;
         }
         y_rows_ = rows_out;
+        auto tq = std::chrono::steady_clock::now();
         post(b, y);
+        gs.post += ms_since(tq);
         y_rows_ = false;
     }
+}
+
+void Core::glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
+                     const std::function<const float*(size_t)>& prep,
+                     const std::function<void(size_t, const float*)>& post) {
+    StepTiming::GemmStageMs& gs = timing_.gemm_stage[2];
+    StepTiming::GemmStageMs& ds = timing_.gemm_stage[3];
+    const Bfp16Tiling bt;
+    const size_t ff = gu.n_pad / 2, x_bytes = T * hid / 8 * BFP16_BLOCK_BYTES, y_bytes = dn.n_pad * T * 4;
+    if (T % (bt.m * bt.rows) || hid % bt.k || hid % bt.n)
+        throw std::runtime_error("open_qwen36: glu " + gu.kernel + ": T=" + std::to_string(T) + " hidden=" +
+                                 std::to_string(hid) + " do not tile");
+    Step gtw = gu, dtw = dn;
+    gtw.args[1] += "#1";
+    dtw.args[2] += "#1";
+    const Step* g_step[2] = {&gu, &gtw};
+    const Step* d_step[2] = {&dn, &dtw};
+    for (int i = 0; i < 2; ++i)
+        if (buffer(g_step[i]->args[1], 0).size() < x_bytes || buffer(gu.args[2], 0).size() < bfp16_h_bytes(T, ff, bt) ||
+            buffer(d_step[i]->args[2], 0).size() < y_bytes)
+            throw std::runtime_error("open_qwen36: glu " + gu.kernel + ": the x / H / y globals are short of T " +
+                                     std::to_string(T) + ", ff " + std::to_string(ff));
+    Kern& kg = kerns_.at(gu.kernel);
+    Kern& kd = kerns_.at(dn.kernel);
+    auto stage_in = [&](size_t b) {
+        xrt::bo& xb = buffer(g_step[b & 1]->args[1], 0);
+        auto tp = std::chrono::steady_clock::now();
+        const float* x = prep(b);
+        gs.prep += ms_since(tp);
+        auto t0 = std::chrono::steady_clock::now();
+        host::bfp16_pack_a(x, T, hid, bt, xb.map<uint8_t*>());
+        timing_.part1_ms += ms_since(t0);
+        timing_.gemm_tile_ms += ms_since(t0);
+        gs.pack += ms_since(t0);
+        auto ts = std::chrono::steady_clock::now();
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, x_bytes, 0);
+        timing_.sync_ms += ms_since(ts);
+        timing_.part1_ms += ms_since(ts);
+        gs.sync += ms_since(ts);
+    };
+    auto finish = [&](Inflight& f, StepTiming::GemmStageMs& st) {
+        const double submit = f.submit_ms;
+        const std::string& name = f.k->name;      // wait_run clears f.k
+        const auto [elapsed, blocked] = wait_run(f);
+        timing_.part0_ms += blocked;
+        st.wait += blocked;
+        if (dispatch_log_) dispatch_stats_[name].add(submit + elapsed);
+    };
+    auto post_of = [&](size_t b) {
+        auto tq = std::chrono::steady_clock::now();
+        post(b, buffer(d_step[b & 1]->args[2], 0).map<const float*>());
+        ds.post += ms_since(tq);
+    };
+    // the host packs block b + 1 under gate|up(b) and runs block b - 1's post under down(b)
+    stage_in(0);
+    Inflight cur = start_run(kg, g_step[0]->args, l);
+    timing_.part0_ms += cur.submit_ms;
+    for (size_t b = 0; b < B; ++b) {
+        if (b + 1 < B) stage_in(b + 1);
+        finish(cur, gs);
+        Inflight d = start_run(kd, d_step[b & 1]->args, l);
+        timing_.part0_ms += d.submit_ms;
+        if (b > 0) post_of(b - 1);
+        finish(d, ds);
+        auto ts = std::chrono::steady_clock::now();
+        read_back(buffer(d_step[b & 1]->args[2], 0), y_bytes, 0);
+        timing_.sync_ms += ms_since(ts);
+        timing_.part1_ms += ms_since(ts);
+        ds.sync += ms_since(ts);
+        if (b + 1 < B) {
+            cur = start_run(kg, g_step[(b + 1) & 1]->args, l);
+            timing_.part0_ms += cur.submit_ms;
+        }
+    }
+    post_of(B - 1);
 }
 
 void Core::staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres) {

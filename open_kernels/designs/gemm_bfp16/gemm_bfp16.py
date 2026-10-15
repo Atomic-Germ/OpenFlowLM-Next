@@ -17,6 +17,8 @@ parameter, so the core program does not depend on K, nor on M or N beyond the ti
 
 Shape constraints: M % (m * 4) == 0, N % (n * 8) == 0, K % k == 0.
 
+GB_EPI=glu: C is the H operand, silu(gate) * up as down's A (OPEN-PREFILL-BFP16-FFN). GB_A=h: A is such an H operand.
+
     GB_M=256 GB_K=2560 GB_N=4096 python open_kernels/build_design.py open_kernels/designs/gemm_bfp16/gemm_bfp16.py <out>
 """
 
@@ -43,10 +45,18 @@ N_ROWS = 4
 N_COLS = 8
 
 
+H_SLOT_WORDS = 8199     # a core tile's 8192 output words, padded to a multiple of 9 words (four bfp16 blocks)
+
+
 def check_shape(M: int, K: int, N: int, m: int, k: int, n: int) -> str | None:
     if M % (m * N_ROWS) or N % (n * N_COLS) or K % k or K // k < 2:
         return f"gemm_bfp16 needs M % {m * N_ROWS}, N % {n * N_COLS}, K % {k} with 2+ chunks (got {M}x{K}x{N})"
     return None
+
+
+def h_slots(M: int, N_glu: int, m: int = 64, n: int = 128) -> int:
+    """Core tiles in a glu GEMM's H output: (M / m) x (N_glu / n)."""
+    return (M // m) * (N_glu // n)
 
 
 @iron.jit(aiecc_flags=["--dynamic-objFifos"])
@@ -54,9 +64,13 @@ def gemm_bfp16(
     B: In, A: In, C: Out, *,
     gm: CompileTime[int], gk: CompileTime[int], gn: CompileTime[int],
     tm: CompileTime[int] = 64, tk: CompileTime[int] = 64, tn: CompileTime[int] = 128,
+    epi: CompileTime[str] = "", a_from: CompileTime[str] = "",
 ):
     why = check_shape(gm, gk, gn, tm, tk, tn)
     assert why is None, why
+    assert epi in ("", "glu") and a_from in ("", "h"), (epi, a_from)
+    # one row block per dispatch keeps the H slot law to (kc, row); the route's T is 256
+    assert (not epi and not a_from) or gm == tm * N_ROWS, "the glu / h variants run 256 rows a dispatch"
     n_aie_rows, n_aie_cols = N_ROWS, N_COLS
     fifo_depth = 2
     r = t = 8  # the 8x8x8 bfp16 mac
@@ -73,6 +87,8 @@ def gemm_bfp16(
                                compile_flags=flags + ["-DF32_FIRST"])
     k_mid = ExternalFunction("mm_f32_mid", source_file=str(_KERNEL_SRC), arg_types=[A_l1_ty, B_l1_ty, C_l1_ty],
                              compile_flags=flags + ["-DF32_MID"])
+    k_epi = ExternalFunction("gemm_epilogue", source_file=str(_KERNEL_SRC), arg_types=[C_l1_ty, A_l1_ty, np.int32],
+                             compile_flags=flags + ["-DGLU_EPILOGUE"])
 
     A_l3l2, A_l2l1, B_l3l2, B_l2l1, C_l2l3 = [], [], [], [], []
     C_l1l2 = [[None] * n_aie_cols for _ in range(n_aie_rows)]
@@ -93,17 +109,17 @@ def gemm_bfp16(
         for row in range(n_aie_rows):
             C_l1l2[row][col] = tmp[row]
 
-    # gk/tk - 1 arrives per dispatch from the instruction stream. The initial value is zeros so no shape's image differs
-    # from another's; the core reads it after acquiring the tile's first chunk, which cannot arrive before the write.
+    # [0] chunks between the first and the last, [1] epilogue mode: zeros at load so every shape's image is the same
     rtps = [[Buffer(np.ndarray[(2,), np.dtype[np.int32]], name=f"nmid_{row}_{col}",
                     initial_value=np.zeros(2, dtype=np.int32), use_write_rtp=True)
              for col in range(n_aie_cols)] for row in range(n_aie_rows)]
 
-    def core_fn(in_a, in_b, out_c, rtp, first, mid):
+    def core_fn(in_a, in_b, out_c, rtp, first, mid, epilogue):
         elem_out = out_c.acquire(1)
         elem_a = in_a.acquire(1)
         elem_b = in_b.acquire(1)
         n_mid = rtp[0]
+        mode = rtp[1]
         first(elem_a, elem_b, elem_out)
         in_a.release(1)
         in_b.release(1)
@@ -113,16 +129,24 @@ def gemm_bfp16(
             mid(ea, eb, elem_out)
             in_a.release(1)
             in_b.release(1)
+        ea = in_a.acquire(1)
+        eb = in_b.acquire(1)
+        mid(ea, eb, elem_out)
+        in_b.release(1)
+        epilogue(elem_out, ea, mode)
+        in_a.release(1)
         out_c.release(1)
 
     workers = Worker.grid(
         n_aie_rows, n_aie_cols,
         lambda row, col: Worker(core_fn, [A_l2l1[row].cons(), B_l2l1[col].cons(), C_l1l2[row][col].prod(),
-                                          rtps[row][col], k_first, k_mid], stack_size=0x1000))
+                                          rtps[row][col], k_first, k_mid, k_epi], stack_size=0x1000))
 
-    A_ty = np.ndarray[(gm * gk // 8,), np.dtype[v8bfp16ebs8]]
+    slot_blocks = H_SLOT_WORDS * 4 // 9                  # one H slot in bfp16 blocks
+    a_elems = h_slots(gm, gk * 2, tm, tn) * slot_blocks if a_from == "h" else gm * gk // 8
+    A_ty = np.ndarray[(a_elems,), np.dtype[v8bfp16ebs8]]
     B_ty = np.ndarray[(gn * gk // 8,), np.dtype[v8bfp16ebs8]]
-    C_ty = np.ndarray[(gm * gn,), np.dtype[np.float32]]
+    C_ty = np.ndarray[(h_slots(gm, gn, tm, tn) * H_SLOT_WORDS if epi == "glu" else gm * gn,), np.dtype[np.float32]]
 
     # A: row block rb (tm rows), then gk chunk; B: array column c, then its tn-row groups, then gk chunk. One contiguous
     # run each, repeated: A once per tn-group a column walks, B not at all.
@@ -135,9 +159,25 @@ def gemm_bfp16(
         assert d2 < 1024 and repeat <= 64
         return TensorAccessPattern((total,), offset, [repeat, d2, d1, d0], [0, d1 * d0, d0, 1])
 
-    A_tiles = [lin_tap(gm * gk // 8, rb * tm * (gk // 8), tm * (gk // 8), gn // tn // n_aie_cols) for rb in range(gm // tm)]
+    per_col = gn // tn // n_aie_cols
+    if a_from == "h":
+        # row block rb's K chunks are H slots (kc * 4 + rb), each A tile the slot's first tm * tk / 8 blocks
+        a_tile = tm * tk // 8
+        assert a_tile % 128 == 0 and per_col <= 64
+        A_tiles = [TensorAccessPattern((a_elems,), rb * slot_blocks, [per_col, gk // tk, a_tile // 128, 128],
+                                       [0, n_aie_rows * slot_blocks, 128, 1]) for rb in range(gm // tm)]
+    else:
+        A_tiles = [lin_tap(gm * gk // 8, rb * tm * (gk // 8), tm * (gk // 8), per_col) for rb in range(gm // tm)]
     B_tiles = [lin_tap(gn * gk // 8, c * (gn // n_aie_cols) * (gk // 8), (gn // n_aie_cols) * (gk // 8))
                for c in range(n_aie_cols)]
+
+    def drain_tap(col, row_base, current):
+        if epi == "glu":
+            # column col's n-group g is ff chunk kc = col * per_col + g: its 4 core tiles go to slots kc * 4 + row
+            return TensorAccessPattern((h_slots(gm, gn, tm, tn) * H_SLOT_WORDS,), col * per_col * n_aie_rows * H_SLOT_WORDS,
+                                       [per_col, n_aie_rows, tm * tn // 256, 256],
+                                       [n_aie_rows * H_SLOT_WORDS, H_SLOT_WORDS, 256, 1])
+        return lin_tap(gm * gn, col * (gm * gn // n_aie_cols) + row_base * c_per_rb, current * c_per_rb)
 
     # Each column drains its results as one contiguous run: block (tm * rows) x tn, row block by row block, then the
     # column's gn tiles c, c + cols, ... in order, each block row-major.
@@ -151,8 +191,8 @@ def gemm_bfp16(
     def sequence(b, a, c, A_prods, B_prods, C_conses):
         for row in rtps:
             for rtp in row:
-                rtp[0] = gk // tk - 1
-                rtp[1] = 0
+                rtp[0] = gk // tk - 2
+                rtp[1] = 1 if epi == "glu" else 0
         tg = TaskGroup()
         c_index = 0
         for tb in range(iron.ceildiv(n_rb, tb_max_n_rows)):
@@ -162,8 +202,7 @@ def gemm_bfp16(
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
                 current = min([tb_max_n_rows // 2, n_rb - row_base])
                 for col in range(n_aie_cols):
-                    C_conses[col].drain(c, tap=lin_tap(gm * gn, col * (gm * gn // n_aie_cols) + row_base * c_per_rb,
-                                                       current * c_per_rb), wait=True, group=tg)
+                    C_conses[col].drain(c, tap=drain_tap(col, row_base, current), wait=True, group=tg)
                     c_index += 1
                     for tile_row in range(current):
                         tile_offset = ((row_base + tile_row) * n_aie_rows + col) % len(A_tiles)
@@ -186,6 +225,8 @@ N = int(os.environ.get("GB_N", 4096))
 TILE_M = int(os.environ.get("GB_TM", 64))
 TILE_K = int(os.environ.get("GB_TK", 64))
 TILE_N = int(os.environ.get("GB_TN", 128))
+EPI = os.environ.get("GB_EPI", "")
+A_FROM = os.environ.get("GB_A", "")
 
 DESIGN = gemm_bfp16
-SPECIALIZE = {"gm": M, "gk": K, "gn": N, "tm": TILE_M, "tk": TILE_K, "tn": TILE_N}
+SPECIALIZE = {"gm": M, "gk": K, "gn": N, "tm": TILE_M, "tk": TILE_K, "tn": TILE_N, "epi": EPI, "a_from": A_FROM}

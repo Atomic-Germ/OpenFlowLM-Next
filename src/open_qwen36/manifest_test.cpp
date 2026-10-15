@@ -248,12 +248,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 5}"));
+    json j = json::parse(std::string("{\"manifest_version\": 6}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 5 is refused");
+        check(false, "manifest_version 6 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 5") != std::string::npos, std::string("manifest_version 5 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 6") != std::string::npos, std::string("manifest_version 6 is refused: ") + e.what());
     }
     // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
     auto bf16_weight = [](json& j, int version, bool mixed) {
@@ -302,6 +302,43 @@ int main(int argc, char** argv) {
                  m4.layer_types.at("linear_attention").gemm_block.program[1].n_pad == 4096;
         } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
         check(ok, "a version 4 manifest with a bfp16 step and a bfp16_gemm weight loads");
+    }
+    // OPEN-PREFILL-BFP16-FFN: a dense route of 4 steps, gate|up through the glu epilogue and down reading its H
+    auto glu_route = [](json& j, int version, bool down_reads_h) {
+        j["manifest_version"] = version;
+        json& gb = j["layer_types"]["dense"]["gemm_block"];
+        auto half = [](const char* t, const char* h) {
+            return json{{"op", "bfp16_gemm"}, {"tensor", t}, {"nch", 380}, {"in_dim", 2560}, {"dst", 0}, {"row0", 0},
+                        {"n_total", 19456}, {"glu", h}};
+        };
+        gb["weights"]["ggu_w"] = {{"from", "pack"},
+                                  {"pack", json::array({half("model.layers.{l}.mlp.gate_proj.weight", "gate"),
+                                                        half("model.layers.{l}.mlp.up_proj.weight", "up")})}};
+        j["globals"]["gbfp_h"] = 1024;
+        json p = gb["program"];
+        for (auto& s : p) s["fmt"] = "bfp16", s["n_pad"] = 1024;
+        p[2] = {{"op", "run"}, {"kernel", "gemm_n9728_k2560"}, {"args", {"ggu_w", "gemm_x_k2560", "gbfp_h"}}, {"fmt", "bfp16"},
+                {"n_pad", 19456}, {"epi", "glu"}};
+        p[4]["args"][1] = down_reads_h ? "gbfp_h" : "gemm_x_k9728";
+        p[4]["a"] = "h";
+        gb["program"] = json::array({p[0], p[1], p[2], p[4]});
+    };
+    refused_manifest(argv[2], "needs manifest_version 5", "a glu route in a version 4 manifest is refused at load",
+                     [&](json& j) { glu_route(j, 4, true); });
+    refused_manifest(argv[2], "or 4 with gate|up's glu H as down's x", "a 4-step route whose down does not read the H is refused",
+                     [&](json& j) { glu_route(j, 5, false); });
+    {
+        std::ifstream f(argv[2]);
+        json g = json::parse(f);
+        glu_route(g, 5, true);
+        bool ok = true;
+        try {
+            Manifest m5 = Manifest::parse(g, "glu");
+            const auto& gb = m5.layer_types.at("dense").gemm_block;
+            ok = gb.program.size() == 4 && gb.program[2].epi == "glu" && gb.program[3].a_from == "h" &&
+                 gb.weights.at("ggu_w").pack[1].glu == "up";
+        } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
+        check(ok, "a version 5 manifest with a glu gate|up and a down from H loads");
     }
     // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
     auto with_lean = [](json& j) {
