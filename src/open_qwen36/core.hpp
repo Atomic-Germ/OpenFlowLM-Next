@@ -237,6 +237,12 @@ public:
     /// Per-kernel dispatch counts and times since the last call, then cleared. Empty unless
     /// dispatch accounting is on (OFLM_OPEN_DISPATCH_LOG).
     std::map<std::string, DispatchStat> take_dispatch_stats();
+    /// Per kernel, the host time that passed between the dispatch before it returning and it starting (summed since the last call).
+    std::map<std::string, double> take_idle_by_kernel() {
+        auto out = std::move(idle_by_);
+        idle_by_.clear();
+        return out;
+    }
     /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
     /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
@@ -576,7 +582,9 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
         xrt::run pre;            ///< the ELF set configure queued ahead of r, if any
         bool active() const { return k != nullptr; }
     };
-    Inflight qkv_pre_;           ///< the next layer's qkv GEMM for block 0, started by this layer's down phase
+    std::map<std::string, double> idle_by_;
+    int inflight_ = 0;           ///< started and not yet waited dispatches
+    Inflight qkv_pre_;          ///< the next layer's qkv GEMM for block 0, started by this layer's down phase
     int qkv_pre_layer_ = -1;
     /// Build the command (or, with `reuse`, restart this layer's last one), set its arguments and start() it. Nothing waits.
     Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer, bool reuse = false);

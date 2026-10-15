@@ -954,7 +954,11 @@ Core::Inflight Core::start_run(Kern& k, const std::vector<std::string>& args, in
     f.gap_ms = last_done_.time_since_epoch().count()
                    ? std::chrono::duration<double, std::milli>(f.t0 - last_done_).count()
                    : -1.0;
-    if (f.gap_ms > 0) timing_.idle_ms += f.gap_ms;
+    if (f.gap_ms > 0 && inflight_ == 0) {
+        timing_.idle_ms += f.gap_ms;
+        idle_by_[k.name] += f.gap_ms;
+    }
+    ++inflight_;
     f.ctx_change = last_dispatched_ && last_dispatched_->ctx != k.ctx;
     // a register-write set is configured again whenever the dispatch before it was not in that set
     const bool need_cfg = k.ek && !(last_dispatched_ && last_dispatched_->ek && last_dispatched_->elf_set == k.elf_set);
@@ -1060,6 +1064,7 @@ std::pair<double, double> Core::wait_run(Inflight& f) {
                                  std::to_string(dispatches_));
     }
     if (f.pre) f.pre.wait();
+    if (inflight_ > 0) --inflight_;
     last_done_ = std::chrono::steady_clock::now();
     const double elapsed = ms_since(t1), blocked = ms_since(tw);
     if (step_trace_) trace_.push_back({&k, layer, f.submit_ms, elapsed, blocked, gap_ms, f.ctx_change});
@@ -4341,9 +4346,17 @@ void Core::glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, 
     }
     for (size_t b = 0; b < B; ++b) {
         if (b + 1 < B) stage_in(b + 1);
+        Inflight d;
+        // level 3: down is queued behind gate|up, which it reads through H, so the array does not wait for the host's wake-up
+        if (phase_overlap_ >= 3) {
+            d = start_run(kd, d_step[b & 1]->args, l);
+            timing_.part0_ms += d.submit_ms;
+        }
         finish(cur, gs);
-        Inflight d = start_run(kd, d_step[b & 1]->args, l);
-        timing_.part0_ms += d.submit_ms;
+        if (phase_overlap_ < 3) {
+            d = start_run(kd, d_step[b & 1]->args, l);
+            timing_.part0_ms += d.submit_ms;
+        }
         if (b > 0) post_of(b - 1);
         finish(d, ds);
         // the next gate|up starts before this block's y is read back: its inputs and H are free

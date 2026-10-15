@@ -641,6 +641,9 @@ std::vector<int> request(Core& core, const Args& a) {
                 std::fprintf(stderr, "      step %d: prep %.1f, pack %.1f, sync %.1f, wait %.1f, untile %.1f, post %.1f ms\n", s,
                              g.prep, g.pack, g.sync, g.wait, g.untile, g.post);
         }
+        std::string idle = "      step 9: npu idle before";
+        for (const auto& [kn, ms] : core.take_idle_by_kernel()) idle += " " + kn + " " + std::to_string(static_cast<int>(ms + 0.5));
+        std::fprintf(stderr, "%s ms\n", idle.c_str());
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
                          d.calls, d.ms, d.ms / d.calls, d.min_ms);
