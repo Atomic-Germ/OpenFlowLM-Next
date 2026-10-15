@@ -490,3 +490,15 @@ DMA and sync floor ~0.4 ms, softmax 0.62 ms, P.V 0.34, Q.K^T 0.17 (the softmax i
   60 -> 220 tok/s at pp512), with the attention on the NPU where the set carries `attn_fa` (OPEN-PREFILL-ATTN-FA). Measure
   it with `open_qwen36_cli --gemm-block --ids-file`; a kernel dir carrying the Uno `dxl` / `lmhl` entries needs the Uno
   engine build to parse it.
+
+## attn_fa prep stream and the 4-buffer af family (2026-10-15)
+
+`manifest_version` 6: every `af*` stream takes a fourth buffer (the block's cos / sin table) and the manifest's
+`attn_fa.prep` names the `afp` stream. The core program changed (prep loops, 14128 of 16384 B program memory), so all 16 `af*`
+streams and `afp` are rebuilt together. From the integration set: copy it and
+`export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <copy> --only afp,af256,...,af4096` (17 builds, ~8 min at
+BelowNormal; `-Only` list is every `af<256 k>` up to 4096). Check one stream alone with
+`designs/attn_fa/make_prep_test.py make|compare` and `run_kernel.exe`. The engine uses it only with `OFLM_OPEN_PREFILL_PREP=1`
+(slower today, see OPEN-PREFILL-GLUE-PREP); `--prefill-mode bfp16` and a prompt starting at an even position.
+Traps: the cache window is an `xrt::bo` sub-buffer of `state` (4 KiB aligned: pos0 * 2048 B), which XRT accepted on the
+`ext::bo`; an older engine passes three buffers to the new streams and hangs, hence the version bump.

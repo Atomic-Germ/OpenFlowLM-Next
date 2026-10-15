@@ -4698,6 +4698,29 @@ on a bf16-route set takes the host path.
   knobs and `AF_ABL=8` (compute stubbed). One pass at a time (the shipped setting) is stable. Cause unknown; a timing race
   in the core's dynamic-objFifo loops is the suspect, not the shim BD count.
 
+**Not built: residual + RMSNorm + bfp16 encode on the array (86 / 434 ms at pp512 / pp2048, plus the A packs 34 / 205).**
+Per-core budgets measured on the shipped builds (`llvm-size -A` on `final.prj/elfs_*`):
+- GEMM core (`gemm_bfp16`, glu epilogue): program memory 4848 of 16384 B (11536 free; without the glu epilogue 1872 B).
+  Data memory 64520 of 65536 B (A 2 x 4608, B 2 x 9216, C 32768, stack 4096): 1016 B free. So program memory does not block
+  a norm / encode / residual kernel in the GEMM program; data memory, input channels and output size do.
+- `attn_fa` core: program memory 9968 B before the prep stream, 14128 with it (2256 free); data memory ~59.5 of 64 KiB
+  (Q hi / lo 2 x 4096, scratch 8192, state 2112, O element 8192, A fifo 2 x 8192, B 8192, stack 8192): ~6 KB free.
+Variants and why each stops:
+1. Residual in the o / down GEMM epilogue: the residual tile (64 x 128 fp32 = 32768 B) has no input channel (both of a
+   core's DMA inputs carry A and B) and no room; it has to ride the A or B broadcast (A reaches the 8 cores of a core row,
+   B the 4 of a column), 4-8x over-delivered, staged through the held A / B buffers (13.8 KB) in pieces. The output is then a
+   fp32 sum (32768 B, the whole C element) AND an encoded 9216 B A operand AND per-token sum-of-squares partials: a second
+   C element per tile, and the cross-core row reduction (a row is 20 tiles over 8 columns) goes through DDR as a second
+   dispatch. Gamma folds into the next GEMM's weights at load and 1/rms into its epilogue, which removes the reduction from
+   the encode path. Estimated 2-3 days; needs all four bfp16 streams rebuilt.
+2. Norm + encode as a stream of the attention context: fits data memory (rows streamed twice through the 8 KB fifo
+   elements, one row-group of tokens a core) but the `af` context is only visited between qkv and o. Serving the two
+   residual points a layer would add 2-4 context switches a layer (1.3-2.4 ms each: 100-300 ms at pp512 against the 120 ms
+   it removes). Pays only with a shared context (the full-ELF register-write reconfiguration, 0.3-0.7 ms a switch).
+3. Sum-of-squares in the epilogue and encode in the next GEMM's A load: the A path is a DMA straight into the mmul's
+   buffers with no compute stage; encoding there means fp32 A tiles (64 x 64 x 4 = 16 KiB a buffer, 2 deep) beside B and C,
+   which does not fit.
+
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
 **Test category:** test (the recipe emission, `tests/test_prefill_batch.py`; the manifest's route selection, `src/open_qwen36/manifest_test.cpp`) + manual (memory and speed on the NPU, below)

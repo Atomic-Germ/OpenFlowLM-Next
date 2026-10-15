@@ -132,3 +132,19 @@ bf16 route: corr min 0.995 (mean 0.9996), 80-token greedy identical on six promp
 tok/s, pp2048 144 -> 227. The route is now host-bound (GEMMs 167 of 1307 ms at pp512). Numbers and procedure: OPEN-PREFILL-BFP16.
 The mmul probe says int8 8x8x8 is 0.56 ns an mmul against 4.4 (bf16 4x8x8) and 3.5 (bfp16 in an unpipelined loop): an int8
 GEMM remains the faster ceiling, if the per-32-k rescale or a per-row weight requantisation can be paid for.
+
+## The host work around the GEMMs, and the prep stream (2026-10-15, OPEN-PREFILL-GLUE-PREP)
+
+Host time in the qkv post at pp512 / pp2048 (ms): c-tiled y copy into q / k / v 29 / 118, RoPE + bf16 cache write 16 / 61, Q pack
+28 / 105, Q + cache syncs 5 / 20 (the `rope+kv`, `qpack`, `qsync` fields of the CLI's stage line). `OFLM_OPEN_PREFILL_PREP=1`
+runs all of it as one more stream of the `af` context (`designs/attn_fa`, `AF_MODE=prep`): correct (Q rel_fro 8e-6, greedy
+decode from the device-written cache identical) but 5-7 % slower, because a prep dispatch is 1.25 ms steady and there are 40 x B
+of them. Opt in only; see the spec for the numbers.
+- GEMM core budgets (for any epilogue idea): program memory 4848 of 16384 B with the glu epilogue; data memory 64520 of 65536 B.
+  Program memory is not what stops a residual / norm kernel here; data memory, input channels (A and B use both) and the one
+  32 KiB C element a tile do.
+- A shim drain of four dimensions is a repeat count: `Buffer descriptor length does not match` at `npu_dma_lowered`. A bf16 run
+  of 2048 is split at 1024 on the way, so a 3-D pattern with a 2048 inner run is 4-D. One drain a core (the memtile join sends
+  the four cores' elements back to back) fixes it.
+- Two prep passes in flight hang the array (state 8, 7 s timeout) when a second input stream is consumed; bisect with
+  `AF_PREP_NQ / AF_PREP_NKV / AF_PREP_NTBL` and `AF_ABL=8` (compute stubbed) in a scratch `build_design.py` run, ~20 s a build.
