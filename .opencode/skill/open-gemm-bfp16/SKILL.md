@@ -115,6 +115,18 @@ purpose. The harness does not set the power mode; the CLI pins `--pmode performa
   After any change to the core program, rebuild every bfp16 stream, or the new instruction streams run on the old program.
 - `Core::wait_run` clears `Inflight::k`; read the kernel's name first (a segfault only with `OFLM_OPEN_DISPATCH_LOG=1`).
 
+## One hardware context for the GEMMs and attention (2026-10-15, OPEN-PREFILL-SHARED-CONTEXT)
+
+`OFLM_OPEN_PREFILL_ELF=1` runs the four GEMM streams, the attention tiers and `afp` through one full ELF
+(`open_kernels/compose_prefill_elf.py`, `export_qwen36_kernels.py --prefill-elf`; skill `full-elf-context`) instead of two xclbin
+contexts. The ELF is built from the exporter's `final.prj` dirs, so it must be rebuilt (seconds when cached) whenever any bfp16
+or `af*` stream is rebuilt, exactly like the xclbins. Prefill logits are byte-identical to the xclbin route. A configure costs
+0.46 ms (GEMM) / 0.83 ms (attention) queued against 2.34 ms for the xclbin switch it replaces; numbers in the spec.
+`OFLM_OPEN_PREFILL_OVERLAP=1` additionally starts the next phase's first GEMM (gate|up after o, the next layer's qkv after
+down) before the last block's host post, which then runs under it (`Core::begin_bfp16`, `core.cpp`).
+Trap: never time the xclbin route "queued" across two contexts (the queues are independent and the sequence batches per
+context): time it waited, or in the engine.
+
 ## Result (2026-10-15, CLEAN with a control, the glu FFN + hold)
 
 pp512 / 1024 / 2048, tok/s min / median: five-step 501 / 537, 423 / 423, 231 / 268 -> glu FFN 819 / 858, 549 / 554, 317 / 332

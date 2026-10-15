@@ -212,6 +212,9 @@ def main() -> int:
     ap.add_argument("--no-build", action="store_true", help="copy/hash the existing build dirs without rebuilding")
     ap.add_argument("--force", action="store_true", help="rebuild even when <out>/manifest.json has this build key")
     ap.add_argument("--max-ctx", type=int, default=4096, help="the manifest's default context capacity")
+    ap.add_argument("--prefill-elf", action="store_true",
+                    help="also assemble prefill.elf (the bfp16 route's GEMM and attention streams in one hardware "
+                         "context, OFLM_OPEN_PREFILL_ELF=1); needs the gemmbfp and af builds on disk")
     ap.add_argument("--check", metavar="DIR",
                     help="a previous export (or a shipped xclbins/<model>/open_kernels dir) to compare "
                          "against; non-zero exit on any difference beyond the per-build UUID/timestamp stamps")
@@ -352,6 +355,10 @@ def main() -> int:
     tj.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     print(f"-> {out_root}  (manifest.json + toolchain.json: mlir-aie {info['mlir_aie_version']}, "
           f"Peano {info['peano_version']})")
+
+    if a.prefill_elf:
+        import compose_prefill_elf
+        compose_prefill_elf.build_elf(out_root, DESIGNS, a.jobs)
 
     if a.check:
         ref = Path(a.check)

@@ -325,6 +325,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     std::map<std::string, bool> wanted;
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_FA")) attn_fa_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_PREFILL_PREP")) attn_prep_on_ = std::string(env) == "1";
+    if (const char* env = std::getenv("OFLM_OPEN_PREFILL_OVERLAP")) phase_overlap_ = std::string(env) == "1";
     for (int l = 0; l < nl_; ++l) {
         for (const auto& s : types_[l]->program) wanted[s.kernel] = true;
         // an A/B arm with the host attention does not register the attention context at all
@@ -3470,7 +3471,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                    af_early = start_run(kerns_.at(fa.kernels.at(af_window(0))), af_args(0), l);
                    timing_.part0_ms += af_early.submit_ms;
                    timing_.attn_ms += af_early.submit_ms;
-               }, prep ? &y_names : nullptr);
+               }, prep ? &y_names : nullptr, qkv_pre_layer_ == l ? &qkv_pre_ : nullptr);
     if (!npu_attn) {
         ts = std::chrono::steady_clock::now();
         st.sync(XCL_BO_SYNC_BO_TO_DEVICE, N * row, pos0 * row);
@@ -3517,6 +3518,16 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
         }
     }
 
+    // OPEN-PREFILL-PHASE-OVERLAP: o's last post, and down's, run under the next GEMM instead of in front of it
+    Inflight glu_first;
+    const bool overlap = phase_overlap_ && B >= 2 && gb.program.size() == 4 && gb.program[2].fmt == "bfp16";
+    std::function<void()> o_hook, d_hook;
+    if (overlap) o_hook = [&] { glu_first = begin_bfp16(l, gb.program[2], T, hid, xm_all, nullptr); };
+    if (overlap && fuse_next && types_[l + 1] == types_[l])
+        d_hook = [&] {
+            qkv_pre_ = begin_bfp16(l + 1, gb.program[0], T, hid, xn_next, prep ? &y_names[0] : nullptr);
+            qkv_pre_layer_ = l + 1;
+        };
     gemm_phase(l, gb.program[1], B, T, qw, hid,
                [&](size_t b) -> const float* { return npu_attn ? af_o[b]->map<const float*>() : og_all + b * T * qw; },
                [&](size_t b, const float* y) {
@@ -3541,7 +3552,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                        rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
                    timing_.part1_ms += ms_since(t1);
                    timing_.tail_ms += ms_since(t1);
-               }, 1, raw_o);
+               }, 1, raw_o, o_hook);
     if (gb.program.size() == 4) {
         // OPEN-PREFILL-BFP16-FFN: down's residual pass also norms the next layer's input (fuse)
         glu_phase(l, gb.program[2], gb.program[3], B, T, hid,
@@ -3553,7 +3564,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                                  fuse_next ? types_[l + 1]->gemm_block.eps : 0.0, fuse_next ? xn_next + b * T * hid : nullptr);
                       timing_.part1_ms += ms_since(t1);
                       timing_.tail_ms += ms_since(t1);
-                  });
+                  }, &glu_first, d_hook);
         xn_ready_ = fuse_next ? l + 1 : -1;
         return;
     }
@@ -3677,6 +3688,8 @@ void Core::step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits)
     timing_.setup_ms += ms_since(tsetup);
     timing_.part1_ms += ms_since(tsetup);
     xn_ready_ = -1;
+    qkv_pre_layer_ = -1;
+    qkv_pre_.k = nullptr;
     prep_setup(B, T, N, pos0);
     for (int l = 0; l < nl_; ++l) layer_dense_staged(l, xres, B, T, N, pos0);
     xn_ready_ = -1;
@@ -4120,7 +4133,8 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
 void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                       const std::function<const float*(size_t)>& prep,
                       const std::function<void(size_t, const float*)>& post, int slot, bool raw,
-                      const std::function<void()>& before_last_post, const std::vector<std::string>* y_dev) {
+                      const std::function<void()>& before_last_post, const std::vector<std::string>* y_dev,
+                      Inflight* first) {
     StepTiming::GemmStageMs dummy;
     StepTiming::GemmStageMs& gs = slot >= 0 && slot < 6 ? timing_.gemm_stage[slot] : dummy;
     const bool bfp = s.fmt == "bfp16";
@@ -4175,8 +4189,14 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
         return f;
     };
     // One run outstanding: a second run of a kernel queued behind the first gave different bits run to run.
-    stage_in(0);
-    Inflight cur = launch(0);
+    Inflight cur;
+    if (first && first->active()) {
+        cur = std::move(*first);
+        first->k = nullptr;
+    } else {
+        stage_in(0);
+        cur = launch(0);
+    }
     for (size_t b = 0; b < B; ++b) {
         if (b + 1 < B) stage_in(b + 1);
         const double submit = cur.submit_ms;
@@ -4235,9 +4255,28 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
     }
 }
 
+Core::Inflight Core::begin_bfp16(int l, const Step& s, size_t T, size_t K, const float* x, const std::string* y_arg) {
+    const Bfp16Tiling bt;
+    xrt::bo& xb = buffer(s.args[1], 0);
+    auto t0 = std::chrono::steady_clock::now();
+    host::bfp16_pack_a(x, T, K, bt, xb.map<uint8_t*>());
+    timing_.part1_ms += ms_since(t0);
+    timing_.gemm_tile_ms += ms_since(t0);
+    auto ts = std::chrono::steady_clock::now();
+    xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, T * K / 8 * BFP16_BLOCK_BYTES, 0);
+    timing_.sync_ms += ms_since(ts);
+    timing_.part1_ms += ms_since(ts);
+    std::vector<std::string> args = s.args;
+    if (y_arg) args[2] = *y_arg;
+    Inflight f = start_run(kerns_.at(s.kernel), args, l);
+    timing_.part0_ms += f.submit_ms;
+    return f;
+}
+
 void Core::glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
                      const std::function<const float*(size_t)>& prep,
-                     const std::function<void(size_t, const float*)>& post) {
+                     const std::function<void(size_t, const float*)>& post, Inflight* first,
+                     const std::function<void()>& before_last_post) {
     StepTiming::GemmStageMs& gs = timing_.gemm_stage[2];
     StepTiming::GemmStageMs& ds = timing_.gemm_stage[3];
     const Bfp16Tiling bt;
@@ -4287,9 +4326,15 @@ void Core::glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, 
         ds.post += ms_since(tq);
     };
     // the host packs block b + 1 under gate|up(b) and runs block b - 1's post under down(b)
-    stage_in(0);
-    Inflight cur = start_run(kg, g_step[0]->args, l);
-    timing_.part0_ms += cur.submit_ms;
+    Inflight cur;
+    if (first && first->active()) {
+        cur = std::move(*first);
+        first->k = nullptr;
+    } else {
+        stage_in(0);
+        cur = start_run(kg, g_step[0]->args, l);
+        timing_.part0_ms += cur.submit_ms;
+    }
     for (size_t b = 0; b < B; ++b) {
         if (b + 1 < B) stage_in(b + 1);
         finish(cur, gs);
@@ -4297,16 +4342,22 @@ void Core::glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, 
         timing_.part0_ms += d.submit_ms;
         if (b > 0) post_of(b - 1);
         finish(d, ds);
+        // the next gate|up starts before this block's y is read back: its inputs and H are free
+        if (phase_overlap_ && b + 1 < B) {
+            cur = start_run(kg, g_step[(b + 1) & 1]->args, l);
+            timing_.part0_ms += cur.submit_ms;
+        }
         auto ts = std::chrono::steady_clock::now();
         read_back(buffer(d_step[b & 1]->args[2], 0), y_bytes, 0);
         timing_.sync_ms += ms_since(ts);
         timing_.part1_ms += ms_since(ts);
         ds.sync += ms_since(ts);
-        if (b + 1 < B) {
+        if (!phase_overlap_ && b + 1 < B) {
             cur = start_run(kg, g_step[(b + 1) & 1]->args, l);
             timing_.part0_ms += cur.submit_ms;
         }
     }
+    if (before_last_post) before_last_post();
     post_of(B - 1);
 }
 

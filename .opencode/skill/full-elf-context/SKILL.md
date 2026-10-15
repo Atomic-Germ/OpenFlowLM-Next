@@ -14,6 +14,26 @@ identical.
   `utilities/dit-chain/switch_probe.py`.
 - Plan: `specs/open-diffusion/archive/one-context.md`.
 
+## Second worked example: Granite's bfp16 prefill (GEMMs + attention in one context, 2026-10-15)
+
+`open_kernels/compose_prefill_elf.py --kernels <set>` (or `export_qwen36_kernels.py ... --prefill-elf`) assembles the manifest's
+`gemmbfp` and `af` contexts (21 streams: 4 GEMMs, 16 attention tiers, the `afp` prep stream) into `prefill.elf` + `prefill_elf.json`:
+4.07 MiB, 120 s with 3 builds at a time (cached builds: seconds). It reads each stream's `final.prj/aie.mlir` from the build dirs
+the exporter leaves in `open_kernels/designs/*/build_*`. The engine replays it behind `OFLM_OPEN_PREFILL_ELF=1`
+(`core.cpp`, `start_run`: one `main:cfg_<set>_a/_b` run, alternating, whenever the dispatch before it was not in the same set;
+context at priority 0x180). `utilities/prefill-elf/elf_probe.cpp` times it (`--mode alone|switch|layer|hammer`).
+- Per-switch cost on this array (queued cfg / waited cfg, ms): GEMM set 0.46 / 0.88, attention set 0.83 / 1.37; a GEMM<->attention
+  alternation 0.65 per cfg queued. The xclbin switch between the same two contexts, waited: 2.34 ms. So ELF saves ~1.3 ms of every
+  switch, not the diffusion sets' 1.4-1.8: the configure is 229 KB (GEMM) and 504 KB (attention) of register / block writes
+  (`txn_ops`: 328-344 block writes carry ~170 / ~452 KB, i.e. the 32 cores' program memory).
+- No hang at any point: alone, alternating, queued, runlist stretches, and an engine prefill + 20 decode steps.
+- A stream runs the same bits in both contexts: the engine's prefill logits (512 positions) and a 20-step decode after it are
+  byte-identical between the xclbin and ELF routes (`utilities/prefill-elf/byte_gate.py`).
+- Do not time the xclbin path "queued" across two contexts: the two contexts' queues are independent, so a queued A/B/A/B
+  sequence batches per context and reads far too fast (175 ms against 400 waited for 40 layers).
+- Per-dispatch times in a probe move 30% with the box (the same glu stream read 2.2 then 1.5 ms/op an hour apart); only compare
+  inside one unit.
+
 ## What a switch costs (measure before building anything)
 
 `switch_probe.py` times each op three ways: queued, waited, and alternating with an op of

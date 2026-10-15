@@ -401,6 +401,7 @@ private:
     size_t af_blocks_ = 0;       ///< af_q#b / af_o#b buffers allocated: one Q and one O a 256-token block
     bool attn_prep_on_ = false;  ///< attn_fa prep stream does the bfp16 route rope / Q pack / cache write (OFLM_OPEN_PREFILL_PREP=1 on; slower today)
     bool prep_run_ = false;      ///< this prompt runs it (prep_setup)
+    bool phase_overlap_ = false; ///< the next phase's first GEMM starts before the last block's host post (OFLM_OPEN_PREFILL_OVERLAP=1)
     size_t prep_pos0_ = 0;       ///< its first position
     std::map<std::tuple<int, size_t, size_t>, xrt::bo> kv_sub_;   ///< (layer, block, pos0) -> the cache rows the block writes
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
@@ -574,6 +575,8 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
         xrt::run pre;            ///< the ELF set configure queued ahead of r, if any
         bool active() const { return k != nullptr; }
     };
+    Inflight qkv_pre_;           ///< the next layer's qkv GEMM for block 0, started by this layer's down phase
+    int qkv_pre_layer_ = -1;
     /// Build the command (or, with `reuse`, restart this layer's last one), set its arguments and start() it. Nothing waits.
     Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer, bool reuse = false);
     /// Wait for `f`, with run_split's timeout / "late or hung" handling, and record it in the
@@ -676,13 +679,16 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                     const std::function<const float*(size_t)>& prep,
                     const std::function<void(size_t, const float*)>& post, int slot = -1, bool raw = false,
                     const std::function<void()>& before_last_post = nullptr,
-                    const std::vector<std::string>* y_dev = nullptr);
+                    const std::vector<std::string>* y_dev = nullptr, Inflight* first = nullptr);
+    /// A bfp16 step's first block, packed and started ahead of its phase (OPEN-PREFILL-PHASE-OVERLAP); `y_arg` replaces the y buffer.
+    Inflight begin_bfp16(int l, const Step& s, size_t T, size_t K, const float* x, const std::string* y_arg);
     /// Decide whether the prompt's blocks go through attn_fa's prep stream and, if so, write each block's table and records.
     void prep_setup(size_t B, size_t T, size_t N, size_t pos0);
     /// OPEN-PREFILL-BFP16-FFN gate|up then down from H per block; one H buffer, as down(b) ends before gate|up(b + 1) starts
     void glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
                    const std::function<const float*(size_t)>& prep,
-                   const std::function<void(size_t, const float*)>& post);
+                   const std::function<void(size_t, const float*)>& post, Inflight* first = nullptr,
+                   const std::function<void()>& before_last_post = nullptr);
     /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
     void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);

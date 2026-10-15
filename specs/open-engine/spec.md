@@ -4770,6 +4770,35 @@ before and after each unit except where noted).**
   Host CPU seconds were measured as whole-process CPU (model load included), not around the prefill alone. Recommendation:
   make prep the default for the bfp16 route (it is level or faster at every measured length), after the multi-turn case.
 
+### OPEN-PREFILL-SHARED-CONTEXT: the bfp16 prefill's GEMMs and attention in one hardware context (full ELF)
+**Applies to:** openflowlm-next (`open_kernels/{compose_prefill_elf.py,compose_elf.py,export_qwen36_kernels.py}`, `src/open_qwen36/core.{cpp,hpp}`, `utilities/prefill-elf/`)
+**Verification:** manual (needs the NPU and the Granite-4.2-3B-NPU2 container)
+
+On the bfp16 prefill route with NPU attention, each layer pays two hardware-context switches (into the `af` xclbin and back to
+the GEMM xclbin). One xclbin cannot hold both (GEMM cores use 64520 of 65536 B of data memory, attention ~56 KB), so the
+streams of both contexts are assembled into one full ELF whose configuration is register writes (`--expand-load-pdis`, skill
+`full-elf-context`): `prefill.elf` + `prefill_elf.json`, built by `compose_prefill_elf.py` (or `export_qwen36_kernels.py
+--prefill-elf`) from the manifest's `gemmbfp` and `af` streams (4 GEMMs, 16 attention tiers, `afp`). Kernels and numerics are
+unchanged: an ELF stream is the same instruction stream on the same core programs.
+
+**Opt in: `OFLM_OPEN_PREFILL_ELF=1`** (needs `prefill_elf.json` beside the manifest; refused with a message otherwise). The engine
+creates one context from the ELF at priority 0x180 and runs every `gemmbfp` / `af` kernel through it; before a dispatch whose
+set differs from the dispatch before it (or whose predecessor was in an xclbin context, e.g. decode), it queues that set's
+`main:cfg_<set>` kernel, alternating two variants whose first op loads different empty devices (a repeated load of the same
+empty PDI is skipped by the firmware, so the array would not be reset). The xclbin route is the fallback and stays the
+default; decode keeps its xclbin contexts.
+
+**Acceptance criteria / Verification (manual):**
+1. Build: `compose_prefill_elf.py --kernels <set>` completes (Granite: 21 streams, 4.07 MiB, 120 s with 3 builds at a time).
+2. Switch cost: `utilities/prefill-elf/out/elf_probe.exe <set> --mode switch` under `dibs run --measure`: ELF configure per switch
+   below the xclbin switch it replaces (2.34 ms waited).
+3. Byte identity: `utilities/prefill-elf/byte_gate.py --a OFLM_OPEN_PREFILL_PREP=1 --b OFLM_OPEN_PREFILL_PREP=1,OFLM_OPEN_PREFILL_ELF=1`
+   at 512 (all 513 logit files), 2048, and `--max-tokens 21` at 70 and 2100: every logit file `BYTE-IDENTICAL`.
+4. Speed: `prefill_ab.py` with the two variants and a control, pp512 / 1024 / 2048, `dibs run --measure` CLEAN before and after.
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, bfp16 route, NPU attention and prep, `perf/granite-shared-context`).** See the results
+block below; filled as the units land.
+
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
 **Test category:** test (the recipe emission, `tests/test_prefill_batch.py`; the manifest's route selection, `src/open_qwen36/manifest_test.cpp`) + manual (memory and speed on the NPU, below)
