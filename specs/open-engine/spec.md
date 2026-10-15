@@ -4868,7 +4868,8 @@ behind the last up | gate band. Every core receives the same bytes in the same o
 **Result 2026-10-15 (Granite-4.2-3B-NPU2, `--pmode performance`, every timing CLEAN).** Gates on the ring alone and on
 the final set (ring + one context): the 70 + 20 and 2100 + 20 logit files byte-identical to the base set, the six
 uno-ref prompts x 96 greedy tokens identical, `--rows-check 17` ROWS PASS. Real step at position 0, interleaved, min /
-median ms: base 46.3-46.6 / 46.4-46.9, ring 44.0-44.1 / 44.2-44.4. Same sitting, not kept: a 24-deep ring 41.0 / 41.6
+median ms: base 46.3-46.6 / 46.4-46.9, ring 44.0-44.1 / 44.2-44.4 (re-checked with a control: ring 43.7-43.8 / 43.9-44.1
+against final 41.2-41.3 / 41.4-41.6, and base 46.0 / 46.2 in another unit). Same sitting, not kept: a 24-deep ring 41.0 / 41.6
 against 16-deep 41.2 / 41.4 (with one context); the layer's unused last xn and its drain dropped, 41.1 / 41.4.
 
 ### OPEN-DECODE-ONE-CONTEXT-DENSE: a dense decode token runs in one hardware context
