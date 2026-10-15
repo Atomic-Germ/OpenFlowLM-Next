@@ -59,7 +59,7 @@ struct CoreConfig {
     size_t max_ctx = 4096;   ///< KV rows per attention layer and RoPE records: the context capacity
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
-    std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    std::string prefill_mode;  ///< OPEN-PREFILL-MODE: fast | lean | bfp16, "" = the default route (core.cpp kDefaultPrefillRoute)
     bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 
@@ -388,7 +388,7 @@ private:
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool attn_fa_on_ = true;     ///< a dense set's attn_fa in place of the host attention (OFLM_OPEN_ATTN_FA=0 off)
     size_t af_blocks_ = 0;       ///< af_q#b / af_o#b buffers allocated: one Q and one O a 256-token block
-    bool attn_prep_on_ = false;  ///< attn_fa prep stream does the bfp16 route rope / Q pack / cache write (OFLM_OPEN_PREFILL_PREP=1 on; slower today)
+    bool attn_prep_on_ = false;  ///< attn_fa prep stream does the bfp16 route rope / Q pack / cache write (on with the bfp16 route; OFLM_OPEN_PREFILL_PREP=0 / 1 forces)
     bool prep_run_ = false;      ///< this prompt runs it (prep_setup)
     size_t prep_pos0_ = 0;       ///< its first position
     std::map<std::tuple<int, size_t, size_t>, xrt::bo> kv_sub_;   ///< (layer, block, pos0) -> the cache rows the block writes

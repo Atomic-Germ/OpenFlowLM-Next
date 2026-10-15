@@ -129,6 +129,8 @@ void dump_pos(const std::string& prefix, int pos, const std::vector<float>& v) {
 struct Args {
     CoreConfig cfg;
     std::vector<int> ids;
+    std::string ids_list, list_out;  // --ids-list: one prompt a line; its logits at every position and greedy ids go to --list-out
+    std::vector<int> ids2;          // a second prompt prefilled after ids at the position they ended (a chat turn)
     int max_tokens = 16;
     std::string dump_prefix;
     bool twice = false;
@@ -215,6 +217,14 @@ Args parse(int argc, char** argv) {
         else if (k == "--kernels") a.cfg.kernel_dir = val();
         else if (k == "--prefill-mode") a.cfg.prefill_mode = val();
         else if (k == "--ids") a.ids = parse_ids(val());
+        else if (k == "--ids-list") a.ids_list = val();
+        else if (k == "--list-out") a.list_out = val();
+        else if (k == "--ids2") a.ids2 = parse_ids(val());
+        else if (k == "--ids2-file") {
+            std::ifstream f(val());
+            std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            a.ids2 = parse_ids(s);
+        }
         else if (k == "--ids-file") {
             std::ifstream f(val());
             std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -269,11 +279,11 @@ Args parse(int argc, char** argv) {
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (no_draft) a.cfg.draft = false;
-    if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
+    if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || (a.ids.empty() && a.ids_list.empty())) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] "
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean|bfp16] "
                              "[--rows-check N] [--uno N] [--spec N [--spec-mode adaptive|lookup|lookup-uno|uno|plain] "
                              "[--spec-ngram NMAX[:NMIN]] [--spec-no-extend] [--no-draft]] [--spec-probe N --spec-dump <json> "
                              "[--spec-probe-seed]]\n");
@@ -654,7 +664,7 @@ std::vector<int> request(Core& core, const Args& a) {
     // each expert once for every token of the prompt that wants it instead of once per
     // block. Bit-exact against the block-at-a-time loop below, which --block-major forces.
     if (a.gemm_block && core.layer_major_ok() && !a.block_major) {
-        core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty());
+        core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty() && a.ids2.empty());   // with a turn 2, its positions are the dump
         core.step_gemm_prompt(a.ids, true);
         stages("gemm-prompt", 0, a.ids.size(), a.ids.size());
         for (size_t t = 0; t < core.block_logits().size(); ++t)
@@ -663,6 +673,17 @@ std::vector<int> request(Core& core, const Args& a) {
             dump_pos(a.dump_prefix, static_cast<int>(a.ids.size() - 1), core.logits());
         if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
         i = a.ids.size();
+        if (!a.ids2.empty()) {
+            const size_t base = a.ids.size();
+            core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty());
+            core.step_gemm_prompt(a.ids2, true);
+            stages("gemm-prompt turn 2", base, base + a.ids2.size(), a.ids2.size());
+            for (size_t t = 0; t < core.block_logits().size(); ++t)
+                dump_pos(a.dump_prefix, static_cast<int>(base + t), core.block_logits()[t]);
+            if (!a.dump_prefix.empty() && core.block_logits().empty())
+                dump_pos(a.dump_prefix, static_cast<int>(base + a.ids2.size() - 1), core.logits());
+            if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
+        }
     } else if (a.gemm_block) {
         size_t GT = core.gemm_block_t();
         if (GT == 0) { std::fprintf(stderr, "ERROR: --gemm-block given but this kernel set has no gemm_block program\n"); std::exit(2); }
@@ -695,7 +716,7 @@ std::vector<int> request(Core& core, const Args& a) {
         std::this_thread::sleep_for(std::chrono::milliseconds(a.gap_ms));
     }
     double prefill_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
-    std::fprintf(stderr, "prefill %zu tokens: %.0f ms (%.0f ms/token)\n", a.ids.size(), prefill_ms, prefill_ms / a.ids.size());
+    std::fprintf(stderr, "prefill %zu tokens: %.0f ms (%.0f ms/token)\n", a.ids.size(), prefill_ms, prefill_ms / (a.ids.size() + a.ids2.size()));
 
     std::vector<int> out;
     auto t1 = clock::now();
@@ -763,6 +784,37 @@ std::vector<int> request(Core& core, const Args& a) {
 }
 
 }  // namespace
+
+int run_list(Core& core, const Args& a) {
+    std::ifstream f(a.ids_list);
+    std::string line;
+    int k = -1;
+    while (std::getline(f, line)) {
+        if (line.empty()) continue;
+        ++k;
+        const std::vector<int> ids = parse_ids(line);
+        core.reset();
+        core.set_block_logits_all(true);
+        core.step_gemm_prompt(ids, true);
+        std::ofstream lf(a.list_out + "/p" + std::to_string(k) + "_logits.f32", std::ios::binary);
+        const size_t V = core.real_vocab();
+        for (const auto& row : core.block_logits()) lf.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(V * 4));
+        core.set_block_logits_all(false);
+        std::vector<int> gen;
+        int tok = argmax(core.logits(), V);
+        for (int n = 0; n < a.max_tokens; ++n) {
+            gen.push_back(tok);
+            if (n + 1 == a.max_tokens) break;
+            core.step(tok, true);
+            tok = argmax(core.logits(), V);
+        }
+        std::ofstream gf(a.list_out + "/p" + std::to_string(k) + "_gen.txt");
+        for (size_t i = 0; i < gen.size(); ++i) gf << (i ? "," : "") << gen[i];
+        gf << "\n";
+        std::fprintf(stderr, "prompt %d: %zu tokens\n", k, ids.size());
+    }
+    return 0;
+}
 
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
@@ -844,6 +896,7 @@ int main(int argc, char** argv) {
         if (a.uno) return uno(core, a, a.uno);
         if (a.spec) return spec(core, a, a.spec);
         if (a.spec_probe) return spec_probe(core, a, a.spec_probe);
+        if (!a.ids_list.empty()) return run_list(core, a);
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;
