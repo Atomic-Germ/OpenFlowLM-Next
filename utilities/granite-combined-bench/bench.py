@@ -1,6 +1,7 @@
 r"""Granite 4.2 3B prefill / decode / Uno-at-depth numbers on one kernel set, both prefill routes.
 
-    python bench.py prefill|decode|uno --cli <exe> --model <dir> --kernels <set> --out <jsonl> [--routes fast,bfp16]
+    python bench.py prefill|decode|uno|spec --cli <exe> --model <dir> --kernels <set> --out <jsonl> [--routes fast,bfp16]
+        [--spec-modes adaptive,lookup]
 
 Wrap each subcommand in `dibs run --measure`; every result row is one CLI process. Prompts are real repo text
 (prose: specs/open-engine/spec.md, code: this repo's python designs), cut to the exact token count, so no row
@@ -18,6 +19,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "utilities" / "uno-bench"))
+sys.path.insert(0, str(REPO / "utilities" / "spec-lookup"))
+from spec_lookup import parse_spec  # noqa: E402
 from uno_bench import parse as parse_uno  # noqa: E402
 
 PREFILL = re.compile(r"prefill (\d+) tokens: ([\d.]+) ms")
@@ -75,7 +78,7 @@ def summary(name: str, v: list[float], unit: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["prefill", "decode", "uno"])
+    ap.add_argument("mode", choices=["prefill", "decode", "uno", "spec"])
     ap.add_argument("--cli", required=True, type=Path)
     ap.add_argument("--model", required=True, type=Path)
     ap.add_argument("--kernels", required=True, type=Path)
@@ -84,6 +87,7 @@ def main() -> int:
     ap.add_argument("--lengths", default="512,1024,2048")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--tokens", type=int, default=128)
+    ap.add_argument("--spec-modes", default="adaptive,lookup", help="OPEN-SPEC-LOOKUP --spec-mode values for `spec`")
     a = ap.parse_args()
     tok = tokenizer(a.model)
     lengths = [int(x) for x in a.lengths.split(",")]
@@ -120,12 +124,14 @@ def main() -> int:
                 for kind in ("chat", "code"):
                     ids = chat_prompt(tok, a.model, kind, n)
                     for r in routes:
-                        txt = run_cli(a, r, ids, ["--gemm-block", "--uno", str(a.tokens)], tmp)
-                        try:
-                            row = parse_uno(txt)
-                        except ValueError as e:
-                            row = {"error": str(e)[-1500:]}
-                        emit(out, {"mode": "uno", "route": r, "n": len(ids), "kind": kind, **row})
+                        for sm in (a.spec_modes.split(",") if a.mode == "spec" else ["uno"]):
+                            flag = ["--spec", str(a.tokens), "--spec-mode", sm] if a.mode == "spec" else ["--uno", str(a.tokens)]
+                            txt = run_cli(a, r, ids, ["--gemm-block", *flag], tmp)
+                            try:
+                                row = parse_spec(txt) if a.mode == "spec" else parse_uno(txt)
+                            except ValueError as e:
+                                row = {"error": str(e)[-1500:]}
+                            emit(out, {"mode": a.mode, "route": r, "n": len(ids), "kind": kind, **row})
     return 0
 
 

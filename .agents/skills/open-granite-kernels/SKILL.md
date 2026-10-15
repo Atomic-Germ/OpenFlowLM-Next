@@ -125,7 +125,8 @@ explicitly, `C:\models\Granite-4.2-3B-NPU2\open_kernels` is a symlink to an old 
 `--uno N --gemm-block` prefills the prompt as blocks before the Uno cycle, so a 1024 / 2048-token context costs seconds, not a
 token-at-a-time prefill. The plain-decode reference inside `--uno` prefills all but the last token the same way and steps the last
 one, so both sides start from one cache (block-prefilling the seed's row instead differs in bf16 and flips near-tie argmaxes: Uno
-then reads DIFFERS at token 27).
+then reads DIFFERS at token 27). `--spec N` does the same for the per-cycle choice of prompt lookup, Uno and a plain step
+(OPEN-SPEC-LOOKUP; how to run and measure it: the open-dxl-rows skill).
 
 Measuring: `utilities/granite-combined-bench/matrix.py` runs prefill / decode / Uno-at-depth / the six-prompt sweep as small units, each
 under `dibs run --measure`, rerunning a NOISY unit. A stray CPU-bound process (an orphaned `find`, a browser tab) makes every unit
