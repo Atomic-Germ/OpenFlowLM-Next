@@ -414,6 +414,8 @@ void af_fin(float *__restrict o, float *__restrict st) {
 // OPEN-PREFILL-GLUE-PREP: the block's rope, scale and Q packing on the array. A raw element is this core's 32 tokens of
 // one head, fp32 [32 tokens][64 dims] as the qkv GEMM left them; the table element is [32 tokens][cos 32 | sin 32].
 void af_ptab(float *__restrict src, float *__restrict dst) {
+  if (AF_ABL & 8)
+    return;
   for (int j = 0; j < TQ * HD; j += 32)
     aie::store_v(dst + j, aie::load_v<32>(src + j));
 }
@@ -421,6 +423,8 @@ void af_ptab(float *__restrict src, float *__restrict dst) {
 // qh / ql hold the scaled rotation as bf16 hi / lo, token rows; o gets them transposed ([64 dims][32 tokens]), hi then lo
 void af_prep_q(float *__restrict raw, float *__restrict tbl, bfloat16 *__restrict qh, bfloat16 *__restrict ql,
                bfloat16 *__restrict o) {
+  if (AF_ABL & 8)
+    return;
   SET_ROUNDING();
   // 1/sqrt(64) and log2(e): the scores come out in the softmax's units
   const vf qs = aie::broadcast<float, 32>(0.125f * 1.4426950408889634f);
@@ -454,6 +458,8 @@ void af_prep_q(float *__restrict raw, float *__restrict tbl, bfloat16 *__restric
 
 // o: K rotated then V, bf16 token rows (the cache's layout), 32 tokens each
 void af_prep_kv(float *__restrict rk, float *__restrict rv, float *__restrict tbl, bfloat16 *__restrict o) {
+  if (AF_ABL & 8)
+    return;
   SET_ROUNDING();
   for (int t = 0; t < TQ; t++) {
     vf r0, r1;
