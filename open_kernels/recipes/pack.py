@@ -180,6 +180,22 @@ def pack_bfp16_gemm(w: np.ndarray, row0: int, n_total: int, dst: np.ndarray) -> 
         out[g % bp.COLS, g // bp.COLS] = bp.pack_b_group(w[gl * n:(gl + 1) * n], bp.TILE_K).reshape(nk, tile)
 
 
+def pack_bfp16_gemm_glu(w: np.ndarray, half: str, n_total: int, dst: np.ndarray) -> None:
+    """float32 [ff, K] gate or up rows into their glu_row rows of the gate|up operand in `dst` (OPEN-PREFILL-BFP16-FFN)."""
+    bp = _gemm_bfp16_pack()
+    ff, K = w.shape
+    n, kb, cols = bp.TILE_N, bp.TILE_K // 8, bp.COLS
+    if 2 * ff != n_total or ff % (n // 2) or n_total % (n * cols) or half not in ("gate", "up"):
+        raise ValueError(f"bfp16_gemm glu {half}: {ff} rows of {n_total} is not a gate|up half")
+    r = bp.glu_row(np.arange(ff), ff) + (8 if half == "up" else 0)
+    cb = np.arange(K // 8)
+    per_col, nk, g = n_total // n // cols, K // bp.TILE_K, r // n
+    tile = (((g % cols) * per_col + g // cols) * nk)[:, None] + cb[None, :] // kb
+    rr = (r % n)[:, None]
+    idx = tile * n * kb + ((rr // 16) * kb + cb[None, :] % kb) * 16 + rr % 16
+    dst.reshape(-1, bp.BLOCK_BYTES)[idx] = bp.encode_blocks(w.reshape(ff, K // 8, 8))
+
+
 def pack_bf16_gemm(w: np.ndarray) -> np.ndarray:
     """bf16 bits [N, K] -> band-major [64 rows x 64 k] elements in mm.cc's A-block order, as uint16."""
     n, k = w.shape
@@ -707,8 +723,12 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         n_bytes = op["n_total"] * op["in_dim"] // 8 * 9
         if op["dst"] + n_bytes > len(dst):
             raise ValueError(f"{kind} {name}: {n_bytes} B at dst {op['dst']} runs past the {len(dst)} B buffer")
-        pack_bfp16_gemm(f32_of_q4_1(sel, rows, op["in_dim"]), op.get("row0", 0), op["n_total"],
-                        dst[op["dst"]:op["dst"] + n_bytes])
+        if op.get("glu"):
+            pack_bfp16_gemm_glu(f32_of_q4_1(sel, rows, op["in_dim"]), op["glu"], op["n_total"],
+                                dst[op["dst"]:op["dst"] + n_bytes])
+        else:
+            pack_bfp16_gemm(f32_of_q4_1(sel, rows, op["in_dim"]), op.get("row0", 0), op["n_total"],
+                            dst[op["dst"]:op["dst"] + n_bytes])
     elif kind == "q8_perm":
         # the q8 twin of std_perm: `nch` is the count of POOL half-tiles (5120 B each, twice
         # the q4_1 bytes of the same tensor); `chunk0` is a SOURCE file-chunk offset, as it is

@@ -73,4 +73,17 @@ inline size_t bfp16_b_offset(size_t r, size_t cb, size_t N, size_t K, const Bfp1
     return (tile * t.n * (t.k / 8) + bfp16_detail::in_tile(r % t.n, cb, t)) * BFP16_BLOCK_BYTES;
 }
 
+/// pack.py glu_row's twin (up row f is 8 further): ff chunk kc in n-tile (kc % per_col) * cols + kc / per_col keeps a column's H slots one run
+inline size_t bfp16_glu_row(size_t f, size_t ff, const Bfp16Tiling& t) {
+    const size_t per_col = 2 * ff / t.n / t.cols, half = t.n / 2, kc = f / half;
+    const size_t ct = (kc % per_col) * t.cols + kc / per_col;
+    return ct * t.n + 16 * ((f % half) / 8) + f % 8;
+}
+
+/// 9 x 911 words: a core tile's 8192 padded so every H slot (kc * rows + row) starts on a whole bfp16 block
+constexpr size_t BFP16_H_SLOT_WORDS = 8199;
+inline size_t bfp16_h_bytes(size_t T, size_t ff, const Bfp16Tiling& t) {
+    return (T / t.m) * (2 * ff / t.n) * BFP16_H_SLOT_WORDS * 4;
+}
+
 }  // namespace open_qwen36

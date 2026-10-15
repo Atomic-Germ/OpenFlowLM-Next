@@ -19,6 +19,30 @@ import numpy as np
 BLOCK_BYTES = 9
 COLS, ROWS = 8, 4
 TILE_M, TILE_K, TILE_N = 64, 64, 128    # what the shipped build compiles (gemm_bfp16.py defaults)
+H_SLOT_WORDS = 8199                     # gemm_bfp16.py's: a core tile's 8192 output words padded to a multiple of 9
+
+
+def glu_row(f: np.ndarray | int, ff: int, n: int = TILE_N, cols: int = COLS):
+    """B row of gate row f (up is 8 further); the n-tile order puts each array column's ff chunks on one run of H slots."""
+    per_col = 2 * ff // n // cols
+    kc = f // (n // 2)
+    ct = (kc % per_col) * cols + kc // per_col
+    return ct * n + 16 * ((f % (n // 2)) // 8) + f % 8
+
+
+def pack_glu_b(gate: np.ndarray, up: np.ndarray, n: int = TILE_N, k: int = TILE_K) -> np.ndarray:
+    """gate, up [ff, K] float -> the glu GEMM's B operand, bytes [2 ff * K / 8 * 9]."""
+    ff, K = gate.shape
+    w = np.empty((2 * ff, K), np.float32)
+    rows = glu_row(np.arange(ff), ff, n)
+    w[rows], w[rows + 8] = gate, up
+    return pack_b(w, n, k)
+
+
+def h_tile(h_words: np.ndarray, kc: int, row: int) -> np.ndarray:
+    """The A tile (bytes, 4608) an H output holds for ff chunk kc and the row block `row` (64 tokens)."""
+    off = (kc * ROWS + row) * H_SLOT_WORDS
+    return h_words[off:off + TILE_M * TILE_K // 8 * BLOCK_BYTES // 4].view(np.uint8)
 
 
 def encode_blocks(x: np.ndarray) -> np.ndarray:

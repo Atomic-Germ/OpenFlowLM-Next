@@ -109,10 +109,13 @@ the eos are the same token — the other three families have a separate pair, an
 ## The combined kernel set (Uno decode + bf16 and bfp16 prefill)
 
 One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dxh` (the head, a second stream
-over `dx`'s image), `dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four
-`gemm_bfp16_n*_k*`, `dxl`, `dxl_lora` and `lmhl`, with one `manifest.json` (manifest_version 4). `dxl`'s weight fifo depth
-(`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and `lm_head_q4_f32` stay
-for the GGUF-direct section's tail.
+over `dx`'s image), `dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four bfp16
+streams (`gemm_bfp16_n4096_k2560`, `_n3072_k2560`, `_n16384_k2560_glu`, `_n3072_k8192_h`: OPEN-PREFILL-BFP16-FFN's fused
+gate|up and down-from-H), `dxl`, `dxl_lora` and `lmhl`, with one `manifest.json` (manifest_version 5). `dxl`'s weight fifo
+depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and
+`lm_head_q4_f32` stay for the GGUF-direct section's tail. To refresh only the bfp16 streams, copy a full set and run the
+exporter with `--out <copy> --only <the four names>` (~2 min); an engine that reads manifest_version 4 refuses the result
+by name.
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1
@@ -131,6 +134,11 @@ then reads DIFFERS at token 27). `--spec N` does the same for the per-cycle choi
 Measuring: `utilities/granite-combined-bench/matrix.py` runs prefill / decode / Uno-at-depth / the six-prompt sweep as small units, each
 under `dibs run --measure`, rerunning a NOISY unit. A stray CPU-bound process (an orphaned `find`, a browser tab) makes every unit
 NOISY; read which process `dibs` names before retrying.
+
+bfp16 prefill with the glu FFN (2026-10-15, CLEAN with a control, min / median tok/s): pp512 819 / 858, pp1024 549 / 554,
+pp2048 317 / 332, against the five-step route's 501 / 537, 423 / 423, 231 / 268 and the default bf16 route's 239 / 187 medians at
+512 / 2048. Host attention is two thirds of pp2048. The skill for the route itself is `open-gemm-bfp16`; the numbers and the
+accuracy gates are OPEN-PREFILL-BFP16-FFN.
 
 ## Result — 2026-09-06, mlir-aie 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301
 

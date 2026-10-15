@@ -30,7 +30,7 @@ the offending key named.
 **Acceptance criteria:**
 - `Manifest::load` on the checked-in fixture (`tests/fixtures/manifest_qwen36.json`) yields 40 layers, two layer types with the 27B's buffer sizes and three-step programs, four contexts, six kernels with their patch kinds (`ax0` attnpos, `lx1`/`ax1` moeroute2), the tail `ln` → `lm`, and the MoE pool geometry `stripe 163840, up 655360, down_core 81920, pool_down 335544320, share 503316480 / 503971840 / 504627200`.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
-- `manifest_version: 4` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`).
+- `manifest_version: 6` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`). Version 4 adds the `bfp16_gemm` pack op and the `bfp16` step format (OPEN-PREFILL-BFP16), version 5 the `glu` epilogue, steps reading its H operand and the `glu` pack halves (OPEN-PREFILL-BFP16-FFN); each is written exactly when a route uses it and refused below it.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
 - `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name. A `linear` / `full` route carries exactly one FFN tail: the MoE block (`moe_kernel`, `shared_program`, requiring `layout.moe`) or a dense `ffn_program` of two steps (up|gate, down) whose buffers `ffn_weights` defines, with its width `ff`; both, or neither, is refused by name. A route weight is normally a run of the layer type's pool or consts ops; `from: "pack"` instead carries its own `std_perm` ops, which the engine packs into that buffer alone, and any other op there is refused. A `std_perm` may carry `split: "hi" | "lo"` (anything else, or on another op, is refused): one half of a q8 source's exact q4_1 split. A `linear` route with `out_split` runs its out projection over both halves stacked, 2 x hidden rows, and adds them.
 - A layer type may carry `gemm_block_variants`, a map of whole routes the engine may load in place of `gemm_block` (OPEN-PREFILL-MODE). Each variant is parsed and refused exactly as `gemm_block` is; a variant without a `gemm_block`, one whose `t` or `kind` differs from it, and a set whose layer types carry different variant names are refused by name. `files()` names every variant's streams, so a set missing one is not a kernel set. An engine that predates the field ignores it and runs `gemm_block` (`manifest_test.cpp`).
@@ -4467,6 +4467,110 @@ from the user's own work, so the timings are not quiet-box numbers.
 - Accuracy on the combined set, `prefill_mode_check.py --cases random,chat,decode,ppl` (not a timing claim): 512 random ids corr min 0.998151 mean 0.999580, argmax 485/512 with all 27 flips at top-2 margins under 0.1; six prompts corr min 0.995189 (math) and 0.998008-0.998333 on the rest, every flip at a margin of 0.173 or less; all six 80-token greedy continuations identical; perplexity 20.7226 against 20.6713 (ratio 0.9975), mean KL 0.00276 nats. Every criterion above holds, identical to the pre-merge figures.
 - bfp16 prefill followed by Uno decode (`uno_bench.py --gemm-block --prefill-mode bfp16`, six prompts x 128): all six identical to plain decode, 3.05 tokens a cycle, 1.08x (CLEAN, OPEN-FAMILY-GRANITE-UNO has the table and the 1024 / 2048 results).
 - The merge of `perf/granite-prefill-int8` into `perf/granite-uno-core-compute` had no textual conflict (`dense.py`, `core.cpp`, `spec.md` all merged cleanly: the two routes' hunks are in different functions). One exporter run builds the union, the four bfp16 xclbins beside `dxl` / `dxl_lora` / `lmhl`, and the `manifest_test`, `pools_test`, `block_host_test` and `gguf_pack_test` binaries pass on it.
+
+### OPEN-PREFILL-BFP16-FFN: the bfp16 route's FFN stays on the NPU from gate|up to down
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_bfp16/{gemm_bfp16.py,mm_bfp_acc.cc,pack.py,make_test.py}`, `open_kernels/recipes/{dense,pack,manifest}.py`, `src/open_qwen36/{bfp16.hpp,block_host.hpp,pools,manifest,core,cli}.cpp`)
+**Verification:** manual (needs the NPU: the harness chain and the model's gates below); the packer twins, the row and slot laws, the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_bfp16.py`, `pools_test.cpp`, `manifest_test.cpp`)
+
+On a SwiGLU family the bfp16 route (OPEN-PREFILL-BFP16) runs its FFN as two dispatches with nothing on the host between them.
+Gate and up are one weight (`ggu_w`, 2 ff rows, 8-row blocks alternating gate and up, n-tile ct holding ff chunk
+(ct % 8) * per_col + ct / 8) on `gemm_bfp16_n{2ff}_k{hidden}_glu`. Each core ends its 64 x 128 tile, while it still holds the
+last K chunk's A buffer, by computing h = silu(gate) * up from the fp32 sums (bf16 hi/lo arithmetic, about 2^-15), encoding h
+to bfp16 into that A buffer, which is exactly one 64 x 64 A tile of the down projection, and copying it into C where the
+memtile's 8x8 -> row-major transform makes it the first 1152 words of the core's stream. The encode follows the host packer's
+rule (`bfp16_encode_block`: the block's largest exponent, round to nearest even, a mantissa that rounds to 128 saturates at
+127): the converter alone raises the block's exponent instead, so the epilogue first holds a value whose significand is
+255/128 or more at 127/64 of its power of two, which encodes to 127 in its own binade and rounds as before in a lower one (a
+negative one encodes to -127 where the host has -128). The shim writes each core tile to an H slot of 8199 words (a whole
+number of bfp16 blocks) at (ff chunk x 4 + row block); down (`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
+program (`rtp[0]` the K chunks between the first and the last, `rtp[1]` the epilogue mode), so the route keeps one hardware
+context. The host never holds gate, up or h: no untile, no SiLU, no encode of down's input, and xm is packed once. The qkv,
+o and down outputs are read c-tiled in place by the stage after them (`bfp16_c_row`), not untiled into a copy first; o's
+residual and post norm are one pass, and down's residual and the next layer's input norm one pass (`OFLM_OPEN_FUSED_NORM=0`
+splits them, bit-identical). `Core::glu_phase` runs gate|up(b) and down(b) back to back, packing b + 1 under gate|up(b) and
+running b - 1's residual under down(b). A family whose activation is not SiLU keeps the five-step route. Manifest version 5
+(`epi: glu`, `a: h`, the `glu` pack halves); an engine that reads 4 refuses the set.
+
+**Acceptance criteria:**
+- Harness (`make_test.py make-glu` / `compare-glu`, 256 x 2560 x 16384 then 256 x 8192 x 3072 in one context): H's bytes equal
+  the host encode of silu(g) * u of the decoded operands at 99.9 % or more and its shared exponents in 99.99 % of blocks or
+  more, H decoded within 5 % of the host encode's own error, and down(H) equal to the decoded-H x decoded-down product
+  (rel_fro < 1e-4); a plain shape on the same core program rel_fro 0.
+- The model: every OPEN-PREFILL-BFP16 criterion against the default route.
+- Prefill faster than the five-step bfp16 route at 512, 1024 and 2048 tokens (CLEAN, same sitting).
+
+**Procedure:** `designs/gemm_bfp16/make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560 --ff 8192
+--N 3072`, `run_kernel.exe <dir>\run.cfg`, `make_test.py compare-glu --out <dir>`; then OPEN-PREFILL-BFP16's procedure.
+
+**Result 2026-10-15, first build (P2 overnight; Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; no timing here, the
+measured split is in the CLEAN result below):**
+- Harness: H's bytes equal the host encode at 99.72 %, decoded H against the exact h rel_fro 8.186e-3 (the host encode's own
+  8.176e-3), down(H) against the decoded product rel_fro 2.5e-8, a plain shape on the new core program rel_fro 0.
+- The host changes are exact: every position's logits of a 512-token prompt are equal to the last bit between the base binary
+  and this one on the five-step set (c-tiled consumers, fused o norm, contiguous pack), between `OFLM_OPEN_FUSED_NORM` 0 and 1,
+  and between the two-phase and the pipelined FFN.
+- Where the new route differs: in 745 of 262,144 H blocks the on-core converter raises the shared exponent where the host packer
+  saturates the largest mantissa at 127; otherwise 470 of 2.09 M mantissas differ by one (SiLU's 2^-15), unbiased. Against the
+  five-step route that is corr min 0.997567, mean 0.999793 over 512 prose positions, 500 of 512 argmax.
+- Against the default route, the same sitting (five-step / glu): chat prompts corr min 0.995189 / 0.997616 (math), every other
+  prompt 0.998008-0.998333 / 0.997848-0.998429; greedy 80 tokens identical 6 / 5 of 6 (reason differs at token 35); flips at
+  margins up to 0.173 / one at 0.209 (code2); 512 random ids corr min 0.998151 (2026-10-14) / 0.996607; perplexity on 511
+  README tokens 20.6713 (2026-10-14) / 20.6964 against the default's 20.7226 (ratios 0.9975 / 0.9987), mean KL 0.00276 / 0.00287.
+  At 2048 random ids both routes miss the 0.995 floor, which was set at 512: corr min 0.987065 / 0.986759, argmax 1944 / 1941 of
+  2048, every flip under 0.2; perplexity on 2047 README tokens 11.3731 (glu) against 11.4226 (ratio 0.9957). So this build
+  passes the statistical criteria (perplexity, KL, corr mean) and misses two per-item extremes the five-step route set.
+
+**Result 2026-10-15, CLEAN with a control (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; each a `dibs run --measure`
+unit, CLEAN before and after, three runs a cell, the variants interleaved and their order alternating, one discarded run first;
+the route as landed, with the hold below):** the control is this route's pp512, median 841-858 in every unit kept; a unit whose
+control is more than 5 % off is rerun (one was: 766). Two earlier units (02:43-02:51) read this route at 768 at pp512: `dibs`
+lets one session's tracks hold the NPU together, and this track's own untimed probe overlapped the first, so they are not quoted.
+
+| prefill, tok/s (min / median) | five-step bfp16 route (before) | this route (after) | after / before (median) |
+|---|---|---|---|
+| pp512 | 501 / 537 | **819 / 858** | 1.60x |
+| pp1024 | 423 / 423 | **549 / 554** | 1.31x |
+| pp2048 | 231 / 268 | **317 / 332** | 1.24x |
+
+- 512 and 1024 are one unit, 2048 another; each before / after pair is within one unit. The five-step route's pp2048 is the
+  noisiest cell tonight (medians 235-274 across units: its 4-6 s of host attention is exposed to any CPU load).
+- The default bf16 route, one unit, the same set and binary: pp512 238 / 239 against this route's 814 / 845 (3.5x), pp2048
+  181 / 187 against 315 / 324 (1.73x).
+- The median run, ms at pp512 / pp2048. Host attention 199 / 4226 (OPEN-PREFILL-HOST-ATTN, not this requirement). The four
+  GEMMs' blocked waits 212 / 943: gate|up 137 / 669, down 44 / 199, qkv 17 / 31, o 13 / 43. The host outside attention
+  166 / 893: residual + norm passes 86 / 434, the qkv, o and gate|up packs 34 / 205, qkv's c-tiled -> q / k / v copy 29 / 168,
+  syncs 14 / 78. Before, the host outside attention was 583 / 2689 (untile and row copies 287 / 1397, residual / norm / SiLU
+  168 / 657, packs 76 / 382, input norms 17 / 92, syncs 34 / 155).
+- Memory, one run each (process peaks): this route 6.59 GiB private / 8.52 GiB working set, the default route 4.90 / 6.81.
+  The bfp16 weights (3.6 GiB at 9 / 8 bytes a weight, padding included) replace the default route's packed weights rather than
+  adding to them, so the difference is 1.7 GiB. Load time was not measured.
+- The o + FFN pipeline (`Core::o_glu_phase`: o a block ahead, so block b's residual, norm and gate|up pack ran under o(b + 1)
+  and b - 1's down residual under gate|up(b)) was bit-identical and is not kept: interleaved with the two-phase route in two
+  units it was no faster, medians 756 against 768 and 754 against 754 at pp512, 327 against 329 and 304 against 306 at pp2048.
+  Both units' controls read 10-12 % low (the first overlapped, the second ran in a slow state of the box), so those are
+  comparisons, not the route's speed. In the first, gate|up's wait fell as down's rose by as much: the host work it moved under
+  a dispatch did not come off the critical path. Why was not isolated.
+- The engine's gate|up dispatch blocks 1.72 ms at pp512 and 2.09 ms at pp2048 in the controlled units; untimed `run_kernel`
+  runs (not under a control) read it at 1.56-1.71 ms alone. Whether that gap is real, and its cause, were not established.
+
+**Result 2026-10-15, the host packer's rule on the core (`hold` in `mm_bfp_acc.cc`; the two-phase binary, untimed unless marked):**
+- Harness: H's bytes equal the host encode at 99.948 % (99.722 % without the hold) and its shared exponents in 262,139 of
+  262,144 blocks (746 differ without; the 5 left are SiLU's 2^-15 across a power of two); decoded H against the exact h
+  rel_fro 8.180e-3 (the host encode's own 8.176e-3); down(H) 2.5e-8. CLEAN, one binary on the two sets interleaved in one
+  unit (controls 843 / 848 at pp512, in range), min / median tok/s with against without: pp512 839 / 843 against 837 / 848,
+  pp1024 560 / 576 against 557 / 561, pp2048 322 / 340 against 323 / 324: no measurable cost.
+- Against the default route: 512 random ids corr min 0.996279 mean 0.999582, argmax 487 / 512 (483 without, five-step 485),
+  every flip under 0.2; chat prompts corr min 0.997736, every flip under 0.2 but code2's 0.209 (there without the hold too);
+  greedy 80 tokens identical on 5 of 6: reason is now identical, chat differs at token 64, where the default route's top-2
+  margin is 0.175; perplexity on 511 README tokens 20.6490 (ratio 0.9964; 0.9987 without, five-step 0.9975), mean KL 0.00267
+  nats (0.00287 without, five-step 0.00276). At 2048: random-id corr min 0.986466, argmax 1954 / 2048 (1941 without), one flip
+  at 0.209; perplexity on 2047 tokens 11.3450 (ratio 0.9932), KL 0.00208 (0.00224 without).
+- Status against the criteria above: the harness and the timing criteria hold. Of OPEN-PREFILL-BFP16's, the corr floor at
+  512, the perplexity and the statistical measures hold (KL at or below the five-step route's); two per-item thresholds miss:
+  one near-tie greedy continuation of six, and one flip at a 0.209 margin that the exponent rule did not cause. Those two were
+  set just under the five-step route's own worst values (OPEN-PREFILL-BFP16, 2026-10-13/14), so any change to the arithmetic
+  moves some near-tie across them; with and without the hold a different prompt missed. Restating them statistically is open,
+  and the route stays opt-in.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)

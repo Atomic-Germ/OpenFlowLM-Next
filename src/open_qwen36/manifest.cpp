@@ -62,6 +62,9 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.via = j.value("via", "");
     p.row0 = j.value("row0", 0ull);
     p.n_total = j.value("n_total", 0ull);
+    p.glu = j.value("glu", "");
+    if (!p.glu.empty() && (p.op != "bfp16_gemm" || (p.glu != "gate" && p.glu != "up")))
+        fail(where, p.op + " " + p.tensor + ": glu must be gate or up, on a bfp16_gemm");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
@@ -108,9 +111,14 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
             st.split = s.value("split", false);
             st.fmt = s.value("fmt", "");
             st.n_pad = s.value("n_pad", 0ull);
+            st.epi = s.value("epi", "");
+            st.a_from = s.value("a", "");
             if (!st.fmt.empty() && st.fmt != "bfp16") fail(where, "run " + st.kernel + ": fmt '" + st.fmt + "' (bfp16 or nothing)");
             if (st.fmt == "bfp16" && (st.n_pad == 0 || st.split))
                 fail(where, "run " + st.kernel + ": a bfp16 step needs n_pad and cannot be split");
+            if ((!st.epi.empty() && st.epi != "glu") || (!st.a_from.empty() && st.a_from != "h") ||
+                ((!st.epi.empty() || !st.a_from.empty()) && st.fmt != "bfp16"))
+                fail(where, "run " + st.kernel + ": epi glu / a h are bfp16 step options");
         } else if (st.op == "moeroute2") {
             st.act_off = get<uint64_t>(s, "act_off", where);
         } else {
@@ -155,8 +163,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // a step is split, and an older engine refuses the set by name instead of misreading it.
     // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
     // 4 adds the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16).
-    if (m.version < 1 || m.version > 4)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 4)");
+    // 5 adds the glu epilogue, steps reading its H operand and the glu pack halves (OPEN-PREFILL-BFP16-FFN).
+    if (m.version < 1 || m.version > 5)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 5)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -343,8 +352,18 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 if (ks != kpv) fail(aw, "kernels_s and kernels_pv cover different windows");
             }
             if (g.kind == "dense") {
-                if (g.program.size() != 5)
-                    fail(gw, "a dense route has exactly 5 steps (qkv3, o, gate, up, down), has " + std::to_string(g.program.size()));
+                // 4 steps: gate|up through the glu epilogue, down reading its H operand (OPEN-PREFILL-BFP16-FFN)
+                const bool glu = g.program.size() == 4 && g.program[2].epi == "glu" && g.program[3].a_from == "h" &&
+                                 g.program[3].args.size() > 1 && g.program[2].args.size() > 2 &&
+                                 g.program[3].args[1] == g.program[2].args[2];
+                if (g.program.size() != 5 && !glu)
+                    fail(gw, "a dense route has 5 steps (qkv3, o, gate, up, down), or 4 with gate|up's glu H as down's x; has " +
+                                 std::to_string(g.program.size()));
+                for (size_t i = 0; i < g.program.size(); ++i)
+                    if ((!g.program[i].epi.empty() && !(glu && i == 2)) || (!g.program[i].a_from.empty() && !(glu && i == 3)))
+                        fail(gw, "step " + g.program[i].kernel + ": epi / a only on a 4-step route's gate|up and down");
+                if ((glu || g.program.size() == 4) && m.version < 5)
+                    fail(gw, "a glu route needs manifest_version 5; an engine that reads 4 would run it as five steps");
                 g.qw = get<uint64_t>(gj, "qw", gw);
                 g.kvw = get<uint64_t>(gj, "kvw", gw);
                 g.ff = get<uint64_t>(gj, "ff", gw);
@@ -561,7 +580,10 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             for (const auto& [name, w] : *ws) {
                 if (w.from == "pack") {
                     for (const auto& o : w.pack)
-                        if (o.op == "bfp16_gemm" && m.version < 4)
+                        if (!o.glu.empty() && m.version < 5)
+                            fail(tw, "gemm_block weight " + name + " packs a glu half in a manifest_version " +
+                                         std::to_string(m.version) + " manifest; it needs version 5");
+                        else if (o.op == "bfp16_gemm" && m.version < 4)
                             fail(tw, "gemm_block weight " + name + " packs " + o.op + " in a manifest_version " +
                                          std::to_string(m.version) + " manifest; an engine that reads 3 cannot pack it, so it needs version 4");
                         else if (o.op == "bf16_gemm" && m.version < 3)
