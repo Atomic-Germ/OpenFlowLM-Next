@@ -100,8 +100,8 @@ purpose. The harness does not set the power mode; the CLI pins `--pmode performa
   equal (a negative extreme is -127 where the host has -128), no measurable cost. Dead ends on the way: a per-group max exponent
   from `shuffle_down` maxima wrote wrong exponents in 80 % of blocks and tripled the dispatch; converting h's powers of two to
   read the converter's exponent crashed Peano's clang (a `block_vector_output_buffer_stream` over a stack array).
-- The engine's gate|up dispatch is slower than the harness's: in CLEAN units it blocks 1.72 ms at pp512 and 2.09 ms at pp2048
-  (plus ~0.15 ms of pack under it) against 1.56-1.71 ms alone in `run_kernel`. Why, and why more at 2048, was not isolated. An
+- The engine's gate|up dispatch may be slower than the harness's: in controlled units it blocks 1.72 ms at pp512 and 2.09 ms at
+  pp2048 (plus ~0.15 ms of pack under it); untimed `run_kernel` runs read 1.56-1.71 ms alone. Not established, cause unknown. An
   untimed thread-count probe that read 2.14 ms at 24 OpenMP threads and 1.63 at 6 ran while other tracks' NPU jobs could overlap
   it (`dibs` grants one session's tracks the NPU together), so it is not evidence for a power or DDR explanation.
 - Hiding host work under the dispatches did not pay: an o + FFN pipeline (o a block ahead, o's residual, norm and gate|up pack

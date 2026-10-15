@@ -4416,8 +4416,8 @@ lets one session's tracks hold the NPU together, and this track's own untimed pr
   Both units' controls read 10-12 % low (the first overlapped, the second ran in a slow state of the box), so those are
   comparisons, not the route's speed. In the first, gate|up's wait fell as down's rose by as much: the host work it moved under
   a dispatch did not come off the critical path. Why was not isolated.
-- The engine's gate|up dispatch blocks 1.72 ms at pp512 and 2.09 ms at pp2048 in the controlled units, against 1.56-1.71 ms
-  alone in `run_kernel`; the cause of the gap was not isolated.
+- The engine's gate|up dispatch blocks 1.72 ms at pp512 and 2.09 ms at pp2048 in the controlled units; untimed `run_kernel`
+  runs (not under a control) read it at 1.56-1.71 ms alone. Whether that gap is real, and its cause, were not established.
 
 **Result 2026-10-15, the host packer's rule on the core (`hold` in `mm_bfp_acc.cc`; the two-phase binary, untimed unless marked):**
 - Harness: H's bytes equal the host encode at 99.948 % (99.722 % without the hold) and its shared exponents in 262,139 of
