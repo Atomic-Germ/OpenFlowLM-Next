@@ -4295,6 +4295,10 @@ set, pp512 bfp16 with host attention, 868-1010 ms across the night's units).**
 pp512 and pp2048 come from one unit, pp1024 from another (controls 909 / 1009 and 879 / 884 ms). llama.cpp Vulkan on the
 same box (2026-10-14, the overnight plan's table): 753 / 766 / 641 tok/s.
 
+- *The full window* (the set with all 16 streams): `make_test.py --L 4096` (p0 3840) PASSes at rel_fro 1.17e-3, 10.1 ms a
+  dispatch. A 4000-token prompt, one run each (an indication, not a median): the bfp16 route 27.3 s (146 tok/s, 21.5 s of
+  it host attention) -> 9.6 s (416 tok/s) with the NPU attention; the bf16 route with it 18.0 s (222 tok/s).
+
 - At pp2048 on the bfp16 route (a 4125 ms run) the attention is 1.20 s of NPU dispatches (320) plus 0.17 s of host packing,
   where the host attention took 4.0-8.1 s (its spread is the host's); the rest is the untile / transposes (1.25 s, the next
   stage to move) and the tails (0.67 s). The host attention's own run-to-run spread at 2048 (7.1-10.9 s) is gone.
