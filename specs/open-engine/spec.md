@@ -4715,6 +4715,13 @@ is a single dispatch (the dense families) queues that dispatch itself behind the
 previous layer's; the deepstack path (Qwen3-VL reads `xres` back between layers)
 runs serially.
 
+`OFLM_OPEN_RUN_REUSE` (default `1`) has a one-dispatch layer, and a tail queued in
+the layers' context, restart the `xrt::run` it kept from the previous step instead
+of building a new one per dispatch; `0` builds anew. The commands are the same, so
+the logits are too. Measured on Granite 4.2 3B only (2026-10-15, with the CLI's
+argmax fix, OPEN-DECODE-ONE-CONTEXT-DENSE): ~0.1-0.2 ms a token; the multi-dispatch
+(MoE) layers build anew as before.
+
 **Verification (manual):**
 1. **Bit-exact, 19 ids, 4 layers, sequential.** `open_qwen36_cli --model <35B>
    --kernels <set> --pmode performance --layers 4 --ids
@@ -4896,5 +4903,15 @@ prompts, and the head queued ahead bit-exact as well as serial. `dxh` runs in 3.
 `lm` at 0.19-0.26 + 3.63-3.83 ms in their own contexts, and the first layer of a token no longer pays +1.1 ms. Real
 step at position 0, min / median ms: 41.2 / 41.4 (24.15 tok/s; base 46.3 / 46.4 in the same sitting). Plain decode,
 tg128 after a 0 / 512 / 1024 / 2048-token prompt (`bench.py decode`, 3 runs a process, median tok/s): base 20.61 /
-17.42 / 15.04 / 12.19, now 22.96 / 19.08 / 16.22 / 13.05 -- the same ~5 ms a token at every depth. tg128 "at 0" sits
-2.2 ms under the position-0 step on both sets: it averages positions 1-128, where attention already grows.
+17.42 / 15.04 / 12.19, now 22.96 / 19.08 / 16.22 / 13.05 -- the same ~5 ms a token at every depth. A tg128 token "at 0"
+cost 2.2 ms more than the position-0 step on both sets: it averages positions 1-128, where attention already grows,
+and 0.7 ms of it was the CLI's scalar argmax over 100352 logits (now AVX2, the same answer; see the skill).
+
+**Re-check 2026-10-15 05:00, a control in every unit.** dibs counts every track of one session as one holder, so a
+sibling's NPU run can land inside a CLEAN unit. Each unit re-ran with a control (the committed CLI's tg128 at ctx 0 on
+the final set, known 22.96 tok/s; void if more than 5% off; every control 22.19-23.13). tg128 medians at 0 / 512 /
+1024 / 2048: base set 20.65 / 17.51 / 15.34 / 12.02, final set 23.03 / 19.33 / 16.69 / 13.08, final set with the CLI's
+argmax and OPEN-DECODE-PIPELINE's run reuse 23.40 / 19.62 / 16.93 / 13.19. Position-0 step min / median: base 46.0 /
+46.2, final 41.1 / 41.2 ms. Uno sweep: base 1.06x, final 0.95x, all identical. Gates for the CLI change against the
+committed CLI on the final set: 70 + 20 and 2100 + 20 logit files byte-identical, six prompts x 96 identical, ROWS PASS.
+(`utilities/decode-gates/tg_control.py` runs such a unit.)

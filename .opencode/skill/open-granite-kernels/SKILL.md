@@ -292,6 +292,32 @@ because it averages positions 1-128. **Uno did not move** (`dxl` / `lmhl` have n
 it on the chat and code prompts (sweep 1.07x -> 0.95x geomean, all identical); the same ring and a `lmhl`-as-second-
 stream on `dxl`'s image are the obvious next port.
 
+**The host gap between tokens.** Timestamps around the step boundary (a scratch build of the CLI, 128 tokens, CLEAN):
+from `dxh`'s wait returning to layer 0's start() returning took 0.82-0.89 ms a token, and 0.69-0.74 of it was the
+CLI's `argmax` over 100352 logits -- `v[i] > v[best]` reloads v[best] through the index it just picked, a dependent
+load chain, run at the clock a host core has after a 40 ms block. The rest: read back 0.01, memcpy 0.02, the per-step
+stderr line 0.04, embed + patch 0.01, layer 0's submit 0.04-0.05 (stderr to a file instead of a pipe: no change). The
+CLI's argmax is now AVX2 with the scalar loop's exact answer (200k edge-case vectors: NaN, +-0, +-inf, subnormals,
+ties), and one-dispatch layers restart a kept `xrt::run` instead of building one per dispatch (`OFLM_OPEN_RUN_REUSE=0`
+builds anew; ~0.1-0.2 ms a token). Still scalar 100k passes a token: `Engine::logits_view` (the app's path, not
+measured) and the CLI's `argmax_bf16`, which the uno sweep's plain-decode column uses.
+
+**Re-check with a control (end of the night).** dibs counts every track of one session as one holder, so a sibling's
+`dibs run npu` can land inside a unit that still prints CLEAN (the night's `--rows-check` gate printed 126.5 ms a pass;
+the same check alone reads 63.9). Every NPU run, timed or not, goes through `dibs run --measure`, and every unit carries
+a control: the committed CLI's tg128 at ctx 0 on the final set, known 22.96 tok/s, the unit void if it is off by more
+than 5% (`utilities/decode-gates/tg_control.py`: control, configs interleaved per depth, control). Re-checked CLEAN
+medians, every control within 5%:
+
+| tg128 after a prompt of | 0 | 512 | 1024 | 2048 |
+|---|--:|--:|--:|--:|
+| base set, committed CLI | 20.65 | 17.51 | 15.34 | 12.02 |
+| final set, committed CLI | 23.03 | 19.33 | 16.69 | 13.08 |
+| final set, this CLI (argmax, run reuse) | 23.40 | 19.62 | 16.93 | 13.19 |
+
+Position-0 step min / median: base 46.0 / 46.2, final 41.1 / 41.2 ms (41.1 / 41.4 on the committed CLI). Uno sweep:
+base 1.06x, final 0.95x geomean, all identical.
+
 **Bytes.** The weight stream is now within ~1% of the 8-stream rate, so the next ctx-0 lever is fewer bytes. A
 Q4_0-native chunk (`GEMV_Q4_0_NATIVE`, `LMHEAD_Q4_0=1`: 4608 B, no m plane, m = -8 d in-register) streams the head in
 2.739 ms against 3.046 for the same blocks in 5120 B chunks, 52.8 against 52.7 GB/s, bit-identical

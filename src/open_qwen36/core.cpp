@@ -1997,7 +1997,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             timing_.dispatch_ms += elapsed;
         }
         if (!head.active()) {
-            head = start_run(kerns_.at(prog.front().kernel), prog.front().args, l, run_reuse_);
+            head = start_run(kerns_.at(prog.front().kernel), prog.front().args, l, run_reuse_ && prog.size() == 1);
             timing_.part0_ms += head.submit_ms;
             timing_.dispatch_ms += head.submit_ms;
         }
@@ -2030,7 +2030,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                     route(kerns_.at(s.kernel), l, s.act_off);
                 }
             }
-            tail_in = start_run(kerns_.at(prog.back().kernel), prog.back().args, l, run_reuse_);
+            tail_in = start_run(kerns_.at(prog.back().kernel), prog.back().args, l);
             timing_.part1_ms += tail_in.submit_ms;
             timing_.dispatch_ms += tail_in.submit_ms;
         }
@@ -2040,7 +2040,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             const bool next_ok = !next.empty() && next.front().op == "run" && next.back().op == "run";
             Kern& nk = next_ok ? kerns_.at(next.front().kernel) : *tail_in.k;
             if (next_ok && (submit_ahead_ >= 2 || nk.ctx == tail_in.k->ctx)) {
-                head = start_run(nk, next.front().args, l + 1, run_reuse_);
+                head = start_run(nk, next.front().args, l + 1, run_reuse_ && next.size() == 1);
                 timing_.part0_ms += head.submit_ms;
                 timing_.dispatch_ms += head.submit_ms;
             }
