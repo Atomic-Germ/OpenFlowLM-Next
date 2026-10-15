@@ -153,11 +153,11 @@ Measuring, `utilities/spec-lookup/spec_lookup.py` (absolute paths everywhere: th
 
 What it buys on Granite 4.2 3B (OPEN-FAMILY-GRANITE-UNO, 2026-10-15): lookup pays wherever the answer repeats the
 context (a whole-file bug fix 3.1x, 43.6 tok/s; an edit 1.8x; quoting / document Q&A 1.5-1.75x) and little on fresh
-reasoning text; Uno pays on math / code and loses on chat; the adaptive choice is the best geomean at short context and
-2048 and within ~3% elsewhere, but up to 9% behind the best single method on a given prompt. The pass cost is the
-lever: a verify pass is 1.33 / 1.26 / 1.24 plain steps at context 0 / 1024 / 2048 and the draft pass 1.56 / 1.44 /
-1.37. Offline, a verify pass at 1.10 steps would lift adaptive on reasoning text from ~1.15x to ~1.30x (estimate); 2 or
-8 rows would not (8 helps only whole-file rewrites).
+reasoning text (1.10-1.17x); Uno pays on math / code and loses on chat. The adaptive choice is the best geomean at
+short context and 2048 and within 3% elsewhere, from 6% behind to 5% ahead of the better single method on a given
+prompt. The pass cost is the lever: a verify pass is 1.33 / 1.26 / 1.24 plain steps at context 0 / 1024 / 2048 and
+the draft pass 1.56 / 1.44 / 1.37. Offline, a verify pass at 1.10 steps would lift adaptive on reasoning text from
+~1.15x to ~1.30x (estimate); 2 or 8 rows would not (8 helps only whole-file rewrites).
 
 Traps:
 - In a worktree-isolated agent, `cmd.exe /c` and `powershell -File` are refused (they could run git). Run a `.cmd`
