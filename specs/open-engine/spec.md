@@ -1207,7 +1207,7 @@ originals under `q4nx_folded_multipliers`.
 - HF and GGUF derivations agree; the RoPE table is the plain unscaled `1e7^(-2i/64)`; `rope_scaling` and tied embeddings are refused by name.
 - An unfolded `attention_multiplier`, or any of the other three unequal to 1.0, is refused by name and names q4nx-build as the fix — from HF `config.json` and from GGUF metadata alike.
 - `hf_config_check` carries `attention_multiplier`, so the **engine** refuses an unfolded container at load, not only the recipe at generation.
-- The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `ln` + `lm` tail.
+- The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `dxh` tail in `dx`'s context (OPEN-DECODE-ONE-CONTEXT-DENSE; the GGUF-direct section keeps `ln` + `lm`).
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Granite-4.2-3B-NPU2`, `out_gr`, prompt id 100264 (`<|start_of_role|>` — *not* `config.json`'s `bos_token_id` 100283, which is `</documents>` and disagrees with `tokenizer_config.json`'s own bos). Three catalogue points entered with it: `attn.head_dim 64`, `attn.num_heads 40`, `gemv_q4.K 8192`.
 
@@ -4831,3 +4831,61 @@ two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; pos
 1024 79.3-80.3 / 80.5-83.0 against 62.9-63.6 / 64.4 (the walk's `ax0` penalty, +0.95 ms
 a call on two contexts, goes to noise). Detail:
 `.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.
+
+### OPEN-DECODE-STREAM: dx's weights stream through a memtile ring, each phase's weights queued ahead of its wait
+**Applies to:** openflowlm-next (`open_kernels/designs/dense/dx.py`, `open_kernels/recipes/dense.py` `stream_knobs()`)
+**Verification:** manual (the NPU and the model; every timing is `dibs run --measure` CLEAN)
+
+For a dense family in `STREAM_MEASURED` (Granite 4.2 3B, q4_1 containers), each main core's weight fifo shall run
+shim -> a `WRING_DEPTH`-deep ring of 10 KB elements in its column's memtile -> core, the ring's memtile channels
+pinned to 0 (in) and 1 (out), and the layer's host sequence shall queue each phase's first weight fills ahead of the
+activation wait in front of that phase: o behind the xn fill, the first up | gate band behind the og fill, down
+behind the last up | gate band. Every core receives the same bytes in the same order, so every logit is unchanged.
+- Why: a core's weight fifo is 2 x 10 KB of L1, so DDR stopped 20 KB into every wait on an activation, and each
+  phase's first fill was only issued after it; `dx` streamed at 46.9 GB/s against the head's 51.7 on the same 8
+  streams.
+- Every other family, and Granite's f32-scale twin `dx_f32`, builds byte-identically (the MLIR is unchanged with
+  the knobs off). `DX_WRING=<n>` (0 off, at most 24) and `DX_WORDER=0|1` force either for an A/B build; both are
+  probe variables, so they are in the build key (OPEN-BUILD-CACHE).
+
+**Verification (manual):**
+1. Build `dx` (and `dxh`) with the knobs and without (`export_qwen36_kernels.py --only dx,dxh --out <dir>`), overlay
+   each on a copy of the union set with that export's manifest, and run the dump-logits gate over 70 prompt tokens +
+   20 decoded and over 2100 + 20, one token at a time (`utilities/decode-gates/decode_gates.py logits --prompt 70|2100`):
+   every logit file byte-identical.
+2. The six `utilities/uno-ref` prompts x 96 greedy tokens identical (`decode_gates.py greedy`); `--rows-check 17`
+   ROWS PASS; the Uno sweep (`utilities/uno-bench`) IDENTICAL.
+3. `decode_gates.py stepab --position 0` (`--bench-decode 5 --bench-step 12`, sets interleaved, 2 rounds) under
+   `dibs run --measure`, and tg128 at depth through `utilities/granite-combined-bench/bench.py decode`.
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, `--pmode performance`, every timing CLEAN).** Gates on the ring alone and on
+the final set (ring + one context): the 70 + 20 and 2100 + 20 logit files byte-identical to the base set, the six
+uno-ref prompts x 96 greedy tokens identical, `--rows-check 17` ROWS PASS. Real step at position 0, interleaved, min /
+median ms: base 46.3-46.6 / 46.4-46.9, ring 44.0-44.1 / 44.2-44.4. Same sitting, not kept: a 24-deep ring 41.0 / 41.6
+against 16-deep 41.2 / 41.4 (with one context); the layer's unused last xn and its drain dropped, 41.1 / 41.4.
+
+### OPEN-DECODE-ONE-CONTEXT-DENSE: a dense decode token runs in one hardware context
+**Applies to:** openflowlm-next (`open_kernels/designs/dense/dx.py` `DX_ONECTX` / `DX_HEAD`, `open_kernels/recipes/dense.py`
+`one_context()` / `programs()` / `builds()`, `src/open_qwen36/core.cpp` `Core::step_impl`)
+**Verification:** manual (the hardware claims) + test (the recipe emission, `tests/test_granite.py`)
+
+For a family in `ONE_CTX_MEASURED` (Granite 4.2 3B, q4_1), the token's tail -- final RMSNorm and LM head -- shall be
+`dxh`, a second instruction stream over `dx`'s image, named in context `dx`, so a decode step changes hardware
+context zero times (it was three: dx -> ln -> lm -> dx). The main cores and the ln core read a per-dispatch RTP word:
+a head pass runs the layer-entry norm with w = normw and then the q|k|v GEMV with `LMHEAD_BANDS / 8` bands instead of
+7 on the same table, and stops; a layer pass runs as before. The engine queues a tail that shares the layers'
+context behind the last layer, like a layer (OPEN-DECODE-PIPELINE, level 1).
+- Bit-identical by construction: `ln_nr` is `ln_xn`'s arithmetic at add = 0 (the old tail ran `ln_xn` with a zero
+  add), and the bands, chunks and GEMV entry are `lm_head_q4`'s.
+- The cores read the RTP word only after the dispatch's first data has landed (x on the main cores, the entry norm's
+  inputs on the ln core). Read right after the barrier it was the previous dispatch's: layer -> head hung (ERT
+  state 8) while layer -> layer and head -> head ran.
+- The GGUF-direct section keeps its `ln` + `lm_head_q4_f32` tail; every other family's manifest and kernels are
+  unchanged. Rollback: `DX_ONECTX=0` at export (a probe variable, in the build key) builds the old `ln` + `lm` tail.
+
+**Acceptance criteria (test):** for the Granite 4.2 3B spec, `programs()`'s tail is one `dxh` run in context `dx`
+with args `lmpool, xres, normw, logits, hn, zero`, `hn` is two 4 KB elements, `builds()` carries `dxh` with
+`DX_HEAD=1`, and the `gguf` section's tail is still `ln` + `lm`.
+
+**Verification (manual):** as OPEN-DECODE-STREAM's 1-3, plus `dx/final.xclbin` and `dxh/final.xclbin` equal apart
+from build stamps (`export_qwen36_kernels.xclbin_equivalent`).

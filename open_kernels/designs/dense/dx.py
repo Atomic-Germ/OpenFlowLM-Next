@@ -163,7 +163,7 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position r
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
-    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8", "DX_WRING", "DX_WORDER", "DX_ONECTX", "DX_NOJUNK"):   # RB is in the flags above via G.RB; FAST picks G itself.
+    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8", "DX_WRING", "DX_WORDER", "DX_ONECTX"):   # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 T8 = tree8(SPEC, G.NHL, G.RB, G.HD)
@@ -171,7 +171,6 @@ if T8:
     ATTN_FLAGS.extend(tree8_flags(4))
 ASTACK = TREE8_STACK if T8 else 0x1800
 WRING, WORDER = stream_knobs(SPEC)                     # OPEN-DECODE-STREAM
-NOJUNK = os.environ.get("DX_NOJUNK", "0") == "1" and not G.SANDWICH   # the layer's last norm skips its unused xn
 ONE_CTX = one_context(SPEC)                            # the head runs on these cores, as a second stream
 HEAD = int(os.environ.get("DX_HEAD", 0))               # 1: build that head stream instead of the layer's
 assert ONE_CTX or not HEAD, "DX_HEAD: this spec has no one-context head"
@@ -450,9 +449,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         else:
             if stop >= 3:                      # group 2 runs from the o projection on
                 add_norm(True)                 # 2. res = x + out; xm = post_attn_norm(res)
-            if stop >= 99 and NOJUNK:
-                add_norm(False)                # 3. xres = res + out2, nothing else on the layer's tail
-            elif stop >= 99:                   # group 3 only in the full layer
+            if stop >= 99:                     # group 3 only in the full layer
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
 
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
@@ -771,8 +768,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_RES, HID * 4), wait=True, group=tg_ln3)
             lni.fill(a_consts, tap=bt(L.CD_BYTES, L.CD_POSTLN, ELN), wait=True, group=tg_ln3)
             lno.drain(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln3)
-            if not NOJUNK:
-                lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_JUNK, ELN), wait=True, group=tg_ln3)
+            lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_JUNK, ELN), wait=True, group=tg_ln3)
             py.finish()                                           # out2 is in DDR
             lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2, HID * 4), wait=True, group=tg_ln3)
         tg_ln3.finish()
