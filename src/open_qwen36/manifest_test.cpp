@@ -628,7 +628,8 @@ int main(int argc, char** argv) {
                     pj["manifest_version"] = 6;
                     pj["kernels"]["afp"] = {{"context", "af"}, {"insts", "afp/insts.bin"}};
                     pj["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"] = {{"kernel", "afp"}, {"n_pad", 4096}};
-                    const AttnFa& pf = Manifest::parse(pj, "attn_fa prep").layer_types.at("dense").gemm_block.attn_fa;
+                    const Manifest pm = Manifest::parse(pj, "attn_fa prep");
+                    const AttnFa& pf = pm.layer_types.at("dense").gemm_block.attn_fa;
                     check(pf.has_prep() && pf.prep_kernel == "afp" && pf.prep_npad == 4096, "attn_fa: a prep stream parses");
                     auto refused_prep = [&](const char* what, const char* label, const std::function<void(json&)>& edit) {
                         json e = pj;

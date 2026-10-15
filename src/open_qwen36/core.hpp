@@ -388,7 +388,7 @@ private:
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool attn_fa_on_ = true;     ///< a dense set's attn_fa in place of the host attention (OFLM_OPEN_ATTN_FA=0 off)
     size_t af_blocks_ = 0;       ///< af_q#b / af_o#b buffers allocated: one Q and one O a 256-token block
-    bool attn_prep_on_ = true;   ///< attn_fa's prep stream does the bfp16 route's rope / Q pack / cache write (OFLM_OPEN_PREFILL_PREP=0 off)
+    bool attn_prep_on_ = false;  ///< attn_fa prep stream does the bfp16 route rope / Q pack / cache write (OFLM_OPEN_PREFILL_PREP=1 on; slower today)
     bool prep_run_ = false;      ///< this prompt runs it (prep_setup)
     size_t prep_pos0_ = 0;       ///< its first position
     std::map<std::tuple<int, size_t, size_t>, xrt::bo> kv_sub_;   ///< (layer, block, pos0) -> the cache rows the block writes

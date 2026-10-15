@@ -4658,7 +4658,8 @@ per prompt and shared by all 40 layers. The core program is attention's, with pr
 dispatch and attention loops of trip count 0 in a prep dispatch (`RTP_TBL`, `RTP_PQ`, `RTP_PKV`), so one xclbin serves all
 streams; each stream takes a fourth buffer, the table, hence `manifest_version` 6 and a rebuilt `af` family.
 
-`OFLM_OPEN_PREFILL_PREP=0` restores the host rotation / pack (the streams still take the fourth buffer). A prompt whose first
+**Opt in: `OFLM_OPEN_PREFILL_PREP=1`.** It is off by default because it is slower today (results below); off, the host rotates
+and packs as before (the streams still take the fourth buffer). A prompt whose first
 position makes `pos0 * state_row` not a multiple of 4096 (an odd `pos0`), whose last window is wider than `attn_fa.l_max`, or
 on a bf16-route set takes the host path.
 
@@ -4672,7 +4673,30 @@ on a bf16-route set takes the host path.
    (bf16 ulp differences only), records intact.
 2. The model: `prefill_mode_check.py` bfp16 route with and without `OFLM_OPEN_PREFILL_PREP`: corr >= 0.995 at 512 (and report 2048),
    perplexity within 1 %, KL against the host-rotation route, the six greedy continuations; decode logits byte-identical.
-3. Timing: pp512 / 1024 / 2048, `OFLM_OPEN_PREFILL_PREP=0/1` interleaved with a control, under `dibs run --measure`.
+3. Timing: pp512 / 1024 / 2048, `OFLM_OPEN_PREFILL_PREP=0/1` interleaved with a control, under `dibs run --measure`
+   (`utilities/dense-decode-probe/prefill_ab.py` with a `::ENV=VAL` variant suffix).
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, bfp16 route, the union set of `perf/granite-overnight` 152f5e2 plus the rebuilt
+`af*` family and `afp`; the unit printed CLEAN before and after, control = the union tree's own CLI and set, pp512, 3 runs).**
+- *The kernel* (step 1, p0 256, seed 0): Q (hi + lo) rel_fro 8.2e-6 against the numpy fp32 pipeline, K rows 99.83 % of bytes
+  equal (the rest one bf16 ulp), V 100 %, records intact, PASS. Program memory of the shared core: 14128 of 16384 B (attention
+  alone 9968): the prep code is 4160 B. A dispatch is 1.25 ms steady (0.77 ms with the compute stubbed, so the dataflow
+  dominates: 12 passes, each waited for).
+- *The model:* against the default (bf16) route at 512 random ids, corr min 0.997523 mean 0.999590, argmax 484 / 512
+  (flips at margins up to 0.189); without prep 0.997877 / 0.999594, 489 / 512. Against the host rotation directly corr min
+  0.9942 (mean 0.99978, 10 flips of 513): the bfp16 route amplifies a 1e-5 change in Q (the host path is bit-reproducible
+  run to run: corr 1.0). A 40-token greedy continuation after a 512-token prompt, decoding from the device-written cache, is
+  token-identical with and without prep.
+- *Speed, tok/s min / median / max:* pp512 prep off 635 / 658 / 662, on 613 / 623 / 624 (control 671 / 712 / 723);
+  pp1024 off 632 / 691 / 761, on 661 / 679 / 700; pp2048 off 693 / 719 / 730, on 663 / 672 / 675. **Prep is 5-7 % slower.**
+  The host work it removes is rope + KV write 16 / 61 ms, Q pack 28 / 105, Q and cache syncs 5 / 20, the qkv copy 29 / 118
+  (pp512 / pp2048): 79 / 304 ms in the qkv post. The prep dispatches cost 211 / 521 ms (80 / 320 dispatches, 2.6 / 1.6 ms
+  each, the first of a layer carrying the context switch that attention used to carry). To win, a dispatch has to be under
+  ~0.9 ms steady.
+- *What hangs:* two passes in flight (`AF_PREP_INFLIGHT=2`) hang the array whenever a second input stream is consumed
+  (the table group, or two kv passes); Q passes alone run 10 deep at 2 in flight. Bisected with the `AF_PREP_NQ/NKV/NTBL`
+  knobs and `AF_ABL=8` (compute stubbed). One pass at a time (the shipped setting) is stable. Cause unknown; a timing race
+  in the core's dynamic-objFifo loops is the suspect, not the shim BD count.
 
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
