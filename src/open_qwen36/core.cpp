@@ -28,6 +28,7 @@
 
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
+#include "nlohmann/json.hpp"
 
 #include "open_qwen36/block_host.hpp"
 
@@ -352,6 +353,25 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         wanted[man_.rows.head] = true;
         if (cfg_.draft && !man_.rows.lora_kernel.empty()) wanted[man_.rows.lora_kernel] = true;
     }
+    // OPEN-PREFILL-SHARED-CONTEXT: the bfp16 route's GEMM and attention streams as one full ELF
+    if (const char* env = std::getenv("OFLM_OPEN_PREFILL_ELF"); env && std::string(env) == "1") {
+        const fs::path mp = fs::path(cfg_.kernel_dir) / "prefill_elf.json";
+        if (!fs::exists(mp)) throw std::runtime_error("open_qwen36: OFLM_OPEN_PREFILL_ELF=1 but " + mp.string() +
+                                                      " is missing (open_kernels/compose_prefill_elf.py builds it)");
+        const auto mraw = read_file(mp);
+        const auto meta = nlohmann::json::parse(mraw.begin(), mraw.end());
+        elf_ = xrt::elf((fs::path(cfg_.kernel_dir) / meta.at("elf").get<std::string>()).string());
+        // high priority: another process taking the NPU between our commands hangs a register-write context otherwise
+        elf_ctx_ = std::make_unique<xrt::hw_context>(*dev_, elf_, xrt::hw_context::cfg_param_type{{"priority", 0x180}},
+                                                     xrt::hw_context::access_mode::shared);
+        for (const auto& [set, names] : meta.at("streams").items()) {
+            for (const auto& n : names) elf_stream_set_[n.get<std::string>()] = set;
+            const auto& c = meta.at("cfg").at(set);
+            for (int v = 0; v < 2; ++v)
+                elf_cfg_[set][v] = std::make_unique<xrt::ext::kernel>(*elf_ctx_, c[v].get<std::string>());
+        }
+        log("prefill ELF: " + std::to_string(elf_stream_set_.size()) + " streams in one hardware context");
+    }
     for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
     logits_host_.assign(w_->vocab, 0.f);
@@ -548,6 +568,12 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     k.name = name;
     k.patch = d.patch;
     k.ctx = d.context;
+    if (auto e = elf_stream_set_.find(name); e != elf_stream_set_.end()) {
+        k.ctx = "elf";
+        k.elf_set = e->second;
+        k.ek = std::make_unique<xrt::ext::kernel>(*elf_ctx_, e->second + ":" + name);
+        return;
+    }
     k.k = std::make_unique<xrt::kernel>(context(d.context), "MLIR_AIE");
     auto insts = read_file(p);
     if (insts.empty() || insts.size() % 4) throw std::runtime_error("open_qwen36: " + p.string() + " is not word-sized");
@@ -928,8 +954,24 @@ Core::Inflight Core::start_run(Kern& k, const std::vector<std::string>& args, in
                    ? std::chrono::duration<double, std::milli>(f.t0 - last_done_).count()
                    : -1.0;
     f.ctx_change = last_dispatched_ && last_dispatched_->ctx != k.ctx;
+    // a register-write set is configured again whenever the dispatch before it was not in that set
+    const bool need_cfg = k.ek && !(last_dispatched_ && last_dispatched_->ek && last_dispatched_->elf_set == k.elf_set);
     last_dispatched_ = &k;
     ++dispatches_;
+    if (k.ek) {
+        if (need_cfg) {
+            f.pre = xrt::run(*elf_cfg_.at(k.elf_set)[elf_flip_]);
+            elf_flip_ ^= 1;
+            f.pre.start();
+        }
+        f.r = xrt::run(*k.ek);
+        int j = 0;
+        for (const auto& a : args) f.r.set_arg(j++, buffer(a, layer));
+        f.submit_ms = ms_since(f.t0);
+        f.t1 = std::chrono::steady_clock::now();
+        f.r.start();
+        return f;
+    }
     // building and freeing a run per dispatch cost ~0.1 ms a token, part of it at the step boundary with the array idle
     xrt::run* kept = reuse ? &k.runs[layer] : nullptr;
     if (kept && *kept) {
@@ -1015,6 +1057,7 @@ std::pair<double, double> Core::wait_run(Inflight& f) {
                                  (st == ERT_CMD_STATE_TIMEOUT ? " (timeout)" : "") + ", dispatch #" +
                                  std::to_string(dispatches_));
     }
+    if (f.pre) f.pre.wait();
     last_done_ = std::chrono::steady_clock::now();
     const double elapsed = ms_since(t1), blocked = ms_since(tw);
     if (step_trace_) trace_.push_back({&k, layer, f.submit_ms, elapsed, blocked, gap_ms, f.ctx_change});

@@ -33,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <array>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -41,6 +42,9 @@
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
+#include "xrt/experimental/xrt_elf.h"
+#include "xrt/experimental/xrt_ext.h"
+#include "xrt/experimental/xrt_kernel.h"
 
 #include "open_qwen36/block_host.hpp"
 #include "open_qwen36/gguf_file.hpp"
@@ -311,6 +315,8 @@ private:
         std::string patch;
         std::string ctx;                             ///< the hardware context it runs in (manifest `contexts`)
         std::unique_ptr<xrt::kernel> k;
+        std::unique_ptr<xrt::ext::kernel> ek;        ///< the prefill ELF's stream (OFLM_OPEN_PREFILL_ELF=1); k and instr are then unset
+        std::string elf_set;                         ///< its set in that ELF (gemmbfp, af)
         std::unique_ptr<xrt::bo> instr;
         std::vector<uint32_t> words;
         std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
@@ -333,6 +339,11 @@ private:
     std::unique_ptr<xrt::device> owned_dev_;
     xrt::device* dev_ = nullptr;
     std::map<std::string, std::unique_ptr<xrt::hw_context>> ctxs_;
+    xrt::elf elf_;                                          ///< prefill.elf: the bfp16 route's GEMM and attention streams in one context
+    std::unique_ptr<xrt::hw_context> elf_ctx_;
+    std::map<std::string, std::array<std::unique_ptr<xrt::ext::kernel>, 2>> elf_cfg_;   ///< per set, its two configure kernels
+    std::map<std::string, std::string> elf_stream_set_;     ///< stream -> set
+    int elf_flip_ = 0;
     std::map<std::string, Kern> kerns_;
 
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
@@ -560,6 +571,7 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
         bool ctx_change = false; ///< the dispatch before it ran in another hardware context
         std::chrono::steady_clock::time_point t0, t1;   ///< entry, and the moment start() returned
         xrt::run r;
+        xrt::run pre;            ///< the ELF set configure queued ahead of r, if any
         bool active() const { return k != nullptr; }
     };
     /// Build the command (or, with `reuse`, restart this layer's last one), set its arguments and start() it. Nothing waits.
