@@ -3090,7 +3090,16 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     apply_thread_budget();
     if (!layer_major_ok()) throw std::runtime_error("open_qwen36: step_gemm_prompt on a kernel set without a layer-major block route");
     if (types_[0]->gemm_block.kind == "dense") {
-        step_gemm_prompt_dense(ids, want_logits);
+        try {
+            step_gemm_prompt_dense(ids, want_logits);
+        } catch (const std::runtime_error& e) {
+            // a register-write context loses its configuration when another process takes the NPU between two of our
+            // dispatches: run the prompt again on the xclbin contexts (pos_ moves only after a whole prompt)
+            if (!elf_ctx_) throw;
+            std::fprintf(stderr, "open_qwen36: prefill ELF failed (%s); this process now prefills on xclbin contexts\n", e.what());
+            drop_prefill_elf();
+            step_gemm_prompt_dense(ids, want_logits);
+        }
         return;
     }
     if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
@@ -3670,6 +3679,26 @@ void Core::prep_setup(size_t B, size_t T, size_t N, size_t pos0) {
         q.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     }
     prep_run_ = true;
+}
+
+void Core::drop_prefill_elf() {
+    std::vector<std::string> names;
+    for (auto& [n, k] : kerns_)
+        if (k.ek) names.push_back(n);
+    for (const auto& n : names) {
+        Kern& k = kerns_.at(n);
+        k.ek.reset();
+        k.elf_set.clear();
+    }
+    elf_cfg_.clear();
+    elf_stream_set_.clear();
+    elf_ctx_.reset();
+    elf_ = xrt::elf();
+    last_dispatched_ = nullptr;
+    inflight_ = 0;
+    qkv_pre_.k = nullptr;
+    qkv_pre_layer_ = -1;
+    for (const auto& n : names) load_kernel(n, w_->kernels.at(n));
 }
 
 void Core::step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits) {

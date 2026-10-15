@@ -703,6 +703,8 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);
     /// The dense kind over the whole prompt (OPEN-PREFILL-HOST-ATTN): host attention, each GEMM step over every block.
     void step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits);
+    /// Back from the prefill ELF to the xclbin contexts (a prefill hung on a foreign NPU process).
+    void drop_prefill_elf();
     void layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t T, size_t N, size_t pos0);
     /// Block b's residual, post-norm and router after the out / o GEMM, into moe_ at row b * T.
     void staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres);
