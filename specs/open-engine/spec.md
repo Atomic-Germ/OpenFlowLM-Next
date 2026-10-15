@@ -4347,9 +4347,8 @@ memtile's 8x8 -> row-major transform makes it the first 1152 words of the core's
 rule (`bfp16_encode_block`: the block's largest exponent, round to nearest even, a mantissa that rounds to 128 saturates at
 127): the converter alone raises the block's exponent instead, so the epilogue first holds a value whose significand is
 255/128 or more at 127/64 of its power of two, which encodes to 127 in its own binade and rounds as before in a lower one (a
-negative one encodes to -127 where the host has -128). The shim writes
-each core tile to an H slot of 8199 words (a whole number of bfp16 blocks) at (ff chunk x 4 + row block); down
-(`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
+negative one encodes to -127 where the host has -128). The shim writes each core tile to an H slot of 8199 words (a whole
+number of bfp16 blocks) at (ff chunk x 4 + row block); down (`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
 program (`rtp[0]` the K chunks between the first and the last, `rtp[1]` the epilogue mode), so the route keeps one hardware
 context. The host never holds gate, up or h: no untile, no SiLU, no encode of down's input, and xm is packed once. The qkv,
 o and down outputs are read c-tiled in place by the stage after them (`bfp16_c_row`), not untiled into a copy first; o's
@@ -4369,11 +4368,8 @@ running b - 1's residual under down(b). A family whose activation is not SiLU ke
 **Procedure:** `designs/gemm_bfp16/make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560 --ff 8192
 --N 3072`, `run_kernel.exe <dir>\run.cfg`, `make_test.py compare-glu --out <dir>`; then OPEN-PREFILL-BFP16's procedure.
 
-**Result 2026-10-15, first build (P2 overnight; Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; untimed unless marked):**
-- Before the change (base binary and set, pp512, second request, 933 ms): of 806 ms on the host, attention 208, the GEMM outputs'
-  untile and row copies 290, residual / norm / SiLU 159, bfp16 encode 87, syncs 40, input norm 18; the array's own GEMM time
-  (dispatch minima x calls) about 290 ms. At pp2048 (7991 ms): attention 4972, untile + copies 1364, residual / norm / SiLU 686,
-  encode 349, syncs 158.
+**Result 2026-10-15, first build (P2 overnight; Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; no timing here, the
+measured split is in the CLEAN result below):**
 - Harness: H's bytes equal the host encode at 99.72 %, decoded H against the exact h rel_fro 8.186e-3 (the host encode's own
   8.176e-3), down(H) against the decoded product rel_fro 2.5e-8, a plain shape on the new core program rel_fro 0.
 - The host changes are exact: every position's logits of a 512-token prompt are equal to the last bit between the base binary
@@ -4390,37 +4386,45 @@ running b - 1's residual under down(b). A family whose activation is not SiLU ke
   2048, every flip under 0.2; perplexity on 2047 README tokens 11.3731 (glu) against 11.4226 (ratio 0.9957). So this build
   passes the statistical criteria (perplexity, KL, corr mean) and misses two per-item extremes the five-step route set.
 
-**Result 2026-10-15, CLEAN (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; one `dibs run --measure` unit for 512 and
-1024 and one for 2048, each CLEAN before and after; three runs a cell, the variants interleaved and their order alternating,
-one discarded run first; the same kernel set for the two glu variants):**
+**Result 2026-10-15, CLEAN with a control (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; each a `dibs run --measure`
+unit, CLEAN before and after, three runs a cell, the variants interleaved and their order alternating, one discarded run first;
+the route as landed, with the hold below):** the control is this route's pp512, median 841-858 in every unit kept; a unit whose
+control is more than 5 % off is rerun (one was: 766). Two earlier units (02:43-02:51) read this route at 768 at pp512: `dibs`
+lets one session's tracks hold the NPU together, and this track's own untimed probe overlapped the first, so they are not quoted.
 
-| prefill, tok/s (min / median) | five-step bfp16 route (before) | this route | o + FFN pipeline (dropped) |
+| prefill, tok/s (min / median) | five-step bfp16 route (before) | this route (after) | after / before (median) |
 |---|---|---|---|
-| pp512 | 520 / 531 | **760 / 768** | 749 / 756 |
-| pp1024 | 381 / 388 | **487 / 492** | 474 / 491 |
-| pp2048 | 269 / 274 | **308 / 329** | 304 / 327 |
+| pp512 | 501 / 537 | **819 / 858** | 1.60x |
+| pp1024 | 423 / 423 | **549 / 554** | 1.31x |
+| pp2048 | 231 / 268 | **317 / 332** | 1.24x |
 
-- 1.45x, 1.27x and 1.20x the five-step route (medians), so the timing criterion holds at every length.
-- The median run, ms at pp512 / pp2048. Host attention 196 / 4122 (OPEN-PREFILL-HOST-ATTN, not this requirement). The four
-  GEMMs' blocked waits 282 / 979: gate|up 172 / 670, down 69 / 225, qkv 22 / 34, o 20 / 50. The host outside attention
-  168 / 1007: residual + norm passes 87 / 481, the qkv, o and gate|up packs 36 / 222, qkv's c-tiled -> q / k / v copy 28 / 201,
-  syncs 15 / 94. Before, the host outside attention was 579 / 2883 (untile and row copies 290 / 1499, residual / norm / SiLU
-  153 / 709, packs 79 / 382, input norms 18 / 101, syncs 37 / 187).
+- 512 and 1024 are one unit, 2048 another; each before / after pair is within one unit. The five-step route's pp2048 is the
+  noisiest cell tonight (medians 235-274 across units: its 4-6 s of host attention is exposed to any CPU load).
+- The default bf16 route, one unit, the same set and binary: pp512 238 / 239 against this route's 814 / 845 (3.5x), pp2048
+  181 / 187 against 315 / 324 (1.73x).
+- The median run, ms at pp512 / pp2048. Host attention 199 / 4226 (OPEN-PREFILL-HOST-ATTN, not this requirement). The four
+  GEMMs' blocked waits 212 / 943: gate|up 137 / 669, down 44 / 199, qkv 17 / 31, o 13 / 43. The host outside attention
+  166 / 893: residual + norm passes 86 / 434, the qkv, o and gate|up packs 34 / 205, qkv's c-tiled -> q / k / v copy 29 / 168,
+  syncs 14 / 78. Before, the host outside attention was 583 / 2689 (untile and row copies 287 / 1397, residual / norm / SiLU
+  168 / 657, packs 76 / 382, input norms 17 / 92, syncs 34 / 155).
+- Memory, one run each (process peaks): this route 6.59 GiB private / 8.52 GiB working set, the default route 4.90 / 6.81.
+  The bfp16 weights (3.6 GiB at 9 / 8 bytes a weight, padding included) replace the default route's packed weights rather than
+  adding to them, so the difference is 1.7 GiB. Load time was not measured.
 - The o + FFN pipeline (`Core::o_glu_phase`: o a block ahead, so block b's residual, norm and gate|up pack ran under o(b + 1)
-  and b - 1's down residual under gate|up(b)) was bit-identical and is not kept: it is no faster at any length. Its waits say
-  why: gate|up's fell (172 -> 146-156 ms at pp512) and down's rose by as much (64-69 -> 88-94). That fits host work slowing
-  the dispatch it runs beside (the CPU and the array share the package's power and DDR; the glu dispatch is 1.56-1.71 ms alone
-  in the harness, 2.14 ms min in the engine at 24 host threads, 1.63 at 6), so on this box overlap is not free; the mechanism
-  was not isolated.
+  and b - 1's down residual under gate|up(b)) was bit-identical and is not kept: interleaved with the two-phase route in two
+  units it was no faster, medians 756 against 768 and 754 against 754 at pp512, 327 against 329 and 304 against 306 at pp2048.
+  Both units' controls read 10-12 % low (the first overlapped, the second ran in a slow state of the box), so those are
+  comparisons, not the route's speed. In the first, gate|up's wait fell as down's rose by as much: the host work it moved under
+  a dispatch did not come off the critical path. Why was not isolated.
+- The engine's gate|up dispatch blocks 1.72 ms at pp512 and 2.09 ms at pp2048 in the controlled units, against 1.56-1.71 ms
+  alone in `run_kernel`; the cause of the gap was not isolated.
 
 **Result 2026-10-15, the host packer's rule on the core (`hold` in `mm_bfp_acc.cc`; the two-phase binary, untimed unless marked):**
 - Harness: H's bytes equal the host encode at 99.948 % (99.722 % without the hold) and its shared exponents in 262,139 of
   262,144 blocks (746 differ without; the 5 left are SiLU's 2^-15 across a power of two); decoded H against the exact h
-  rel_fro 8.180e-3 (the host encode's own 8.176e-3); down(H) 2.5e-8. The glu dispatch is 2.267 against 2.282 ms without, the
-  same sitting (three fastest of ten): no measurable cost. CLEAN, one binary on the two sets, min / median tok/s, with against
-  without: pp512 839 / 843 against 837 / 848, pp1024 560 / 576 against 557 / 561, pp2048 322 / 340 against 323 / 324. This
-  sitting ran both 9-17 % above the table above (pp512 848 against 768 median, nothing changed), which is why every
-  comparison here is within one unit.
+  rel_fro 8.180e-3 (the host encode's own 8.176e-3); down(H) 2.5e-8. CLEAN, one binary on the two sets interleaved in one
+  unit (controls 843 / 848 at pp512, in range), min / median tok/s with against without: pp512 839 / 843 against 837 / 848,
+  pp1024 560 / 576 against 557 / 561, pp2048 322 / 340 against 323 / 324: no measurable cost.
 - Against the default route: 512 random ids corr min 0.996279 mean 0.999582, argmax 487 / 512 (483 without, five-step 485),
   every flip under 0.2; chat prompts corr min 0.997736, every flip under 0.2 but code2's 0.209 (there without the hold too);
   greedy 80 tokens identical on 5 of 6: reason is now identical, chat differs at token 64, where the default route's top-2
