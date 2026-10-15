@@ -499,6 +499,6 @@ streams and `afp` are rebuilt together. From the integration set: copy it and
 `export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <copy> --only afp,af256,...,af4096` (17 builds, ~8 min at
 BelowNormal; `-Only` list is every `af<256 k>` up to 4096). Check one stream alone with
 `designs/attn_fa/make_prep_test.py make|compare` and `run_kernel.exe`. The engine uses it only with `OFLM_OPEN_PREFILL_PREP=1`
-(slower today, see OPEN-PREFILL-GLUE-PREP); `--prefill-mode bfp16` and a prompt starting at an even position.
-Traps: the cache window is an `xrt::bo` sub-buffer of `state` (4 KiB aligned: pos0 * 2048 B), which XRT accepted on the
+(level at pp512, +3 % / +11 % at pp1024 / pp2048 since the transpose rewrite, see OPEN-PREFILL-GLUE-PREP); `--prefill-mode bfp16` and a prompt starting at an even position.
+Rebuilding the 17 streams took 7 min at BelowNormal (2026-10-15, glue parity). Traps: the cache window is an `xrt::bo` sub-buffer of `state` (4 KiB aligned: pos0 * 2048 B), which XRT accepted on the
 `ext::bo`; an older engine passes three buffers to the new streams and hangs, hence the version bump.
