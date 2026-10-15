@@ -29,7 +29,8 @@ Gaussian: 0.6 % per operand). ggml-xdna's own log (`kernels/bfp16_gemm/results.l
   (`bfp16_untile_c`) so the stages after the GEMM are unchanged.
 - Manifest: `gemm_block_variants.bfp16` on the dense layer type (manifest_version 4), selected with
   `OFLM_OPEN_PREFILL_MODE=bfp16` / `open_qwen36_cli --prefill-mode bfp16`. Default stays the bf16 `gemm_block`.
-  The route runs layer-major with host attention only (`Core::layer_major_ok`), and refuses to load otherwise.
+  The route runs layer-major only (`Core::layer_major_ok`), and refuses to load otherwise. Its attention is the NPU's
+  `attn_fa` where the set carries it (OPEN-PREFILL-ATTN-FA; pp2048 269 -> 480 tok/s), the host's with `OFLM_OPEN_ATTN_FA=0`.
 
 ## Build (Windows)
 

@@ -4220,6 +4220,90 @@ A dense `gemm_block` set with no `attn_block`, no q/k norm, no sliding window, n
 
 **Result 2026-10-13 (Granite-4.2-3B-NPU2, q4_1, pp512, T 256, performance mode, quiet box):** `dxB` 8.45-8.82 s (58-60 tok/s); host attention block at a time 3.5-3.85 s (133-145); layer-major stage-major **2.28-2.33 s (220-225 tok/s)**. At 2048 tokens 14.4 s (142 tok/s): the host attention grows with position (5-6 s of it) and is not overlapped, so a long prompt wants the NPU attention products (`attn_block`, which needs `prep` for a no-norm family and hd 64 builds, not built). What is left at 512 is the projection GEMMs themselves: 2.3-2.5 TFLOPS per dispatch (`gemm_n8192_k2560` 5.3 ms min), about 1.15 s a block, so the route is NPU-bound.
 
+**2026-10-15:** a set whose dense type carries `attn_fa` (OPEN-PREFILL-ATTN-FA, Granite's) takes the same layer-major route with the attention on the NPU by default; the host attention here is then its `OFLM_OPEN_ATTN_FA=0` fallback, and the route for a prompt whose last window is wider than the set's widest `attn_fa` stream.
+
+### OPEN-PREFILL-ATTN-FA: a dense set's block attention as one NPU flash-attention dispatch a block
+**Applies to:** openflowlm-next (`open_kernels/designs/attn_fa/`, `open_kernels/recipes/dense.py`, `src/open_qwen36/{manifest,core}.cpp`, `utilities/dense-decode-probe/prefill_mode_check.py`, `utilities/granite-combined-bench/attn_bench.py`)
+**Verification:** test (the recipe emission, `tests/test_prefill_attn_fa.py`; the manifest schema, `manifest_test.cpp`) + manual (the kernel against fp64 and the model against the host attention, below)
+
+A dense layer type whose `gemm_block` carries `attn_fa` (the families in `recipes/dense.py BLOCK_ATTN_FA`, Granite only: head
+dim 64, full rotary, no q/k norm, no output gate, no window) runs each 256-token block's attention on the layer-major route
+(OPEN-PREFILL-HOST-ATTN) as ONE dispatch of `designs/attn_fa`: scores, the causal mask, the online softmax and both products
+stay on the array, and nothing between them comes back to the host. One xclbin (context `af`), an instruction stream per 256
+rows of window up to `attn_fa.l_max` (`af256` .. `af<l_max>`). It is the default on both GEMM routes (bf16 and
+`--prefill-mode bfp16`); `OFLM_OPEN_ATTN_FA=0` keeps the host attention for A/B and does not register the `af` context.
+
+What the host still does per block: RoPE on q and k, the bf16 KV-cache write (the rows decode reads), and packing Q as the
+kernel reads it (per head a record with p0, then per 32 tokens Q^T as bf16 hi / lo in log2 units, log2(e)/sqrt(hd) folded
+in). That is O(T x width) a block; nothing on the host grows with the window. The kernel reads K and V in place from the
+layer's KV cache (`state`) and writes O as the fp32 token rows the out projection reads, so neither is copied. Block 0's
+dispatch (and the switch into the `af` context) starts while the host still packs the last block; every block's dispatch
+runs in that one visit, so a layer pays two context switches, not two a block.
+
+The kernel: 4 groups of 8 cores; a pass is one query head's 256 tokens, each core 32 of them against every 64-key chunk of
+its kv head's window, broadcast to the group. The 32 query rows are the vector lanes (scores come out as S^T), so the row
+max, the rescale and the row sum are lane-wise. bf16 element-wise MACs into fp32 (a broadcast key or P element times a
+vector of rows); Q as a hi / lo pair (no q/k norm); an integer running max, so rescales are exact powers of two, applied
+only when a row's chunk max passes it by 16 (log2 units); 2^x as a degree-3 polynomial to bf16 precision (aie2p's bf16
+exp2 is Mitchell's, 6 % off); fp32 O and l, l summed from the bf16 P the product used. A fully masked chunk skips its
+compute.
+
+**Acceptance criteria (unit):**
+- The Granite emission carries `attn_fa` on `gemm_block` and on the `bfp16` variant: `hd` 64, `l_max` 4096, `q_head` 36864 (the record and Q hi / lo for 256 tokens), `qsplit`, streams `af256` .. `af4096` on context `af`; the builds pass `AF_L`, `AF_HEADS` 40, `AF_KV_HEADS` 8, `AF_KV_LD` 1024 (a KV row is every kv head's K then V), `AF_MAX_ROWS`, `AF_QSPLIT`; Qwen3-4B, Llama 3.1, Phi-4-mini, K2-Horizon and Gemma 3 carry none (`test_prefill_attn_fa.py`).
+- The parser: four windows of 256 rows parse with their kernels; a missing window, a head dim other than 64 and a `q_head` that is not the design's layout are refused (`manifest_test.cpp`).
+
+**Verification (manual):**
+1. The kernel: `designs/attn_fa/make_test.py --build <dir> --out <t> --L 512` (40 / 8 heads, a block at p0 256 against 512 cached rows, an attention-sink row), `run_kernel.exe <t>/run.cfg`, `compare.py <t>`: rel_fro <= 4e-3 against fp64, no NaN.
+2. The model against the host attention, both GEMM routes: `prefill_mode_check.py --arms <route>:host,<route>:npu --cases random,ppl --tokens 512` and `--tokens 2048`, then `--cases chat,decode`. Thresholds are OPEN-PREFILL-BFP16's: corr >= 0.995 at every position, an argmax flip only where the reference's top-2 margin is under 0.2, perplexity within 1 %, and the six `utilities/uno-ref` prompts' 80-token greedy continuations identical.
+3. Timing: `utilities/granite-combined-bench/attn_bench.py --lengths 512,1024,2048 --reps 3 --dispatch-log` under `dibs run --measure`, with a control in the unit.
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; every model and timing run in a
+`dibs run --measure` unit that printed CLEAN before and after, each with a control: the unchanged CLI on the unchanged
+set, pp512 bfp16 with host attention, 868-1010 ms across the night's units).**
+
+- *The kernel* (step 1): rel_fro 1.15e-3 against fp64, min row cosine 0.999995, no NaN. In the engine (`--dispatch-log`,
+  the bf16 route at pp2048) a dispatch costs ~0.1 ms plus ~0.69 ms per 256 rows of window: `af512` 1.47 ms, `af1024` 2.69,
+  `af2048` 5.64 (all 40 heads of one 256-token block), ~17 us a 64-key chunk a pass. A layer's first dispatch also
+  carries the switch into the `af` context (`af256` 3.2 ms against ~1.5 expected).
+- *Accuracy, the bf16 (default) route, NPU against host attention:* 512 random ids corr min 0.999835 mean 0.999978,
+  argmax 508 / 512 (flips at margins of 0.026 or less), perplexity 20.7226 -> 20.7152 (0.9996), KL 0.00023 nats; 2048
+  random ids corr min 0.999835 mean 0.999977, argmax 2030 / 2048 (margins 0.041 or less), perplexity over 2047 predictions
+  11.4226 -> 11.4098 (0.9989), KL 0.00019 nats; the six chat prompts corr min 0.99982-0.99991, one flip (margin 0.083),
+  all six 80-token greedy continuations identical. Every threshold holds, and OPEN-PREFILL-HOST-ATTN's tighter ones too
+  (corr >= 0.9998, flips under 0.05 at 512 random ids).
+- *Accuracy, 2048 tokens, the bfp16 route, NPU against host attention:* random ids corr min 0.998425 mean 0.999817, argmax
+  1980 / 2048 with every flip at a margin of 0.137 or less; perplexity 11.3597 -> 11.3685 (1.0008), KL 0.00115 nats.
+- *Accuracy, 512 tokens, the bfp16 route, NPU against host attention:* random ids corr min 0.998955 mean 0.999812, argmax
+  494 / 512 (every flip at a margin of 0.06 or less); perplexity 20.6713 -> 20.7382 (1.0032), KL 0.0014 nats; the six
+  prompts corr min 0.99849-0.99899 with flips at margins 0.068, 0.226 and 0.602; five of six continuations identical,
+  `reason` differs at token 35. **Two of the thresholds fail on one prompt each.** Against the default route (bf16, host
+  attention) the bfp16 route with NPU attention is where the bfp16 route with host attention is: random ids corr min
+  0.998214 mean 0.999599 (host attention's 0.998151 / 0.999580), argmax 488 / 512, flips at 0.172 or less; prompts corr
+  min 0.99719-0.99826 (host attention's 0.99519-0.99833); KL 0.00278 nats (0.00276); perplexity ratio 1.0008 (0.9975);
+  but the `math` flip at 0.593 and the `reason` divergence at token 35 remain. The bfp16 encoding of the attention output
+  amplifies the bf16 P's error (the bf16 route, which rounds the same O to bf16, shows none of it).
+
+| prefill tok/s, median (min-max) of 3 | host attention | NPU attention (attn_fa) | |
+|---|---|---|---|
+| pp512, bf16 route | 240.4 (239.1-241.5) | 233.9 (233.7-235.5) | 0.97x |
+| pp512, bfp16 route | 541.8 (517.2-569.5) | 500.0 (492.8-505.4) | 0.92x |
+| pp1024, bf16 route | 227.1 (227.0-229.8) | 251.3 (250.6-252.6) | 1.11x |
+| pp1024, bfp16 route | 428.3 (427.7-437.0) | 539.8 (534.2-541.8) | 1.26x |
+| pp2048, bf16 route | 183.1 (168.2-183.4) | 246.9 (246.7-248.2) | 1.35x |
+| pp2048, bfp16 route | 268.7 (187.7-286.8) | 479.6 (474.8-496.5) | 1.78x |
+
+pp512 and pp2048 come from one unit, pp1024 from another (controls 909 / 1009 and 879 / 884 ms). llama.cpp Vulkan on the
+same box (2026-10-14, the overnight plan's table): 753 / 766 / 641 tok/s.
+
+- At pp2048 on the bfp16 route (a 4125 ms run) the attention is 1.20 s of NPU dispatches (320) plus 0.17 s of host packing,
+  where the host attention took 4.0-8.1 s (its spread is the host's); the rest is the untile / transposes (1.25 s, the next
+  stage to move) and the tails (0.67 s). The host attention's own run-to-run spread at 2048 (7.1-10.9 s) is gone.
+- At pp512 the route is slower: each layer pays two context switches (into `af` with block 0's dispatch, which starts while
+  the host finishes the last block, and back for the out projection), ~2.5-3 ms a layer, 100-120 ms a prompt, against the
+  host attention's ~200-270 ms of which part overlapped the GEMMs. A context shared with the GEMMs (one xclbin carrying
+  both, or the full-ELF register-write reconfiguration of the `full-elf-context` skill, 0.3-0.7 ms a switch) is what
+  removes it.
+
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
 **Test category:** test (the recipe emission, `tests/test_prefill_batch.py`; the manifest's route selection, `src/open_qwen36/manifest_test.cpp`) + manual (memory and speed on the NPU, below)
@@ -4272,8 +4356,9 @@ instruction against the bf16 route's 256, one xclbin for every shape. The weight
 encoded to bfp16 at load by the `bfp16_gemm` pack op (rows padded to a multiple of 1024 with zero blocks); the activations are
 encoded per GEMM on the host and the c-tiled fp32 result is untiled to token rows. Nothing in the container or q4nx-build
 changes. The route is the `bfp16` entry of `gemm_block_variants` (manifest_version 4) and is chosen with
-`OFLM_OPEN_PREFILL_MODE=bfp16` / `open_qwen36_cli --prefill-mode bfp16`. **bf16 stays the default.** It runs layer-major with host
-attention only and refuses to load otherwise; `oflm --prefill-mode` does not accept it yet.
+`OFLM_OPEN_PREFILL_MODE=bfp16` / `open_qwen36_cli --prefill-mode bfp16`. **bf16 stays the default.** It runs layer-major only
+and refuses to load otherwise (its attention is OPEN-PREFILL-ATTN-FA's where the set carries `attn_fa`, the host's
+without); `oflm --prefill-mode` does not accept it yet.
 
 Why bfp16 and not int8 (the question this requirement answers): the q4_1 weight carries a scale and a min per (row, 32 k), so an
 int8 product needs an int32 rescale every 32 k or a second, per-row weight quantisation; bfp16 has the per-8-k exponent in
