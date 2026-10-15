@@ -1041,6 +1041,9 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
 #else
 #define ATTN_T8_KV(h) attn_kvh(h)
 #endif
+    unsigned t8ko[8];                               // each head's K slice offset in a window row, the same for every row
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned h = 0; h < 8; ++h) t8ko[h] = ATTN_T8_KV(hb + h) * kHD;
 #if ATTN_T8_UNROLL == 2
     _Pragma("clang loop unroll_count(2)")
 #elif ATTN_T8_UNROLL == 4
@@ -1050,7 +1053,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
       v32f z[4];                                    // level 1: heads (0,1) (2,3) (4,5) (6,7), 16 lanes each
       AIE_LOOP_UNROLL_FULL
       for (unsigned hp = 0; hp < 4; ++hp)
-        z[hp] = attn_score2g(Kb[r] + ATTN_T8_KV(hb + 2 * hp) * kHD, Kb[r] + ATTN_T8_KV(hb + 2 * hp + 1) * kHD,
+        z[hp] = attn_score2g(Kb[r] + t8ko[2 * hp], Kb[r] + t8ko[2 * hp + 1],
                              q0 + 2 * hp * kHD, q0 + (2 * hp + 1) * kHD);
       const v32f w0 = attn_tree2(z[0], z[1], 8);   // heads 0..3, 8 lanes each
       const v32f w1 = attn_tree2(z[2], z[3], 8);   // heads 4..7

@@ -213,7 +213,11 @@ int main(int argc, char** argv) {
         j["kernels"]["ax0"]["kvslice"] = 4;
         check(Manifest::parse(j, "kvslice").kernels.at("ax0").kvslice == 4 && m.kernels.at("ax0").kvslice == 0,
               "manifest: kvslice read on an attnpos kernel, absent means 0");
+        j["kernels"]["ax0"]["kvslice"] = 8;
+        check(Manifest::parse(j, "kvslice8").kernels.at("ax0").kvslice == 8, "manifest: kvslice 8 (OPEN-ATTN-BLOCK8) is read");
     }
+    refused_manifest(argv[1], "kvslice 6", "kvslice of 6 rows refused",
+                     [](json& j) { j["kernels"]["ax0"]["rb"] = 1; j["kernels"]["ax0"]["kvslice"] = 6; });
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
     check(lin.consts_bytes == 11882496 && lin.act_bytes == 190464 && lin.state_kind == "linear" && lin.state_bytes == 2342912, "linear layer buffers");
