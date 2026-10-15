@@ -312,6 +312,7 @@ private:
         std::vector<stream_patch::AttnPatch> attn;
         std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
+        std::map<int, xrt::run> runs;        ///< per layer: the decode walk's commands, built once and restarted
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
 
@@ -352,6 +353,7 @@ private:
     ///     only as the probe that established that. Never a default.
     /// OFLM_OPEN_SUBMIT_AHEAD sets it.
     int submit_ahead_ = 0;
+    bool run_reuse_ = true;                    ///< one-dispatch layers and a shared-context tail restart their run (OFLM_OPEN_RUN_REUSE=0 builds anew)
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
     /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
     /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
@@ -547,8 +549,8 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
         xrt::run r;
         bool active() const { return k != nullptr; }
     };
-    /// Build the command, set its arguments and start() it. Nothing waits.
-    Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer);
+    /// Build the command (or, with `reuse`, restart this layer's last one), set its arguments and start() it. Nothing waits.
+    Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer, bool reuse = false);
     /// Wait for `f`, with run_split's timeout / "late or hung" handling, and record it in the
     /// trace. Returns {elapsed, blocked}: elapsed is start() to done (the dispatch's own cost),
     /// blocked is how long THIS call sat in wait() -- the same number serially, and the only

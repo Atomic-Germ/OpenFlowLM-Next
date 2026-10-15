@@ -251,6 +251,30 @@ def per_call(spec: ModelSpec) -> int:
 from .attnknobs import (PROBE_VARS, RB_SUPPORTED, FAST_ATTENTION, MAX_ATTN_CORES,  # noqa: E402,F401
                         probe_env, fast_attention, attn_cores, knobs as attn_knobs)
 
+# OPEN-DECODE-STREAM: families measured on dx's memtile weight ring and early weight issue (bit-identical).
+STREAM_MEASURED: tuple[str, ...] = ("granite",)
+WRING_DEPTH = 16
+
+
+def stream_knobs(spec: ModelSpec) -> tuple[int, bool]:
+    """(memtile ring depth in weight elements, 0 = shim straight to the core; early weight issue)."""
+    on = spec.family in STREAM_MEASURED and not spec.sandwich_norms and spec.quant == "q4_1"
+    ring = int(os.environ.get("DX_WRING", WRING_DEPTH if on else 0))
+    order = os.environ.get("DX_WORDER", "1" if on else "0") == "1"
+    if order and spec.sandwich_norms:
+        raise OpRangeError("dense: DX_WORDER covers the plain norm sequence only")
+    return ring, order
+
+
+# OPEN-DECODE-ONE-CONTEXT-DENSE: families whose final norm + head run as dx's second stream (bit-identical tail).
+ONE_CTX_MEASURED: tuple[str, ...] = ("granite",)
+
+
+def one_context(spec: ModelSpec) -> bool:
+    forced = os.environ.get("DX_ONECTX")
+    on = forced == "1" if forced is not None else spec.family in ONE_CTX_MEASURED
+    return on and spec.quant == "q4_1" and not spec.sandwich_norms and not qkv_bias(spec)
+
 
 def geometry(spec: ModelSpec) -> DenseGeometry:
     n = cores_for(spec)
@@ -686,6 +710,11 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                     "xresf": spec.hidden * 4, "hn": spec.hidden * 2, "logits": lm_rows(spec) * 4,
                     "lmpool": L.LMHEAD_POOL_BYTES},
     }
+    if one_context(spec):
+        # the final norm and the head as a second stream over dx's image: no context change in a token
+        out["kernels"]["dxh"] = {"context": "dx", "insts": "dxh/insts.bin", "build": "dxh"}
+        out["tail"] = [{"op": "run", "kernel": "dxh", "args": ["lmpool", "xres", "normw", "logits", "hn", "zero"]}]
+        out["globals"]["hn"] = G.XN_ELEMS * ELEM          # the head's x fill reads whole 4 KB elements
     types = sorted(set(spec.layer_types))
     for lt in types:
         local = lt == DENSE_LOCAL
@@ -801,6 +830,9 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                            "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden),
                                    "LMHEAD_CORES": str(n), "LMHEAD_SCALES_F32": "1"}},
     }
+    if one_context(spec):
+        b["dxh"] = {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}_head",
+                    "env": {"DX_HEAD": "1"}}
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

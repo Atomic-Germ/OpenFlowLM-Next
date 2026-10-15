@@ -39,8 +39,9 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
+from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import Tile
 from aie.iron.kernel import ExternalFunction
 
@@ -55,6 +56,7 @@ from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
 from recipes.attnknobs import TREE8_STACK, tree8, tree8_flags  # noqa: E402
+from recipes.dense import one_context, stream_knobs  # noqa: E402
 from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
@@ -161,13 +163,21 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position r
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
-    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8"):             # RB is in the flags above via G.RB; FAST picks G itself.
+    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8", "DX_WRING", "DX_WORDER", "DX_ONECTX"):   # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 T8 = tree8(SPEC, G.NHL, G.RB, G.HD)
 if T8:
     ATTN_FLAGS.extend(tree8_flags(4))
 ASTACK = TREE8_STACK if T8 else 0x1800
+WRING, WORDER = stream_knobs(SPEC)                     # OPEN-DECODE-STREAM
+ONE_CTX = one_context(SPEC)                            # the head runs on these cores, as a second stream
+HEAD = int(os.environ.get("DX_HEAD", 0))               # 1: build that head stream instead of the layer's
+assert ONE_CTX or not HEAD, "DX_HEAD: this spec has no one-context head"
+NB_HEAD = L.LMHEAD_BANDS // N_CORES if ONE_CTX else 0
+LM_ROWS = L.LMHEAD_BANDS * BAND_ROWS
+assert not ONE_CTX or (L.LMHEAD_BANDS % N_CORES == 0 and not G.SANDWICH and NEED_Q4_GY and not MIXED and not G.QKVB
+                       and L.LMHEAD_BAND_BYTES == QR.band_bytes(HID, SPEC.quant))
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
@@ -244,7 +254,17 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
 
     # ---- fifos
-    of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+    if WRING:
+        # channels 0 / 1: aie2p memtiles split their BDs 24 / 24 between even and odd channels
+        assert WRING <= 24, "dx: a memtile ring deeper than 24 does not fit one BD pool"
+        of_wm = [ObjectFifo(elem, name=f"wm{c}", depth=WRING) for c in range(N_CORES)]
+        of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+        for c in range(N_CORES):
+            ObjectFifoLink(of_wm[c].cons(channel=0), [of_w[c].prod(channel=1)], Tile(c, 1), [], [0])
+        w_src = of_wm
+    else:
+        of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+        w_src = of_w
     of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
@@ -296,7 +316,14 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         e = fifo.acquire(n)
         return [e] if n == 1 else e            # acquire(1) yields the element itself
 
-    def main_body(win, xin, yout, tab, ms, *fns):
+    def main_body(win, xin, yout, tab, ms, *rest):
+        if not ONE_CTX:
+            return layer_main(win, xin, yout, tab, ms, rest)
+        mode, bar, fns = rest[0], rest[1], rest[2:]
+        bar.wait_for_value(1)
+        layer_main(win, xin, yout, tab, ms, fns, mode)
+
+    def layer_main(win, xin, yout, tab, ms, fns, mode=None):
         K = dict(zip(KN, fns))
         f_prep, f_prepf, f_silu = K["prep"], K["prepf"], K["act"]
         if "ffn" in Q8:
@@ -316,10 +343,21 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         xe = acq(xin, G.XN_ELEMS)
         for i in range(G.XN_ELEMS):
             f_prep(xe[i], tab, HID, i)
-        role_bands(win, yout, tab, K, "attn", G.Q_PC + 2 * G.KV_PC, HID, ms)
+        if mode is None:
+            role_bands(win, yout, tab, K, "attn", G.Q_PC + 2 * G.KV_PC, HID, ms)
+        else:
+            # read after the x data landed: read at the barrier, it was the previous dispatch's word
+            gemv_bands(win, yout, tab, K["gy"], mode[1], n_groups(HID), per_band(HID), 2)
         xin.release(G.XN_ELEMS)
         if stop == 1:
             return
+        if mode is not None:
+            for _ in range_(mode[0]):
+                layer_tail(win, xin, yout, tab, ms, K, band, f_prep, f_prepf, f_silu, ng_u)
+            return
+        layer_tail(win, xin, yout, tab, ms, K, band, f_prep, f_prepf, f_silu, ng_u)
+
+    def layer_tail(win, xin, yout, tab, ms, K, band, f_prep, f_prepf, f_silu, ng_u):
         # o against og (K = QW)
         oe = acq(xin, G.OG_ELEMS)
         for i in range(G.OG_ELEMS):
@@ -357,12 +395,26 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         role_bands(win, yout, tab, K, "ffn", G.DOWN_PC, FF, ms)
 
     def ln_body(ain, aout, f_nr, f_lny, f_lnx, *rest):
-        # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]
+        if not ONE_CTX:
+            return layer_ln(ain, aout, f_nr, f_lny, f_lnx, rest)
+        mode, bar = rest[0], rest[1]
+        bar.wait_for_value(1)
+        layer_ln(ain, aout, f_nr, f_lny, f_lnx, (), mode)
+
+    def layer_ln(ain, aout, f_nr, f_lny, f_lnx, rest, mode=None):
+        # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]; with w = normw it is the head's final norm
         e = ain.acquire(3)
         o = aout.acquire(1)
         f_nr(e[0], e[1], e[2], o)
         aout.release(1)
         ain.release(3)
+        if mode is not None:
+            for _ in range_(mode[0]):
+                layer_ln_tail(ain, aout, f_lny, f_lnx, rest)
+            return
+        layer_ln_tail(ain, aout, f_lny, f_lnx, rest)
+
+    def layer_ln_tail(ain, aout, f_lny, f_lnx, rest):
 
         def post_norm(f_nr32):
             # a sandwich norm on a block output: [o0 o1 w] -> [t0] [t1] (fp32 halves)
@@ -517,12 +569,17 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, h0)
             return body
 
-    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx] + ([f_nr32] if G.SANDWICH else []),
-                      tile=Tile(0, 3), stack_size=0x1800)]
+    # ONE_CTX, per main core and the ln core (last): [layer passes after the first phase, first-phase bands]
+    modes =([Buffer(np.ndarray[(16,), np.dtype[np.int32]], name=f"mode{c}", initial_value=np.zeros(16, np.int32),
+                     use_write_rtp=True) for c in range(N_CORES + 1)] if ONE_CTX else [])
+    bars = [WorkerRuntimeBarrier() for _ in range(N_CORES + 1)] if ONE_CTX else []
+    mode_args = (lambda c: [modes[c], bars[c]]) if ONE_CTX else (lambda c: [])
+    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx] + ([f_nr32] if G.SANDWICH else [])
+                      + mode_args(N_CORES), tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
-                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
-                               tile=Tile(c, 2), stack_size=0x1400 if F32 else 0x1800))
+                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")]
+                               + mode_args(c) + KF, tile=Tile(c, 2), stack_size=0x1400 if F32 else 0x1800))
     def abufs(c):
         s = "" if c == 0 else str(c)
         return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),
@@ -544,7 +601,34 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     BB_UG = role_band_bytes("ffn", HID)          # the FFN's up | gate bands (K = HID)
     YB = BAND_ROWS * 4
 
+    def set_mode(head):
+        for c in range(N_CORES + 1):
+            modes[c][0] = 0 if head else 1
+            modes[c][1] = NB_HEAD if head else G.Q_PC + 2 * G.KV_PC
+        for c in range(N_CORES + 1):
+            bars[c].set(1)
+
+    def head_sequence(a_lm, c_xres, a_normw, c_logits, a_hn, lni, lno, w_prods, x_prod, y_conss):
+        # ln_nr is ln_xn's arithmetic at add = 0, and the bands are lm_head_q4's split: the old tail's bits
+        set_mode(True)
+        tg = TaskGroup()
+        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg)               # [x0 x1]
+        lni.fill(a_normw, tap=bt(ELN, 0, ELN), wait=True, group=tg)              # [w]
+        lno.drain(a_hn, tap=bt(G.XN_ELEMS * ELEM, 0, ELN), wait=True, group=tg)
+        tw = TaskGroup()
+        hb = NB_HEAD * BB_H
+        for c in range(N_CORES):
+            w_prods[c].fill(a_lm, tap=bt(L.LMHEAD_POOL_BYTES, c * hb, hb), wait=True, group=tw)
+            y_conss[c].drain(c_logits, tap=bt(LM_ROWS, c * NB_HEAD * BAND_ROWS, NB_HEAD * BAND_ROWS), wait=True, group=tw)
+        tg.finish()                                                               # hn is in DDR
+        tx = TaskGroup()
+        x_prod.fill(a_hn, tap=bt(G.XN_ELEMS * ELEM, 0, G.XN_ELEMS * ELEM), wait=True, group=tx)
+        tw.finish()
+        tx.finish()
+
     def _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs, abias_p):
+        if ONE_CTX:
+            set_mode(False)
         # 1. layer-entry norm: xn -> act
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -562,6 +646,23 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         tg_ln.finish()                                            # xn is in DDR
         tg_x = TaskGroup()
         x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_XN, G.XN_ELEMS * ELEM), wait=True, group=tg_x)
+
+        def o_fills():
+            for c in range(N_CORES):
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_O + c * G.O_PC * BB_Q, G.O_PC * BB_Q))
+
+        def ug_fills(j):
+            for c in range(N_CORES):
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_UP + (c * G.UP_PC + j) * BB_UG, BB_UG))
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_GATE + (c * G.UP_PC + j) * BB_UG, BB_UG))
+
+        def down_fills():
+            for c in range(N_CORES):
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_DOWN + c * G.DOWN_PC * BB_F, G.DOWN_PC * BB_F))
+
+        # WORDER: each phase's weights queue ahead of its activation wait; every await below needs no later issue
+        if WORDER and stop >= 2:
+            o_fills()                                             # awaits q's fill, which needs only xn
         # DX_STOP=1 no longer early-returns: phase 3 (attention) runs for every stop
         # now, fed the placeholder 1-row window at stop=1, so the attention cores
         # complete their bodies and multi-run invocations stay clean (the early
@@ -588,7 +689,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             # at stop=1 the main cores return after q/k/v: nobody would consume
             # the o weights or drain the o results
             for c in range(N_CORES):
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_O + c * G.O_PC * BB_Q, G.O_PC * BB_Q))
+                if not WORDER:
+                    pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_O + c * G.O_PC * BB_Q, G.O_PC * BB_Q))
                 py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_OUT + c * G.O_PC * YB, G.O_PC * YB))
         pa_out.finish()                                           # og (and the new cache row) are in DDR
         if stop >= 2:
@@ -596,6 +698,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             # it, and the old early return starved it (the cores park in
             # state 8 for seconds waiting on an x fill that never arrives)
             x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OG, G.OG_ELEMS * ELEM), wait=True, group=tg_x)
+        if WORDER and stop >= 3:
+            ug_fills(0)                                           # awaits k and v, long consumed; up_1 would await o
         if stop <= 2:
             pa_in.finish()
             py.finish()
@@ -632,10 +736,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         # 38 fills per core three at a time (Pipeline).
         for c in range(N_CORES):
             py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_H + c * G.UP_PC * YB, G.UP_PC * YB))
-        for j in range(G.UP_PC):
-            for c in range(N_CORES):
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_UP + (c * G.UP_PC + j) * BB_UG, BB_UG))
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_GATE + (c * G.UP_PC + j) * BB_UG, BB_UG))
+        for j in range(1 if WORDER else 0, G.UP_PC):
+            ug_fills(j)
+        if WORDER and stop >= 99:
+            down_fills()                                          # awaits the last up/gate fills but one
         py.finish()                                               # h is in DDR
         if stop == 3:
             pw.finish()
@@ -645,7 +749,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         # 7. down against h, then the output residual -> xres
         x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_H, G.H_ELEMS * ELEM), wait=True, group=tg_x)
         for c in range(N_CORES):
-            pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_DOWN + c * G.DOWN_PC * BB_F, G.DOWN_PC * BB_F))
+            if not WORDER:
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_DOWN + c * G.DOWN_PC * BB_F, G.DOWN_PC * BB_F))
             py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_OUT2 + c * G.DOWN_PC * YB, G.DOWN_PC * YB))
         tg_ln3 = TaskGroup()
         if G.SANDWICH:
@@ -679,13 +784,22 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
             _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
                       ain_p, aout_c, og_cs, None)
+    io_ty = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty]
+    if HEAD:
+        # every fifo stays in the Runtime so the image stays dx's: only the stream differs
+        def sequence(a_lm, c_xres, a_normw, c_logits, a_hn, a_unused, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
+            head_sequence(a_lm, c_xres, a_normw, c_logits, a_hn, lni, lno, w_prods, x_prod, y_conss)
+        u8 = np.dtype[np.uint8]
+        io_ty = [np.ndarray[(L.LMHEAD_POOL_BYTES,), u8], xres_ty, np.ndarray[(ELN,), u8],
+                 np.ndarray[(LM_ROWS,), np.dtype[np.float32]], np.ndarray[(G.XN_ELEMS * ELEM,), u8],
+                 np.ndarray[(2 * ELN,), u8]]
 
     # Tile(3, 0) is the one shim column with a free MM2S channel at every core count: it
     # carries at most w3, while 0, 1 and 2 already pair theirs with lni, x and ain.
     bprod = [of_abias.prod(tile=Tile(3, 0))] if QKVB else []
-    rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
+    rt = Runtime(sequence, [*io_ty,
                             of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                            [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                            [w_src[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_ain.prod(tile=Tile(2, 0))] + bprod + [of_aout.cons(tile=Tile(1, 0)),
