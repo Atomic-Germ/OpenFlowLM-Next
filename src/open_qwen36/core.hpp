@@ -378,6 +378,8 @@ private:
     std::string prefill_route_;  ///< "fast" | "lean" on a set that carries both, "" on a set with one route
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
+    bool attn_fa_on_ = true;     ///< a dense set's attn_fa in place of the host attention (OFLM_OPEN_ATTN_FA=0 off)
+    size_t af_blocks_ = 0;       ///< af_q#b / af_o#b buffers allocated: one Q and one O a 256-token block
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
     bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
@@ -645,7 +647,8 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// One GEMM step over B blocks: block b + 1 runs on the NPU while post(b, [N, T] y) runs on the host.
     void gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                     const std::function<const float*(size_t)>& prep,
-                    const std::function<void(size_t, const float*)>& post);
+                    const std::function<void(size_t, const float*)>& post,
+                    const std::function<void()>& before_last_post = nullptr);
     /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
     void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);

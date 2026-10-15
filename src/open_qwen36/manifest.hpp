@@ -120,6 +120,17 @@ struct AttnBlock {
     bool present() const { return !kernels_s.empty(); }
 };
 
+/// A dense layer's block attention as one causal flash-attention dispatch a 256-token block (OPEN-PREFILL-ATTN-FA,
+/// open_kernels/designs/attn_fa): scores, mask, softmax and both products on the array. One stream per 256 rows of
+/// window up to l_max on one xclbin. Its buffers are the engine's: the block's Q (per head the record with p0, Q hi,
+/// Q lo, q_head bf16 a head), the layer's KV cache (`state`) and the block's fp32 [t, qw] output.
+struct AttnFa {
+    std::map<size_t, std::string> kernels;   ///< window rows -> the stream for that width
+    size_t hd = 0, l_max = 0, q_head = 0;
+    bool qsplit = true;                      ///< Q as a bf16 hi / lo pair
+    bool present() const { return !kernels.empty(); }
+};
+
 struct GemmBlockProgram {
     uint64_t t = 0;               ///< 0 = no route for this layer type
     std::string kind;             ///< dense | linear | full
@@ -171,6 +182,8 @@ struct GemmBlockProgram {
     bool has_dense_ffn() const { return !ffn_program.empty(); }
     // full: the attention products on the NPU (absent: attention on the host)
     AttnBlock attn_block;
+    // dense: the whole block attention on the NPU (absent: host attention or dxB)
+    AttnFa attn_fa;
 };
 
 struct LayerType {
