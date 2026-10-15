@@ -77,7 +77,8 @@ and rewrites the manifest (version 5). Engine build: `src/open_qwen36/build.cmd`
    `open_kernels\harness\out\run_kernel.exe <dir>\run.cfg`, `make_test.py compare --out <dir>` -> kernel vs decoded-operand
    product rel_fro < 1e-4. The FFN chain: `make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560
    --ff 8192 --N 3072` (pass `--N` -- the default 4096 is not down's padded 3072, and the mismatch reads as rel_fro 0.5),
-   `run_kernel.exe`, `make_test.py compare-glu` -> H bytes vs the host encode of silu(g) * u, down(H) rel_fro.
+   `run_kernel.exe`, `make_test.py compare-glu` -> H's bytes (>= 99.9 %) and shared exponents (>= 99.99 %) against the host
+   encode of silu(g) * u, down(H) rel_fro. A build without `hold()` reads 0.99722 / 0.99715 and FAILs.
 3. The model: `utilities\dense-decode-probe\prefill_mode_check.py` (random ids, chat prompts, greedy decode, perplexity, timing).
 
 NPU runs go under `dibs run npu --tag <you> ...`, numbers you report under `dibs run --measure` (CLEAN before and after);
@@ -88,14 +89,16 @@ NPU runs go under `dibs run npu --tag <you> ...`, numbers you report under `dibs
 - The mmul probe (`utilities/aie-probes/mmul_rate_probe.*`): `asm volatile("")` crashes Peano's IRTranslator ("unable to
   translate instruction: call"); `aie::mmul<8,8,8,int8,uint4>` does not instantiate.
 - A bfp16 block with a saturating +128 mantissa decodes lower than it encoded; re-encoding a decoded operand is not a fixed point.
-- **The on-core converter (`to_vector<bfp16ebs8>`) is not the host packer.** When a group's largest value rounds to 128 the
-  converter raises the shared exponent; `bfp16_encode_block` saturates at 127 (lower error for the other seven). Measured on
-  the glu harness: 745 of 262,144 blocks, and 0.28 % of H's bytes; mantissas otherwise agree (470 of 2.09 M off by one, from
-  SiLU's 2^-15). `aie::set_saturation` (saturate or symmetric) changes nothing. The 40 layers turn that into corr 0.9976 against
-  the host-encoded route, enough to move OPEN-PREFILL-BFP16's per-item extremes. Two on-core fix-ups were tried and dropped: a
-  per-group max exponent from `shuffle_down` maxima wrote wrong exponents in 80 % of blocks (cause not found) and doubled the
-  dispatch; converting h's powers of two to read the host's exponent crashed Peano's clang (a `block_vector_output_buffer_stream`
-  over a stack array).
+- **The on-core converter (`to_vector<bfp16ebs8>`) is not the host packer.** When a value of a group rounds to |128| the
+  converter raises the shared exponent (for -128 too); `bfp16_encode_block` saturates at 127 (lower error for the other seven).
+  Measured on the glu harness: 746 of 262,144 blocks, 0.28 % of H's bytes. `aie::set_saturation` (saturate or symmetric)
+  changes nothing. **The fix is per element, no cross-lane work** (`hold()` in `mm_bfp_acc.cc`): only a value in the group's top
+  binade can round to 128, and it does exactly when its significand is >= 255/128, so set such a value's mantissa field to
+  0x7E0000 (127/64) before converting. In the top binade that encodes to 127, the host's saturation; in a lower binade it rounds
+  to the same mantissa as before. Result: 5 of 262,144 exponents differ (SiLU's 2^-15 across a power of two), 99.95 % of bytes
+  equal (a negative extreme is -127 where the host has -128), no measurable cost. Dead ends on the way: a per-group max exponent
+  from `shuffle_down` maxima wrote wrong exponents in 80 % of blocks and tripled the dispatch; converting h's powers of two to
+  read the converter's exponent crashed Peano's clang (a `block_vector_output_buffer_stream` over a stack array).
 - Busy host threads slow the array: the glu dispatch is 1.56 ms alone in the harness, 2.14 ms min in the engine with 24 OpenMP
   threads working beside it, 1.63-1.78 with 6 (the prefill is slower at 6: host attention needs the threads). Overlapping more
   host work under the dispatches does not pay either: an o + FFN pipeline that hid o's residual, norm and pack under gate|up
@@ -109,9 +112,10 @@ NPU runs go under `dibs run npu --tag <you> ...`, numbers you report under `dibs
 
 pp512 / 1024 / 2048, tok/s min / median: five-step 520 / 531, 381 / 388, 269 / 274 -> glu FFN 760 / 768, 487 / 492, 308 / 329.
 At pp512 what is left: host attention 196 ms, the GEMM waits 282 (gate|up 172), residual + norm 87, packs 36, qkv's copy 28,
-syncs 15. Accuracy against the bf16 route: perplexity ratio 0.9987, KL 0.00287, random-id corr min 0.9966; two per-item
-extremes of OPEN-PREFILL-BFP16 missed (one greedy continuation of six, one flip at a 0.209 margin), traced to the converter
-trap above. Numbers and procedure: OPEN-PREFILL-BFP16-FFN.
+syncs 15. Accuracy against the bf16 route, with `hold()`: perplexity ratio 0.9964, KL 0.00267 (the five-step route's 0.00276),
+random-id corr min 0.9963; two per-item extremes of OPEN-PREFILL-BFP16 still missed (one near-tie greedy continuation of six,
+one flip at a 0.209 margin), on other prompts than without `hold()`. The same sitting matters: a later CLEAN unit read the glu
+route at 837-862 tok/s at pp512, 13 % above the first, with nothing changed. Numbers and procedure: OPEN-PREFILL-BFP16-FFN.
 
 ## Result (2026-10-13/14, no gate, FrameServer idle context present)
 

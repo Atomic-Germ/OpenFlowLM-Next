@@ -4342,8 +4342,12 @@ On a SwiGLU family the bfp16 route (OPEN-PREFILL-BFP16) runs its FFN as two disp
 Gate and up are one weight (`ggu_w`, 2 ff rows, 8-row blocks alternating gate and up, n-tile ct holding ff chunk
 (ct % 8) * per_col + ct / 8) on `gemm_bfp16_n{2ff}_k{hidden}_glu`. Each core ends its 64 x 128 tile, while it still holds the
 last K chunk's A buffer, by computing h = silu(gate) * up from the fp32 sums (bf16 hi/lo arithmetic, about 2^-15), encoding h
-to bfp16 (round to nearest even) into that A buffer, which is exactly one 64 x 64 A tile of the down projection, and copying
-it into C where the memtile's 8x8 -> row-major transform makes it the first 1152 words of the core's stream. The shim writes
+to bfp16 into that A buffer, which is exactly one 64 x 64 A tile of the down projection, and copying it into C where the
+memtile's 8x8 -> row-major transform makes it the first 1152 words of the core's stream. The encode follows the host packer's
+rule (`bfp16_encode_block`: the block's largest exponent, round to nearest even, a mantissa that rounds to 128 saturates at
+127): the converter alone raises the block's exponent instead, so the epilogue first holds a value whose significand is
+255/128 or more at 127/64 of its power of two, which encodes to 127 in its own binade and rounds as before in a lower one (a
+negative one encodes to -127 where the host has -128). The shim writes
 each core tile to an H slot of 8199 words (a whole number of bfp16 blocks) at (ff chunk x 4 + row block); down
 (`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
 program (`rtp[0]` the K chunks between the first and the last, `rtp[1]` the epilogue mode), so the route keeps one hardware
@@ -4356,8 +4360,9 @@ running b - 1's residual under down(b). A family whose activation is not SiLU ke
 
 **Acceptance criteria:**
 - Harness (`make_test.py make-glu` / `compare-glu`, 256 x 2560 x 16384 then 256 x 8192 x 3072 in one context): H's bytes equal
-  the host encode of silu(g) * u of the decoded operands at 99 % or more, H decoded within 5 % of the host encode's own error,
-  and down(H) equal to the decoded-H x decoded-down product (rel_fro < 1e-4); a plain shape on the same core program rel_fro 0.
+  the host encode of silu(g) * u of the decoded operands at 99.9 % or more and its shared exponents in 99.99 % of blocks or
+  more, H decoded within 5 % of the host encode's own error, and down(H) equal to the decoded-H x decoded-down product
+  (rel_fro < 1e-4); a plain shape on the same core program rel_fro 0.
 - The model: every OPEN-PREFILL-BFP16 criterion against the default route.
 - Prefill faster than the five-step bfp16 route at 512, 1024 and 2048 tokens (CLEAN, same sitting).
 
@@ -4407,6 +4412,27 @@ one discarded run first; the same kernel set for the two glu variants):**
   the dispatch it runs beside (the CPU and the array share the package's power and DDR; the glu dispatch is 1.56-1.71 ms alone
   in the harness, 2.14 ms min in the engine at 24 host threads, 1.63 at 6), so on this box overlap is not free; the mechanism
   was not isolated.
+
+**Result 2026-10-15, the host packer's rule on the core (`hold` in `mm_bfp_acc.cc`; the two-phase binary, untimed unless marked):**
+- Harness: H's bytes equal the host encode at 99.948 % (99.722 % without the hold) and its shared exponents in 262,139 of
+  262,144 blocks (746 differ without; the 5 left are SiLU's 2^-15 across a power of two); decoded H against the exact h
+  rel_fro 8.180e-3 (the host encode's own 8.176e-3); down(H) 2.5e-8. The glu dispatch is 2.267 against 2.282 ms without, the
+  same sitting (three fastest of ten): no measurable cost. CLEAN, one binary on the two sets, min / median tok/s, with against
+  without: pp512 839 / 843 against 837 / 848, pp1024 560 / 576 against 557 / 561, pp2048 322 / 340 against 323 / 324. This
+  sitting ran both 9-17 % above the table above (pp512 848 against 768 median, nothing changed), which is why every
+  comparison here is within one unit.
+- Against the default route: 512 random ids corr min 0.996279 mean 0.999582, argmax 487 / 512 (483 without, five-step 485),
+  every flip under 0.2; chat prompts corr min 0.997736, every flip under 0.2 but code2's 0.209 (there without the hold too);
+  greedy 80 tokens identical on 5 of 6: reason is now identical, chat differs at token 64, where the default route's top-2
+  margin is 0.175; perplexity on 511 README tokens 20.6490 (ratio 0.9964; 0.9987 without, five-step 0.9975), mean KL 0.00267
+  nats (0.00287 without, five-step 0.00276). At 2048: random-id corr min 0.986466, argmax 1954 / 2048 (1941 without), one flip
+  at 0.209; perplexity on 2047 tokens 11.3450 (ratio 0.9932), KL 0.00208 (0.00224 without).
+- Status against the criteria above: the harness and the timing criteria hold. Of OPEN-PREFILL-BFP16's, the corr floor at
+  512, the perplexity and the statistical measures hold (KL at or below the five-step route's); two per-item thresholds miss:
+  one near-tie greedy continuation of six, and one flip at a 0.209 margin that the exponent rule did not cause. Those two were
+  set just under the five-step route's own worst values (OPEN-PREFILL-BFP16, 2026-10-13/14), so any change to the arithmetic
+  moves some near-tie across them; with and without the hold a different prompt missed. Restating them statistically is open,
+  and the route stays opt-in.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)

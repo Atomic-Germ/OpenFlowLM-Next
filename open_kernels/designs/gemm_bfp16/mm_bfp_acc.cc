@@ -173,6 +173,14 @@ __attribute__((always_inline)) inline va swiglu32(vf g, vf u) {
   return mul3(split(mul3(gs, us)), s);
 }
 
+// a significand >= 255/128 rounds to mantissa 128 in its own binade; at 127/64 the converter keeps the host packer's exponent
+__attribute__((always_inline)) inline va hold(va a) {
+  const vi b = a.template to_vector<float>().template cast_to<int32_t>();
+  const aie::mask<32> up = aie::ge(aie::bit_and((int32_t)0x7FFFFF, b), (int32_t)0x7F0000);
+  return acc(aie::select(b, aie::bit_or((int32_t)0x7E0000, aie::bit_and((int32_t)0xFF800000, b)), up)
+                 .template cast_to<float>());
+}
+
 constexpr unsigned kOutWords = (DIM_M * DIM_N / 2) / 8 * 9 / 4;   // 1152: one bfp16 A tile, 64 x 64
 static_assert(DIM_M == 64 && DIM_N == 128 && DIM_K == 64, "the glu epilogue is written for the 64 x 64 x 128 tile");
 
@@ -191,7 +199,7 @@ extern "C" void gemm_epilogue(float *__restrict pC, bfp16ebs8 *__restrict pA, in
         const float *g = pC + ((2 * rg + zz) * colB + 2 * cb) * 64;
         const va lo = swiglu32(aie::load_v<32>(g), aie::load_v<32>(g + 64));
         const va hi = swiglu32(aie::load_v<32>(g + 32), aie::load_v<32>(g + 96));
-        out << aie::concat(lo, hi).template to_vector<bfp16ebs8>();
+        out << aie::concat(hold(lo), hold(hi)).template to_vector<bfp16ebs8>();
       }
   // stream word s is C's (row s / 128, column s % 128), and C is 8x8 blocks
   const float *src = reinterpret_cast<const float *>(pA);

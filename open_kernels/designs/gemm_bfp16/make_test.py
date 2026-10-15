@@ -100,13 +100,15 @@ def compare_glu(a) -> int:
     h_ref = g / (1.0 + np.exp(-g)) * u
     hw = np.fromfile(out / "h.bin", dtype=np.uint32)
     hk = np.empty((M, ff))
-    same = total = 0
+    same = total = e_same = blocks = 0
     for kc in range(ff // 64):
         for r in range(M // 64):
             tile = pack.h_tile(hw, kc, r)
             ref = pack.pack_a(h_ref[64 * r:64 * r + 64, 64 * kc:64 * kc + 64].astype(np.float32))
             same += int((tile == ref).sum())
             total += tile.size
+            e_same += int((tile.reshape(-1, 9)[:, 0] == ref.reshape(-1, 9)[:, 0]).sum())
+            blocks += tile.size // 9
             hk[64 * r:64 * r + 64, 64 * kc:64 * kc + 64] = pack.unpack_a(tile, 64, 64)
     h_enc = pack.unpack_a(pack.pack_a(h_ref.astype(np.float32)), M, ff).astype(np.float64)
 
@@ -114,11 +116,13 @@ def compare_glu(a) -> int:
         return np.linalg.norm(y - r) / np.linalg.norm(r)
 
     print(f"H bytes equal to the host encode of silu(g) * u: {same / total:.5f}")
+    print(f"H shared exponents equal to the host encode's: {e_same / blocks:.5f} ({blocks - e_same} of {blocks} differ)")
     print(f"H decoded vs exact h: rel_fro {rel(hk, h_ref):.3e} (the host encode alone: {rel(h_enc, h_ref):.3e})")
     dq = pack.unpack_b(np.fromfile(out / "bd.bin", dtype=np.uint8), N, ff).astype(np.float64)
     y = pack.untile_c(np.fromfile(out / "y.bin", dtype=np.float32), M, N)
     print(f"down(H) vs decoded-H x decoded-down: rel_fro {rel(y, hk @ dq.T):.3e}")
-    ok = rel(y, hk @ dq.T) < 1e-4 and rel(hk, h_ref) < 1.05 * rel(h_enc, h_ref) and same / total > 0.99
+    ok = (rel(y, hk @ dq.T) < 1e-4 and rel(hk, h_ref) < 1.05 * rel(h_enc, h_ref) and same / total >= 0.999
+          and e_same / blocks >= 0.9999)
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
