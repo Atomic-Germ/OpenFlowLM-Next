@@ -4889,3 +4889,12 @@ with args `lmpool, xres, normw, logits, hn, zero`, `hn` is two 4 KB elements, `b
 
 **Verification (manual):** as OPEN-DECODE-STREAM's 1-3, plus `dx/final.xclbin` and `dxh/final.xclbin` equal apart
 from build stamps (`export_qwen36_kernels.xclbin_equivalent`).
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, with OPEN-DECODE-STREAM, every timing CLEAN).** Gates as OPEN-DECODE-STREAM's
+(70 + 20 and 2100 + 20 byte-identical, six prompts x 96 identical, ROWS PASS), the Uno sweep IDENTICAL on all six
+prompts, and the head queued ahead bit-exact as well as serial. `dxh` runs in 3.04-3.09 ms (52.5 GB/s) against `ln` +
+`lm` at 0.19-0.26 + 3.63-3.83 ms in their own contexts, and the first layer of a token no longer pays +1.1 ms. Real
+step at position 0, min / median ms: 41.2 / 41.4 (24.15 tok/s; base 46.3 / 46.4 in the same sitting). Plain decode,
+tg128 after a 0 / 512 / 1024 / 2048-token prompt (`bench.py decode`, 3 runs a process, median tok/s): base 20.61 /
+17.42 / 15.04 / 12.19, now 22.96 / 19.08 / 16.22 / 13.05 -- the same ~5 ms a token at every depth. tg128 "at 0" sits
+2.2 ms under the position-0 step on both sets: it averages positions 1-128, where attention already grows.

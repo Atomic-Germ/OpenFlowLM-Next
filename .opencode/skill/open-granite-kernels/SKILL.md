@@ -281,6 +281,19 @@ ms against 3.11 alone in its own context and ~3.7 in the step). Step 44.4 -> 41.
   runs under an old manifest's `ln` + `lm` tail). A dx-only experiment is `--only dx,dxh` plus that export's
   `manifest.json`.
 
+tg128 after a 0 / 512 / 1024 / 2048-token prompt, CLEAN medians: 20.61 / 17.42 / 15.04 / 12.19 -> 22.96 / 19.08 / 16.22 /
+13.05 tok/s, ~5 ms a token at every depth. tg128 "at 0" is 2.2 ms a token slower than the position-0 step on either set
+because it averages positions 1-128. **Uno did not move** (`dxl` / `lmhl` have neither change): plain decode now beats
+it on the chat and code prompts (sweep 1.07x -> 0.95x geomean, all identical); the same ring and a `lmhl`-as-second-
+stream on `dxl`'s image are the obvious next port.
+
+**Bytes.** The weight stream is now within ~1% of the 8-stream rate, so the next ctx-0 lever is fewer bytes. A
+Q4_0-native chunk (`GEMV_Q4_0_NATIVE`, `LMHEAD_Q4_0=1`: 4608 B, no m plane, m = -8 d in-register) streams the head in
+2.739 ms against 3.046 for the same blocks in 5120 B chunks, 52.8 against 52.7 GB/s, bit-identical
+(`utilities/decode-gates/q4_0_head_probe.py`). A model-wide Q4_0 layout would take ~10% off every layer's stream
+(estimate: 41.4 -> ~37.5 ms at position 0). Quality on the repo-docs corpus (llama.cpp Vulkan, KLD against bf16 over
+24 x 512 tokens): Q4_0 0.155, Q4_1 0.158, Q4_K_M 0.124. Not a default: a proposal.
+
 ## Rules
 
 - Never commit the xclbins; the distributed package ships them pre-built.
