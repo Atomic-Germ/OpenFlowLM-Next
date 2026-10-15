@@ -142,8 +142,7 @@ int main(int argc, char** argv) {
         check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
     }
     {
-        // OPEN-ATTN-KVSLICE: five per-core window fills (each a BD write then its DDR patch on arg 3 below one row,
-        // compiled for 4 rows of 192 words), the new row's drain at one row and the record on arg 5.
+        // OPEN-ATTN-KVSLICE: five window fills compiled for 4 rows of 192 words, the new row's drain and the record
         std::vector<uint32_t> w(4, 0);
         auto bd = [&](uint32_t reg, uint32_t len) {
             std::vector<uint32_t> op(12, 0);
@@ -180,8 +179,28 @@ int main(int argc, char** argv) {
         try { stream_patch::attn_table(w, "kvslice test", stream_patch::AttnGeometry{}); }
         catch (const std::runtime_error& e) { refused_plain = std::string(e.what()).find("unexpected kv transfer") != std::string::npos; }
         check(refused_plain, "attn_table: per-core fills without the manifest's kvslice are refused");
+        // the L-row stream (attnrows, L = 4): the joined KV drain at one row, four records at rows 1..4, the five fills
+        std::vector<uint32_t> r(4, 0);
+        std::swap(w, r);
+        bd(0x100, 2048); patch(0x104, 3, 2048);
+        for (uint32_t j = 1; j <= 4; ++j) patch(0x300 + j, 5, (j * 1024) | 0x80000000u);
+        for (int c = 0; c < 5; ++c) { bd(0x200 + 0x20 * c, 768); patch(0x204 + 0x20 * c, 3, offs[c]); }
+        std::swap(w, r);
+        auto rt = stream_patch::attn_rows_table(r, "kvslice rows", 4, g);
+        bool rok = rt.size() == 4 + 1 + 10;
+        for (uint64_t pos0 : {0ull, 1ull, 5ull, 1022ull, 2044ull}) {
+            std::vector<uint32_t> iw = r;
+            stream_patch::attn_rows_apply(iw.data(), rt, pos0, g);
+            const uint64_t pad = 4 * ((pos0 + 4 + 3) / 4);
+            for (const auto& p : rt) {
+                const uint64_t pos = pos0 + p.row;
+                const uint64_t want = p.kind == 0 ? pad * 192 : p.kind == 1 ? pos * 2048 : p.kind == 2 ? (pos * 1024) | 0x80000000u : p.base;
+                rok = rok && iw[p.word] == static_cast<uint32_t>(want);
+            }
+        }
+        check(rok, "attn_rows_apply kvslice: the shared window of pos0 + L rows padded to whole blocks, every fill from its own offset");
     }
-    refused_manifest(argv[1], "kvslice 4 needs the attnpos patch table, rb 1", "kvslice beside a blocked walk refused",
+    refused_manifest(argv[1], "kvslice 4 needs the attnpos or attnrows patch table, rb 1", "kvslice beside a blocked walk refused",
                      [](json& j) { j["kernels"]["ax0"]["kvslice"] = 4; });
     refused_manifest(argv[1], "kvslice 3", "kvslice of 3 rows refused",
                      [](json& j) { j["kernels"]["ax0"]["rb"] = 1; j["kernels"]["ax0"]["kvslice"] = 3; });

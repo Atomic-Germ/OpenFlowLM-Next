@@ -24,7 +24,7 @@ sys.path.insert(0, str(DESIGNS.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
-from recipes.attnknobs import TREE8_STACK, tree8, tree8_flags  # noqa: E402
+from recipes.attnknobs import TREE8_STACK, dxl_kvslice, kv_slices, tree8, tree8_flags  # noqa: E402
 from recipes import dxl as DXR  # noqa: E402
 from recipes.dxl import JMAX, NF, Z_ROW, job_table, jobs  # noqa: E402
 
@@ -56,12 +56,19 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():
-    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8"):
+    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8", "ATTN_KVSLICE", "ATTN_DXL_KVSLICE"):
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 T8 = tree8(SPEC, G.NHL, G.RB, G.HD)           # the same bit-identical score tree as dx (OPEN-ATTN-SCORE-TREE)
 if T8:
     ATTN_FLAGS.extend(tree8_flags(1))
+KVSL = dxl_kvslice(SPEC, ACORES, RB, G.QKVB, G.WINDOW) > 0   # core c of every group on one slice stream (OPEN-ATTN-KVSLICE)
+if KVSL:
+    KVS, KVB = kv_slices(G.NH, G.KVH, ACORES)
+    KW_COLS = [3, 4, 5, 6, 7]                  # lni, w0..w7, x and ain fill columns 0..2 twice and 3..7 once
+    assert ACORES <= len(KW_COLS), f"dxl KVSLICE: {ACORES} window streams, free shim MM2S columns {KW_COLS}"
+    ATTN_FLAGS.append(f"-DATTN_KVS={KVS}")
+    E_W = RB * 2 * KVS * G.HD * 2
 ASTACK = TREE8_STACK if T8 else 0x1800
 # Every DDR-bound stream leaves the compute rows through row 2's south ports, 4 a column. A group's core 0 drains
 # its own KV row; where og, KV, y and ln outflows overrun them (Granite's 5 cores a group: 33), group 0's core 0
@@ -152,12 +159,20 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a, brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
+    if KVSL:                                            # the window from the core's slice stream: blocks, tail, the rest skipped
+        u8_w = np.ndarray[(E_W,), np.dtype[np.uint8]]
+        f_step = ef("attn_tailw", ATTN / "attn_tailw.cc", [u8_w, fq, foacc, fml, pb_ty, i32], ATTN_FLAGS)
+    else:
+        f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
     f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
-    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
-                  ATTN_FLAGS) if RB > 1 else None)
+    if KVSL:
+        f_stepb = ef("attn_stepw", ATTN / "attn_stepw.cc", [u8_w, fq, foacc, fml, pb_ty, i32], ATTN_FLAGS)
+    else:
+        f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
+                      ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
-    f_skip = ef("dxl_attn_skip", HERE / "dxl_attn_skip.cc", [pb_ty, i32], OS)
+    f_skip = (ef("dxl_attn_skipw", HERE / "dxl_attn_skipw.cc", [pb_ty, i32], OS + [f"-DDXL_RB={RB}"]) if KVSL else
+              ef("dxl_attn_skip", HERE / "dxl_attn_skip.cc", [pb_ty, i32], OS))
     f_kvpack = ef("dxl_kvpack", HERE / "dxl_kvpack.cc", [brow, brow, kvrow_ty], OS + [f"-DDXL_KVW={KVW}"])
     f_kvrow = (ef("dxl_kvpack_row", HERE / "dxl_kvpack_row.cc", [brow, brow, kvrows_ty, pb_ty, i32],
                   OS + [f"-DDXL_KVW={KVW}"]) if KV_ONE else None)
@@ -168,7 +183,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)
-    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))
+    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 1 + NPTAB + 1) if KVSL else max(4, 2 * RB + 2, 1 + NPTAB + 1))
+    of_kw = [ObjectFifo(u8_w, name=f"kw{c}", depth=2) for c in range(ACORES)] if KVSL else []
     # row g's group writes its new KV row at slot g, so one drain puts all L rows in the cache
     of_kv = ObjectFifo(kvrows_ty, name="kvj", depth=1)
     kv_parts = None if KV_ONE else of_kv.prod().join([g * 2 * KVW for g in range(LR)], tile=Tile(1, 1),
@@ -240,7 +256,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
 
     def _attn(g, ain, kvout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
               f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, f_skip, f_kvpack, f_count, h0,
-              kvall=None):
+              kvall=None, kw=None):
         def skip_prologues(rows):
             f_count(pb, rows * PRO)
             for _ in range_(pb[7]):
@@ -293,7 +309,19 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             skip_prologues(LR - 1 - g)
         f_skip(pb, LR - g)
         f_init(oacc, ml)
-        if RB > 1:
+        if kw is not None:                                       # KVSLICE: this core's slice, whole RB-row elements
+            for _ in range_(pb[4]):
+                e = kw.acquire(1)
+                f_stepb(e, qs, oacc, ml, pb, h0)
+                kw.release(1)
+            for _ in range_(pb[6]):
+                e = kw.acquire(1)
+                f_step(e, qs, oacc, ml, pb, h0)
+                kw.release(1)
+            for _ in range_(pb[3]):                              # the elements past this group's position
+                kw.acquire(1)
+                kw.release(1)
+        elif RB > 1:
             for _ in range_(pb[4]):
                 e = ain.acquire(2 * RB)
                 args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
@@ -308,9 +336,10 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                 e = ain.acquire(2)
                 f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
                 ain.release(2)
-        for _ in range_(pb[6]):                                  # the window's rows past this group's position
-            ain.acquire(2)
-            ain.release(2)
+        if kw is None:
+            for _ in range_(pb[6]):                              # the window's rows past this group's position
+                ain.acquire(2)
+                ain.release(2)
         f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
         o = ogout.acquire(1)
         f_fin(oacc, ml, o, 0)
@@ -327,13 +356,15 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
         packs_all = KV_ONE and kv_core(g, c)
 
         def body(ain, *rest):
+            kw = rest[0] if KVSL else None
+            rest = rest[1:] if KVSL else rest
             kvout = rest[0] if kv_core(g, c) else None
             rest = rest[1:] if kv_core(g, c) else rest
             ogout, bufs = rest[0], rest[1:11]
             fns = list(rest[11:len(rest) - (8 if packs_all else 0)])
             if RB <= 1:
                 fns.insert(8, None)
-            _attn(g, ain, kvout, ogout, *bufs, *fns, h0, kvall=tuple(rest[-8:]) if packs_all else None)
+            _attn(g, ain, kvout, ogout, *bufs, *fns, h0, kvall=tuple(rest[-8:]) if packs_all else None, kw=kw)
         return body
 
     workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx],
@@ -365,11 +396,13 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             kvall = ([Buffer(bhd, name="qn_kv"), Buffer(bhd, name="kn_kv"), Buffer(fcs, name="cs_kv"),
                       Buffer(pb_ty, name="pb_kv"), Buffer(brow, name="kout_kv"), Buffer(brow, name="vout_kv"),
                       Buffer(pb_ty, name="cnt_kv"), f_kvrow] if (KV_ONE and kv_core(g, c)) else [])
-            workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + outs + abufs(g, c) + afns + kvall,
+            kwc = [of_kw[c].cons()] if KVSL else []
+            workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + kwc + outs + abufs(g, c) + afns + kvall,
                                   tile=att_tiles[g][c], stack_size=ASTACK))
 
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_lora, lni, lno, w_prods, x_prod, y_conss,
-                 ain_p, kv_c, og_cs):
+                 ain_p, kv_c, og_cs, *kw):
+        kw_ps = kw[0] if kw else None
         AB, XF = X.AD_BYTES, X.XRES_FLOATS
         for c in range(N_CORES):
             rtps[c][0] = 1 if DRAFT else 0
@@ -452,7 +485,12 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             pa_in.fill(ain_p, a_act, bt(AB, X.AD_K + j * X.KV_ROW_ACT, KVW * 4))
             pa_in.fill(ain_p, a_act, bt(AB, X.AD_V + j * X.KV_ROW_ACT, KVW * 4))
         pk.finish()                                              # the window reads the rows this drain writes
-        pa_in.fill(ain_p, a_kv, bt(L0.KV_BYTES, 0, L0.KV_ROW))                              # attnrows window
+        if kw_ps:                                                # each core index's slice, compiled for one block (attnrows, kvslice)
+            for c in range(ACORES):
+                pa_in.fill(kw_ps[c], a_kv, tap(L0.KV_BYTES, KVB[c] * G.HD * 2, [1, RB, 2, KVS * G.HD * 2],
+                                               [0, L0.KV_ROW, L0.KV_ROW // 2, 1]))
+        else:
+            pa_in.fill(ain_p, a_kv, bt(L0.KV_BYTES, 0, L0.KV_ROW))                          # attnrows window
         e = early("o")                                           # o's first weights stream under the attention
         pa_out.finish()
         pa_in.finish()
@@ -490,7 +528,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_ain.prod(tile=Tile(2, 0)), of_kv.cons(tile=Tile(1, 0)),
-                            [of_og[g].cons(tile=Tile(2 + g, 0)) for g in range(LR)]])
+                            [of_og[g].cons(tile=Tile(2 + g, 0)) for g in range(LR)]]
+                 + ([[of_kw[c].prod(tile=Tile(KW_COLS[c], 0)) for c in range(ACORES)]] if KVSL else []))
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

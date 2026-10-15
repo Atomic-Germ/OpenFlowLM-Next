@@ -1,5 +1,4 @@
-// The rows that do not fill a block (pb[5] of them, the position-0 dummy included), from the
-// last, padded window element (attn.h ATTN_KVS): one at a time, as attn_step takes them.
+// The pb[5] rows past the last whole block, from the padded window element, one at a time as attn_step takes them.
 #include "attn.h"
 #if ATTN_KVS
 extern "C" {

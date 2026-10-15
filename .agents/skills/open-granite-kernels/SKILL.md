@@ -231,10 +231,46 @@ the union set (the manifest needs no edit unless `rb` changes). Check a probe to
 ring lowers to 9 buffers) and the `.text` size (`llvm-size -A elfs_main_core_2_3/*.elf`). A fifo-depth change moves only ~85 bytes
 of the xclbin (the ring's wrap constants), so a near-identical xclbin proves nothing either way.
 
-Not done, and where the rest is: the stream (0.28 ms) is 2 KB a position broadcast to every core, of which a core needs a quarter; a
-stream per core on the five free shim MM2S channels would cut it, at the cost of a 3-D window BD the position patch
-(`stream_patch.hpp attn_table`) does not know. Eight attention cores (one per kv head) would cut the compute by 3/8 but need a memtile
-join for the og drains (the shim S2MM channels are all taken).
+The stream and the head split were done next (OPEN-ATTN-KVSLICE, the section below).
+
+## Attention by kv head, each core on its own window (2026-10-15, OPEN-ATTN-KVSLICE)
+
+Two bit-identical changes, both on by default for Granite (`attnknobs.KVSLICE_MEASURED`, `KVCORES_MEASURED`):
+
+- **KVSLICE**: each attention core streams only its kv heads of the cached rows on its own shim MM2S channel, as one 3-D BD
+  over the row-major cache (`[rows][K | V][KVS x 128 B]`, compiled for one 4-row block and sized per token by `attnpos`). A
+  fifo element is a whole block, so the ring is two elements and the DMA refills one while the core computes the other; the
+  window is padded to whole blocks and the tail rows still go one at a time (`attn_tailw.cc`). The cache layout does not
+  change, so nothing else reads it differently and no capacity is compiled in.
+- **KVCORES**: cores grouped by kv head so the 5 q heads of one kv head share every K and V row they load (attn.h
+  `ATTN_G5`). `ATTN_KVCORES=1`: 8 cores of 5 heads on row 4; `=2`: 16 cores, a kv head's heads as 3 + 2 (rows 4 and 5,
+  the pair in one column; the 2-head cores compile attn.h at `ATTN_NHL=2` under `symbol_prefix="h2"`). The two kv heads of
+  an aligned slice share one window stream (4 streams of 512 B a position), og joins in memtiles of up to 6 inputs.
+
+Build and check one variant in ~2 min: `export_qwen36_kernels.py --model-dir <model> --only dx --out <copy of the union set>`
+with the knob in the environment (`ATTN_KVSLICE=0|1`, `ATTN_KVCORES=0|1|2`, `ATTN_G5_PVROLL=0|1`, all probe variables), then
+`--dump-logits` over a 70-token prompt one token at a time against the base set: 22 of 22 files byte-identical, or it is wrong.
+
+Traps met on the way:
+- **The window placeholder must be at least two rows.** The lowering drops the stride of a size-1 dimension, and a BD whose
+  length is later patched past it re-reads row 0. dx.py compiles the window for one block (4 rows); `attnpos` takes each
+  fill's per-row words as its compiled length / 4.
+- **Every KV transfer below one row is a window fill** only when the manifest says `kvslice`; an engine without the key
+  refuses the stream ("unexpected kv transfer"), which is the point: a kvslice `dx` under a plain patch would stream a quarter
+  of the window and compute garbage, not fail.
+- **A memtile join takes at most 6 inputs** (6 S2MM channels): 16 og streams join as 6 + 6 + 4 on memtiles (2..4, 1).
+- **Two head counts in one design** need two ExternalFunction sets; without `symbol_prefix` the MLIR symbols collide. Each
+  core links only its own objects, so the shared inline bodies (`attn_rowb_impl`, `vexpN`) do not meet at link time.
+- **`attn_row_impl` must index the same way for the window rows and the new row**: the tail rows come from the slice, the
+  new row from the full scratch row, so `attn_step_new` offsets its pointers by `attn_kvb(h0)` instead of a per-TU macro
+  (PR #105's trap: two same-named bodies, the linker keeps one).
+- **Do not name a helper script `profile.py`**: `transformers` imports `cProfile`, which imports `profile`, and Python finds
+  the script in the caller's directory first.
+- **An Edit of attn.h fails while a build reads it** (EPERM on the rename): wait for the build's compile phase.
+
+What the arithmetic costs now (Peano bundles a 4-row block, `utilities/dxl-asm/attn_tu_check.py` + `bb_bundles.py`): 8 heads
+(TREE8) ~1,460; 5 heads (G5) ~1,150 with 257 of them the 32-lane exponential; 3 heads ~890; 2 heads ~770. The exponential is
+latency-bound (a 64-lane one is 292), so it does not shrink with the head count.
 
 ## Decode at context 0: the weight stream and one context (2026-10-15)
 

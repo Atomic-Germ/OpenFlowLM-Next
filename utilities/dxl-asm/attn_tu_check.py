@@ -1,6 +1,7 @@
 """Compile attention TUs for Granite's dx point to Peano assembly (a fast syntax / codegen check before a design build) and
-print each function's bundle count: python attn_tu_check.py OUTDIR TU.cc [TU.cc ...] -- [extra -D flags]."""
-import re, subprocess, sys
+print each function's bundle count: python attn_tu_check.py OUTDIR TU.cc [TU.cc ...] -- [extra -D flags].
+With ATTN_TU_OBJ=1 it builds objects instead and prints each symbol's bytes (llvm-nm --print-size), what program memory counts."""
+import os, re, subprocess, sys
 from pathlib import Path
 
 SP = Path(r"C:\dev\mlir-aie\ironenv\Lib\site-packages")
@@ -19,16 +20,22 @@ def main():
     args = sys.argv[2:]
     tus, extra = (args[:args.index("--")], args[args.index("--") + 1:]) if "--" in args else (args, [])
     for tu in tus:
-        src = REPO / "open_kernels/designs/attn" / tu
-        asm = out / (Path(tu).stem + ".s")
-        cmd = [config.peano_cxx_path(), str(src), "-S", "-o", str(asm), f"-I{config.cxx_header_path()}", "-std=c++20",
+        src = Path(tu) if Path(tu).is_absolute() else REPO / "open_kernels/designs/attn" / tu
+        obj = os.environ.get("ATTN_TU_OBJ") == "1"
+        asm = out / (Path(tu).stem + (".o" if obj else ".s"))
+        cmd = [config.peano_cxx_path(), str(src), "-c" if obj else "-S", "-o", str(asm), f"-I{config.cxx_header_path()}", "-std=c++20",
                "-Wno-parentheses", "-Wno-attributes", "-Wno-macro-redefined", "-Wno-empty-body", "-O2", "-DNDEBUG",
-               "-D__AIE_API_AIE_ADF_HPP__", "--target=aie2p-none-unknown-elf", "-Os", *BASE, *extra]
-        for d in include_dirs() + [str(src.parent)]:
+               "-D__AIE_API_AIE_ADF_HPP__", "--target=aie2p-none-unknown-elf", *BASE, *extra]
+        for d in include_dirs() + [str(src.parent), str(REPO / "open_kernels/designs/attn")]:
             cmd += ["-I", d]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:
             sys.exit(f"{tu}:\n{r.stderr[-4000:]}")
+        if obj:
+            nm = Path(config.peano_cxx_path()).parent / "llvm-nm"
+            r = subprocess.run([str(nm), "--print-size", "--size-sort", str(asm)], capture_output=True, text=True)
+            print(tu, [(l.split()[3], int(l.split()[1], 16)) for l in r.stdout.splitlines() if len(l.split()) == 4])
+            continue
         lines = asm.read_text().splitlines()
         funcs, cur, n = [], None, 0
         for ln in lines:

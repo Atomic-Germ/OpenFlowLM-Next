@@ -56,10 +56,7 @@ struct AttnGeometry {
     /// blocks AND takes the new position's row as the last block's final slot (attn.h
     /// ATTN_BLOCK_ONLY). 1 = every other kernel: the row count is the window's own.
     uint64_t rb = 1;
-    /// Rows a per-core window element holds (dx.py KVSLICE, OPEN-ATTN-KVSLICE): every KV transfer below one row is
-    /// one core's window fill, compiled for this many rows, and streams the window padded to whole elements.
-    /// 0 = the one window fill of every other kernel.
-    uint64_t kvslice = 0;
+    uint64_t kvslice = 0;            ///< rows a per-core window element holds (OPEN-ATTN-KVSLICE); 0 = one window fill
 };
 
 /// The cached rows position `pos` attends to: [start, pos), streamed as nf rows (>= 1: position 0
@@ -206,8 +203,7 @@ inline std::vector<AttnPatch> attn_table(const std::vector<uint32_t>& w, const s
     return t;
 }
 
-/// The window rows a kvslice kernel streams: nf padded to whole elements (the kernel takes the tail rows of the
-/// last one singly and never reads the rest).
+/// nf padded to whole elements: the kernel takes the last one's real rows singly and never reads the rest
 inline uint64_t attn_kvslice_rows(uint64_t nf, uint64_t kvslice) { return kvslice * ((nf + kvslice - 1) / kvslice); }
 
 /// Bytes this instruction stream moves between DDR and the array, per host
@@ -314,6 +310,8 @@ struct AttnRowPatch {
     uint8_t kind;
     uint32_t flags;
     uint32_t row;
+    uint64_t base = 0;        ///< kind 3 with kvslice: the fill's compiled offset inside a row
+    uint32_t row_words = 0;   ///< kind 0 with kvslice: words the fill moves per row
 };
 
 // Placeholder positions 1 .. rows; the one window fill's length (in the BD write before it) becomes pos0 + rows.
@@ -328,11 +326,15 @@ inline std::vector<AttnRowPatch> attn_rows_table(const std::vector<uint32_t>& w,
         uint32_t reg = w[i + 6], arg = w[i + 8];
         uint64_t off = w[i + 10] & 0x7fffffffu;
         uint32_t flags = w[i + 10] & 0x80000000u;
-        if (arg == 3 && off == 0) {
+        if (arg == 3 && (off == 0 || (g.kvslice && off < g.kv_row))) {
             if (!have_bd || bd_write + 2 >= w.size() || w[bd_write + 2] + 4 != reg)
                 throw std::runtime_error("attnrows: " + kn + ": no BD write before a KV window fill");
-            t.push_back({bd_write + 4, 0, 0, rows});
-            t.push_back({i + 10, 3, flags, rows});
+            const uint64_t len = w[bd_write + 4];
+            if (g.kvslice && (len % g.kvslice || !len))
+                throw std::runtime_error("attnrows: " + kn + ": a window fill of " + std::to_string(len) +
+                                         " words is not " + std::to_string(g.kvslice) + " whole rows");
+            t.push_back({bd_write + 4, 0, 0, rows, 0, g.kvslice ? static_cast<uint32_t>(len / g.kvslice) : 0});
+            t.push_back({i + 10, 3, flags, rows, off});
         } else if (arg == 3) {
             if (off != g.kv_row)
                 throw std::runtime_error("attnrows: " + kn + ": unexpected kv transfer at offset " + std::to_string(off));
@@ -356,11 +358,14 @@ inline std::vector<AttnRowPatch> attn_rows_table(const std::vector<uint32_t>& w,
     };
     for (uint32_t r = 0; r < rows; ++r) expect(2, r, 1);
     expect(1, 0, 1);
-    expect(0, rows, 1);
-    expect(3, rows, 1);
-    if (t.size() != rows + 3)
+    // with kvslice every attention core index has its own window fill, one length and one offset patch apiece
+    const size_t fills = g.kvslice ? count(0, rows) : 1;
+    if (!fills) throw std::runtime_error("attnrows: " + kn + ": no KV window fill");
+    expect(0, rows, fills);
+    expect(3, rows, fills);
+    if (t.size() != rows + 1 + 2 * fills)
         throw std::runtime_error("attnrows: " + kn + ": " + std::to_string(t.size()) + " patches, expected " +
-                                 std::to_string(rows + 3));
+                                 std::to_string(rows + 1 + 2 * fills));
     if (g.window || g.rb > 1)
         throw std::runtime_error("attnrows: " + kn + ": the shared window takes no sliding window or row padding");
     return t;
@@ -374,10 +379,10 @@ inline void attn_rows_apply(uint32_t* iw, const std::vector<AttnRowPatch>& table
         uint64_t start, nf;
         attn_window(pos, g.window, &start, &nf);
         if (g.rb > 1) nf = g.rb * ((pos - start) / g.rb + 1) - 1;
-        uint64_t v = p.kind == 0   ? nf * g.kv_row / 4
+        uint64_t v = p.kind == 0   ? (g.kvslice ? attn_kvslice_rows(nf, g.kvslice) * p.row_words : nf * g.kv_row / 4)
                      : p.kind == 1 ? pos * g.kv_row
                      : p.kind == 2 ? pos * g.ptab_row
-                                   : start * g.kv_row;
+                                   : p.base + start * g.kv_row;
         iw[p.word] = static_cast<uint32_t>(v) | p.flags;
     }
 }

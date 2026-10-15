@@ -36,6 +36,11 @@ the offending key named.
 - A layer type may carry `gemm_block_variants`, a map of whole routes the engine may load in place of `gemm_block` (OPEN-PREFILL-MODE). Each variant is parsed and refused exactly as `gemm_block` is; a variant without a `gemm_block`, one whose `t` or `kind` differs from it, and a set whose layer types carry different variant names are refused by name. `files()` names every variant's streams, so a set missing one is not a kernel set. An engine that predates the field ignores it and runs `gemm_block` (`manifest_test.cpp`).
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
+- A kernel may carry `kvslice` (OPEN-ATTN-KVSLICE): the rows of one per-core window element, read only with the `attnpos`
+  or `attnrows` patch table and `rb` 1, and only 2 or 4; anything else is refused by name. With it every KV transfer below
+  one row is a window fill whose length and offset `attn_table` / `attn_rows_table` patch per fill, and the KV buffer is
+  allocated `kvslice - 1` rows past the capacity. Absent means 0, the one window fill of every other kernel; a plain table
+  refuses a stream with more than one window fill ("unexpected kv transfer") (`manifest_test.cpp`).
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
 
 ### OPEN-ADD-KERNEL-LINK: `oflm-add` links a model to the kernel set matching its spec
@@ -176,7 +181,12 @@ A family enters the path by measurement, never by declaration:
 `recipes/attnknobs.py: FAST_ATTENTION` lists the measured families; every
 other family compiles the single-core attention it compiled before, byte for
 byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
-measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
+measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE). So are
+the knobs of OPEN-ATTN-KVSLICE beside it: `ATTN_KVSLICE=0|1` (per-core windows in
+`dx`), `ATTN_DXL_KVSLICE=0|1` (the same in `dxl`), `ATTN_KVCORES=0|1|2` (attention
+cores per kv head) and `ATTN_G5_PVROLL=0|1` (the G5 value loop rolled), each with
+its own measured list (`KVSLICE_MEASURED`, `DXL_KVSLICE_MEASURED`,
+`KVCORES_MEASURED`).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
 - With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 4 with the single-row kernel retired (RB 2 from 2026-09-22 until Track E the same day); Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
@@ -444,7 +454,71 @@ into local buffers and releasing the fifo before computing (so the ring refills 
 reads 1.929), so the copy cost what it was expected to (~0.1 ms) and bought nothing: the 0.28 ms is not DMA wait; the per-block acquire / release and pointer selection is the suspect (RB 2 costs 0.2 ms a layer
 more), unmeasured. The score loop ran 8 times a block and called `__muldi3` for `h / 5` each time. Still open: that per-block cost,
 the stream's volume (2 KB a position broadcast to every core, of which a core needs a quarter to three eighths), and the arithmetic's
-spills (358 vector stores in the 795-bundle score block).
+spills (358 vector stores in the 795-bundle score block). OPEN-ATTN-KVSLICE (2026-10-15) takes the stream off the critical path.
+
+### OPEN-ATTN-KVSLICE: attention cores by kv head, each on its own slice of the window, bit-identical
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h` `ATTN_KVS` / `ATTN_G5`, `attn_stepw.cc`, `attn_tailw.cc`,
+`designs/dense/dx.py`, `designs/dxl/dxl.py`, `dxl_attn_skipw.cc`, `recipes/attnknobs.py` `kvslice()` / `kv_slices()` / `kv_cores()`,
+`harness/stream_patch.hpp`, `src/open_qwen36/manifest.cpp` / `core.cpp`)
+**Verification:** test (the patch tables and the manifest key: `src/open_qwen36/manifest_test.cpp`; the slice geometry and the
+knobs: `tests/test_attn_geometry.py`); manual (the hardware procedure below)
+
+For a family in the measured lists (Granite 4.2 3B), `dx` shall feed each attention core the cached rows of its own kv heads on
+a shim channel of its own instead of broadcasting whole rows to every core, group the attention cores by kv head so the q heads
+of one kv head share every K and V row they load, and give logits byte-identical to the broadcast kernel's:
+- **Per-core windows (`kvslice`).** A core reads kv heads [kvb, kvb + KVS) of every cached row as one 3-D BD over the row-major
+  cache ([rows][K | V][KVS x HD x 2 B]). The cache layout does not change, so the host block prefill, checkpoints and `kv_row`
+  read it as before, and no context capacity is compiled into a descriptor (`--max-ctx` and the server's registry length work
+  unchanged). A fifo element is one block of RB rows: the core's ring is two elements, so the DMA fills block b + 1 while the
+  core computes block b, and the per-block 8-way pointer switch goes. The window fills are issued before the q / k / v GEMVs
+  finish (they read only rows earlier tokens wrote). The window is padded to whole blocks; the real rows of the last block go
+  one at a time through `attn_step_impl`, the new row last, as before.
+- **Cores by kv head (`KVCORES`, attn.h `ATTN_G5`).** 1: 8 cores of 5 heads (row 4); 2: 16 cores, each kv head's heads as 3 + 2
+  (rows 4 and 5; the 2-head cores compile attn.h at `ATTN_NHL=2` under prefixed symbols). The score tree is TREE8's over head
+  pairs of one K row, the value pass covers all of a core's heads per head-dim slice with every head's chain in its old order,
+  and the per-head rescale test is skipped when no head of the block raised its max. The two kv heads of an aligned slice
+  share one window stream (4 streams of 512 B a position); the og elements join in memtiles (at most 6 inputs each).
+- **The manifest's `kvslice`** (rows an element) tells `attnpos` / `attnrows` the layout (OPEN-MANIFEST): every KV transfer
+  below one row is a window fill, its BD length patched to the padded rows times its own per-row words, its offset to its base
+  plus `start * kv_row`; the KV buffer keeps `kvslice - 1` rows of slack.
+- `dx.py` counts its own shim MM2S producers and refuses, naming the free columns, a design with more window streams than
+  free channels (Granite: columns 3..7); a q / k / v bias or a sliding window keeps the broadcast.
+- **`dxl`** (the L-row pass) takes the same per-core windows when its family is in `DXL_KVSLICE_MEASURED`: core c of every row
+  group reads one slice stream shared by the groups, each group walking its own blocks and tail element and skipping the rest
+  (`dxl_attn_skipw`), so `dxl` stays bit-identical to `dx`.
+- Probe variables (OPEN-ATTN-CONTEXT): `ATTN_KVSLICE`, `ATTN_DXL_KVSLICE`, `ATTN_KVCORES`, `ATTN_G5_PVROLL`.
+
+**Acceptance criteria:**
+- `--dump-logits` over 70 prompt tokens + 20 decoded, one token at a time, on the set and on the broadcast set: every logit file
+  byte-identical (22 of 22), and the same over 2100 + 20.
+- The six `utilities/uno-ref` prompts and the chat / code prompts at 1024 and 2048 x 96 greedy tokens: identical to the broadcast set.
+- `open_qwen36_cli --rows-check 17` prints `ROWS PASS` (prompts of 70, 1030 and 2060 tokens), and Uno is identical to plain
+  decode on the six-prompt sweep and at 1024 / 2048.
+- `manifest_test`: five fills of 192 words a row patch to the padded rows at each position (attnpos and attnrows), the row drain
+  and records as before; a plain geometry refuses the same stream; `kvslice` beside `rb` 4, or of 3 rows, is refused.
+- `test_attn_geometry.py`: every core's heads lie inside its slice at 5, 8 and 16 cores; the knobs are on for Granite only.
+
+**Procedure (manual):** build `dx` (and `dxl`, `dxl_lora`) with the knob set and unset (`export_qwen36_kernels.py --only dx
+--out <copy of the union set>`, ~2 min), run the criteria against each, and profile with `OFLM_OPEN_STEP_TRACE=1 open_qwen36_cli
+--ids 100264 --at-position P --bench-decode 5 --bench-step 20` at P = 0, 1024, 2048 under `dibs run --measure`.
+
+**Result 2026-10-15** (`dibs run --measure` CLEAN, pipelined step wall min / one `dx` dispatch min; the broadcast and KVCORES
+columns are one sitting, `kvslice` alone an earlier one, whose broadcast row read 46.3 / 63.1 / 79.7):
+
+| position | broadcast (decode-depth) | `kvslice`, 5 cores x 8 | KVCORES 1 (8 x 5) | KVCORES 2 (16, 3 + 2) |
+|---|---|---|---|---|
+| 0 | 46.3 ms / 1.091 | 46.5 / 1.102 | 46.6 / 1.098 | 47.3 / 1.096 |
+| 1024 | 63.0 / 1.510 | 57.7 / 1.381 | 54.1 / 1.277 | 52.6 / 1.227 |
+| 2048 | 79.0 / 1.915 | 69.0 / 1.649 | 61.5 / 1.467 | 58.3 / 1.366 |
+| growth a layer a position | 0.399 us | 0.275 | 0.182 | 0.134 |
+
+- The windows alone took the 0.28 ms a layer the stream cost at 2048 (`ATTN_NULL`, OPEN-ATTN-SCORE-TREE); the rest is the
+  arithmetic, which the kv-head grouping cuts: a block of 4 rows is ~1,460 Peano bundles at 8 heads (TREE8), ~1,150 at 5 (257
+  of them the exponential), ~890 at 3 and ~770 at 2.
+- **KVCORES 2 is not the default.** Its context reloads 8 more core programs at every switch to and from `ln` / `lm`: the first
+  `dx` of a step costs 3.16 ms against 2.22 (broadcast) and 2.48 (KVCORES 1), ~1 ms a token at every depth, which at context 0
+  is a 2 % regression. It wins above ~500 tokens of context; with `dx` alone in its context it would win everywhere.
+- Program memory: fullest core 14,128 B at KVCORES 1, 12,768 at 2.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)

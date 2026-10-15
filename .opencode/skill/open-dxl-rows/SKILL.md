@@ -31,6 +31,11 @@ decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DEC
     row with `attn_step_new`. Bit-identical to decode by construction.
   - Granite's groups compile the same bit-identical score tree as `dx` (`attnknobs.tree8`, OPEN-ATTN-SCORE-TREE), with the row loop
     rolled to fit program memory: 12,320 B per core (13,520 with the KV pack) of 16,384; unrolling by 4 overflows it and by 2 crashes the backend.
+  - With `ATTN_DXL_KVSLICE` / `attnknobs.DXL_KVSLICE_MEASURED` (OPEN-ATTN-KVSLICE) the window leaves `ain`: core c of every
+    group reads kv heads [kvb_c, kvb_c + 3) of the pos0 + L rows from one stream shared by the L groups (shim columns 3..7),
+    in 4-row elements; a group takes its blocks and its tail element and skips the rest (`dxl_attn_skipw` counts them into
+    pb[3]; pb[6] is the tail flag here, not the old skip count). The window fills still follow the KV drain's finish, since the
+    pass's own new rows are in the window. `attnrows` patches each fill like `attnpos` does (manifest `kvslice`).
   - Each group's core 0 packs its new K|V row (`dxl_kvpack`) into a memtile join (Tile(1, 1)).
     One drain writes all L rows, and it finishes before the window fill is issued.
   - Each group's four og elements join in a memtile (Tile(2 + g, 1)) into one 8 KB row: one
@@ -110,8 +115,11 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
   engine's 107 ms step). The "2x" once noted here was a busy machine.
 - **Other sessions share this NPU.** Take turns with `dibs` (the old `lock.py` is gone): a number you will quote
   comes from `dibs run --measure --tag <you> --label <what> --eta <t> -- <cmd>` and only when it prints both
-  `dibs: CLEAN` and `dibs: CLEAN after`; a correctness run goes under `dibs run npu --tag <you> ...`. Keep a measured
-  unit under ~5 minutes: it holds every other session's commands while it runs.
+  `dibs: CLEAN` and `dibs: CLEAN after` (`NOISY after`: rerun, never quote it); a correctness run goes under
+  `dibs run npu --tag <you> ...`. Keep a measured unit under ~5 minutes: it holds every other session's commands while
+  it runs. dibs counts every agent of one Claude session as one holder, so with sibling agents on the box run
+  correctness runs under `--measure` too and wrap timed units in `utilities/granite-combined-bench/controlled.py`
+  (a context-0 control decode before and after, plus an `xrt-smi` watch for other processes' NPU work).
 - **Measured 2026-10-08/09 (K2-7B, L = 4):**
   - A verify pass costs 1.39x a decode step at short context (quiet; the 1.17-1.28x first noted
     came from a busy machine). The draft pass ~1.7x.
