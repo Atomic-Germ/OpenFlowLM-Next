@@ -191,11 +191,51 @@ static constexpr unsigned kMLU = ((kNHL + kVE - 1) / kVE) * kVE;
 #if ATTN_TREE8 && !ATTN_EXP32
 #error "attn.h: ATTN_TREE8 needs ATTN_EXP32"
 #endif
+#ifndef ATTN_EXPA
+#define ATTN_EXPA 0          // 1: exp with each Horner step's constant folded into the accumulator (not bit-identical to vexpN)
+#endif
+#if ATTN_EXPA
+template <unsigned N>
+__attribute__((noinline)) inline vfN<N> attn_expa(vfN<N> x) {
+  x = aie::max(x, aie::broadcast<float, N>(-87.0f));
+  const vfN<N> t = fmulN<N>(x, aie::broadcast<float, N>(1.44269504f));
+  const aie::vector<int32_t, N> n = aie::to_fixed<int32_t>(t, 0);
+  const vfN<N> f = fsubN<N>(t, aie::to_float<float>(n, 0));
+  vbN<N> fh, fl;
+  splitN<N>(f, fh, fl);
+#if ATTN_EXPA >= 2
+  vfN<N> p = aie::broadcast<float, N>(9.68571144e-3f);   // degree 4 minimax of 2^f on [-0.5, 0.5], 3.7e-6 relative
+  constexpr float c[4] = {5.59220257e-2f, 2.40218655e-1f, 6.93121036e-1f, 1.00000015f};
+  constexpr unsigned kDeg = 4;
+#else
+  vfN<N> p = aie::broadcast<float, N>(1.54035304e-4f);
+  constexpr float c[6] = {1.33335581e-3f, 9.61812911e-3f, 5.55041087e-2f, 2.40226507e-1f, 6.93147181e-1f, 1.0f};
+  constexpr unsigned kDeg = 6;
+#endif
+  AIE_LOOP_UNROLL_FULL
+  for (unsigned i = 0; i < kDeg; ++i) {
+    vbN<N> ph, pl;
+    splitN<N>(p, ph, pl);
+    accN<N> acc;
+    acc.from_vector(aie::broadcast<float, N>(c[i]));
+    acc = aie::mac(acc, ph, fh);
+    acc = aie::mac(acc, ph, fl);
+    acc = aie::mac(acc, pl, fh);
+    p = acc.template to_vector<float>();
+  }
+  // p in [0.7, 1.5] is normal: adding n to its exponent field is the exact 2^n scale
+  return aie::add(p.template cast_to<int32_t>(), aie::upshift(n, 23)).template cast_to<float>();
+}
+#define ATTN_EXPN attn_expa
+#else
+#define ATTN_EXPN vexpN
+#endif
 #if ATTN_EXP32
+static constexpr unsigned kEW = ATTN_RB >= 8 ? 64 : 32;     // the one exponential routine the narrow ones ride on
 template <unsigned N>
 static inline vfN<N> attn_vexp(vfN<N> x) {
-  if constexpr (N < 32) return vexpN<32>(x.template grow<32>()).template extract<N>(0);
-  else return vexpN<N>(x);
+  if constexpr (N < kEW) return ATTN_EXPN<kEW>(x.template grow<kEW>()).template extract<N>(0);
+  else return ATTN_EXPN<N>(x);
 }
 #endif
 static constexpr unsigned kRB = ATTN_RB;      // cached rows per call
@@ -1093,11 +1133,11 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   // exponential, ~240 bundles a block and 960 bytes of program, is gone.
   const vfN<kNL> earg = faddN<kNL>(fsubN<kNL>(m, mn), fsubN<kNL>(smax, mn));
   const vfN<kPV> eup = aie::shuffle_up(earg.template grow<kPV>(), kNHL);
-  const vfN<kPV> pv = vexpN<kPV>(aie::select(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)), eup,
+  const vfN<kPV> pv = ATTN_EXPN<kPV>(aie::select(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)), eup,
                                              aie::mask<kPV>::from_uint32(((1u << kNHL) - 1u) << kNHL)));
   const vfN<kNL> e = aie::shuffle_down(pv, kNHL).template extract<kNL>(0);
 #else
-  const vfN<kPV> pv = vexpN<kPV>(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)));
+  const vfN<kPV> pv = ATTN_EXPN<kPV>(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)));
 #endif
   aie::store_v(pvf, pv);
   vbN<kPV> t0, t1;

@@ -1,6 +1,7 @@
 r"""Decode gates against the first kernel set named, and the real-step A/B (wrap stepab in `dibs run --measure`).
 
     python decode_gates.py logits  --cli <exe> --model <dir> --sets <base> <cand> ... [--prompt 70|2100]
+    python decode_gates.py corr    --cli <exe> --model <dir> --sets <base> <cand> ... [--prompt 1030] [--block]
     python decode_gates.py greedy  --cli <exe> --model <dir> --sets <base> <cand> ... [--tokens 96]
     python decode_gates.py stepab  --cli <exe> --model <dir> --sets <a> <b> ... [--position 0] [--rounds 2]
 """
@@ -44,6 +45,37 @@ def logits(a) -> int:
         ok &= good
         print(f"{k}: tokens identical {v[0] == b[0]}, logit files byte-identical {same}/{len(b[1])} -> "
               f"{'BIT-EXACT' if good else 'DIFFERS'}", flush=True)
+    return 0 if ok else 1
+
+
+def corr(a) -> int:
+    import numpy as np
+    ids = ",".join(str(1000 + (i * 7919) % 50000) for i in range(a.prompt))
+    work = Path(a.work or tempfile.mkdtemp(prefix="decode_corr_"))
+    work.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, **({"OFLM_OPEN_ATTN_FA": "0"} if a.block else {}))   # the base set has no attn_fa: both prefill on the host
+    res = {}
+    for n, k in enumerate(a.sets):
+        pre = str(work / f"cg{a.prompt}_{n}")
+        for f in glob.glob(pre + "_*.bin"):
+            os.remove(f)
+        r = subprocess.run([a.cli, "--model", a.model, "--kernels", k, "--ids", ids, "--max-tokens", "20",
+                            "--dump-logits", pre, "--quiet", *(["--gemm-block"] if a.block else [])],
+                           capture_output=True, text=True, env=env)
+        files = sorted(glob.glob(pre + "_t*.bin"), key=lambda x: int(x.rsplit("_t", 1)[1][:-4]))
+        res[k] = [np.fromfile(f, np.float32) for f in files]
+        print(f"{k}: {len(files)} logit files, exit {r.returncode}", flush=True)
+    b = res[a.sets[0]]
+    ok = len(b) == 20
+    for k in a.sets[1:]:
+        v = res[k]
+        cs = [float(np.corrcoef(x, y)[0, 1]) for x, y in zip(v, b)]
+        top = sum(int(np.argmax(x) == np.argmax(y)) for x, y in zip(v, b))
+        exact = sum(int(np.array_equal(x, y)) for x, y in zip(v, b))
+        good = len(v) == 20 and min(cs) >= a.min_corr and top == 20
+        ok &= good
+        print(f"{k}: corr min {min(cs):.6f} (mean {sum(cs) / len(cs):.6f}), top-1 equal {top}/20, byte-identical {exact}/20 -> "
+              f"{'PASS' if good else 'FAIL'} (min corr {a.min_corr})", flush=True)
     return 0 if ok else 1
 
 
@@ -97,7 +129,7 @@ def stepab(a) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("mode", choices=["logits", "greedy", "stepab"])
+    ap.add_argument("mode", choices=["logits", "corr", "greedy", "stepab"])
     ap.add_argument("--cli", required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--sets", nargs="+", required=True)
@@ -106,8 +138,10 @@ def main() -> int:
     ap.add_argument("--position", type=int, default=0)
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--work", default=None)
+    ap.add_argument("--block", action="store_true", help="corr: block-prefill the prompt (host attention) for a deep context")
+    ap.add_argument("--min-corr", type=float, default=0.9998)
     a = ap.parse_args()
-    return {"logits": logits, "greedy": greedy, "stepab": stepab}[a.mode](a)
+    return {"logits": logits, "corr": corr, "greedy": greedy, "stepab": stepab}[a.mode](a)
 
 
 if __name__ == "__main__":
