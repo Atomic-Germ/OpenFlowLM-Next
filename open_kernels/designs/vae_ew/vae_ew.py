@@ -11,6 +11,8 @@ Activations are NHWC bf16 views: {"off", "pitch" (pixels per row), "border": 1 i
 image starts at row 1 / column 1 of a zero-bordered buffer (dit_conv's layout), 0 for a
 plain [H*W, C] tensor, "px_stride": elements from one pixel to the next when a pixel's C
 channels are the start of a wider row (default C)}; H, W, C are the op's. Kernels: vew.cc.
+"npix" (default H*W): the pixel count the GroupNorm statistics cover, when gn_apply runs
+over part of the tensor they were gathered on (the encoder's space-to-depth phases).
 
 Topology: dit_ew's -- 16 cores, 2 per column (rows 2-3); per column two input streams (A,
 B) split between the pair and two output streams (Y, Z) joined; the ops are DDR-bound.
@@ -200,7 +202,7 @@ def vae_ew(X: In, B: In, S: In, Y: Out, *, spec: CompileTime[str]):
         add_stats = op == "add" and bool(s.get("stats"))
         for (c, r), buf in rtp.items():
             vals = {cnt: per_core, R_C: C, R_SILU: int(bool(s.get("silu"))),
-                    R_NPIX: H * W, R_ADD_STATS: int(add_stats),
+                    R_NPIX: s.get("npix", H * W), R_ADD_STATS: int(add_stats),
                     R_NPAR: BLOCK - 1 if op == "gn_apply" else 0,
                     R_STATS_OUT: int(op == "gn_stats"), R_ADD_STATS_OUT: int(add_stats)}
             for k in range(RTP_LEN):

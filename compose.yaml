@@ -1,0 +1,30 @@
+services:
+  oflm:
+    image: openflowlm:runtime
+    build:
+      context: .
+      target: runtime
+    init: true
+    restart: unless-stopped
+    devices:
+      - "${OFLM_NPU_DEVICE:-/dev/accel/accel0}:/dev/accel/accel0"
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      OFLM_MODEL_PATH: /root/.config/oflm
+      NPU_CACHE_HOME: /root/.npu/cache
+    ports:
+      - "${OFLM_BIND_ADDRESS:-127.0.0.1}:${OFLM_PORT:-52625}:52625"
+    volumes:
+      - ./oflm-data:/root/.config/oflm
+      - ./npu-cache:/root/.npu/cache
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:52625/api/version"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
