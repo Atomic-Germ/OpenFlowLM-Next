@@ -27,7 +27,7 @@ from .spec import ModelSpec
 # main cores: LX_NULL_DN compiles the DeltaNet arithmetic away, LX_NULL_GEMV the q4/q8 GEMV
 # tile body, both leaving every stream, fifo and DMA -- and so insts.bin -- byte-identical.
 PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV", "DXL_NULL_PREP", "DXL_NULL_LN", "ATTN_TREE8", "ATTN_REPEAT",
-              "DX_WRING", "DX_WORDER", "DX_ONECTX", "ATTN_KVSLICE", "ATTN_KVCORES", "ATTN_G5_PVROLL", "ATTN_DXL_KVSLICE")
+              "DX_WRING", "DX_WORDER", "DX_ONECTX", "ATTN_KVSLICE", "ATTN_KVCORES", "ATTN_G5_PVROLL", "ATTN_DXL_KVSLICE", "DXL_WRING", "DXL_WDEPTH")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 

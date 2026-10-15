@@ -13,6 +13,7 @@ from ml_dtypes import bfloat16
 import aie.iron as iron
 from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
+from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import Tile
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern
@@ -87,6 +88,7 @@ NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"     # probes: the stream and 
 NULL_LN = os.environ.get("DXL_NULL_LN") == "1"
 # a deeper weight fifo prefetches through the activation prep; only where L1 holds the extra chunks
 W_DEPTH = int(os.environ.get("DXL_WDEPTH", 4 if DXR._main_l1(LR, X.YB, X.BP, G.KV_PC, X.TAB_K) + 2 * CHUNK <= DXR.L1_BUDGET else 2))
+WRING = int(os.environ.get("DXL_WRING", 0))     # memtile weight ring depth (dx's OPEN-DECODE-STREAM); 0: shim straight to the core
 # fewer accumulator spills in the tile loop (154 -> 140 bundles a k-block); scheduling only, no arithmetic
 GEMV_SCHED = ["-mllvm", "-aie-aggressive-realloc", "-mllvm", "-aie-gpr-realloc"]
 
@@ -178,7 +180,16 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                   OS + [f"-DDXL_KVW={KVW}"]) if KV_ONE else None)
     f_count = ef("dxl_attn_count", HERE / "dxl_attn_count.cc", [pb_ty, i32], OS)
 
-    of_w = [ObjectFifo(elem, name=f"w{c}", depth=W_DEPTH) for c in range(N_CORES)]
+    if WRING:
+        assert WRING <= 24, "dxl: a memtile ring deeper than 24 does not fit one BD pool"
+        of_wm = [ObjectFifo(elem, name=f"wm{c}", depth=WRING) for c in range(N_CORES)]
+        of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+        for c in range(N_CORES):
+            ObjectFifoLink(of_wm[c].cons(channel=0), [of_w[c].prod(channel=1)], Tile(c, 1), [], [0])
+        w_src = of_wm
+    else:
+        of_w = [ObjectFifo(elem, name=f"w{c}", depth=W_DEPTH) for c in range(N_CORES)]
+        w_src = of_w
     of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
@@ -524,7 +535,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
 
     rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty, lora_ty,
                             of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                            [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                            [w_src[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_ain.prod(tile=Tile(2, 0)), of_kv.cons(tile=Tile(1, 0)),
@@ -541,5 +552,5 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + [(LN / "ln.h").read_bytes(), (LN / "ln_y.cc").read_bytes(), (LN / "ln_xn.cc").read_bytes(),
                    (LINL / "ln_nr.cc").read_bytes(), (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(),
                    (DESIGNS.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode(), str(LR).encode(),
-                   str(DRAFT).encode(), repr(GL_FLAGS).encode(), repr(GEMV_SCHED).encode(), str(W_DEPTH).encode()])
+                   str(DRAFT).encode(), repr(GL_FLAGS).encode(), repr(GEMV_SCHED).encode(), str(W_DEPTH).encode(), str(WRING).encode()])
 SPECIALIZE = {"srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
