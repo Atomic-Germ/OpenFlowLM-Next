@@ -33,7 +33,10 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
     header_print("OFLM", "Granite on the open kernels (" + kernels + ")" +
-                             (eng->uno_ok() ? "; greedy requests (top_k 1, no penalty) decode by Uno's draft pass" : ""));
+                             (eng->spec_ok() ? std::string("; greedy requests (top_k 1, no penalty) decode speculatively: "
+                                                           "prompt lookup") + (eng->uno_ok() ? ", Uno's draft pass" : "") +
+                                                   " or a plain step, each cycle (OFLM_SPEC_MODE)"
+                                             : std::string()));
     this->lm_engine = std::move(eng);
 #else
     throw std::runtime_error("Granite needs the open engine, which this build does not have "

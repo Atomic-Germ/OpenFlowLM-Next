@@ -24,6 +24,7 @@
 #include "device_runtime.hpp"
 #include "lm_config.hpp"
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/spec_lookup.hpp"
 #include "open_qwen36/vision/vit.hpp"
 
 namespace open_qwen36 {
@@ -71,6 +72,11 @@ public:
     int uno_cycle(int seed, std::vector<int>& out);
     /// Put the cache position at `pos`: the rows past it are dropped (a cycle cut short).
     void uno_seek(int pos);
+    // OPEN-SPEC-LOOKUP: the switch (OFLM_SPECULATIVE=1) and the rows route; Uno joins when uno.q4nx is packed.
+    bool spec_ok() const;
+    void spec_begin();
+    // uno_cycle's contract; false asks the caller for a plain step, so plain tokens come from the app's own sampler.
+    bool spec_cycle(int seed, const std::vector<int>& history, std::vector<int>& out, int& p);
 
 private:
     CoreConfig cfg_;
@@ -81,6 +87,9 @@ private:
     std::vector<bf16> logits_;
     bool poisoned_ = false;
     std::mt19937 uno_rng_{0};                   ///< the draft rows' noise ids
+    SpecPolicy spec_;
+    bool spec_plain_ = false;                   ///< the last cycle was the caller's plain step: time it on the next call
+    int uno_passes(int seed, std::vector<int>& out, double& draft_ms, double& verify_ms, size_t& accepted);
     vision::VitConfig vcfg_;
     std::unique_ptr<vision::VitWeights> vit_;   ///< loaded on the first image (~0.85 GB, ~3 s)
     void ensure_vit();

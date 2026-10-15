@@ -271,7 +271,9 @@ Args parse(int argc, char** argv) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean]\n");
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] "
+                             "[--rows-check N] [--uno N] [--spec N [--spec-mode adaptive|lookup|lookup-uno|uno|plain] "
+                             "[--spec-ngram NMAX[:NMIN]] [--spec-no-extend] [--no-draft]] [--spec-probe N --spec-dump <json>]\n");
         std::exit(2);
     }
     return a;
@@ -421,7 +423,6 @@ void prefill_but_last(Core& core, const Args& a) {
         for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
 }
 
-// Plain greedy decode of n tokens with the app's pick, from a fresh prefill; ms is the decode loop's wall time.
 std::vector<int> plain_reference(Core& core, const Args& a, int n, double& ms) {
     core.seek(0);
     prefill_but_last(core, a);
@@ -477,8 +478,9 @@ int spec(Core& core, const Args& a, int n) {
         const int matched = open_qwen36::lookup_drafts(hist.data(), hist.size(), L - 1, a.spec_nmax, a.spec_nmin, drafts,
                                                        a.spec_extend);
         lookup_ms += std::chrono::duration<double, std::milli>(clock::now() - tq).count();
-        const SpecMethod m = pol.choose(matched, static_cast<size_t>(p) + L <= cap,
-                                        uno_ok && static_cast<size_t>(p) + 1 + L <= cap);
+        // strict: the cycle's last seek lands on its next position, which must itself be inside the capacity
+        const SpecMethod m = pol.choose(matched, static_cast<size_t>(p) + L < cap,
+                                        uno_ok && static_cast<size_t>(p) + 1 + L < cap);
         const auto tc = clock::now();
         std::vector<int> got;
         size_t k = 0;
@@ -495,8 +497,8 @@ int spec(Core& core, const Args& a, int n) {
             while (k + 1 < L && vr[k + 1] == av[k]) ++k;    // draft k+1 checked by verify row k
             for (size_t j = 0; j <= k; ++j) got.push_back(av[j]);
             core.seek(p + 1 + static_cast<int>(k));
-            ++by_n[matched];
-            acc_n[matched] += k;
+            ++by_n[std::min(matched, 4)];
+            acc_n[std::min(matched, 4)] += k;
         } else {
             dr[0] = pending;
             for (size_t j = 1; j < L; ++j) dr[j] = noise(rng);
