@@ -4348,9 +4348,11 @@ each core tile to an H slot of 8199 words (a whole number of bfp16 blocks) at (f
 (`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
 program (`rtp[0]` the K chunks between the first and the last, `rtp[1]` the epilogue mode), so the route keeps one hardware
 context. The host never holds gate, up or h: no untile, no SiLU, no encode of down's input, and xm is packed once. The qkv,
-o and down outputs are read c-tiled in place by the stage after them (`bfp16_c_row`), not untiled into a copy first. A
-family whose activation is not SiLU keeps the five-step route. Manifest version 5 (`epi: glu`, `a: h`, the `glu` pack halves);
-an engine that reads 4 refuses the set.
+o and down outputs are read c-tiled in place by the stage after them (`bfp16_c_row`), not untiled into a copy first; o's
+residual and post norm are one pass, and down's residual and the next layer's input norm one pass (`OFLM_OPEN_FUSED_NORM=0`
+splits them, bit-identical). `Core::glu_phase` runs gate|up(b) and down(b) back to back, packing b + 1 under gate|up(b) and
+running b - 1's residual under down(b). A family whose activation is not SiLU keeps the five-step route. Manifest version 5
+(`epi: glu`, `a: h`, the `glu` pack halves); an engine that reads 4 refuses the set.
 
 **Acceptance criteria:**
 - Harness (`make_test.py make-glu` / `compare-glu`, 256 x 2560 x 16384 then 256 x 8192 x 3072 in one context): H's bytes equal
@@ -4361,6 +4363,50 @@ an engine that reads 4 refuses the set.
 
 **Procedure:** `designs/gemm_bfp16/make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560 --ff 8192
 --N 3072`, `run_kernel.exe <dir>\run.cfg`, `make_test.py compare-glu --out <dir>`; then OPEN-PREFILL-BFP16's procedure.
+
+**Result 2026-10-15, first build (P2 overnight; Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; untimed unless marked):**
+- Before the change (base binary and set, pp512, second request, 933 ms): of 806 ms on the host, attention 208, the GEMM outputs'
+  untile and row copies 290, residual / norm / SiLU 159, bfp16 encode 87, syncs 40, input norm 18; the array's own GEMM time
+  (dispatch minima x calls) about 290 ms. At pp2048 (7991 ms): attention 4972, untile + copies 1364, residual / norm / SiLU 686,
+  encode 349, syncs 158.
+- Harness: H's bytes equal the host encode at 99.72 %, decoded H against the exact h rel_fro 8.186e-3 (the host encode's own
+  8.176e-3), down(H) against the decoded product rel_fro 2.5e-8, a plain shape on the new core program rel_fro 0.
+- The host changes are exact: every position's logits of a 512-token prompt are equal to the last bit between the base binary
+  and this one on the five-step set (c-tiled consumers, fused o norm, contiguous pack), between `OFLM_OPEN_FUSED_NORM` 0 and 1,
+  and between the two-phase and the pipelined FFN.
+- Where the new route differs: in 745 of 262,144 H blocks the on-core converter raises the shared exponent where the host packer
+  saturates the largest mantissa at 127; otherwise 470 of 2.09 M mantissas differ by one (SiLU's 2^-15), unbiased. Against the
+  five-step route that is corr min 0.997567, mean 0.999793 over 512 prose positions, 500 of 512 argmax.
+- Against the default route, the same sitting (five-step / glu): chat prompts corr min 0.995189 / 0.997616 (math), every other
+  prompt 0.998008-0.998333 / 0.997848-0.998429; greedy 80 tokens identical 6 / 5 of 6 (reason differs at token 35); flips at
+  margins up to 0.173 / one at 0.209 (code2); 512 random ids corr min 0.998151 (2026-10-14) / 0.996607; perplexity on 511
+  README tokens 20.6713 (2026-10-14) / 20.6964 against the default's 20.7226 (ratios 0.9975 / 0.9987), mean KL 0.00276 / 0.00287.
+  At 2048 random ids both routes miss the 0.995 floor, which was set at 512: corr min 0.987065 / 0.986759, argmax 1944 / 1941 of
+  2048, every flip under 0.2; perplexity on 2047 README tokens 11.3731 (glu) against 11.4226 (ratio 0.9957). So this build
+  passes the statistical criteria (perplexity, KL, corr mean) and misses two per-item extremes the five-step route set.
+
+**Result 2026-10-15, CLEAN (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; one `dibs run --measure` unit for 512 and
+1024 and one for 2048, each CLEAN before and after; three runs a cell, the variants interleaved and their order alternating,
+one discarded run first; the same kernel set for the two glu variants):**
+
+| prefill, tok/s (min / median) | five-step bfp16 route (before) | this route | o + FFN pipeline (dropped) |
+|---|---|---|---|
+| pp512 | 520 / 531 | **760 / 768** | 749 / 756 |
+| pp1024 | 381 / 388 | **487 / 492** | 474 / 491 |
+| pp2048 | 269 / 274 | **308 / 329** | 304 / 327 |
+
+- 1.45x, 1.27x and 1.20x the five-step route (medians), so the timing criterion holds at every length.
+- The median run, ms at pp512 / pp2048. Host attention 196 / 4122 (OPEN-PREFILL-HOST-ATTN, not this requirement). The four
+  GEMMs' blocked waits 282 / 979: gate|up 172 / 670, down 69 / 225, qkv 22 / 34, o 20 / 50. The host outside attention
+  168 / 1007: residual + norm passes 87 / 481, the qkv, o and gate|up packs 36 / 222, qkv's c-tiled -> q / k / v copy 28 / 201,
+  syncs 15 / 94. Before, the host outside attention was 579 / 2883 (untile and row copies 290 / 1499, residual / norm / SiLU
+  153 / 709, packs 79 / 382, input norms 18 / 101, syncs 37 / 187).
+- The o + FFN pipeline (`Core::o_glu_phase`: o a block ahead, so block b's residual, norm and gate|up pack ran under o(b + 1)
+  and b - 1's down residual under gate|up(b)) was bit-identical and is not kept: it is no faster at any length. Its waits say
+  why: gate|up's fell (172 -> 146-156 ms at pp512) and down's rose by as much (64-69 -> 88-94). That fits host work slowing
+  the dispatch it runs beside (the CPU and the array share the package's power and DDR; the glu dispatch is 1.56-1.71 ms alone
+  in the harness, 2.14 ms min in the engine at 24 host threads, 1.63 at 6), so on this box overlap is not free; the mechanism
+  was not isolated.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
