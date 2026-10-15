@@ -64,8 +64,7 @@ PREP_KV_PER_GROUP = 2     # kv heads a group rotates and caches: 8 over 4 groups
 PREP_NQ = int(os.environ.get("AF_PREP_NQ", -1))
 PREP_NKV = int(os.environ.get("AF_PREP_NKV", -1))
 PREP_NTBL = int(os.environ.get("AF_PREP_NTBL", 1))
-# two prep passes in flight hang the array (bisected); one at a time
-PREP_INFLIGHT = int(os.environ.get("AF_PREP_INFLIGHT", 1))
+# two whole prep passes (fills and drains) in flight hang the array with the table; only the fills run ahead
 # fills of pass k+1 are queued before pass k's drains are awaited
 PREP_PIPE = int(os.environ.get("AF_PREP_PIPE", 1))
 
@@ -283,8 +282,6 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
             buf[RTP_PKV] = PREP_NKV if PREP_NKV >= 0 else PREP_KV_PER_GROUP
         for b in barriers.values():
             b.set(1)
-        inflight: list[TaskGroup] = []
-
         prev: list[tuple[TaskGroup, TaskGroup]] = []
 
         def pass_group(fills, drains, first=False):

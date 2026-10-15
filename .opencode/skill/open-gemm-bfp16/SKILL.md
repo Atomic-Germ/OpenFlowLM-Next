@@ -138,8 +138,19 @@ GEMM remains the faster ceiling, if the per-32-k rescale or a per-row weight req
 Host time in the qkv post at pp512 / pp2048 (ms): c-tiled y copy into q / k / v 29 / 118, RoPE + bf16 cache write 16 / 61, Q pack
 28 / 105, Q + cache syncs 5 / 20 (the `rope+kv`, `qpack`, `qsync` fields of the CLI's stage line). `OFLM_OPEN_PREFILL_PREP=1`
 runs all of it as one more stream of the `af` context (`designs/attn_fa`, `AF_MODE=prep`): correct (Q rel_fro 8e-6, greedy
-decode from the device-written cache identical) but 5-7 % slower, because a prep dispatch is 1.25 ms steady and there are 40 x B
-of them. Opt in only; see the spec for the numbers.
+decode from the device-written cache identical). The first version was 5-7 % slower (1.25 ms a dispatch); the time was
+the Q transpose, not the dataflow: `aie::transpose(blk, 8, 8)` in `af_prep_q` ran ~60 us a pass (ablation `AF_ABL=32` took the
+dispatch from 1.2 to 0.55 ms; `AF_ABL=16`, no rope, changed nothing). It is now five `interleave_zip` rounds per 32x32 block
+(each round rotates the row and column index bits; `attn_fa.cc`, ping-pong in the output element's next slot): 0.47 ms a
+dispatch, same bytes out. With the next pass's fills queued before this pass's drains are awaited (`AF_PREP_PIPE`, default 1)
+and the engine queuing prep and attention of a block back to back, prep ties the host at pp512 and wins 3 % / 11 % at
+pp1024 / pp2048. Opt in (`OFLM_OPEN_PREFILL_PREP=1`); see the spec for the numbers.
+- Time a dispatch in isolation with `run_kernel.exe` (several `run k q kv y tb` lines in `run.cfg` print each wall time; the
+  first is 3 ms, the rest steady), and build variants in ~25 s with `AF_PREP_NQ / NKV / NTBL` (passes), `AF_ABL` bits
+  (8 all prep compute, 16 the rope loop of Q, 32 the transposes): an empty dispatch is 0.15 ms, the table 0.14, a Q pass 0.09.
+  Traps: `AF_PREP_NTBL=0` used to leave the table fill in the dataflow while the cores skipped it (fixed: the bisect before it
+  was not valid). Two whole passes (fills and drains) in flight still hang with the table (the old `AF_PREP_INFLIGHT=2`,
+  removed); `AF_PREP_PIPE` queues only the next pass's fills ahead and does not.
 - GEMM core budgets (for any epilogue idea): program memory 4848 of 16384 B with the glu epilogue; data memory 64520 of 65536 B.
   Program memory is not what stops a residual / norm kernel here; data memory, input channels (A and B use both) and the one
   32 KiB C element a tile do.
