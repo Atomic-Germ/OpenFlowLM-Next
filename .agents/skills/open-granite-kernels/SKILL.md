@@ -135,9 +135,10 @@ Measuring: `utilities/granite-combined-bench/matrix.py` runs prefill / decode / 
 under `dibs run --measure`, rerunning a NOISY unit. A stray CPU-bound process (an orphaned `find`, a browser tab) makes every unit
 NOISY; read which process `dibs` names before retrying.
 
-bfp16 prefill with the glu FFN (2026-10-15, CLEAN, min / median tok/s): pp512 760 / 768, pp1024 487 / 492, pp2048 308 / 329,
-against the five-step route's 520 / 531, 381 / 388, 269 / 274. Host attention is two thirds of pp2048. The skill for the route
-itself is `open-gemm-bfp16`; the numbers and the accuracy gates are OPEN-PREFILL-BFP16-FFN.
+bfp16 prefill with the glu FFN (2026-10-15, CLEAN with a control, min / median tok/s): pp512 819 / 858, pp1024 549 / 554,
+pp2048 317 / 332, against the five-step route's 501 / 537, 423 / 423, 231 / 268 and the default bf16 route's 239 / 187 medians at
+512 / 2048. Host attention is two thirds of pp2048. The skill for the route itself is `open-gemm-bfp16`; the numbers and the
+accuracy gates are OPEN-PREFILL-BFP16-FFN.
 
 ## Result — 2026-09-06, mlir-aie 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301
 

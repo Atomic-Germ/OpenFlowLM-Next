@@ -81,8 +81,9 @@ and rewrites the manifest (version 5). Engine build: `src/open_qwen36/build.cmd`
    encode of silu(g) * u, down(H) rel_fro. A build without `hold()` reads 0.99722 / 0.99715 and FAILs.
 3. The model: `utilities\dense-decode-probe\prefill_mode_check.py` (random ids, chat prompts, greedy decode, perplexity, timing).
 
-NPU runs go under `dibs run npu --tag <you> ...`, numbers you report under `dibs run --measure` (CLEAN before and after);
-`lock.py` is gone on purpose. The harness does not set the power mode; the CLI pins `--pmode performance`.
+Every NPU run, timed or not, goes under `dibs run --measure --tag <you> ...` (CLEAN before and after): `dibs` treats one
+session's tracks as one holder, so a `dibs run npu` job can land inside another track's timed unit. `lock.py` is gone on
+purpose. The harness does not set the power mode; the CLI pins `--pmode performance`.
 
 ## Traps
 
@@ -99,23 +100,28 @@ NPU runs go under `dibs run npu --tag <you> ...`, numbers you report under `dibs
   equal (a negative extreme is -127 where the host has -128), no measurable cost. Dead ends on the way: a per-group max exponent
   from `shuffle_down` maxima wrote wrong exponents in 80 % of blocks and tripled the dispatch; converting h's powers of two to
   read the converter's exponent crashed Peano's clang (a `block_vector_output_buffer_stream` over a stack array).
-- Busy host threads slow the array: the glu dispatch is 1.56 ms alone in the harness, 2.14 ms min in the engine with 24 OpenMP
-  threads working beside it, 1.63-1.78 with 6 (the prefill is slower at 6: host attention needs the threads). Overlapping more
-  host work under the dispatches does not pay either: an o + FFN pipeline that hid o's residual, norm and pack under gate|up
-  cut gate|up's wait by 20 ms at pp512 and added as much to down's, CLEAN no faster at 512 / 1024 / 2048 (OPEN-PREFILL-BFP16-FFN).
-  Remove host work; do not move it under a dispatch.
+- The engine's gate|up dispatch is slower than the harness's: in CLEAN units it blocks 1.72 ms at pp512 and 2.09 ms at pp2048
+  (plus ~0.15 ms of pack under it) against 1.56-1.71 ms alone in `run_kernel`. Why, and why more at 2048, was not isolated. An
+  untimed thread-count probe that read 2.14 ms at 24 OpenMP threads and 1.63 at 6 ran while other tracks' NPU jobs could overlap
+  it (`dibs` grants one session's tracks the NPU together), so it is not evidence for a power or DDR explanation.
+- Hiding host work under the dispatches did not pay: an o + FFN pipeline (o a block ahead, o's residual, norm and gate|up pack
+  under the next dispatch) was bit-identical and no faster in two interleaved units (754 against 754 at pp512); it is not kept.
+- **Measure with a control.** Every timed unit carries a cell whose value is known (this route's pp512, median ~850 tok/s on
+  2026-10-15), and a unit whose control is more than 5 % off is rerun; `ab_bench`-style interleaving alone did not catch an
+  overlapped unit that read the route at 768. Run untimed NPU work under `dibs run --measure` too, never beside a timed unit.
 - **One context, one core program: the context's xclbin is the first step's build** (`contexts.gemmbfp` = the qkv stream's).
   After any change to the core program, rebuild every bfp16 stream, or the new instruction streams run on the old program.
 - `Core::wait_run` clears `Inflight::k`; read the kernel's name first (a segfault only with `OFLM_OPEN_DISPATCH_LOG=1`).
 
-## Result (2026-10-15, CLEAN, the glu FFN)
+## Result (2026-10-15, CLEAN with a control, the glu FFN + hold)
 
-pp512 / 1024 / 2048, tok/s min / median: five-step 520 / 531, 381 / 388, 269 / 274 -> glu FFN 760 / 768, 487 / 492, 308 / 329.
-At pp512 what is left: host attention 196 ms, the GEMM waits 282 (gate|up 172), residual + norm 87, packs 36, qkv's copy 28,
-syncs 15. Accuracy against the bf16 route, with `hold()`: perplexity ratio 0.9964, KL 0.00267 (the five-step route's 0.00276),
-random-id corr min 0.9963; two per-item extremes of OPEN-PREFILL-BFP16 still missed (one near-tie greedy continuation of six,
-one flip at a 0.209 margin), on other prompts than without `hold()`. The same sitting matters: a later CLEAN unit read the glu
-route at 837-862 tok/s at pp512, 13 % above the first, with nothing changed. Numbers and procedure: OPEN-PREFILL-BFP16-FFN.
+pp512 / 1024 / 2048, tok/s min / median: five-step 501 / 537, 423 / 423, 231 / 268 -> glu FFN 819 / 858, 549 / 554, 317 / 332
+(1.60x / 1.31x / 1.24x); the default bf16 route in the same kind of unit 239 at pp512 and 187 at pp2048 (medians). At pp512
+what is left: host attention 199 ms, the GEMM waits 212 (gate|up 137), residual + norm 86, packs 34, qkv's copy 29, syncs 14.
+Accuracy against the bf16 route, with `hold()`: perplexity ratio 0.9964, KL 0.00267 (the five-step route's 0.00276), random-id
+corr min 0.9963; two per-item extremes of OPEN-PREFILL-BFP16 still missed (one near-tie greedy continuation of six, one flip at
+a 0.209 margin), on other prompts than without `hold()`. Memory: +1.7 GiB peak over the default route. Numbers and procedure:
+OPEN-PREFILL-BFP16-FFN.
 
 ## Result (2026-10-13/14, no gate, FrameServer idle context present)
 
