@@ -249,7 +249,7 @@ def per_call(spec: ModelSpec) -> int:
 # MoE / Qwen3.5 recipe, which compiles the same attn.h); re-exported here because the
 # dense recipe is where they were first exposed and where cache.py and the tests look.
 from .attnknobs import (PROBE_VARS, RB_SUPPORTED, FAST_ATTENTION, MAX_ATTN_CORES,  # noqa: E402,F401
-                        probe_env, fast_attention, attn_cores, knobs as attn_knobs)
+                        probe_env, fast_attention, attn_cores, knobs as attn_knobs, kvslice as attn_kvslice)
 
 
 def geometry(spec: ModelSpec) -> DenseGeometry:
@@ -695,6 +695,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         args = ["pool", "xres", "consts", "state", "act", tab]
         check_buffer_args(kn, args)
         out["kernels"][kn] = {"context": "dx", "insts": f"{dx_set}/insts.bin", "patch": "attnpos", "build": dx_set, "window": window}
+        ks = attn_kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW)
+        if ks:                                   # per-core window fills of whole blocks (OPEN-ATTN-KVSLICE)
+            out["kernels"][kn]["kvslice"] = ks
         out["globals"][tab] = {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq(local=local), "window": window}
         if longrope:
             orig = int(sc["original_max_position_embeddings"])

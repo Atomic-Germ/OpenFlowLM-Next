@@ -56,6 +56,10 @@ struct AttnGeometry {
     /// blocks AND takes the new position's row as the last block's final slot (attn.h
     /// ATTN_BLOCK_ONLY). 1 = every other kernel: the row count is the window's own.
     uint64_t rb = 1;
+    /// Rows a per-core window element holds (dx.py KVSLICE, OPEN-ATTN-KVSLICE): every KV transfer below one row is
+    /// one core's window fill, compiled for this many rows, and streams the window padded to whole elements.
+    /// 0 = the one window fill of every other kernel.
+    uint64_t kvslice = 0;
 };
 
 /// The cached rows position `pos` attends to: [start, pos), streamed as nf rows (>= 1: position 0
@@ -99,6 +103,8 @@ struct AttnPatch {
     size_t word;
     uint8_t kind;
     uint32_t flags;
+    uint64_t base = 0;        ///< kind 3 with kvslice: the fill's compiled offset inside a row
+    uint64_t row_words = 0;   ///< kind 0 with kvslice: words the fill moves per row
 };
 
 /// `moeroute`'s table: the moe_experts design's weight fills, built against a
@@ -171,11 +177,15 @@ inline std::vector<AttnPatch> attn_table(const std::vector<uint32_t>& w, const s
         uint32_t reg = w[i + 6], arg = w[i + 8];
         uint64_t off = w[i + 10] & 0x7fffffffu;
         uint32_t flags = w[i + 10] & 0x80000000u;
-        if (arg == 3 && off == 0) {
+        if (arg == 3 && (off == 0 || (g.kvslice && off < g.kv_row))) {
             if (!have_bd || bd_write + 2 >= w.size() || w[bd_write + 2] + 4 != reg)
                 throw std::runtime_error("attnpos: " + kn + ": no BD write before the KV window fill");
-            t.push_back({bd_write + 4, 0, 0});
-            t.push_back({i + 10, 3, flags});
+            const uint64_t len = w[bd_write + 4];
+            if (g.kvslice && (len % g.kvslice || !len))
+                throw std::runtime_error("attnpos: " + kn + ": a window fill of " + std::to_string(len) +
+                                         " words is not " + std::to_string(g.kvslice) + " whole rows");
+            t.push_back({bd_write + 4, 0, 0, 0, g.kvslice ? len / g.kvslice : 0});
+            t.push_back({i + 10, 3, flags, off});
         } else if (arg == 3 && off == g.kv_row) {
             t.push_back({i + 10, 1, flags});
         } else if (arg == 3) {
@@ -187,12 +197,18 @@ inline std::vector<AttnPatch> attn_table(const std::vector<uint32_t>& w, const s
     for (uint8_t kind = 0; kind < 4; ++kind) {
         size_t n = 0;
         for (const auto& p : t) n += (p.kind == kind);
-        if (n != 1)
+        // with kvslice each attention core has its own window fill: one length and one offset patch apiece
+        if (g.kvslice && (kind == 0 || kind == 3) ? n == 0 : n != 1)
             throw std::runtime_error("attnpos: " + kn + ": " + std::to_string(n) + " patches of kind " +
-                                     std::to_string(kind) + ", expected 1 (window length, row drain, record fill, window offset)");
+                                     std::to_string(kind) + ", expected " + (g.kvslice && (kind == 0 || kind == 3) ? "1 or more" : "1") +
+                                     " (window length, row drain, record fill, window offset)");
     }
     return t;
 }
+
+/// The window rows a kvslice kernel streams: nf padded to whole elements (the kernel takes the tail rows of the
+/// last one singly and never reads the rest).
+inline uint64_t attn_kvslice_rows(uint64_t nf, uint64_t kvslice) { return kvslice * ((nf + kvslice - 1) / kvslice); }
 
 /// Bytes this instruction stream moves between DDR and the array, per host
 /// buffer argument.
@@ -283,10 +299,11 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
         nf = g.rb * (valid / g.rb + 1) - 1;
     }
     for (const auto& p : table) {
-        uint64_t v = p.kind == 0   ? nf * g.kv_row / 4  // a BD length is in words
+        uint64_t v = p.kind == 0   ? (g.kvslice ? attn_kvslice_rows(nf, g.kvslice) * p.row_words
+                                                : nf * g.kv_row / 4)  // a BD length is in words
                      : p.kind == 1 ? pos * g.kv_row
                      : p.kind == 2 ? pos * g.ptab_row
-                                   : start * g.kv_row;
+                                   : p.base + start * g.kv_row;
         iw[p.word] = static_cast<uint32_t>(v) | p.flags;
     }
 }
