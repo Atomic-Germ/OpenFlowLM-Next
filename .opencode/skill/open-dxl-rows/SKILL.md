@@ -1,13 +1,13 @@
 ---
 name: open-dxl-rows
-description: Build, verify and extend the dense L-row pass (designs/dxl - dxl, dxl_lora, lmhl) behind speculative decoding and K2-Horizon-7B-Uno. Use when rebuilding those xclbins, adding a family to ROWS_FAMILIES, changing L, adding a LoRA/draft model, or when an L-row build computes garbage or hangs.
+description: Build, verify and extend the dense L-row pass (designs/dxl - dxl, dxl_lora, lmhl) behind speculative decoding (Uno, prompt lookup, the per-cycle choice between them) on K2 and Granite. Use when rebuilding those xclbins, adding a family to ROWS_FAMILIES, changing L, adding a LoRA/draft model, measuring or tuning --spec / --uno, or when an L-row build computes garbage or hangs.
 ---
 
 # The dense L-row pass (designs/dxl)
 
 L consecutive positions through a dense layer in one dispatch (`dxl.py`), plus their final
 norm, the head and per-row argmax in another (`lmhl.py`). Each row is **bit-identical** to a
-decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DECODE. Recipe:
+decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DECODE, OPEN-SPEC-LOOKUP. Recipe:
 `open_kernels/recipes/dxl.py`. Plan with history: `specs/open-engine/plans/k2-horizon-7b-uno.md`.
 
 ## How it is put together
@@ -108,14 +108,10 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
 
 - **The harness and the engine agree** on a quiet machine (one dx layer 2.6 ms × 36 ≈ the
   engine's 107 ms step). The "2x" once noted here was a busy machine.
-- **Other sessions share this NPU.** Run timed work under their lock:
-
-  ```
-  python C:/Users/josha/AppData/Local/Temp/claude/c--code-openflowlm-next/343fcc59-a3ad-4984-a34e-b3d7ef3e8d75/scratchpad/agents/lock.py timing --label <you> -- <cmd>
-  ```
-
-  Use `npu` instead of `timing` for correctness runs. `timing` waits until CPU is under 25% and
-  no NPU/GPU rival is running (LM Studio counts).
+- **Other sessions share this NPU.** Take turns with `dibs` (the old `lock.py` is gone): a number you will quote
+  comes from `dibs run --measure --tag <you> --label <what> --eta <t> -- <cmd>` and only when it prints both
+  `dibs: CLEAN` and `dibs: CLEAN after`; a correctness run goes under `dibs run npu --tag <you> ...`. Keep a measured
+  unit under ~5 minutes: it holds every other session's commands while it runs.
 - **Measured 2026-10-08/09 (K2-7B, L = 4):**
   - A verify pass costs 1.39x a decode step at short context (quiet; the 1.17-1.28x first noted
     came from a busy machine). The draft pass ~1.7x.
@@ -128,3 +124,55 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
     thing to find.
   - **Never quote a ratio from a busy machine.** With the CPU at 100% the same bench showed
     1.55x: contention slowed plain decode (more dispatches per token) ~3x and Uno less.
+
+## Prompt lookup and the per-cycle choice (OPEN-SPEC-LOOKUP)
+
+The verify pass needs no draft pass when the drafts come from the context: the tokens that followed the latest earlier
+occurrence of the current suffix n-gram (n = 4 .. 1, `spec_lookup.hpp lookup_drafts`). One verify pass (~1.33 plain
+steps) commits 1 to L tokens; a Uno cycle (~2.9 steps) 2 to L + 1. Each cycle the engine picks lookup, Uno or a plain
+step by expected tokens per ms (running means of acceptance, lookup's per matched n, and of each pass's measured ms).
+
+```powershell
+open_qwen36_cli --model <dir> --kernels <set> --ids-file <ids> [--gemm-block] --spec 128 [--spec-mode adaptive|lookup|lookup-uno|uno|plain]
+#   -> per-method cycles / tokens a cycle, accepted drafts by matched n, pass ms, both speeds, SPEC IDENTICAL
+open_qwen36_cli ... --spec-probe 256 --spec-dump <json>   # greedy by draft passes: the transcript + every position's Uno drafts
+```
+
+Measuring, `utilities/spec-lookup/spec_lookup.py` (absolute paths everywhere: the CLI is started by CreateProcess):
+
+1. `prompts --model <dir> --out <p>`: the six uno-ref prompts (thinking on, as served), chat / code at 1024 and 2048
+   (`granite-combined-bench`'s real repo text), and four lookup prompts with thinking off: a whole-file edit, a bug fix,
+   quoting a spec section, document Q&A.
+2. `probe ...` under `dibs run npu` (~10 min for all fourteen), then `sim` / `ngrams` replay them offline: exact for
+   lookup, Uno up to the noise ids. `sim --rows 2|8` prices a what-if verify build linearly in rows (lookup only).
+3. `matrix --units "short:128:lookup+adaptive;edit_py+fix_py:256:uno+lookup+adaptive;..." --reps 3 --gap 75` runs each
+   unit (prompt names or groups, tokens, modes back to back in one process) per rep as one `dibs run --measure` (keep it
+   under ~5 min), sleeps `--gap` seconds after each so the other sessions get the machine, reruns NOISY units and skips
+   units that already have a `.jsonl`; `table --dir <out>` prints medians. A `STOP` file in the out dir pauses it at
+   the next unit. While a unit runs, every command of yours but plain reads is held.
+
+What it buys on Granite 4.2 3B (OPEN-FAMILY-GRANITE-UNO, 2026-10-15): lookup pays wherever the answer repeats the
+context (a whole-file bug fix 3.1x, 43.6 tok/s; an edit 1.8x; quoting / document Q&A 1.5-1.75x) and little on fresh
+reasoning text (1.10-1.17x); Uno pays on math / code and loses on chat. The adaptive choice is the best geomean at
+short context and 2048 and within 3% elsewhere, from 6% behind to 5% ahead of the better single method on a given
+prompt. The pass cost is the lever: a verify pass is 1.33 / 1.26 / 1.24 plain steps at context 0 / 1024 / 2048 and
+the draft pass 1.56 / 1.44 / 1.37. Offline, a verify pass at 1.10 steps would lift adaptive on reasoning text from
+~1.15x to ~1.30x (estimate); 2 or 8 rows would not (8 helps only whole-file rewrites).
+
+Traps:
+- In a worktree-isolated agent, `cmd.exe /c` and `powershell -File` are refused (they could run git). Run a `.cmd`
+  wrapper directly (`./.claude/build_cli.cmd`) and keep it in the gitignored `.claude/`.
+- dibs treats the subagents of one session as one holder. While a `--measure` unit of mine held the machine, a sibling
+  track's `dibs run npu` held the npu at the same time (`dibs status` showed both), and an untimed probe of my own got
+  in the same way; those units still read CLEAN while plain decode fell to a third. Start no NPU work while your own
+  matrix runs; give `matrix --expect <json of plain tok/s>` so a unit 5% slow is rerun like a NOISY one, and read the
+  table, which sets aside a run whose plain decode or pass time is 5% off the prompt's median. Stage a CLI copy as
+  `<dir>/open_qwen36_cli.exe`, not `cli_v4.exe`: dibs's NOISY verdicts named `open_qwen36_cli.exe` processes and
+  missed a renamed copy.
+- `presence_penalty 1e-6` (the old served "decode plainly" trick) is not plain greedy at an exact bf16 tie: the penalty
+  breaks the tie. Serve a second time with `OFLM_SPECULATIVE` unset for the reference instead.
+- The app's AVX2 greedy scan kept the lower *lane* on a tie, not the lower id (fixed with OPEN-SPEC-LOOKUP); a served
+  speculative reply could split from plain decode there.
+- Granite's server used to drop a request's `"think": false` (no `enable_think` parameter, no `enable_thinking` for the
+  template), so a served whole-file edit reasoned first and lookup gained 1.15x there; with the flag passed through it
+  is 3.06x, the CLI's figure. A served speed test of lookup needs a reply that copies.

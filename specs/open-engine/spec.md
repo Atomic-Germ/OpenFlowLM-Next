@@ -1180,7 +1180,7 @@ token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`, `src/common/AutoModel/modeling_granite.cpp`)
 **Test category:** manual (needs the NPU and `vegahyo/Granite-4.2-3B-NPU2`); the derivation, the multiplier fold and the 3B layout are unit-tested in `tests/test_granite.py`
 
 An IBM Granite dense model (GQA without q/k norms, unscaled RoPE, eps 1e-5,
@@ -1240,6 +1240,11 @@ install has not been re-verified end to end.
 sets `think: true`, but `Granite` implements no `parse_stream_content` /
 `parse_nstream_content`, so the chain of thought is printed raw and only the
 closing tag appears. Cosmetic, and separate from the kernel path.
+
+**Thinking is the request's choice (2026-10-15).** `Granite` takes `enable_think` / `toggle_think` and hands
+`enable_thinking` to its template, on by default as the template's own default, so a request's `"think": false`
+renders `<think></think>` and the reply starts with the answer. Before, the flag was dropped and every reply reasoned
+first.
 
 **At zero context `dx` beats the hand-written kernels**: `part0` 60.0 ms over
 40 layers is **1500 µs/layer**, against those kernels' 1744.7 µs at four
@@ -1443,7 +1448,7 @@ output.
 - The draft layer is 6.7 ms against the verify stream's 5.9 ms in the harness.
 
 ### OPEN-UNO-DECODE: greedy Uno on the NPU, the same tokens as greedy decode
-**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `core.cpp` the draft pack, `cli.cpp` `--uno`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `common/AutoModel/modeling_k2.cpp`)
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `core.cpp` the draft pack, `cli.cpp` `--uno`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `common/AutoModel/modeling_k2.cpp`, `common/modules/sampler.cpp` `sample_greedy`)
 **Verification:** manual (an implementation error changes the output, and the procedure compares it token for token)
 
 **Off unless asked.** The draft adapter is packed, and Uno runs, only when `OFLM_SPECULATIVE=1`
@@ -1463,10 +1468,11 @@ set that has `dxl_lora`, shall decode greedy requests by IFM's two-pass cycle:
 
 Because the L-row pass is bit-identical to decode, the output is exactly plain greedy decode's.
 
-In the app, AutoModel's shared Uno generate runs the cycle for a family that opts in (K2 does)
-when the request is greedy: top_k 1, and no penalty that reorders the logits. A cycle cut short
-by EOS or a length limit is sought back to where plain decode would have left the cache. A
-sampled request decodes as usual.
+In the app, AutoModel's shared Uno generate runs OPEN-SPEC-LOOKUP's per-cycle choice, of which this
+cycle is one method (`OFLM_SPEC_MODE=uno` runs it every cycle), for a family that opts in (K2 and
+Granite do) when the request is greedy: top_k 1, and no penalty that reorders the logits. A cycle
+cut short by EOS or a length limit is sought back to where plain decode would have left the cache.
+A sampled request decodes as usual.
 
 **Every argmax is the app's greedy pick.** The app's plain greedy argmaxes the logits after
 `Engine::forward` rounds them to bf16 (nearest even, subnormals to zero), the lowest id winning a
@@ -1475,6 +1481,9 @@ tie. So:
   within a core, and the engine keeps the first core on a tie across cores.
 - The CLI's `--uno` and `--rows-check` decode references use the same pick (`argmax_bf16`), and so
   does the CPU oracle (`utilities/uno-ref`).
+- `Sampler::sample_greedy`'s AVX2 scan keeps a running argmax in each of 8 lanes (lane j holds the
+  ids j mod 8), so its cross-lane step asks for the lower id on a tie. Before 2026-10-15 it kept the
+  lower lane, which is not the lower id: ids 89 and 96 tied went to 96, where `lmhl` takes 89.
 - An f32 argmax splits from it wherever the top two share a bf16 value, which is common: logits
   near 25 are 0.125 apart in bf16. K2-7B's six prompts split at tokens 6, 18, 28 and 124 on four
   of them; the train prompt at token 128 (' =' 25.494 against ':' 25.439, both 25.5).
@@ -1525,6 +1534,80 @@ lock's `timing` gate):**
 - **Served by `oflm serve`:** the 160-token train reply is identical to plain decode's, the 37-token
   cut and the streamed reply match too, and a sampled request decodes as before.
 
+### OPEN-SPEC-LOOKUP: prompt-lookup drafts on the verify pass, and the speculative method chosen each cycle
+**Applies to:** openflowlm-next (`src/open_qwen36/spec_lookup.hpp`, `engine.cpp` `spec_cycle`, `cli.cpp` `--spec` / `--spec-probe`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `modeling_granite.cpp`, `modeling_k2.cpp`, `utilities/spec-lookup`, `utilities/granite-combined-bench` `spec`)
+**Verification:** test (the drafter: `tests/test_spec_lookup.py` and `src/open_qwen36/spec_lookup_test.cpp`, both on `tests/fixtures/spec_lookup_cases.json`); manual (the output and the speed, the procedures below)
+
+A greedy request on a kernel set with the L-row pass (OPEN-DECODE-ROWS) shall decode cycle by cycle, each cycle one of:
+1. **Lookup.** One verify pass on `[seed, d_1 .. d_{L-1}]` without the LoRA, the drafts from the drafter below. It
+   commits the drafts the pass agrees with, in order, then the pass's own next token: 1 to L tokens for one pass.
+2. **Uno.** OPEN-UNO-DECODE's draft and verify passes, when `uno.q4nx` is packed: 2 to L + 1 tokens for two passes.
+3. **Plain.** One decode step: 1 token.
+
+Every pass is bit-identical to decode at its rows, so the output is plain greedy decode's whatever the choice.
+
+**The drafter.** Up to L - 1 drafts: the tokens that followed the most recent earlier occurrence, in the prompt and
+the output so far, of the context's longest suffix n-gram, n = 4 down to 1. A continuation that runs into the end of
+the context is extended by looking up again on the context plus the drafts so far. Rows the drafts do not fill repeat
+the last draft (a lucky repeat is accepted like any draft). It reads token ids only, on the host, between passes: a
+linear scan, 0.014 ms a cycle at 2048 tokens of context.
+
+**The choice.** The method with the most committed tokens per millisecond expected:
+- A method's expected tokens are 1 + its running mean of accepted drafts (lookup: per matched n; Uno: 2 + the mean;
+  plain: 1). Each running mean weighs the newest cycle 0.3; a mean not refreshed this cycle moves 0.1 of the way back
+  to its prior (lookup n = 1..4: 0.3, 0.8, 1.0, 2.0; Uno: 1.0), so a method that lost is tried again later.
+- A method's cost is the running mean of its measured passes: plain step, verify pass, draft + verify. A pass not yet
+  timed costs its prior ratio to whichever pass has been (verify 1.33, draft 1.58 plain steps).
+- `--spec-mode` (CLI) / `OFLM_SPEC_MODE` (app) pin a rule instead: `lookup` (lookup when it drafts, else plain),
+  `lookup-uno` (lookup, else Uno, else plain), `uno`, `plain`.
+
+**Capacity.** A lookup pass writes rows pos .. pos + L - 1 and can leave the next position at pos + L, so it needs
+pos + L < max_ctx; a Uno cycle needs pos + 1 + L < max_ctx. Without the room the cycle is a plain step, so neither the
+`step_rows` refusal (`pos + L > max_ctx`, OPEN-FAMILY-GRANITE-UNO) nor a seek past the capacity is reached.
+
+**Served.** With `OFLM_SPECULATIVE=1`, the shared generate of a family that opts into OPEN-UNO-DECODE runs this cycle
+for greedy requests, with OPEN-UNO-DECODE's cut rules: committed token i sits at the cycle's position + 1 + i, all but
+the cycle's last are cached. The policy starts each request from its priors. A plain cycle is the app's own forward and
+sampler. A kernel set with the rows route and no `uno.q4nx` gets lookup and plain.
+
+**Acceptance criteria (unit):** the fixture's cases, each derived by hand: no repeated token gives no draft; the most
+recent occurrence wins; a longer match beats a more recent shorter one; a continuation cut by the end is extended (and
+is not without extension); nmin 2 refuses a unigram; a single token drafts nothing; a period-2 run matches itself.
+Random histories (a small alphabet, so matches are common) agree with the rule restated with slices.
+
+**Procedure (manual):**
+1. `open_qwen36_cli --model <dir> --kernels <set> --ids-file <ids> [--gemm-block] --spec N [--spec-mode M]` runs N
+   tokens by the cycle, then plain greedy decode from the same cache (the prompt but its last token prefilled, the last
+   one stepped, as `--uno`). It prints `SPEC IDENTICAL to decode over N tokens`, each method's cycles and tokens a
+   cycle, the drafts accepted by matched n, each pass's mean ms, and both speeds.
+2. `utilities/spec-lookup/spec_lookup.py prompts` writes the prompt sets; `matrix --units ... --gap 75 --expect <json>`
+   runs `--spec` per unit under `dibs run --measure`, rerunning a NOISY unit or one whose plain decode is 5% under the
+   prompt's known figure; `table` prints the medians, setting aside a run whose plain decode or pass time is 5% off.
+3. `--spec-probe N --spec-dump <json>` decodes greedily by draft passes: row 0 is the decode step, rows 1.. are what a
+   Uno cycle seeded there would verify. `spec_lookup.py sim` / `ngrams` replay those transcripts through each rule.
+4. Served: `spec_lookup.py serve-launch --oflm <oflm.exe> --registry <model_list.json> --models-root <root> --kernels
+   <set> --env OFLM_SPECULATIVE=1 --out a.json`, the same without `--env` into `b.json` (plain decode), then
+   `serve-compare a.json b.json`: a greedy request, the same cut by `max_tokens`, and the same streamed equal plain
+   decode's reply, on a chat prompt (thinking on) and a whole-file bug fix (`"think": false`); a sampled request
+   replies.
+   Not `presence_penalty 1e-6` for the reference: at an exact bf16 tie the penalty picks the token.
+5. Capacity: `--max-ctx 96 --spec 68` from a 26-token prompt, `--spec-mode uno` and `lookup`: the last cycles fall back to
+   plain steps (a Uno cycle last at position 90, a lookup pass at 91), `SPEC IDENTICAL`.
+
+**Result 2026-10-15 (Granite 4.2 3B, the decode-depth kernel set, L = 4):**
+- The C++ and Python drafters pass the fixture's 13 cases; the full `specs/open-engine/tests` suite passes (858, 21
+  skipped); `build.cmd`'s unit tests pass; `--rows-check 17` prints `ROWS PASS` (63.1 ms a pass, 1.32x a 47.7 ms step).
+- `SPEC IDENTICAL` on every CLI run (fourteen prompts, every mode, every rep) and on the capacity check. K2-Horizon-7B
+  on its own kernel set (`feat/k2-horizon-7b`'s): `--spec 96` adaptive on a whole-file bug fix is identical too, mixing
+  13 lookup and 18 Uno cycles (untimed: the machine was busy).
+- Served (`oflm serve`, `OFLM_SPECULATIVE=1` against unset): the chat reply (133 tokens, to its end) and the bug fix
+  (200, cut by `max_tokens`), their 37-token cuts and their streamed forms are identical to plain decode's; sampled
+  requests reply. Measured (one `dibs run --measure` unit, both servers, CLEAN; the server's own decode tok/s): the
+  bug fix returning the whole file 42.60 against 13.90 tok/s (3.06x, the CLI's 3.1x), chat 20.82 against 20.42
+  (1.02x). A first A/B read 1.15x on the bug fix: the server had dropped the request's `"think": false`, so the reply
+  reasoned before answering; `Granite` now passes it to its template (OPEN-FAMILY-GRANITE).
+- The numbers are in OPEN-FAMILY-GRANITE-UNO.
+
 ### OPEN-FAMILY-GRANITE-UNO: Granite 4.2 3B's Uno drafter
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py` `ROWS_FAMILIES`, `src/common/AutoModel/modeling_granite.cpp`, `utilities/q4nx-build` `--uno-adapter`)
 **Verification:** manual (the procedure below compares every token with greedy decode)
@@ -1533,8 +1616,9 @@ Granite 4.2 3B with its Uno adapter (`Cyronius/granite-4.2-3b-uno`: r 128, alpha
 the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, identical to greedy decode:
 - The kernel set ships `dxl`, `dxl_lora` and `lmhl` at hidden 2560 (OPEN-DECODE-ROWS).
 - `uno.q4nx` carries s·B with q's fold of 0.125 (OPEN-UNO-LORA) and `uno_noise_high` 100256.
-- Granite's AutoModel opts in as K2's does. Its sampling defaults are unchanged, so Uno serves only requests that ask
-  for greedy (top_k 1, no penalty); at L = 4 those run at about 0.94x of plain decode (the result below).
+- Granite's AutoModel opts in as K2's does. Its sampling defaults are unchanged, so speculation serves only requests
+  that ask for greedy (top_k 1, no penalty), and since 2026-10-15 by OPEN-SPEC-LOOKUP's per-cycle choice, of which this
+  cycle is one method (the results below).
 
 **Procedure (manual):**
 1. `q4nx-build -i granite-4.2-3b-bf16.gguf -s <granite-4.2-3b dir> -f granite -t language --quant Q4_1
@@ -1544,8 +1628,9 @@ the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, 
    and tokens a cycle within 5% of the CPU reference (the adapter's training repo, `uno_generate` at L = 4 on a
    q4_1 fake-quantized base, the same prompts).
 4. `oflm serve` with the model registered: a request with `top_k` 1 and `repetition_penalty` 1 equals one that
-   decodes plainly (the same plus `presence_penalty` 1e-6), also when cut by `max_tokens`; streamed equals
-   non-streamed; a sampled request replies.
+   decodes plainly, also when cut by `max_tokens`; streamed equals non-streamed; a sampled request replies. Since
+   2026-10-15 the plain reply comes from a second server with `OFLM_SPECULATIVE` unset (OPEN-SPEC-LOOKUP's served
+   procedure), not from adding `presence_penalty` 1e-6, which breaks exact bf16 ties.
 
 **Result 2026-10-10 (q4_1, L = 4, six prompts x 128 tokens, quiet machine under the shared lock's `timing` gate):**
 
@@ -1646,6 +1731,55 @@ an outlier among five figures at 20.6-20.8; that run's 1.08x is not quoted.)
 - The slope is not gone. At 2048 plain decode is still ~1.9x slower than Vulkan: 78.7 ms a step against 45.8 at context 0 (81 / 48 ms a
   token at 12.35 / 20.84 tok/s); what remains is the window stream (0.28 ms a layer at 2048) plus the arithmetic, 0.59 ms a pass with the
   tree before the conditional exponential (`ATTN_REPEAT` 3 against 1, OPEN-ATTN-SCORE-TREE).
+
+**Result 2026-10-15, prompt lookup and the per-cycle choice (OPEN-SPEC-LOOKUP) on the decode-depth kernel set, unchanged
+(`utilities/spec-lookup/spec_lookup.py matrix`, every unit `dibs run --measure --tag d3`, CLEAN, 75 s between units; each
+figure the median of the runs kept, n of them, Uno 1 run; a run is set aside when its plain decode or a pass time is 5% off
+the prompt's median, which is what another track's NPU run inside a CLEAN unit looks like; every run against its own
+plain-decode reference in the same process; 128 tokens, the lookup prompts 256, every window inside the reply; every run
+SPEC IDENTICAL):**
+
+| prompt | context | plain tok/s | Uno tok/s (tokens a cycle) | Uno | lookup tok/s (tokens a cycle) | lookup | adaptive tok/s (tokens a cycle) | adaptive |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| chat | 26 | 20.54 | 17.25 (2.42) | 0.84x | 20.97 (1.11) | 1.02x | 19.95 (1.28) | 0.97x |
+| chat2 | 23 | 20.54 | 18.55 (2.61) | 0.91x | 19.56 (1.05) | 0.95x | 20.59 (1.32) | 1.00x |
+| code | 35 | 20.47 | 22.63 (3.20) | 1.11x | 23.27 (1.31) | 1.13x | 24.01 (1.75) | 1.17x |
+| code2 | 30 | 20.46 | 22.73 (3.20) | 1.11x | 21.58 (1.19) | 1.05x | 23.15 (1.86) | 1.14x |
+| math | 42 | 20.33 | 26.67 (3.76) | 1.31x | 24.65 (1.45) | 1.21x | 25.66 (2.25) | 1.26x |
+| reason | 44 | 20.33 | 24.49 (3.46) | 1.21x | 26.59 (1.52) | 1.30x | 24.87 (2.29) | 1.22x |
+| chat_1024 | 1024 | 15.36 | 15.14 (2.67) | 0.99x | 16.77 (1.24) | 1.09x | 16.26 (1.62) | 1.06x |
+| code_1024 | 1024 | 15.43 | 18.56 (3.28) | 1.21x | 19.12 (1.41) | 1.24x | 19.37 (2.29) | 1.25x |
+| chat_2048 | 2048 | 12.25 | 12.94 (2.78) | 1.06x | 12.93 (1.19) | 1.06x | 12.85 (1.80) | 1.05x |
+| code_2048 | 2048 | 12.22 | 15.07 (3.20) | 1.24x | 15.80 (1.47) | 1.29x | 16.38 (2.46) | 1.34x |
+| edit_py | 1347 | 14.01 | 19.08 (3.61) | 1.36x | 25.34 (2.15) | 1.81x | 25.35 (2.67) | 1.82x |
+| fix_py | 1390 | 13.89 | 23.44 (4.49) | 1.69x | 42.51 (3.82) | 3.06x | 43.64 (4.00) | 3.14x |
+| quote_doc | 1032 | 15.15 | 19.53 (3.51) | 1.31x | 23.58 (1.88) | 1.56x | 22.79 (2.49) | 1.51x |
+| qa_doc | 728 | 16.34 | 22.82 (3.82) | 1.40x | 28.44 (2.10) | 1.74x | 27.15 (2.64) | 1.66x |
+
+The six short prompts are the uno-ref set (thinking on); chat / code at 1024 and 2048 are real repo text with a
+summarize / Fibonacci request; the lookup prompts (thinking off) are a whole-file edit (`edit_py`), a bug fix replying
+with the whole file (`fix_py`), quoting a spec section's procedures (`quote_doc`) and answering from a skill's traps
+section (`qa_doc`). 98 runs, all identical to plain decode.
+
+- Geometric means over plain decode, short / 1024 / 2048 / lookup prompts: Uno 1.07 / 1.09 / 1.14 / 1.43x, lookup
+  1.10 / 1.16 / 1.17 / 1.97x, adaptive 1.12 / 1.15 / 1.19 / 1.94x. Chat stops losing (Uno 0.84x, lookup 1.02x); a
+  whole-file reply runs at 43.6 tok/s.
+- The passes, ms (plain step / verify / draft): 48.7 / 64.8 / 76.1 at short context, 65.1 / 82.3 / 93.5 at 1024,
+  81.9 / 101.4 / 112.3 at 2048. A verify pass is 1.33 / 1.26 / 1.24 plain steps and a Uno cycle 2.9 / 2.7 / 2.6, so a
+  lookup pass pays from 0.33 / 0.26 / 0.24 accepted drafts and a Uno cycle from 0.9 / 0.7 / 0.6.
+- In adaptive mode on the short prompts a lookup cycle runs at 27-51 tok/s, a Uno cycle at 18-23 and a plain step at
+  20.4: the gain is the lookup cycles, and Uno barely beats a plain step outside math and code.
+- Lookup and Uno repeat run to run (the same tokens a cycle, the speed within 1%). Adaptive does not: its choice reads
+  measured pass times, so two runs of one prompt can choose differently (code: 1.75 and 1.54 tokens a cycle, 1.23x and
+  1.16x); the output never differs. Against the better single method of each prompt it is 6% behind (reason, against
+  lookup) to 5% ahead (chat2).
+- Against llama.cpp Vulkan (24.2 / 23.1 / 23.3 tok/s at context 0 / 1024 / 2048, 2026-10-14, without its own lookup
+  decoding): plain decode is 0.85 / 0.66 / 0.52x of it, adaptive ~0.95x on the short prompts, 0.70-0.84x at 1024,
+  0.55-0.70x at 2048, and 1.0-1.9x on the lookup prompts at 0.7-1.4k context.
+- Served by `oflm serve` (OPEN-SPEC-LOOKUP's result): the whole-file bug fix at 42.60 against 13.90 tok/s, chat at
+  20.82 against 20.42, the replies identical.
+- The offline replay of `--spec-probe` transcripts (`plans/archive/granite-spec-lookup.md`) predicted each group within
+  ~0.03x of these.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,

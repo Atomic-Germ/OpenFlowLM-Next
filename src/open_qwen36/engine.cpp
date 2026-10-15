@@ -81,6 +81,12 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) cfg_.prefill_mode = pm;   // oflm --prefill-mode
     cfg_.draft = utils::getenv_oflm("OFLM_SPECULATIVE") == "1";
+    if (const char* sm = std::getenv("OFLM_SPEC_MODE")) {
+        const std::string s = sm;
+        using M = SpecPolicy::Mode;
+        spec_.mode = s == "uno" ? M::uno : s == "lookup" ? M::lookup : s == "lookup-uno" ? M::lookup_uno
+                   : s == "plain" ? M::plain : M::adaptive;
+    }
     // Say which set won. Three rules can pick one, and every one of them yields
     // valid output -- so a set chosen against the user's intent looks exactly
     // like the right one. An A/B that silently ran identical kernels twice, and
@@ -328,23 +334,75 @@ int Engine::get_current_context_length() { return core_->position(); }
 
 bool Engine::uno_ok() const { return core_ && core_->rows_l() && core_->has_draft(); }
 
+int Engine::uno_passes(int seed, std::vector<int>& out, double& draft_ms, double& verify_ms, size_t& accepted) {
+    const size_t L = core_->rows_l();
+    std::uniform_int_distribution<int> noise(1, static_cast<int>(core_->uno_noise_bound()) - 1);   // the adapter's [1, N)
+    std::vector<int> draft(L), am(L), av(L);
+    const int p = core_->position();
+    draft[0] = seed;
+    for (size_t j = 1; j < L; ++j) draft[j] = noise(uno_rng_);
+    core_->step_rows(draft.data(), am.data(), false, true);    // am[0] = c, am[1..] the drafts
+    draft_ms = core_->rows_ms();
+    core_->seek(p + 1);
+    core_->step_rows(am.data(), av.data(), false, false);      // av[j] checks am[j + 1]
+    verify_ms = core_->rows_ms();
+    size_t k = 0;
+    while (k + 1 < L && am[k + 1] == av[k]) ++k;
+    for (size_t j = 0; j <= k; ++j) out.push_back(am[j]);
+    out.push_back(av[k]);
+    core_->seek(p + 2 + static_cast<int>(k));
+    accepted = k;
+    return p;
+}
+
 int Engine::uno_cycle(int seed, std::vector<int>& out) {
     return guarded([&] {
-        const size_t L = core_->rows_l();
-        std::uniform_int_distribution<int> noise(1, static_cast<int>(core_->uno_noise_bound()) - 1);   // the adapter's [1, N)
-        std::vector<int> draft(L), am(L), av(L);
-        const int p = core_->position();
-        draft[0] = seed;
-        for (size_t j = 1; j < L; ++j) draft[j] = noise(uno_rng_);
-        core_->step_rows(draft.data(), am.data(), false, true);    // am[0] = c, am[1..] the drafts
-        core_->seek(p + 1);
-        core_->step_rows(am.data(), av.data(), false, false);      // av[j] checks am[j + 1]
+        double d = 0, v = 0;
         size_t k = 0;
-        while (k + 1 < L && am[k + 1] == av[k]) ++k;
-        for (size_t j = 0; j <= k; ++j) out.push_back(am[j]);
-        out.push_back(av[k]);
-        core_->seek(p + 2 + static_cast<int>(k));
-        return p;
+        return uno_passes(seed, out, d, v, k);
+    });
+}
+
+bool Engine::spec_ok() const { return core_ && cfg_.draft && core_->rows_l(); }
+
+void Engine::spec_begin() {
+    spec_.reset_estimates();
+    spec_plain_ = false;
+}
+
+bool Engine::spec_cycle(int seed, const std::vector<int>& history, std::vector<int>& out, int& p) {
+    return guarded([&] {
+        const size_t L = core_->rows_l(), cap = core_->max_ctx();
+        if (spec_plain_) spec_.record(SpecMethod::plain, 0, 0, core_->last_timing().total_ms, 0, 0);
+        spec_plain_ = false;
+        if (history.empty() || history.back() != seed)
+            throw std::runtime_error("open_qwen36: spec_cycle's history must end with the seed");
+        p = core_->position();
+        std::vector<int> drafts;
+        const int matched = lookup_drafts(history.data(), history.size(), L - 1, 4, 1, drafts);
+        // strict: the cycle's last seek lands on its next position, which must itself be inside the capacity
+        const SpecMethod m = spec_.choose(matched, static_cast<size_t>(p) + L < cap,
+                                          core_->has_draft() && static_cast<size_t>(p) + 1 + L < cap);
+        if (m == SpecMethod::plain) {
+            spec_plain_ = true;
+            return false;
+        }
+        size_t k = 0;
+        if (m == SpecMethod::uno) {
+            double d = 0, v = 0;
+            uno_passes(seed, out, d, v, k);
+            spec_.record(m, matched, static_cast<int>(k), 0, v, d);
+            return true;
+        }
+        std::vector<int> vr(L), av(L);
+        vr[0] = seed;
+        for (size_t j = 1; j < L; ++j) vr[j] = j - 1 < drafts.size() ? drafts[j - 1] : vr[j - 1];
+        core_->step_rows(vr.data(), av.data(), false, false);
+        while (k + 1 < L && vr[k + 1] == av[k]) ++k;    // draft k+1 checked by verify row k
+        for (size_t j = 0; j <= k; ++j) out.push_back(av[j]);
+        core_->seek(p + 1 + static_cast<int>(k));
+        spec_.record(m, matched, static_cast<int>(k), 0, core_->rows_ms(), 0);
+        return true;
     });
 }
 

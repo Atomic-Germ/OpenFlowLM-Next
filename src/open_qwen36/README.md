@@ -13,6 +13,7 @@ same way they drive the closed DLL. Below the seam it is:
 | [pools.cpp](pools.cpp) | interprets the manifest's packing plan: each layer's weights into the byte order the kernels stream, straight into resident device buffers (the same plan `open_kernels/recipes/pack.py` runs in NumPy) |
 | [core.cpp](core.cpp) | device, contexts, kernels, 21 GB of resident pools, per-layer state; runs the manifest's program per layer, one `step()` per token |
 | [engine.cpp](engine.cpp) | the `causal_lm` adapter: forward / prefill / checkpoint / restore / KV accessors |
+| [spec_lookup.hpp](spec_lookup.hpp) | OPEN-SPEC-LOOKUP: prompt-lookup drafts, and each cycle's choice of a lookup verify, a Uno cycle or a plain step (`cli --spec`, served greedy requests with `OFLM_SPECULATIVE=1`) |
 | [cli.cpp](cli.cpp), [chat.py](chat.py) | drive the engine without the app (ids in, tokens out; `chat.py` tokenizes) |
 | [manifest_test.cpp](manifest_test.cpp) | the OPEN-MANIFEST unit test (no XRT): parses the checked-in fixture, checks the model refusals |
 | `../xclbins/<model>/open_kernels/` | `manifest.json` + the six kernels (`lx0 lx1 ax0 ax1 ln lm_head_q8`), **built, not checked in** — see below |
