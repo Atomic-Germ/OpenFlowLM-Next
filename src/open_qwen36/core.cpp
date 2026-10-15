@@ -200,11 +200,16 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
     // OPEN-PREFILL-MODE: swapped in before the kernel list and the packing, so the other route costs nothing
+    // the route a load with no --prefill-mode takes where the set carries it; "bfp16" here makes the bfp16 route the default
+    static const char* const kDefaultPrefillRoute = "fast";
+    const bool route_given = !cfg_.prefill_mode.empty();
+    if (!route_given) cfg_.prefill_mode = kDefaultPrefillRoute;
     if (cfg_.prefill_mode != "fast" && cfg_.prefill_mode != "lean" && cfg_.prefill_mode != "bfp16")
         throw std::runtime_error("open_qwen36: prefill mode '" + cfg_.prefill_mode + "' is not fast, lean or bfp16");
     bool has_variants = false;
     for (const auto& [name, t] : man_.layer_types) has_variants = has_variants || !t.gemm_block_variants.empty();
-    const bool found = man_.select_prefill_route(cfg_.prefill_mode == "fast" ? "" : cfg_.prefill_mode);
+    bool found = man_.select_prefill_route(cfg_.prefill_mode == "fast" ? "" : cfg_.prefill_mode);
+    if (!found && !route_given && cfg_.prefill_mode != "fast") cfg_.prefill_mode = "fast";   // the default only where the set has it
     if (has_variants) prefill_route_ = cfg_.prefill_mode;
     if (cfg_.prefill_mode != "fast" && !found)
         log("this kernel set has no " + cfg_.prefill_mode + " prefill route; " + cfg_.prefill_mode + " changes nothing");
@@ -323,6 +328,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     std::map<std::string, bool> wanted;
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_FA")) attn_fa_on_ = std::string(env) != "0";
+    // the glue follows the route (OPEN-PREFILL-GLUE-PREP): on with the bfp16 route unless OFLM_OPEN_PREFILL_PREP=0
+    attn_prep_on_ = prefill_route_ == "bfp16";
     if (const char* env = std::getenv("OFLM_OPEN_PREFILL_PREP")) attn_prep_on_ = std::string(env) == "1";
     for (int l = 0; l < nl_; ++l) {
         for (const auto& s : types_[l]->program) wanted[s.kernel] = true;
