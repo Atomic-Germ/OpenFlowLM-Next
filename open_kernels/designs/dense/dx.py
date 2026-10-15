@@ -256,9 +256,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
 
     # ---- fifos
     if WRING:
-        # DDR keeps streaming into the column's memtile while the cores wait on an activation. The ring's
-        # in and out channels are pinned to 0 and 1: aie2p memtiles give even and odd channels separate
-        # 24-BD pools, and a ring takes a BD per buffer on each side.
+        # channels 0 / 1: aie2p memtiles split their BDs 24 / 24 between even and odd channels
         assert WRING <= 24, "dx: a memtile ring deeper than 24 does not fit one BD pool"
         of_wm = [ObjectFifo(elem, name=f"wm{c}", depth=WRING) for c in range(N_CORES)]
         of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
@@ -327,9 +325,6 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         layer_main(win, xin, yout, tab, ms, fns, mode)
 
     def layer_main(win, xin, yout, tab, ms, fns, mode=None):
-        """`mode` (ONE_CTX) is read only after the dispatch's first x data has landed: a read at the barrier
-        saw the previous dispatch's words. [-, layers, first-phase bands]: a layer is q|k|v then the rest,
-        the head is NB_HEAD bands of K = HID on the same table and nothing after."""
         K = dict(zip(KN, fns))
         f_prep, f_prepf, f_silu = K["prep"], K["prepf"], K["act"]
         if "ffn" in Q8:
@@ -352,12 +347,13 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         if mode is None:
             role_bands(win, yout, tab, K, "attn", G.Q_PC + 2 * G.KV_PC, HID, ms)
         else:
-            gemv_bands(win, yout, tab, K["gy"], mode[2], n_groups(HID), per_band(HID), 2)
+            # read after the x data landed: read at the barrier, it was the previous dispatch's word
+            gemv_bands(win, yout, tab, K["gy"], mode[1], n_groups(HID), per_band(HID), 2)
         xin.release(G.XN_ELEMS)
         if stop == 1:
             return
         if mode is not None:
-            for _ in range_(mode[1]):
+            for _ in range_(mode[0]):
                 layer_tail(win, xin, yout, tab, ms, K, band, f_prep, f_prepf, f_silu, ng_u)
             return
         layer_tail(win, xin, yout, tab, ms, K, band, f_prep, f_prepf, f_silu, ng_u)
@@ -407,15 +403,14 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         layer_ln(ain, aout, f_nr, f_lny, f_lnx, (), mode)
 
     def layer_ln(ain, aout, f_nr, f_lny, f_lnx, rest, mode=None):
-        # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]; the head's final norm is this with w = normw
-        # (ln_nr is ln_xn's arithmetic at add = 0), so its mode is read only after this data landed
+        # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]; with w = normw it is the head's final norm
         e = ain.acquire(3)
         o = aout.acquire(1)
         f_nr(e[0], e[1], e[2], o)
         aout.release(1)
         ain.release(3)
         if mode is not None:
-            for _ in range_(mode[1]):
+            for _ in range_(mode[0]):
                 layer_ln_tail(ain, aout, f_lny, f_lnx, rest)
             return
         layer_ln_tail(ain, aout, f_lny, f_lnx, rest)
@@ -577,8 +572,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, h0)
             return body
 
-    # ONE_CTX: [head passes, layer passes] for the dispatch about to run, per main core and the ln core (last)
-    modes = ([Buffer(np.ndarray[(16,), np.dtype[np.int32]], name=f"mode{c}", initial_value=np.zeros(16, np.int32),
+    # ONE_CTX, per main core and the ln core (last): [layer passes after the first phase, first-phase bands]
+    modes =([Buffer(np.ndarray[(16,), np.dtype[np.int32]], name=f"mode{c}", initial_value=np.zeros(16, np.int32),
                      use_write_rtp=True) for c in range(N_CORES + 1)] if ONE_CTX else [])
     bars = [WorkerRuntimeBarrier() for _ in range(N_CORES + 1)] if ONE_CTX else []
     mode_args = (lambda c: [modes[c], bars[c]]) if ONE_CTX else (lambda c: [])
@@ -611,16 +606,13 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
 
     def set_mode(head):
         for c in range(N_CORES + 1):
-            modes[c][0] = 1 if head else 0
-            modes[c][1] = 0 if head else 1
-            modes[c][2] = NB_HEAD if head else G.Q_PC + 2 * G.KV_PC
+            modes[c][0] = 0 if head else 1
+            modes[c][1] = NB_HEAD if head else G.Q_PC + 2 * G.KV_PC
         for c in range(N_CORES + 1):
             bars[c].set(1)
 
     def head_sequence(a_lm, c_xres, a_normw, c_logits, a_hn, lni, lno, w_prods, x_prod, y_conss):
-        """The tail as one dispatch on these cores: hn = norm(xres) * normw (the layer-entry norm, which is the
-        ln design's arithmetic at add = 0), then logits = lm_head . hn over NB_HEAD bands a core (lm_head_q4's
-        band split and GEMV)."""
+        # ln_nr is ln_xn's arithmetic at add = 0, and the bands are lm_head_q4's split: the old tail's bits
         set_mode(True)
         tg = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg)               # [x0 x1]
@@ -671,8 +663,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             for c in range(N_CORES):
                 pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_DOWN + c * G.DOWN_PC * BB_F, G.DOWN_PC * BB_F))
 
-        # WORDER: every phase's weights are queued before the activation wait in front of it, so the ring fills
-        # during the wait. Each issue below awaits only a transfer the cores can already finish (no cycle).
+        # WORDER: each phase's weights queue ahead of its activation wait; every await below needs no later issue
         if WORDER and stop >= 2:
             o_fills()                                             # awaits q's fill, which needs only xn
         # DX_STOP=1 no longer early-returns: phase 3 (attention) runs for every stop
@@ -799,7 +790,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       ain_p, aout_c, og_cs, None)
     io_ty = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty]
     if HEAD:
-        # every fifo stays in the Runtime so the image is dx's byte for byte; only the stream differs
+        # every fifo stays in the Runtime so the image stays dx's: only the stream differs
         def sequence(a_lm, c_xres, a_normw, c_logits, a_hn, a_unused, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
             head_sequence(a_lm, c_xres, a_normw, c_logits, a_hn, lni, lno, w_prods, x_prod, y_conss)
         u8 = np.dtype[np.uint8]

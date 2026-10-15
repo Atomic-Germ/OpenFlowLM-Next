@@ -1,9 +1,11 @@
-# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-GRANITE (canonical spec: specs/open-engine/spec.md)
+# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-GRANITE, OPEN-DECODE-STREAM, OPEN-DECODE-ONE-CONTEXT-DENSE (canonical spec: specs/open-engine/spec.md)
 """IBM Granite 4.2 3B on the dense recipe: spec derivation (HF and GGUF), the
 four scalar multipliers and why the recipe may ignore them, the 3B's layout
 (head_dim 64 at hidden 2560 -- the point every shipped design refused), and the
 manifest."""
 from __future__ import annotations
+
+import dataclasses
 
 import numpy as np
 import pytest
@@ -126,10 +128,39 @@ def test_3b_layout_and_manifest():
 def test_one_dispatch_per_layer():
     """Our own tuned Granite kernels ran a layer in four dispatches at
     1744.7 us; the dense recipe's program is one step per layer plus a
-    per-token ln + lm_head tail."""
+    per-token tail."""
     prog = DR.programs(ModelSpec.from_hf_config(HF_GRANITE_42_3B))
     assert [s["kernel"] for s in prog["layer_types"][DENSE]["program"]] == ["dx"]
-    assert [s["kernel"] for s in prog["tail"]] == ["ln", "lm"]
+    assert [s["kernel"] for s in prog["tail"]] == ["dxh"]
+
+
+def test_one_context_tail(monkeypatch):
+    """OPEN-DECODE-ONE-CONTEXT-DENSE: the norm + head are dx's second stream, in dx's context; the
+    GGUF-direct section (f32-scale pools) keeps the ln + lm_head tail in their own contexts."""
+    monkeypatch.delenv("DX_ONECTX", raising=False)
+    spec = ModelSpec.from_hf_config(HF_GRANITE_42_3B)
+    prog = DR.programs(spec)
+    assert prog["kernels"]["dxh"] == {"context": "dx", "insts": "dxh/insts.bin", "build": "dxh"}
+    assert prog["tail"] == [{"op": "run", "kernel": "dxh", "args": ["lmpool", "xres", "normw", "logits", "hn", "zero"]}]
+    assert prog["globals"]["hn"] == 8192                       # the head's x fill reads two whole 4 KB elements
+    assert [s["kernel"] for s in prog["gguf"]["tail"]] == ["ln", "lm"]
+    assert DR.builds(spec)["dxh"] == {"design": "dense/dx.py", "build_dir": "dense/build_granite_h2560_head",
+                                      "env": {"DX_HEAD": "1"}}
+    monkeypatch.setenv("DX_ONECTX", "0")
+    assert [s["kernel"] for s in DR.programs(spec)["tail"]] == ["ln", "lm"]
+
+
+def test_stream_knobs_are_granite_q4_1_only(monkeypatch):
+    """OPEN-DECODE-STREAM: Granite's q4_1 dx gets the memtile ring and the early weight issue; its f32-scale
+    twin and every other dense family build what they built before."""
+    for v in ("DX_WRING", "DX_WORDER"):
+        monkeypatch.delenv(v, raising=False)
+    spec = ModelSpec.from_hf_config(HF_GRANITE_42_3B)
+    assert DR.stream_knobs(spec) == (DR.WRING_DEPTH, True)
+    assert DR.stream_knobs(dataclasses.replace(spec, quant="q4_1_f32")) == (0, False)
+    assert DR.stream_knobs(dataclasses.replace(spec, family="qwen3")) == (0, False)
+    monkeypatch.setenv("DX_WRING", "0")
+    assert DR.stream_knobs(spec) == (0, True)
 
 
 def test_rope_is_the_plain_unscaled_table():
