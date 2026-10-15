@@ -289,7 +289,12 @@ int rows_check(Core& core, const Args& a, int n) {
     const size_t P = a.ids.size();
     std::vector<int> seq(a.ids);
     std::vector<std::vector<float>> lg;
-    for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    if (a.gemm_block && core.layer_major_ok() && P > 1) {
+        core.step_gemm_prompt(std::vector<int>(a.ids.begin(), a.ids.end() - 1), false);
+        core.step(a.ids[P - 1], true);
+    } else {
+        for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    }
     double step_ms = 0;
     for (int t = 0; t < n; ++t) {
         lg.emplace_back(core.logits().begin(), core.logits().end());
