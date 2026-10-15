@@ -223,9 +223,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
         // OPEN-ATTN-KVSLICE: per-core window fills of whole blocks; the stream and the kernel count the same blocks
         d.kvslice = v.value("kvslice", 0ull);
-        if (d.kvslice && ((d.patch != "attnpos" && d.patch != "attnrows") || d.rb != 1 || (d.kvslice != 2 && d.kvslice != 4)))
+        if (d.kvslice && ((d.patch != "attnpos" && d.patch != "attnrows") || d.rb != 1 || (d.kvslice != 2 && d.kvslice != 4 && d.kvslice != 8)))
             fail(where, "kernel " + k + ": kvslice " + std::to_string(d.kvslice) +
-                        " needs the attnpos or attnrows patch table, rb 1 and 2 or 4 rows an element");
+                        " needs the attnpos or attnrows patch table, rb 1 and 2, 4 or 8 rows an element");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
             d.patch != "attnrows")
