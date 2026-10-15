@@ -108,9 +108,11 @@ the eos are the same token — the other three families have a separate pair, an
 
 ## The combined kernel set (Uno decode + bf16 and bfp16 prefill)
 
-One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dx_attn`, `dx_f32`, `ln`,
-`lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four `gemm_bfp16_n*_k*`, `dxl`, `dxl_lora` and `lmhl`, with one
-`manifest.json` (manifest_version 4). `dxl`'s weight fifo depth (`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed.
+One `export_qwen36_kernels.py` run builds everything Granite ships, no manual step: `dx`, `dxh` (the head, a second stream
+over `dx`'s image), `dx_attn`, `dx_f32`, `ln`, `lm_head_q4`, `lm_head_q4_f32`, the four bf16 `gemm_n*_k*`, the four
+`gemm_bfp16_n*_k*`, `dxl`, `dxl_lora` and `lmhl`, with one `manifest.json` (manifest_version 4). `dxl`'s weight fifo depth
+(`DXL_WDEPTH`) defaults to 4 where L1 holds it, so no env is needed. The q4nx tail is `dxh`; `ln` and `lm_head_q4_f32` stay
+for the GGUF-direct section's tail.
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1
@@ -224,6 +226,60 @@ Not done, and where the rest is: the stream (0.28 ms) is 2 KB a position broadca
 stream per core on the five free shim MM2S channels would cut it, at the cost of a 3-D window BD the position patch
 (`stream_patch.hpp attn_table`) does not know. Eight attention cores (one per kv head) would cut the compute by 3/8 but need a memtile
 join for the og drains (the shim S2MM channels are all taken).
+
+## Decode at context 0: the weight stream and one context (2026-10-15)
+
+A ctx-0 token is ~2.13 GB of q4_1 weights: 40 x 49.2 MB of `dx` and a 160.6 MB head. What a step cost on the base set,
+CLEAN (`--bench-decode 5 --bench-step 12`, `OFLM_OPEN_STEP_TRACE=1`):
+
+| piece | ms | how it was read |
+|---|--:|---|
+| real step, submit-ahead (min / median) | 46.3-46.6 / 46.4-46.9 | `--bench-step` |
+| `dx` x 40 in the pipelined step | ~1.04 each | 49.2 MB at 46.9 GB/s |
+| the first `dx` of a token, after the `lm` context | +1.1 | the trace's `mean(sw)` against `mean(=)` |
+| `ln` | 0.21-0.26 | 0.087 alone (`--bench-kernel ln:40`): the rest is its context change |
+| `lm` | 3.63-3.83 | 3.107 alone, 51.7 GB/s on 8 streams: ~0.6 is its context change |
+| host (embed, logits read, gaps) | ~0.1 | the trace's gap / submit columns |
+
+**The timeline method.** `--bench-kernel NAME:40` is a kernel's same-context minimum (one warm call first);
+`OFLM_OPEN_STEP_TRACE=2 --bench-decode 5 --bench-step 12` prints the serial per-kernel table, the real step under both
+schedules and the last step dispatch by dispatch (gap, submit, start-to-done, `<- context change`). A queued dispatch's
+start-to-done includes its wait behind the one in front, so a layer's cost in the step is (step - tail - first-layer
+penalty) / 40, not that column. `xrt-smi examine -r all` shows Windows' own `WorkloadsSessionHost.exe` contexts on the
+same partition; `-r platform` reports the power mode and no power reading ("Estimated Power: N/A").
+
+**The channel map.** `dx`'s weights are 8 streams, one per shim column (`w0..w7` on `Tile(c, 0)`); the second MM2S of
+columns 0, 1, 2 carries `lni`, `x`, `ain`, so 11 of 16 MM2S are used (columns 3..7 have one free each). S2MM: `y0..y7`,
+`lno`, `aout`, `og0..og4` = 15 of 16. The head streams on the same 8 and reaches 51.7-52.5 GB/s, within ~3% of the
+15-stream array ceiling (53): more streams are worth ~1 ms a token at most, `dx` was the one below the line.
+
+**What fixed `dx` (OPEN-DECODE-STREAM, bit-identical).** A main core's weight fifo is 2 x 10 KB of L1, so DDR stopped
+20 KB into every wait on an activation (entry norm, attention, mid norm, h gather), and each phase's first fill was
+issued only after that wait. Each column's weights now go shim -> a 16-deep ring in its memtile -> core, and the o, first
+up | gate band and down fills queue ahead of the wait in front of their phase. Step 46.4 -> 44.4 ms median, `dx`
+~1.04 -> ~0.97 ms a layer (50.9 GB/s).
+- Pin the ring's memtile channels to 0 (in) and 1 (out): aie2p memtiles split their 48 BDs into even / odd pools of 24
+  and a ring takes one per buffer on each side, so both on channel 0 overflow past depth 12 (`emit_mlir.py --lower`
+  prints each memtile's BD use).
+- Issue order is the trick, and a wrong one deadlocks: `Pipeline(3)` awaits a channel's oldest fill before queueing a
+  fourth, so a fill may go early only where that await needs no transfer issued after it (o after the xn fill;
+  up_0 / gate_0 after the og fill, never up_1, which awaits o; down after the last up | gate band).
+- Did not help (CLEAN, same sitting, with one context): a 24-deep ring (41.0 / 41.6 against 41.2 / 41.4 ms min /
+  median), dropping the layer's unused last xn and its drain (41.1 / 41.4; the probe was removed again).
+
+**One context (OPEN-DECODE-ONE-CONTEXT-DENSE).** The final norm and the head are `dxh`, a second instruction stream over
+`dx`'s image (the two xclbins differ only in build stamps), named in context `dx`; the engine queues it behind the last
+layer like a layer. A token changes context zero times (was three, ~1.9 ms), and the head runs at 52.5 GB/s there (3.06
+ms against 3.11 alone in its own context and ~3.7 in the step). Step 44.4 -> 41.4 ms median (24.2 tok/s).
+- The head is the layer's own code: the ln core runs the entry norm with w = normw (`ln_nr` is `ln_xn`'s arithmetic at
+  add = 0, so hn is the old tail's bits) and the main cores the q|k|v GEMV with 196 bands instead of 7 (the head is
+  K = 2560 like q, the band split `lm_head_q4`'s), then skip the rest. Logits byte-identical.
+- **Trap: an RTP word read right after the barrier is the previous dispatch's.** The first build read the mode there:
+  layer -> layer and head -> head ran, layer -> head hung (ERT state 8, serial and queued alike). The cores read it only
+  after the dispatch's first data has landed (x on the main cores, the entry norm's inputs on the ln core).
+- **Overlay `dx` and `dxh` together.** `dxh`'s stream only runs on the `dx` image it was built with (a new `dx` still
+  runs under an old manifest's `ln` + `lm` tail). A dx-only experiment is `--only dx,dxh` plus that export's
+  `manifest.json`.
 
 ## Rules
 
