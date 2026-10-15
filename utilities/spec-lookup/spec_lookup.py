@@ -208,6 +208,8 @@ def simulate(d: dict, policy: str, costs: dict, ntok: int, nmax: int = 4, nmin: 
             m = "lookup" if matched >= thr else ("uno" if has_uno else "plain")
         elif base == "adaptive":
             m = pol.choose(matched, has_uno, costs)
+        elif base == "unofill":      # every cycle Uno, its verify rows from a lookup after c when that matches >= thr
+            m = "uno" if has_uno else "plain"
         elif base == "oracle":       # the best of the three for this cycle, known in hindsight: a bound, not a policy
             opts = [("plain", 1 / ts)]
             if matched:
@@ -226,7 +228,12 @@ def simulate(d: dict, policy: str, costs: dict, ntok: int, nmax: int = 4, nmin: 
             by_n[matched][0] += 1
             by_n[matched][1] += k
         else:
-            k = acc(list(U[p - (P - 1)]), p + 2)
+            ud = list(U[p - (P - 1)])
+            if base == "unofill":
+                mc, lc = fast_lookup(G, p + 2, rows - 1, nmax, nmin, extend)
+                if mc >= thr:
+                    ud = lc + [lc[-1]] * (rows - 1 - len(lc))
+            k = acc(ud, p + 2)
             got, cost = k + 2, td + tv
         got = min(got, end - (p + 1))
         cyc[m][0] += 1
@@ -558,6 +565,43 @@ def run_serve(a) -> int:
     return 0
 
 
+def run_serve_launch(a) -> int:
+    """Start `oflm serve` with the given env, run `serve` against it, stop it: one call per server configuration."""
+    import os
+    import time
+    import urllib.request
+    env = dict(os.environ)
+    env.update({"OFLM_CONFIG_PATH": a.registry, "OFLM_MODEL_PATH": a.models_root, "OMP_WAIT_POLICY": "PASSIVE",
+                "OFLM_OPEN_KERNELS_DIR": a.kernels})
+    env.pop("OFLM_SPECULATIVE", None)
+    env.pop("OFLM_SPEC_MODE", None)
+    for kv in a.env:
+        k, _, v = kv.partition("=")
+        env[k] = v
+    log = open(a.log, "w", encoding="utf-8")
+    srv = subprocess.Popen([a.oflm, "serve", a.tag, "-p", str(a.port)], env=env, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        t0 = time.time()
+        while True:
+            if srv.poll() is not None:
+                raise RuntimeError(f"oflm serve exited with {srv.returncode}; see {a.log}")
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{a.port}/v1/models", timeout=5):
+                    break
+            except Exception:
+                if time.time() - t0 > 300:
+                    raise RuntimeError("oflm serve did not come up in 300 s")
+                time.sleep(2)
+        return run_serve(a)
+    finally:
+        srv.terminate()
+        try:
+            srv.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            srv.kill()
+        log.close()
+
+
 def run_serve_compare(a) -> int:
     x, y = (json.loads(Path(p).read_text()) for p in (a.a, a.b))
     bad = 0
@@ -625,6 +669,18 @@ def main(argv=None) -> int:
     sv.add_argument("--tokens", type=int, default=200)
     sv.add_argument("--cut", type=int, default=37)
     sv.add_argument("--out", required=True)
+    sl = sub.add_parser("serve-launch", help="start oflm serve with --env KEY=VALUE ..., run `serve`, stop it")
+    sl.add_argument("--oflm", required=True)
+    sl.add_argument("--registry", required=True, help="a model_list.json naming the model (OFLM_CONFIG_PATH)")
+    sl.add_argument("--models-root", required=True, help="OFLM_MODEL_PATH: <root>/<model_path>/<name>")
+    sl.add_argument("--kernels", required=True)
+    sl.add_argument("--log", required=True)
+    sl.add_argument("--env", nargs="*", default=[])
+    sl.add_argument("--port", type=int, default=52625)
+    sl.add_argument("--tag", default="granite:4.2-3b")
+    sl.add_argument("--tokens", type=int, default=200)
+    sl.add_argument("--cut", type=int, default=37)
+    sl.add_argument("--out", required=True)
     sc = sub.add_parser("serve-compare")
     sc.add_argument("a")
     sc.add_argument("b")
@@ -653,6 +709,8 @@ def main(argv=None) -> int:
         return run_table(a)
     if a.cmd == "serve":
         return run_serve(a)
+    if a.cmd == "serve-launch":
+        return run_serve_launch(a)
     if a.cmd == "serve-compare":
         return run_serve_compare(a)
     return run_sim(a)
