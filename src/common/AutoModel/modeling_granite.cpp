@@ -4,7 +4,7 @@
 #include "AutoModel/modeling_granite.hpp"
 
 /************              Granite family            **************/
-// granite-4.2's template thinks unless told otherwise; a request's "think" now reaches it
+// granite-4.2's template thinks unless told otherwise, so thinking stays on until a request says "think": false
 Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") { this->enable_think = true; }
 
 bool Granite::configure_parameter(std::string parameter_name, const std::any& value) {
