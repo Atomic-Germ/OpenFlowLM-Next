@@ -46,6 +46,46 @@ still applies to a `nix develop` shell; the flake just supplies the toolchain
 
 ## Presets Overview
 
+### Faster Linux builds
+
+Both repository-root and `src/` builds automatically use `mold` for C/C++
+linking and `ccache` for C/C++ compilation when installed:
+
+```bash
+sudo apt install mold ccache ninja-build  # Ubuntu/Debian
+# Fedora: sudo dnf install mold ccache ninja-build
+cmake --preset linux-default -DOFLM_BUILD_KERNELS=OFF
+cmake --build --preset linux-default
+ccache --show-stats
+```
+
+Use `OFLM_BUILD_KERNELS=OFF` for engine development when the required kernels
+have already been exported. Reconfigure with `-DOFLM_BUILD_KERNELS=ON` before
+building a full distribution. `linux-debug` also skips kernel export and now
+honors Debug instead of silently compiling Release.
+
+Configuration reports the selected tools; missing optional tools fall back to
+the configured compiler/linker. GCC must support `-fuse-ld=mold` (GCC 12+), or
+use Clang. Explicit compiler launchers are preserved. To opt out, configure
+with `-DOFLM_USE_MOLD=OFF -DOFLM_USE_CCACHE=OFF`. When choosing another linker
+through a toolchain or linker flags, disable `OFLM_USE_MOLD`.
+
+The Docker builder installs both tools. `build_in_docker.sh` keeps up to 10 GiB
+of compiler cache in the named volume `oflm-ccache`, including across container
+and builder-image recreation. Inspect it with:
+
+```bash
+docker run --rm -v oflm-ccache:/var/cache/oflm-ccache \
+  openflowlm-build:ubuntu26 ccache --show-stats
+```
+
+`ccache` accelerates repeated C/C++ compilation; it does not cache Rust or NPU
+kernel compilation. Keep the build directory for incremental Cargo builds.
+These settings do not alter the Peano toolchain used to compile NPU kernels.
+
+The linker capability probe uses CMake's
+[CheckLinkerFlag](https://cmake.org/cmake/help/v3.22/module/CheckLinkerFlag.html).
+
 All builds use CMake presets in `CMakePresets.json`. Presets define configure, build, and test steps.
 
 ### Configure Presets

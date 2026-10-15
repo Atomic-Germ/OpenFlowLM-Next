@@ -20,10 +20,10 @@ docker run --rm -it \
   --ulimit memlock=-1:-1 \
   -e CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
   -e CTEST_PARALLEL_LEVEL="$(nproc)" \
-  -e LDFLAGS="-fuse-ld=lld" \
   -e NPU_CACHE_HOME=/root/.npu/cache \
   -v "$PWD:/code" \
   -v "$PWD/npu-cache:/root/.npu/cache" \
+  -v oflm-ccache:/var/cache/oflm-ccache \
   "$IMAGE" \
   bash -eu -c '
     case "$1" in

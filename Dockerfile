@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     ninja-build \
+    mold \
+    ccache \
     pkg-config \
     doxygen \
     curl \
@@ -81,6 +83,8 @@ ENV LD_LIBRARY_PATH="/opt/xilinx/xrt/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-
 ENV PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
 ENV PYTHONPATH="/opt/xilinx/xrt/python"
 ENV NPU_CACHE_HOME=/root/.npu/cache
+ENV CCACHE_DIR=/var/cache/oflm-ccache
+ENV CCACHE_MAXSIZE=10G
 
 # Sanity checks. These are deliberately individual so Docker shows the exact
 # missing component if Ubuntu changes a package layout later.
@@ -89,6 +93,8 @@ RUN set -eux; \
     command -v file; \
     command -v dpkg-shlibdeps; \
     command -v ninja; \
+    command -v mold; \
+    command -v ccache; \
     command -v cargo; \
     command -v clang; \
     command -v xclbinutil; \

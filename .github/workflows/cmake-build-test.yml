@@ -20,12 +20,23 @@ permissions:
 jobs:
   config-build-test:
     runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Cache C/C++ compilation
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-
 
       - name: Install dependencies
         shell: bash
@@ -38,6 +49,8 @@ jobs:
             libdrm-dev \
             cmake \
             ninja-build \
+            mold \
+            ccache \
             g++ \
             libreadline-dev \
             libcurl4-openssl-dev \
