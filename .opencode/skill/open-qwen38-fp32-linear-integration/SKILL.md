@@ -146,3 +146,34 @@ LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=2 \
 Artifacts live in `Models/qwen38-27b/production-fp32-linear/`. Do not promote
 this result to full model acceptance: head-output diagnostics, full-depth
 resident lifecycle, block-prefill parity, serving and performance remain open.
+
+
+## Follow-up: localize head-output errors without model residency
+
+Use `utilities/deltanet_readout.py` with `--model-dir`, `--kernel-dir` and `--out`
+pointing to the same production model, export and completed decode fixture as
+above. It loads no model weights and runs no NPU kernels. Preserve stdout JSON
+and the exit status: unresolved primary head diagnostics deliberately return 1.
+The unrounded recurrence remains independent of captured state; only a separate
+readout diagnostic uses the updated state snapshot.
+
+On 2026-10-16, all 6912 primary head metrics and 289 capture hashes reproduce
+the retained production recurrence report. Primary whole-tensor checks still
+pass and 92 head-output diagnostics still fail. Exact captured-state readout
+versus observed output has 69 failures; exact captured-state readout versus
+independent primary output has 47. These sets overlap: do not add their counts.
+Even ideal readout alone therefore does not close the primary head gate.
+
+A CPU three-term BF16-pair representation estimate matches observed output
+within the existing head bounds in 6909/6912 cases. Adding low×low leaves 47
+representation-to-exact-readout failures, versus 67 for three terms. The estimates
+use FP64 accumulation, not bit-exact hardware emulation; the fourth term alone
+is not a validated fix. Failed heads have median cancellation ratio 79.08,
+versus 2.60 for passed heads. Next, isolate higher-precision state update and
+readout with a byte-exact hardware control and causal state before promotion.
+The production kernels and build key remain unchanged.
+
+Artifacts: `Models/qwen38-27b/deltanet-readout/`. Full-depth resident/reset still
+requires additional available RAM. The diagnostic does not close that gate.
+
+Diagnostic follow-up tests: 15 new cases; full host suite 1246 passed, 47 skipped.

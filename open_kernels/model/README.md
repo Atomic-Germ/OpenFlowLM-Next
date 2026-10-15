@@ -510,3 +510,28 @@ for build, resource audits and full-depth checks. Host scalar/vector arithmetic
 uses explicit multiply-then-add compiler semantics so legacy and FP32 tests
 remain comparable. Host unit tests do not establish full model block-prefill
 parity; resident runtime/reset and serving acceptance require separate checks.
+
+
+### DeltaNet head readout diagnostics
+
+```bash
+OPENBLAS_NUM_THREADS=1 python utilities/deltanet_readout.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-fp32-linear/kernels \
+  --out Models/qwen38-27b/production-fp32-linear/decode
+```
+
+This CPU-only tool carries the unchanged independent FP64 recurrence from zero,
+then separately evaluates `S^T q / sqrt(128)` using the captured updated state.
+It reports primary head state/output scores, observed versus exact captured-state
+readout, and the effect of state error on that readout. The cancellation ratio
+is `max(sum(abs(S*q))) / max(abs(sum(S*q)))` per head; an exactly zero readout
+has a null ratio. It is a sensitivity diagnostic, not an acceptance threshold.
+
+Three-term and four-term paired-BF16 estimates isolate operand representation
+and the omitted low×low product. They use FP64 accumulation and do not emulate
+AIE accumulation or establish that a replacement kernel passes. No estimate
+replaces the primary reference or its bounds. All layers/positions, sizes,
+finite values and export identity are required; hashes pin the captures and
+script. Exit status 1 preserves the complete JSON when any primary whole-tensor
+or per-head gate fails, even when a diagnostic estimate fits the observations.
