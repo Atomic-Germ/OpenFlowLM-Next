@@ -184,3 +184,32 @@ Traps:
 - Granite's server used to drop a request's `"think": false` (no `enable_think` parameter, no `enable_thinking` for the
   template), so a served whole-file edit reasoned first and lookup gained 1.15x there; with the flag passed through it
   is 3.06x, the CLI's figure. A served speed test of lookup needs a reply that copies.
+
+## Where a rows pass goes (track D, 2026-10-15, Granite 4.2 3B, `--rows-check 17 --gemm-block`)
+
+`open_qwen36_cli --rows-check 17` prints the mean pass against the mean decode step, and with `--gemm-block` it block-prefills,
+so a 2048-token depth costs seconds. `utilities/granite-combined-bench/dprobe.py --what rows|uno|tg` runs configs interleaved per
+depth inside `controlled.py` (void a unit whose control is off by more than 5 %: another session's CPU job slowed the NPU 26-30 %
+for hours on 2026-10-15 and every control said so). Ablation builds of `dxl` alone (`export_qwen36_kernels.py --only dxl --out
+<copy>`, ~100 s; the rows pass needs no `dxl_lora`) with the probe variables `LX_NULL_GEMV`, `DXL_NULL_PREP`, `DXL_NULL_LN`,
+`DXL_NULL_OUT`, `ATTN_NULL` price each part. The base and plain rows are a CLEAN unit with its control within 1.3 %; the nulled rows come from a unit whose
+first control read -7.6 % (void by the rule, so indicative), ms of one pass:
+
+| | ctx 0 | ctx 2048 |
+|---|--:|--:|
+| plain decode step | 41.6 (24.0 tok/s) | 52.6 (19.0 tok/s) |
+| rows pass, base | 63.0 (1.51 steps) | 87.9 (1.67 steps) |
+| L-row GEMV arithmetic nulled | 55.6 | 79.7 |
+| attention nulled | 63.6 | 70.5 |
+
+- The L-row GEMV arithmetic is ~8 ms of a pass, not the bulk (D2's "compute-bound" reading was too strong).
+- Attention costs nothing at context 0 and 17.6 ms at 2048 (`dx`'s whole growth is 11 ms): `dxl`'s 20 attention cores run 8 heads
+  each at TREE8 with the row loop rolled, 382 Peano bundles a row against 89 for `dx`'s 3-head unrolled cores.
+- A memtile weight ring for `dxl` (`DXL_WRING=16`, `dx`'s pattern) changes nothing (63.5 / 88.5 ms): the pass is not waiting on
+  weights. Depth 24 does not route ("no space for this BD": the og joins share the memtiles).
+- `dxl` cannot take `dx`'s 16-core by-kv-head layout: 4 row groups x 16 cores, 23 tiles are free. 8 heads a core (TREE8) is
+  already the cheapest per head (182 bundles a block per head against 297 for a 3-head G5 core).
+- GEMV loop (`dxl_tile4`, 140 bundles per 32-wide k-block of 4 tokens, 48 vector stores of accumulator spills): unroll 2 / 4
+  (178 / 183 a block), `-O3` (143) and a per-token fused float stage (152) are all worse.
+- Dead end: unrolling `dxl`'s TREE8 score loop by 2 rows. The frame passes 8 KB and the backend dies encoding a stack offset
+  ("immediate operand out of range"); the rolled loop keeps every offset under 8,000.

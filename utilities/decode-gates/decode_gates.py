@@ -60,7 +60,7 @@ def corr(a) -> int:
         for f in glob.glob(pre + "_*.bin"):
             os.remove(f)
         r = subprocess.run([a.cli, "--model", a.model, "--kernels", k, "--ids", ids, "--max-tokens", "20",
-                            "--dump-logits", pre, "--quiet", *(["--gemm-block"] if a.block else [])],
+                            "--dump-logits", pre, "--quiet", *(["--gemm-block"] if a.block and not (a.ref_step and n == 0) else [])],
                            capture_output=True, text=True, env=env)
         files = sorted(glob.glob(pre + "_t*.bin"), key=lambda x: int(x.rsplit("_t", 1)[1][:-4]))
         res[k] = [np.fromfile(f, np.float32) for f in files]
@@ -74,6 +74,8 @@ def corr(a) -> int:
         exact = sum(int(np.array_equal(x, y)) for x, y in zip(v, b))
         good = len(v) == 20 and min(cs) >= a.min_corr and top == 20
         ok &= good
+        if a.verbose:
+            print("per-step corr", " ".join(f"{c:.4f}" for c in cs), flush=True)
         print(f"{k}: corr min {min(cs):.6f} (mean {sum(cs) / len(cs):.6f}), top-1 equal {top}/20, byte-identical {exact}/20 -> "
               f"{'PASS' if good else 'FAIL'} (min corr {a.min_corr})", flush=True)
     return 0 if ok else 1
@@ -139,6 +141,8 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--work", default=None)
     ap.add_argument("--block", action="store_true", help="corr: block-prefill the prompt (host attention) for a deep context")
+    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--ref-step", action="store_true", help="corr: the first set prefills one token at a time, the others as blocks")
     ap.add_argument("--min-corr", type=float, default=0.9998)
     a = ap.parse_args()
     return {"logits": logits, "corr": corr, "greedy": greedy, "stepab": stepab}[a.mode](a)
