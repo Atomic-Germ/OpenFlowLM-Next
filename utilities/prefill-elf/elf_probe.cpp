@@ -48,13 +48,14 @@ int main(int argc, char** argv) try {
     if (argc < 2) { std::fprintf(stderr, "usage: elf_probe <kernel dir> [--reps N] [--prio P] [--tier af512] [--mode m]\n"); return 2; }
     fs::path kdir = argv[1];
     int reps = 9;
-    unsigned prio = 0x180;
+    unsigned prio = 0x180, xprio = 0;
     std::string tier = "af512", mode = "all";
     int layers = 40;
     for (int i = 2; i + 1 < argc; i += 2) {
         std::string a = argv[i];
         if (a == "--reps") reps = std::atoi(argv[i + 1]);
         else if (a == "--prio") prio = static_cast<unsigned>(std::strtoul(argv[i + 1], nullptr, 0));
+        else if (a == "--xprio") xprio = static_cast<unsigned>(std::strtoul(argv[i + 1], nullptr, 0));
         else if (a == "--tier") tier = argv[i + 1];
         else if (a == "--mode") mode = argv[i + 1];
         else if (a == "--layers") layers = std::atoi(argv[i + 1]);
@@ -89,7 +90,7 @@ int main(int argc, char** argv) try {
         fs::path p = kdir / man.at("contexts").at(s).get<std::string>();
         xrt::xclbin xcl(p.string());
         auto uuid = dev.register_xclbin(xcl);
-        xrt::hw_context ctx(dev, uuid);
+        xrt::hw_context ctx = xprio ? xrt::hw_context(dev, uuid, xrt::hw_context::cfg_param_type{{"priority", xprio}}) : xrt::hw_context(dev, uuid);
         xk[s] = XK{ctx, xrt::kernel(ctx, "MLIR_AIE")};
     }
     std::map<std::string, std::pair<xrt::bo, size_t>> insts;
@@ -220,6 +221,66 @@ int main(int argc, char** argv) try {
         return med(v);
     };
 
+    if (mode == "hammer") {
+        // a contender for the contention test: xclbin contexts alternating gemm / attention ops for --reps seconds
+        std::vector<Op> ga = {{G, "gemm_bfp16_n3072_k2560"}, {A, "afp"}, {G, "gemm_bfp16_n4096_k2560"}, {A, tier}};
+        auto end = clk::now() + std::chrono::seconds(reps);
+        long n = 0;
+        while (clk::now() < end) { x_waited(ga); n += static_cast<long>(ga.size()); }
+        std::printf("hammer: %ld ops in %d s\n", n, reps);
+        return 0;
+    }
+    if (mode == "all" || mode == "switch") {
+        std::printf("== switch cost alone (waited unless noted), %d reps of 20\n", reps);
+        auto cfg_waited = [&](const std::vector<std::string>& sets) {
+            auto t = clk::now();
+            for (auto& s : sets) { auto c = cfg_run(s); c.start(); c.wait(); }
+            return ms(t, clk::now());
+        };
+        auto cfg_queued = [&](const std::vector<std::string>& sets) {
+            std::vector<xrt::run> rs;
+            auto t = clk::now();
+            for (auto& s : sets) { rs.push_back(cfg_run(s)); rs.back().start(); }
+            for (auto& r : rs) r.wait();
+            return ms(t, clk::now());
+        };
+        auto many = [&](const char* what, auto fn, std::vector<std::string> sets) {
+            std::vector<double> v;
+            fn(sets);
+            for (int i = 0; i < reps; ++i) v.push_back(fn(sets));
+            std::printf("  %-34s per cfg %7.3f ms (min %.3f max %.3f)\n", what, med(v) / sets.size(),
+                        v.front() / sets.size(), v.back() / sets.size());
+            std::fflush(stdout);
+        };
+        std::vector<std::string> g(20, G), a(20, A), alt;
+        for (int i = 0; i < 10; ++i) { alt.push_back(G); alt.push_back(A); }
+        many("cfg gemm repeated, waited", cfg_waited, g);
+        many("cfg af repeated, waited", cfg_waited, a);
+        many("cfg gemm/af alternating, waited", cfg_waited, alt);
+        many("cfg gemm repeated, queued", cfg_queued, g);
+        many("cfg af repeated, queued", cfg_queued, a);
+        many("cfg gemm/af alternating, queued", cfg_queued, alt);
+        // xclbin: the same alternation with the cheapest op of each set
+        std::vector<Op> gg(20, Op{G, "gemm_bfp16_n3072_k2560"}), aa(20, Op{A, "afp"}), ga;
+        for (int i = 0; i < 10; ++i) { ga.push_back(gg[0]); ga.push_back(aa[0]); }
+        auto xw = [&](const std::vector<Op>& s) { return x_waited(s) / s.size(); };
+        std::vector<double> v1, v2, v3;
+        x_waited(ga);
+        for (int i = 0; i < reps; ++i) { v1.push_back(xw(gg)); v2.push_back(xw(aa)); v3.push_back(xw(ga)); }
+        std::printf("  xclbin o waited %.3f, prep waited %.3f, alternating waited %.3f ms/op -> per switch %.3f ms\n",
+                    med(v1), med(v2), med(v3), med(v3) - (med(v1) + med(v2)) / 2);
+        std::vector<double> e1, e2, e3;
+        auto ew = [&](const std::vector<Op>& s) { return e_waited(s) / s.size(); };
+        auto e_always = [&](const std::vector<Op>& s) {
+            auto t = clk::now();
+            for (auto& o : s) { auto c = cfg_run(o.set); c.start(); c.wait(); auto r = erun_mk(o); r.start(); r.wait(); }
+            return ms(t, clk::now()) / s.size();
+        };
+        ew(ga);
+        for (int i = 0; i < reps; ++i) { e1.push_back(ew(gg)); e2.push_back(ew(aa)); e3.push_back(e_always(ga)); }
+        std::printf("  ELF o waited %.3f, prep waited %.3f, cfg+op each time (alternating) %.3f ms/op -> per switch %.3f ms\n",
+                    med(e1), med(e2), med(e3), med(e3) - (med(e1) + med(e2)) / 2);
+    }
     if (mode == "all" || mode == "alone") {
         std::printf("== each stream alone, 20 queued back to back (xclbin) / after one configure (ELF, queued)\n");
         for (auto& [set, names] : meta.at("streams").items())
