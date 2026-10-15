@@ -60,6 +60,12 @@ RTP_LEN = 8
 # AF_MODE=prep: the same cores and dataflow, another instruction stream (OPEN-PREFILL-GLUE-PREP)
 MODE = os.environ.get("AF_MODE", "attn")
 PREP_KV_PER_GROUP = 2     # kv heads a group rotates and caches: 8 over 4 groups
+# bisecting a hang: passes a prep dispatch runs (-1: all), and whether it loads the table
+PREP_NQ = int(os.environ.get("AF_PREP_NQ", -1))
+PREP_NKV = int(os.environ.get("AF_PREP_NKV", -1))
+PREP_NTBL = int(os.environ.get("AF_PREP_NTBL", 1))
+# two prep passes in flight hang the array (bisected); one at a time
+PREP_INFLIGHT = int(os.environ.get("AF_PREP_INFLIGHT", 1))
 
 assert CORES * TQ == T
 PREP_TBL_ELEMS = T * 2 * HD * 2     # the block's table, fp32 [256 tokens][cos 32 | sin 32], as bf16 pairs
@@ -270,9 +276,9 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
         for buf in rtp.values():
             buf[RTP_PASSES] = 0
             buf[RTP_CHUNKS] = 0
-            buf[RTP_TBL] = 1
-            buf[RTP_PQ] = hpg
-            buf[RTP_PKV] = PREP_KV_PER_GROUP
+            buf[RTP_TBL] = PREP_NTBL
+            buf[RTP_PQ] = PREP_NQ if PREP_NQ >= 0 else hpg
+            buf[RTP_PKV] = PREP_NKV if PREP_NKV >= 0 else PREP_KV_PER_GROUP
         for b in barriers.values():
             b.set(1)
         inflight: list[TaskGroup] = []
@@ -287,10 +293,12 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
             for drain in drains:
                 drain(tg)
             inflight.append(tg)
-            if len(inflight) == MAX_INFLIGHT:
+            if len(inflight) == PREP_INFLIGHT:
                 inflight.pop(0).finish()
 
-        for k in range(hpg):
+        if PREP_NQ == 0 and PREP_NTBL:
+            pass_group([], [], first=True)
+        for k in range(PREP_NQ if PREP_NQ >= 0 else hpg):
             fills, drains = [], []
             for g in range(N_GROUPS):
                 h = g * hpg + k
@@ -305,7 +313,7 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
                             q, offset=h * qh_elems + ELEM + (cc * N_ROWS + r) * (TQ * HD), sizes=[2, TQ * HD],
                             strides=[ELEM * Q_ELEMS, 1], wait=True, group=tg))
             pass_group(fills, drains, first=k == 0)
-        for j in range(PREP_KV_PER_GROUP):
+        for j in range(PREP_NKV if PREP_NKV >= 0 else PREP_KV_PER_GROUP):
             fills, drains = [], []
             for g in range(N_GROUPS):
                 kvh = g * PREP_KV_PER_GROUP + j
