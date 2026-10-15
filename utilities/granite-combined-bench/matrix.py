@@ -1,6 +1,6 @@
 r"""Run bench.py / uno_bench.py as small units, each under `dibs run --measure`, rerunning a unit until dibs says CLEAN.
 
-    python matrix.py --cli <exe> --model <dir> --kernels <set> --tokenizer <dir> --out <dir> [--tries 5] [--only prefill,decode,uno,sweep]
+    python matrix.py --cli <exe> --model <dir> --kernels <set> --tokenizer <dir> --out <dir> [--tries 5] [--only prefill,decode,uno,spec,sweep]
 
 A NOISY unit is kept as <unit>.noisyN.log and never read; the CLEAN one is <unit>.log with its jsonl beside it.
 """
@@ -45,6 +45,7 @@ def main() -> int:
     ap.add_argument("--routes", default="fast,bfp16")
     ap.add_argument("--sweeps", default="default,bfp16,fast_block")
     ap.add_argument("--tag", default="combined-bench", help="the dibs tag")
+    ap.add_argument("--spec-modes", default="adaptive,lookup", help="`--only spec`: the --spec-mode values a unit runs")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     only = a.only.split(",")
@@ -62,6 +63,11 @@ def main() -> int:
             for r in a.routes.split(","):
                 unit(a, f"uno_{r}_{n}", [*base, "uno", *common, "--lengths", str(n), "--routes", r,
                                         "--out", str(a.out / f"uno_{r}_{n}.jsonl")])
+    if "spec" in only:      # OPEN-SPEC-LOOKUP at depth: one unit per length and route, each mode back to back
+        for n in map(int, a.uno_lengths.split(",")):
+            for r in a.routes.split(","):
+                unit(a, f"spec_{r}_{n}", [*base, "spec", *common, "--lengths", str(n), "--routes", r,
+                                         "--spec-modes", a.spec_modes, "--out", str(a.out / f"spec_{r}_{n}.jsonl")])
     if "sweep" in only:
         ub = [sys.executable, str(HERE.parent / "uno-bench" / "uno_bench.py"), "--cli", a.cli, "--model", a.model,
               "--kernels", a.kernels, "--tokenizer", a.tokenizer]

@@ -3,8 +3,10 @@ offline simulation that replays greedy transcripts through each cycle policy.
 
     python spec_lookup.py prompts --model <dir> --out <dir>             # <name>.ids for every prompt set
     python spec_lookup.py probe --cli <exe> --model <dir> --kernels <set> --prompts <dir> --out <dir> [--only a,b]
-    python spec_lookup.py sim --probes <dir> [--costs costs.json]       # acceptance and projected tok/s
+    python spec_lookup.py sim|ngrams --probes <dir> --prompts <dir> [--costs costs.json]   # replayed offline
     python spec_lookup.py bench --cli <exe> --model <dir> --kernels <set> --prompts <dir> --out <jsonl> --modes ...
+    python spec_lookup.py matrix ... --units "what:tokens:modes;..." --gap 75; table --dir <matrix out>
+    python spec_lookup.py serve-launch ... [--env OFLM_SPECULATIVE=1] --out a.json; serve-compare a.json b.json
 
 `probe` runs `open_qwen36_cli --spec-probe`: greedy decode by draft passes, so one sweep gives the greedy transcript and,
 at every position, the drafts a Uno cycle seeded there would verify. Under greedy decoding a draft never changes the
@@ -163,9 +165,16 @@ def build_prompts(model: Path, out: Path) -> dict[str, dict]:
 
 # ---------------------------------------------------------------- simulation
 
+EOS = (100257,)     # Granite's <|im_end|>: a transcript is replayed to its reply's end, never past it
+
+
 def load_probe(path: Path) -> dict:
     d = json.loads(path.read_text())
     d["name"] = path.stem
+    P = d["prompt_len"]
+    cut = next((i for i, t in enumerate(d["ids"][P:]) if t in EOS), None)
+    if cut is not None:
+        d["ids"] = d["ids"][:P + cut + 1]
     return d
 
 
@@ -179,7 +188,7 @@ def simulate(d: dict, policy: str, costs: dict, ntok: int, nmax: int = 4, nmin: 
     U = (d.get("uno") or []) if d.get("draft", True) else []
     end = min(len(G), P + ntok)
     ts, tv, td = costs["step"], costs["verify"], costs["draft"]
-    pol = Policy(**(pol_args or {})) if policy == "adaptive" else None
+    pol = Policy(**(pol_args or {})) if policy.startswith("adaptive") else None
     p = P - 1                        # the pending token's position
     ms = 0.0
     cyc = {"plain": [0, 0], "lookup": [0, 0], "uno": [0, 0]}
@@ -208,6 +217,8 @@ def simulate(d: dict, policy: str, costs: dict, ntok: int, nmax: int = 4, nmin: 
             m = "lookup" if matched >= thr else ("uno" if has_uno else "plain")
         elif base == "adaptive":
             m = pol.choose(matched, has_uno, costs)
+        elif base == "adaptive2":    # a what-if: Uno only where the lookup has no draft
+            m = pol.choose(matched, has_uno and not matched, costs)
         elif base == "unofill":      # every cycle Uno, its verify rows from a lookup after c when that matches >= thr
             m = "uno" if has_uno else "plain"
         elif base == "oracle":       # the best of the three for this cycle, known in hindsight: a bound, not a policy
@@ -382,7 +393,9 @@ def run_probe(a) -> int:
         if only and name not in only and info["group"] not in only:
             continue
         cmd = [a.cli, "--model", a.model, "--kernels", a.kernels, "--ids-file", str(Path(a.prompts) / f"{name}.ids"),
-               "--spec-probe", str(info["tokens"]), "--spec-dump", str(out / f"{name}.json"), "--quiet"]
+               "--spec-probe", str(a.tokens or info["tokens"]), "--spec-dump", str(out / f"{name}.json"), "--quiet"]
+        if a.seed:
+            cmd.append("--spec-probe-seed")
         if info["prompt_tokens"] >= 64:
             cmd.append("--gemm-block")
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -498,9 +511,32 @@ def run_table(a) -> int:
     import statistics as st
     rows = [json.loads(l) for f in sorted(Path(a.dir).glob("*.jsonl")) for l in f.read_text().splitlines() if l.strip()]
     rows = [r for r in rows if "error" not in r]
-    bad = [r for r in rows if not r["identical"]]
-    modes = list(dict.fromkeys(r["mode"] for r in rows))
-    names = list(dict.fromkeys(r["name"] for r in rows))
+    # a CLEAN unit can still share the NPU with a sibling's work dibs let in: the run's own pass times say so
+    def med_of(n, key):
+        v = [r[key] for r in rows if r["name"] == n and r.get(key, 0) > 0]
+        return st.median(v) if v else 0.0
+    names_all = {r["name"] for r in rows}
+    ref = {n: {k: med_of(n, k) for k in ("decode_tok_s", "verify_ms", "step_ms", "draft_ms")} for n in names_all}
+    def slow_run(r):
+        m = ref[r["name"]]
+        if r["decode_tok_s"] < 0.95 * m["decode_tok_s"]:
+            return f"plain decode {r['decode_tok_s']:.2f} against {m['decode_tok_s']:.2f}"
+        for k in ("verify_ms", "step_ms", "draft_ms"):
+            if r.get(k, 0) > 1.05 * m[k] > 0:
+                return f"{k} {r[k]:.1f} against {m[k]:.1f}"
+        return ""
+    slow = [(r, slow_run(r)) for r in rows]
+    for r, why in slow:
+        if why:
+            print(f"set aside: {r['name']} {r['mode']} rep {r['rep']}: {why}")
+    bad = [r for r, _ in slow if not r["identical"]]
+    total = len(slow)
+    rows = [r for r, why in slow if not why]
+    order = ["plain", "uno", "lookup", "lookup-uno", "adaptive"]
+    modes = sorted(dict.fromkeys(r["mode"] for r in rows), key=lambda m: order.index(m) if m in order else 99)
+    groups = ["short", "ctx1024", "ctx2048", "lookup"]
+    names = sorted(dict.fromkeys(r["name"] for r in rows),
+                   key=lambda n: next((groups.index(r["group"]) for r in rows if r["name"] == n and r["group"] in groups), 99))
     med = lambda v: st.median(v) if v else float("nan")
     print(f"| prompt | plain tok/s | " + " | ".join(f"{m} tok/s (tokens a cycle) | {m} x" for m in modes) + " |")
     print("|---|--:|" + "--:|--:|" * len(modes))
@@ -521,30 +557,34 @@ def run_table(a) -> int:
         print(f"| {n} | {plain:.2f} | " + " | ".join(cells) + " |")
     for g, d in per_grp.items():
         print(f"geomean {g}: " + ", ".join(f"{m} {math.exp(sum(map(math.log, v)) / len(v)):.2f}x" for m, v in d.items()))
-    print(f"{len(rows)} runs, {len(bad)} not identical" + ("".join(f"\n  DIFFERS: {r['name']} {r['mode']} rep {r['rep']}" for r in bad)))
+    print(f"{total} runs ({len(rows)} kept), {len(bad)} not identical"
+          + "".join(f"\n  DIFFERS: {r['name']} {r['mode']} rep {r['rep']}" for r in bad))
     return 1 if bad else 0
 
 
-def _chat(url: str, body: dict) -> tuple[str, float]:
-    """One /v1/chat/completions request: the reply (reasoning + content) and its wall seconds; streamed when asked."""
+def _chat(url: str, body: dict) -> tuple[str, float, dict]:
+    """One /v1/chat/completions request: the reply (reasoning + content), its wall seconds and the server's usage."""
     import time
     import urllib.request
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=900) as r:
         if not body.get("stream"):
-            m = json.loads(r.read())["choices"][0]["message"]
-            return (m.get("reasoning_content") or "") + "\x00" + (m.get("content") or ""), time.time() - t0
-        reasoning, content = [], []
+            j = json.loads(r.read())
+            m = j["choices"][0]["message"]
+            return (m.get("reasoning_content") or "") + "\x00" + (m.get("content") or ""), time.time() - t0, j.get("usage") or {}
+        reasoning, content, usage = [], [], {}
         for raw in r:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:") or line[5:].strip() == "[DONE]":
                 continue
-            ch = json.loads(line[5:]).get("choices") or [{}]
+            j = json.loads(line[5:])
+            usage = j.get("usage") or usage
+            ch = j.get("choices") or [{}]
             d = ch[0].get("delta") or {}
             reasoning.append(d.get("reasoning_content") or "")
             content.append(d.get("content") or "")
-        return "".join(reasoning) + "\x00" + "".join(content), time.time() - t0
+        return "".join(reasoning) + "\x00" + "".join(content), time.time() - t0, usage
 
 
 def run_serve(a) -> int:
@@ -558,9 +598,10 @@ def run_serve(a) -> int:
         for kind, body in (("greedy", greedy), ("cut", {**greedy, "max_tokens": a.cut}),
                            ("streamed", {**greedy, "stream": True}), ("sampled", {"model": a.tag, "messages": msgs,
                                                                                    "max_tokens": 48})):
-            text, sec = _chat(url, body)
-            res[f"{name}_{kind}"] = {"text": text, "seconds": sec}
-            print(f"{name}_{kind}: {sec:.1f} s, {len(text)} chars", flush=True)
+            text, sec, usage = _chat(url, body)
+            res[f"{name}_{kind}"] = {"text": text, "seconds": sec, "usage": usage}
+            print(f"{name}_{kind}: {sec:.1f} s, {len(text)} chars, {usage.get('completion_tokens')} tokens, decode "
+                  f"{usage.get('decoding_speed_tps', float('nan')):.2f} tok/s", flush=True)
     Path(a.out).write_text(json.dumps(res, indent=1))
     return 0
 
@@ -636,6 +677,9 @@ def main(argv=None) -> int:
         q.add_argument("--prompts", required=True)
         q.add_argument("--out", required=True)
         q.add_argument("--only", default="", help="prompt names or groups (short, ctx1024, ctx2048, lookup)")
+        if name == "probe":
+            q.add_argument("--tokens", type=int, default=0, help="0: the prompt set's own count")
+            q.add_argument("--seed", action="store_true", help="--spec-probe-seed: draft rows start from the lookup's guess")
         if name == "bench":
             q.add_argument("--modes", default="adaptive")
             q.add_argument("--reps", type=int, default=1)

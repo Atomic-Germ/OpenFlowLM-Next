@@ -127,6 +127,7 @@ struct Args {
     int uno = 0;                    // OPEN-UNO-DECODE: N tokens by Uno's two-pass cycle, then by decode
     int spec = 0;                   // OPEN-SPEC-LOOKUP: N tokens by the per-cycle policy, then by decode
     int spec_probe = 0;             // N greedy tokens by draft passes, each position's Uno drafts to --spec-dump
+    bool spec_probe_seed = false;   // --spec-probe-seed: the draft rows' inputs are lookup drafts where it has any
     std::string spec_mode = "adaptive";
     int spec_nmax = 4, spec_nmin = 1;
     bool spec_extend = true;
@@ -236,6 +237,7 @@ Args parse(int argc, char** argv) {
             if (c != std::string::npos) a.spec_nmin = std::atoi(v.substr(c + 1).c_str());
         }
         else if (k == "--spec-no-extend") a.spec_extend = false;
+        else if (k == "--spec-probe-seed") a.spec_probe_seed = true;
         else if (k == "--spec-dump") a.spec_dump = val();
         else if (k == "--no-draft") no_draft = true;
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
@@ -247,7 +249,8 @@ Args parse(int argc, char** argv) {
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
                              "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] "
                              "[--rows-check N] [--uno N] [--spec N [--spec-mode adaptive|lookup|lookup-uno|uno|plain] "
-                             "[--spec-ngram NMAX[:NMIN]] [--spec-no-extend] [--no-draft]] [--spec-probe N --spec-dump <json>]\n");
+                             "[--spec-ngram NMAX[:NMIN]] [--spec-no-extend] [--no-draft]] [--spec-probe N --spec-dump <json> "
+                             "[--spec-probe-seed]]\n");
         std::exit(2);
     }
     return a;
@@ -542,7 +545,7 @@ int spec_probe(Core& core, const Args& a, int n) {
     std::mt19937 rng(0);
     std::uniform_int_distribution<int> noise(1, std::max(1, static_cast<int>(core.uno_noise_bound()) - 1));
     prefill_but_last(core, a);
-    std::vector<int> seq(a.ids), dr(L), am(L);
+    std::vector<int> seq(a.ids), dr(L), am(L), look;
     std::string uno;
     double ms = 0;
     int done = 0;
@@ -551,6 +554,9 @@ int spec_probe(Core& core, const Args& a, int n) {
         if (static_cast<size_t>(p) + L > core.max_ctx()) break;
         dr[0] = seq.back();
         for (size_t j = 1; j < L; ++j) dr[j] = draft ? noise(rng) : dr[0];
+        // a what-if: the draft rows start from the lookup's guess of their own positions instead of noise
+        if (draft && a.spec_probe_seed && open_qwen36::lookup_drafts(seq.data(), seq.size(), L - 1, a.spec_nmax, a.spec_nmin, look))
+            for (size_t j = 1; j < L; ++j) dr[j] = j - 1 < look.size() ? look[j - 1] : dr[j - 1];
         core.step_rows(dr.data(), am.data(), false, draft);
         ms += core.rows_ms();
         uno += std::string(uno.empty() ? "" : ",") + "[";
