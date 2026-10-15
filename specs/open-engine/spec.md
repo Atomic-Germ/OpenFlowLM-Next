@@ -1180,7 +1180,7 @@ token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`, `src/common/AutoModel/modeling_granite.cpp`)
 **Test category:** manual (needs the NPU and `vegahyo/Granite-4.2-3B-NPU2`); the derivation, the multiplier fold and the 3B layout are unit-tested in `tests/test_granite.py`
 
 An IBM Granite dense model (GQA without q/k norms, unscaled RoPE, eps 1e-5,
@@ -1240,6 +1240,11 @@ install has not been re-verified end to end.
 sets `think: true`, but `Granite` implements no `parse_stream_content` /
 `parse_nstream_content`, so the chain of thought is printed raw and only the
 closing tag appears. Cosmetic, and separate from the kernel path.
+
+**Thinking is the request's choice (2026-10-15).** `Granite` takes `enable_think` / `toggle_think` and hands
+`enable_thinking` to its template, on by default as the template's own default, so a request's `"think": false`
+renders `<think></think>` and the reply starts with the answer. Before, the flag was dropped and every reply reasoned
+first.
 
 **At zero context `dx` beats the hand-written kernels**: `part0` 60.0 ms over
 40 layers is **1500 µs/layer**, against those kernels' 1744.7 µs at four
@@ -1583,8 +1588,8 @@ Random histories (a small alphabet, so matches are common) agree with the rule r
 4. Served: `spec_lookup.py serve-launch --oflm <oflm.exe> --registry <model_list.json> --models-root <root> --kernels
    <set> --env OFLM_SPECULATIVE=1 --out a.json`, the same without `--env` into `b.json` (plain decode), then
    `serve-compare a.json b.json`: a greedy request, the same cut by `max_tokens`, and the same streamed equal plain
-   decode's reply, on a chat prompt and a whole-file bug fix (sent with `"think": false`, which Granite's server ignores
-   today); a sampled request replies.
+   decode's reply, on a chat prompt (thinking on) and a whole-file bug fix (`"think": false`); a sampled request
+   replies.
    Not `presence_penalty 1e-6` for the reference: at an exact bf16 tie the penalty picks the token.
 5. Capacity: `--max-ctx 96 --spec 68` from a 26-token prompt, `--spec-mode uno` and `lookup`: the last cycles fall back to
    plain steps (a Uno cycle last at position 90, a lookup pass at 91), `SPEC IDENTICAL`.
@@ -1597,11 +1602,10 @@ Random histories (a small alphabet, so matches are common) agree with the rule r
   13 lookup and 18 Uno cycles (untimed: the machine was busy).
 - Served (`oflm serve`, `OFLM_SPECULATIVE=1` against unset): the chat reply (133 tokens, to its end) and the bug fix
   (200, cut by `max_tokens`), their 37-token cuts and their streamed forms are identical to plain decode's; sampled
-  requests reply. Measured (one `dibs run --measure` unit, both servers, CLEAN; the server's own decode tok/s): chat
-  20.18 against 20.37 (0.99x, as the CLI's 0.97x), the bug fix 15.93 against 13.89 (1.15x). The bug fix is not the
-  CLI's 3.1x because the server ran it with thinking on: Granite's AutoModel takes no `enable_think` parameter and its
-  template is not given `enable_thinking`, so the request's `"think": false` is ignored and the reply reasons about the
-  bug instead of returning the file (not fixed here; the other thinking families pass it).
+  requests reply. Measured (one `dibs run --measure` unit, both servers, CLEAN; the server's own decode tok/s): the
+  bug fix returning the whole file 42.60 against 13.90 tok/s (3.06x, the CLI's 3.1x), chat 20.82 against 20.42
+  (1.02x). A first A/B read 1.15x on the bug fix: the server had dropped the request's `"think": false`, so the reply
+  reasoned before answering; `Granite` now passes it to its template (OPEN-FAMILY-GRANITE).
 - The numbers are in OPEN-FAMILY-GRANITE-UNO.
 
 ### OPEN-FAMILY-GRANITE-UNO: Granite 4.2 3B's Uno drafter
@@ -1772,6 +1776,8 @@ section (`qa_doc`). 98 runs, all identical to plain decode.
 - Against llama.cpp Vulkan (24.2 / 23.1 / 23.3 tok/s at context 0 / 1024 / 2048, 2026-10-14, without its own lookup
   decoding): plain decode is 0.85 / 0.66 / 0.52x of it, adaptive ~0.95x on the short prompts, 0.70-0.84x at 1024,
   0.55-0.70x at 2048, and 1.0-1.9x on the lookup prompts at 0.7-1.4k context.
+- Served by `oflm serve` (OPEN-SPEC-LOOKUP's result): the whole-file bug fix at 42.60 against 13.90 tok/s, chat at
+  20.82 against 20.42, the replies identical.
 - The offline replay of `--spec-probe` transcripts (`plans/archive/granite-spec-lookup.md`) predicted each group within
   ~0.03x of these.
 

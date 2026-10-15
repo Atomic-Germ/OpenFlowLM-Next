@@ -4,7 +4,24 @@
 #include "AutoModel/modeling_granite.hpp"
 
 /************              Granite family            **************/
-Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") {}
+// granite-4.2's template thinks unless told otherwise; a request's "think" now reaches it
+Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") { this->enable_think = true; }
+
+bool Granite::configure_parameter(std::string parameter_name, const std::any& value) {
+    if (parameter_name == "enable_think") {
+        try {
+            this->enable_think = std::any_cast<bool>(value);
+            return true;
+        } catch (const std::bad_any_cast&) {
+            return false;
+        }
+    }
+    if (parameter_name == "toggle_think") {
+        this->enable_think = !this->enable_think;
+        return true;
+    }
+    return AutoModel::configure_parameter(parameter_name, value);
+}
 
 void Granite::load_model(std::string model_path, json model_info, int default_context_length,
                          bool enable_preemption) {
@@ -71,6 +88,7 @@ std::string Granite::apply_chat_template(nlohmann::ordered_json& messages,
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    inputs.extra_context["enable_thinking"] = this->enable_think;
     // granite-4.2's own chat_template.jinja branches on `tools` (it emits a
     // <tools> block and changes the system turn when the list is non-empty), so
     // dropping the argument here would not fail -- it would silently produce a
