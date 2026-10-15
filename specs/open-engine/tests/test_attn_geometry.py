@@ -83,6 +83,21 @@ def test_measured_family_is_on_the_path_without_the_probe(name, unvalidated, mon
     assert (G.VEXP, G.ACORES, G.NHL, G.RB) == (1,) + FAST_GEOMETRY[name]
 
 
+@pytest.mark.parametrize("name,on", [("granite42-3b.json", True), ("qwen3-4b.json", False), ("llama31-8b.json", False),
+                                     ("phi4-mini-4b.json", False)])
+def test_score_tree_is_granite_only(name, on, unvalidated, monkeypatch):
+    """The 8-heads-a-core score tree (attn.h ATTN_TREE8) is on for the measured family and byte-for-byte
+    absent elsewhere; ATTN_TREE8 forces it either way for an A/B build."""
+    from recipes import attnknobs
+    monkeypatch.delenv("ATTN_TREE8", raising=False)
+    spec = load_spec(SPECS / name)
+    G = DR.geometry(spec)
+    assert attnknobs.tree8(spec, G.NHL, G.RB, G.HD) is on
+    monkeypatch.setenv("ATTN_TREE8", "0")
+    assert attnknobs.tree8(spec, G.NHL, G.RB, G.HD) is False
+    assert DR.probe_env() == {"ATTN_TREE8": "0"}
+
+
 def test_attn_fast_is_a_probe_variable(monkeypatch):
     """It changes the compiled kernel, so the build key has to see it (OPEN-BUILD-CACHE)."""
     assert "ATTN_FAST" in DR.PROBE_VARS

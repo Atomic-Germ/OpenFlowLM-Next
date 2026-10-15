@@ -47,9 +47,14 @@ Q3="-DATTN_NH=32 -DATTN_KVH=8 -DATTN_HD=128 -DATTN_ROT=128 -DATTN_GATE=0 -DATTN_
 Q35="-DATTN_NH=16 -DATTN_KVH=4 -DATTN_HD=256 -DATTN_ROT=64 -DATTN_GATE=1 -DATTN_VEXP=1 -DATTN_NHL=4"
 # The 35B's previous flags: RB 1, the single-row path.
 Q36RB1="-DATTN_NH=16 -DATTN_KVH=2 -DATTN_HD=256 -DATTN_ROT=64 -DATTN_GATE=1 -DATTN_VEXP=1 -DATTN_NHL=4"
+# Granite with ATTN_TREE8=0 (the knobs recipes/attnknobs.py tree8() turns on for it): the shipped kernel it replaces.
+GR="-DATTN_NH=40 -DATTN_KVH=8 -DATTN_HD=64 -DATTN_ROT=64 -DATTN_GATE=0 -DATTN_VEXP=1 -DATTN_NHL=8 -DATTN_RB=4 -DATTN_QKNORM=0"
+
+# The 35B at RB 4 on the block-only path (ATTN_TREE=1 there): its tree helpers share the guard ATTN_TREE8 widened.
+Q36RB4="$Q36RB1 -DATTN_RB=4 -DATTN_BLOCK_ONLY=1"
 
 fail=0; n=0
-for name in "gemma3-4b|$G3" "qwen3-4b|$Q3" "qwen35-9b|$Q35" "qwen36-rb1|$Q36RB1"; do
+for name in "gemma3-4b|$G3" "qwen3-4b|$Q3" "qwen35-9b|$Q35" "qwen36-rb1|$Q36RB1" "qwen36-rb4|$Q36RB4" "granite-tree8-off|$GR"; do
   tag=${name%%|*}; flags=${name#*|}
   for tu in attn_meta attn_q attn_k attn_v attn_init attn_fin attn_fin_ng attn_step attn_step_new attn_stepb; do
     if [ $tu = attn_stepb ]; then case "$flags" in *ATTN_RB=*) ;; *) continue;; esac; fi

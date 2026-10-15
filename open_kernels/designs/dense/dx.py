@@ -54,6 +54,7 @@ sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
+from recipes.attnknobs import TREE8_STACK, tree8, tree8_flags  # noqa: E402
 from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
@@ -160,9 +161,13 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position r
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
-    if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
+    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8"):             # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+T8 = tree8(SPEC, G.NHL, G.RB, G.HD)
+if T8:
+    ATTN_FLAGS.extend(tree8_flags(4))
+ASTACK = TREE8_STACK if T8 else 0x1800
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
@@ -528,11 +533,11 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
     bcons = (lambda: [of_abias.cons()]) if QKVB else (lambda: [])
     workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
-                          tile=Tile(2, 3), stack_size=0x1800))
+                          tile=Tile(2, 3), stack_size=ASTACK))
     # The rest of the attention cores: same broadcast stream in, their own og out.
     for c in range(1, ACORES):
         workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + bcons() + [of_og[c].prod()] + abufs(c) + afns,
-                              tile=Tile(2 + c, 3), stack_size=0x1800))
+                              tile=Tile(2 + c, 3), stack_size=ASTACK))
 
     BB_H, BB_Q, BB_F = (role_band_bytes("attn", HID), role_band_bytes("attn", QW),
                         role_band_bytes("ffn", FF))

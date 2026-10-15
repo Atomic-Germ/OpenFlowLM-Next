@@ -162,6 +162,69 @@ what tracks.
 over 63 tokens and 1500 µs/layer at position 0 are both true and are not the
 same measurement.
 
+## Decode cost versus context depth (2026-10-14)
+
+Plain decode fell from 20.7 tok/s at context 0 to 10.7 at 2048 while Vulkan stayed at ~23. Nothing on the host grows with position
+(`OFLM_OPEN_STEP_TRACE=1 open_qwen36_cli --ids 100264 --at-position P --bench-decode 5 --bench-step 10`): embed 0.03 ms, patch 0.00,
+route 0.00, `ln` 0.2, `lm` 3.6, all flat; the 40 `dx` dispatches carry the whole growth, 0.54 us per layer per position. Attention is
+inside `dx` (5 cores x 8 heads, RB 4, the whole KV window broadcast on `ain` after the q/k/v GEMVs), so the cost is that kernel's.
+
+Where one layer's 1.12 ms of growth at 2048 sits (base kernel, `dx` min per dispatch, all CLEAN):
+
+| piece | ms/layer at 2048 | how it was priced |
+|---|---:|---|
+| window stream alone (`ATTN_NULL=1`) | 0.28 | the cores take the rows and compute nothing |
+| score phase | 0.41 | `ATTN_ABL=1` minus the stream |
+| softmax | 0.19 | `ATTN_ABL=2` minus `ATTN_ABL=1` |
+| value accumulation | 0.24 | the rest |
+| pure compute, all three | 0.83 | `ATTN_REPEAT=3` minus 1, divided by 2 |
+
+The stream and the compute **add** (0.28 + 0.83 = 1.11 against 1.12 measured). A deeper `ain` ring changes nothing, and that is why: the objectfifo lowers to
+max acquire + 1 buffers whatever depth the design declares (declared 10 and 24 both gave 9 `ain_0_cons_buff_N` in
+`input_with_addresses.mlir`; `lni` 5 -> 6, `x` 2 -> 3), so the DMA has one spare 1 KB buffer while the core holds eight. Giving it room did not help
+either: copying each block into eight local 1 KB buffers (`acquire(8)`, a vector copy kernel, `release(8)`, then `attn_stepb` on the
+copies) was bit-identical and slower, 2.080 against 1.986 ms a dispatch at 2048 (both with the rolled tree: beside the copy the
+unrolled one overflows program memory, and it reads 1.929 alone). The copy cost what it should (~0.1 ms) and bought nothing, so the 0.28 ms is not DMA wait; suspect the per-block acquire / release and the
+9-way pointer `switch` for each of the 8 elements (unmeasured). RB 2
+is worse than RB 4 (+0.2 ms/layer), so the per-block cost is real but is not the bulk either.
+
+The function's flat bundle count (419 for `attn_rowb_impl`) is a third of what a block costs: counting the per-head score and value loops
+at their 8 trips gives ~2,770 cycles, which is the 1.6 us a block that `ATTN_REPEAT` measured if the core runs near 1.7 GHz (inferred,
+not read from a counter). And **the bundle count of a function does not
+include loop trip counts** (`utilities/dxl-asm/attn_bundles.py` prints bundles per basic block). The score loop also called
+`__muldi3` (64-bit software multiply) once per head per block for `h / 5`, Granite's 5 q heads per kv head.
+
+Per-change attribution, one `dx` dispatch at 2048 (min of 21, CLEAN; each row adds to the one above): base 2.212 ms; `ATTN_KVH_MUL` 2.092;
++ the rolled tree 2.057; + rows unrolled by 4 with `ATTN_EXP32` 1.996; + the conditional rescale exponential 1.929. The ablation rows
+above come from builds that also change the DMA schedule, so the split of the 1.12 ms is a pricing, not a trace.
+
+What shipped, all bit-identical to the old kernel (the logit files byte-identical over 70 + 20 and over 2100 + 20 positions; 10 prompts x 96 greedy tokens
+identical; `--rows-check 17` ROWS PASS), all under `recipes/attnknobs.py: tree8()` for Granite only:
+- `ATTN_KVH_MUL`: `h / 5` as a 32-bit multiply-shift (`attn_kvh`).
+- `ATTN_TREE8`: the 8-heads-a-core score tree (`attn_score2g`, one tree across the block's heads instead of 32 `reduce_add`s), with
+  `ATTN_T8_UNROLL=4` rows unrolled on `dx`, 1 on `dxl` (whose cores carry the skip / pack kernels: 4 overflows program memory, 2 stops
+  the backend with "immediate operand out of range"); a core's 8 heads span two or three kv heads (5 q heads each), so the two heads of
+  a pair can need different K rows.
+- `ATTN_EXP32`: the 8-lane exponential runs on the 32-lane routine (`vexpN` is lane-wise), which frees ~1.5 KB of program memory; the
+  unrolled tree needs it (15,472 of 16,384 bytes with it; rows unrolled by four overflowed without it, and the rolled tree is 13,072).
+- Under `ATTN_TREE8` the rescale factor `a = exp(m - mn)` is computed only when some lane's max rose (it is exactly 1 otherwise): the
+  second 32-lane exponential, ~257 bundles a block, ran every block before. Profile at 2048: step 82.0 -> 78.7 ms.
+- Stack 0x3000 for the attention workers. **0x1800 builds and runs and reads back NaN** from the first blocked position (pos >= 4):
+  the unrolled tree spills past it. A NaN `xres after layers` at `--ids` of 5+ tokens is this.
+
+Probe variables for the next attention experiment (`PROBE_VARS`, in the build key): `ATTN_NULL`, `ATTN_ABL` (1 score, 2 + softmax,
+now honoured by the block kernel), `ATTN_REPEAT=n` (the block computed n times), `ATTN_TREE8=0|1`. A `dx`-only build takes ~75 s:
+`export_qwen36_kernels.py --model-dir <model> --only dx --out <scratch>`, then copy `dx/final.xclbin` and `dx/insts.bin` over a copy of
+the union set (the manifest needs no edit unless `rb` changes). Check a probe took effect in
+`dense/build_granite_h2560/final.prj`: `aie.mlir` (the objectfifo depth), `input_with_addresses.mlir` (`ain_0_cons_buff_N`: a depth-10
+ring lowers to 9 buffers) and the `.text` size (`llvm-size -A elfs_main_core_2_3/*.elf`). A fifo-depth change moves only ~85 bytes
+of the xclbin (the ring's wrap constants), so a near-identical xclbin proves nothing either way.
+
+Not done, and where the rest is: the stream (0.28 ms) is 2 KB a position broadcast to every core, of which a core needs a quarter; a
+stream per core on the five free shim MM2S channels would cut it, at the cost of a 3-D window BD the position patch
+(`stream_patch.hpp attn_table`) does not know. Eight attention cores (one per kv head) would cut the compute by 3/8 but need a memtile
+join for the og drains (the shim S2MM channels are all taken).
+
 ## Rules
 
 - Never commit the xclbins; the distributed package ships them pre-built.
