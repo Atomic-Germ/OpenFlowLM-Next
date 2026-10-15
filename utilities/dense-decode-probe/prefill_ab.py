@@ -1,7 +1,7 @@
 r"""Prefill A/B on the NPU: (cli, kernel set, route) variants interleaved, one CLI process a run, with a control.
 
     python prefill_ab.py --model <dir> --out <jsonl> [--lengths 512,1024,2048] [--reps 3] [--route bfp16]
-        [--control name=cli::set[::route]] name=cli::set[::route] [name=cli::set[::route] ...]
+        [--control name=cli::set[::route[::ENV=1,ENV2=0]]] name=cli::set[::route[::ENV=1]] [name=... ...]
 
 Run it as one `dibs run --measure` unit. Each length runs --reps rounds, the variant order reversing every round, after one
 discarded run. The control (a variant whose speed is known) runs at --control-len before each length and once at the end;
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -41,7 +42,8 @@ def main() -> int:
     def parse(v: str):
         name, rest = v.split("=", 1)
         parts = rest.split("::")
-        return name, win(parts[0]), win(parts[1]), parts[2] if len(parts) > 2 else a.route
+        env = dict(kv.split("=", 1) for kv in parts[3].split(",")) if len(parts) > 3 and parts[3] else {}
+        return name, win(parts[0]), win(parts[1]), parts[2] if len(parts) > 2 and parts[2] else a.route, env
 
     vs = [parse(v) for v in a.variants]
     ctl = parse(a.control) if a.control else None
@@ -49,41 +51,59 @@ def main() -> int:
     import bench  # noqa: E402  (granite-combined-bench: the tokenizer and the prose prompt)
     tok = bench.tokenizer(a.model)
     res: dict[tuple[str, int], list[float]] = {}
+    cpus: dict[tuple[str, int], list[float]] = {}
     with tempfile.TemporaryDirectory(prefix="prefill_ab_") as tmp, open(a.out, "a", encoding="utf-8") as f:
         ids = {}
         for n in sorted(set(lengths + [a.control_len, 512])):
             ids[n] = Path(tmp) / f"ids{n}.txt"
             ids[n].write_text(",".join(map(str, bench.body_ids(tok, "prose", n))))
 
-        def one(name, cli, kset, route, n, rep):
+        def cpu_seconds(p) -> float:
+            # user + kernel time of the finished process, from its still-open handle
+            import ctypes
+            from ctypes import wintypes
+            t = [wintypes.FILETIME() for _ in range(4)]
+            h = wintypes.HANDLE(int(p._handle))
+            if not ctypes.windll.kernel32.GetProcessTimes(h, *[ctypes.byref(x) for x in t]):
+                return float("nan")
+            ticks = lambda ft: (ft.dwHighDateTime << 32 | ft.dwLowDateTime)
+            return (ticks(t[2]) + ticks(t[3])) / 1e7
+
+        def one(name, cli, kset, route, env, n, rep):
             cmd = [cli, "--model", str(a.model), "--kernels", kset, "--ids-file", str(ids[n]), "--prefill-mode", route,
                    "--gemm-block", "--max-tokens", "1"]
-            p = subprocess.run(cmd, capture_output=True, text=True)
-            txt = p.stdout + p.stderr
+            with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                  env={**os.environ, **env}) as p:
+                txt = p.communicate()[0]
+                cpu = cpu_seconds(p)
             m = PREFILL.search(txt)
             ms = float(m[2]) if m else float("nan")
             row = {"variant": name, "n": n, "rep": rep, "ms": ms, "tok_s": n / ms * 1000 if m else None,
-                   "stages": STAGE.findall(txt)}
+                   "cpu_s": cpu, "stages": STAGE.findall(txt)}
             res.setdefault((name, n), []).append(row["tok_s"] or 0)
+            cpus.setdefault((name, n), []).append(cpu)
             f.write(json.dumps(row) + "\n")
             f.flush()
-            print(f"{name} pp{n} rep{rep}: {ms:.0f} ms ({row['tok_s'] or 0:.0f} tok/s)", flush=True)
+            print(f"{name} pp{n} rep{rep}: {ms:.0f} ms ({row['tok_s'] or 0:.0f} tok/s, process CPU {cpu:.1f} s)", flush=True)
             if not m:
                 print(txt[-1500:], flush=True)
 
         # the NPU can come out of another job's power-mode change slow for the first run
         subprocess.run([vs[0][1], "--model", str(a.model), "--kernels", vs[0][2], "--ids-file", str(ids[512]),
-                        "--prefill-mode", vs[0][3], "--gemm-block", "--max-tokens", "1"], capture_output=True, text=True)
+                        "--prefill-mode", vs[0][3], "--gemm-block", "--max-tokens", "1"], capture_output=True, text=True,
+                       env={**os.environ, **vs[0][4]})
         for li, n in enumerate(lengths):
             if ctl:
                 one("ctl:" + ctl[0], *ctl[1:], a.control_len, li)
             for rep in range(a.reps):
-                for name, cli, kset, route in (vs if rep % 2 == 0 else vs[::-1]):
-                    one(name, cli, kset, route, n, rep)
+                for name, cli, kset, route, env in (vs if rep % 2 == 0 else vs[::-1]):
+                    one(name, cli, kset, route, env, n, rep)
         if ctl:
             one("ctl:" + ctl[0], *ctl[1:], a.control_len, -1)
     for (name, n), v in res.items():
-        print(f"SUMMARY {name} pp{n}: min {min(v):.0f} median {statistics.median(v):.0f} max {max(v):.0f} tok/s", flush=True)
+        c = cpus[(name, n)]
+        print(f"SUMMARY {name} pp{n}: min {min(v):.0f} median {statistics.median(v):.0f} max {max(v):.0f} tok/s, "
+              f"process CPU median {statistics.median(c):.1f} s", flush=True)
     return 0
 
 

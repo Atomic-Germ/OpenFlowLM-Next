@@ -32,6 +32,12 @@ GEMM_POOL_OPS = ("bf16_gemm",)
 BFP16_MANIFEST_VERSION = 4
 # 4 plus OPEN-PREFILL-BFP16-FFN's glu steps and pack halves, which an engine that reads 4 would misrun
 GLU_MANIFEST_VERSION = 5
+# 5 plus OPEN-PREFILL-GLUE-PREP: every attn_fa stream takes a fourth buffer, which an engine that reads 5 would not pass
+PREP_MANIFEST_VERSION = 6
+
+
+def has_attn_fa_prep(layer_types: dict) -> bool:
+    return any((g.get("attn_fa") or {}).get("prep") for g in routes(layer_types))
 
 
 def has_glu_step(layer_types: dict) -> bool:
@@ -115,6 +121,8 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["manifest_version"] = BFP16_MANIFEST_VERSION
     if has_glu_step(m["layer_types"]):
         m["manifest_version"] = GLU_MANIFEST_VERSION
+    if has_attn_fa_prep(m["layer_types"]):
+        m["manifest_version"] = PREP_MANIFEST_VERSION
     return m
 
 

@@ -4490,7 +4490,8 @@ stay on the array, and nothing between them comes back to the host. One xclbin (
 rows of window up to `attn_fa.l_max` (`af256` .. `af<l_max>`). It is the default on both GEMM routes (bf16 and
 `--prefill-mode bfp16`); `OFLM_OPEN_ATTN_FA=0` keeps the host attention for A/B and does not register the `af` context.
 
-What the host still does per block: RoPE on q and k, the bf16 KV-cache write (the rows decode reads), and packing Q as the
+What the host does per block unless the set carries the prep stream (OPEN-PREFILL-GLUE-PREP moves all of this onto the
+array on the bfp16 route): RoPE on q and k, the bf16 KV-cache write (the rows decode reads), and packing Q as the
 kernel reads it (per head a record with p0, then per 32 tokens Q^T as bf16 hi / lo in log2 units, log2(e)/sqrt(hd) folded
 in). That is O(T x width) a block; nothing on the host grows with the window. The kernel reads K and V in place from the
 layer's KV cache (`state`) and writes O as the fp32 token rows the out projection reads, so neither is copied. Block 0's
@@ -4564,6 +4565,40 @@ same box (2026-10-14, the overnight plan's table): 753 / 766 / 641 tok/s.
   host attention's ~200-270 ms of which part overlapped the GEMMs. A context shared with the GEMMs (one xclbin carrying
   both, or the full-ELF register-write reconfiguration of the `full-elf-context` skill, 0.3-0.7 ms a switch) is what
   removes it.
+
+### OPEN-PREFILL-GLUE-PREP: RoPE, Q packing and the cache write of the bfp16 prefill run on the NPU, in the attention context
+**Applies to:** openflowlm-next (`open_kernels/designs/attn_fa/{attn_fa.py,attn_fa.cc,make_prep_test.py}`, `open_kernels/recipes/{dense,manifest}.py`, `src/open_qwen36/{manifest,core}.cpp`)
+**Verification:** manual (needs the NPU and the Granite-4.2-3B-NPU2 container); the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_attn_fa.py`, `manifest_test.cpp`)
+
+On the bfp16 prefill route (OPEN-PREFILL-BFP16) with NPU attention (OPEN-PREFILL-ATTN-FA), the qkv GEMM's c-tiled fp32 output
+stays on the device in a per-block buffer (`af_y#b`) and a `prep` stream of the same `af` context (`afp`, `AF_MODE=prep`)
+turns it into what the attention reads, so the host no longer reads y back, copies it into q / k / v, rotates, converts, packs
+Q or syncs cache rows. Per 256-token block, per layer, one dispatch ahead of the block's attention dispatch, inside the visit
+to the `af` context the layer already pays for (no extra context switch):
+- Q: RoPE (the half-split rotation, the host's), x log2(e) / sqrt(64), bf16 hi / lo, transposed to Q^T [64 dims][32 tokens]
+  per core, written into the Q buffer's hi / lo regions (the records, which carry p0, are written once per prompt);
+- K: RoPE then bf16; V: bf16; both straight into the layer's KV cache rows `[pos0 + 256 b, +256)` through a sub-buffer of
+  `state` (the cache layout decode reads is unchanged: a row is every kv head's K, then every V, bf16).
+The cos / sin table (fp32, per token 32 cos then 32 sin, the host's `static_cast<float>(cos(p * inv_freq[i]))`) is built once
+per prompt and shared by all 40 layers. The core program is attention's, with prep loops of trip count 0 in an attention
+dispatch and attention loops of trip count 0 in a prep dispatch (`RTP_TBL`, `RTP_PQ`, `RTP_PKV`), so one xclbin serves all
+streams; each stream takes a fourth buffer, the table, hence `manifest_version` 6 and a rebuilt `af` family.
+
+`OFLM_OPEN_PREFILL_PREP=0` restores the host rotation / pack (the streams still take the fourth buffer). A prompt whose first
+position makes `pos0 * state_row` not a multiple of 4096 (an odd `pos0`), whose last window is wider than `attn_fa.l_max`, or
+on a bf16-route set takes the host path.
+
+**Acceptance criteria (unit):**
+- The Granite emission carries `attn_fa.prep = {kernel: afp, n_pad: 4096}` on `gemm_block` and the `bfp16` variant, stream `afp` on context `af`, build env `AF_MODE=prep`, `AF_QKV_NPAD=4096`, manifest version 6 (`test_prefill_attn_fa.py`).
+- The parser reads the prep stream; a version 5 manifest, an unknown stream and an `n_pad` that is not a whole number of 1024 columns are refused (`manifest_test.cpp`).
+
+**Verification (manual):**
+1. The kernel: `designs/attn_fa/make_prep_test.py make --build <afp build> --out <t> --p0 256`, `run_kernel.exe <t>/run.cfg`,
+   `make_prep_test.py compare --out <t>`: Q (hi + lo) rel_fro < 1e-4 against the numpy fp32 pipeline, K / V rows rel_fro < 3e-3
+   (bf16 ulp differences only), records intact.
+2. The model: `prefill_mode_check.py` bfp16 route with and without `OFLM_OPEN_PREFILL_PREP`: corr >= 0.995 at 512 (and report 2048),
+   perplexity within 1 %, KL against the host-rotation route, the six greedy continuations; decode logits byte-identical.
+3. Timing: pp512 / 1024 / 2048, `OFLM_OPEN_PREFILL_PREP=0/1` interleaved with a control, under `dibs run --measure`.
 
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)

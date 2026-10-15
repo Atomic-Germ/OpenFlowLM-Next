@@ -131,7 +131,12 @@ struct AttnFa {
     std::map<size_t, std::string> kernels;   ///< window rows -> the stream for that width
     size_t hd = 0, l_max = 0, q_head = 0;
     bool qsplit = true;                      ///< Q as a bf16 hi / lo pair
+    /// OPEN-PREFILL-GLUE-PREP: one more stream of the same context that rotates the bfp16 qkv GEMM's c-tiled output,
+    /// packs Q and writes the cache rows. With it every stream takes a fourth buffer, the block's cos / sin table.
+    std::string prep_kernel;
+    size_t prep_npad = 0;                    ///< the qkv GEMM's padded width the prep stream was built for
     bool present() const { return !kernels.empty(); }
+    bool has_prep() const { return !prep_kernel.empty(); }
 };
 
 struct GemmBlockProgram {
