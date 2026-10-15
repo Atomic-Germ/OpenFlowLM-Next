@@ -2047,11 +2047,12 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             }
         }
     }
-    // The tail's norm reads the same xres, from its own hardware context, so only level 2
-    // queues it behind the last layer.
+    // The tail's norm reads the same xres. In its own hardware context only level 2 queues it behind the
+    // last layer; a tail in the layers' context (OPEN-DECODE-ONE-CONTEXT-DENSE) queues like a layer does.
     Inflight tail0;
-    if (want_logits && submit_ahead_ >= 2 && tail_in.active() && !w_->tail.empty() &&
-        w_->tail.front().op == "run") {
+    if (want_logits && submit_ahead_ >= 1 && tail_in.active() && !w_->tail.empty() &&
+        w_->tail.front().op == "run" &&
+        (submit_ahead_ >= 2 || kerns_.at(w_->tail.front().kernel).ctx == tail_in.k->ctx)) {
         tail0 = start_run(kerns_.at(w_->tail.front().kernel), w_->tail.front().args, 0);
         timing_.dispatch_ms += tail0.submit_ms;
     }
