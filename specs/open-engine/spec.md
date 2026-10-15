@@ -4658,10 +4658,14 @@ per prompt and shared by all 40 layers. The core program is attention's, with pr
 dispatch and attention loops of trip count 0 in a prep dispatch (`RTP_TBL`, `RTP_PQ`, `RTP_PKV`), so one xclbin serves all
 streams; each stream takes a fourth buffer, the table, hence `manifest_version` 6 and a rebuilt `af` family.
 
-**Opt in: `OFLM_OPEN_PREFILL_PREP=1`.** Off by default while the model gates below are only partly run (glue parity results
-at the end of this requirement: it ties the host at pp512 and wins at pp1024 / pp2048); off, the host rotates and packs as
-before (the streams still take the fourth buffer). A prompt whose first position makes `pos0 * state_row` not a multiple
-of 4096 (an odd `pos0`), whose last window is wider than `attn_fa.l_max`, or on a bf16-route set takes the host path.
+**It follows the route.** On when the bfp16 route is selected and the set carries `afp` (placement rule: the NPU stage ties
+the host at pp512 and wins at pp1024 / pp2048, results at the end of this requirement); `OFLM_OPEN_PREFILL_PREP=0` forces
+the host rotation and packing (the streams still take the fourth buffer), `=1` forces it on. A prompt whose first position
+makes `pos0 * state_row` not a multiple of 4096 (an odd `pos0`; a chat turn that follows an odd-length history), whose last
+window is wider than `attn_fa.l_max`, or on a bf16-route set takes the host path, which is correct and no slower than the
+glue within noise. Any other `pos0` (a second turn, a continued conversation) runs the prep stream: the RoPE table is built
+from `pos0 + 256 b + t`, the Q records carry the block's first position, the cache rows go to `[pos0 + 256 b, +256)`
+through a sub-buffer of the layer's cache, and `attn_fa` takes the position from the record.
 The engine queues a block's prep and attention dispatches back to back and the next block's pair before this block's
 attention output is read back (`core.cpp`, the `launch` lambda of the NPU-attention loop).
 
@@ -4792,7 +4796,7 @@ nothing` and runs that route. The route line reads `block prefill route: T = 256
 **Acceptance criteria (unit):**
 - `Manifest::select_prefill_route("lean")` gives every layer type the variant's programs, keeps the globals the variant names and drops those only `gemm_block` named; `select_prefill_route("")` keeps `gemm_block` and drops the variant and the globals only it named; on a set without the variant it returns false and changes nothing (`manifest_test.cpp`).
 - The all-q8 35B emission carries both routes, the bf16 `gemm_block` on `gemmb` and the split `lean` on `gemm`, with the same kind, t, `moe_batch` and `attn_block`; a q4_1 or mixed spec carries no variant (`test_prefill_batch.py`).
-- `oflm --prefill-mode` takes `fast` or `lean` and only with `run`, `serve` and `bench`; anything else is refused at parse.
+- `oflm --prefill-mode` takes `fast`, `lean` or `bfp16` and only with `run`, `serve` and `bench`; anything else is refused at parse. Without the flag the route is `kDefaultPrefillRoute` (`core.cpp`, `"fast"`): changing that one string to `"bfp16"` makes the bfp16 route the default for every set that carries it, and a set that does not keeps `fast`. `--prefill-mode fast` always means the `gemm_block` route.
 
 **Verification (manual):** on the all-q8 35B set, with nothing else on the NPU,
 1. `open_qwen36_cli --gemm-block --ids-file <1024 ids> --max-tokens 8 --repeat 2 --dump-logits <p>` with the default mode
@@ -4824,7 +4828,9 @@ encoded per GEMM on the host and the c-tiled fp32 result is untiled to token row
 changes. The route is the `bfp16` entry of `gemm_block_variants` (manifest_version 4) and is chosen with
 `OFLM_OPEN_PREFILL_MODE=bfp16` / `open_qwen36_cli --prefill-mode bfp16`. **bf16 stays the default.** It runs layer-major only
 and refuses to load otherwise (its attention is OPEN-PREFILL-ATTN-FA's where the set carries `attn_fa`, the host's
-without); `oflm --prefill-mode` does not accept it yet.
+without); `oflm run|serve|bench --prefill-mode bfp16` selects it (the NPU glue of OPEN-PREFILL-GLUE-PREP comes with it).
+**The default route is the single constant `kDefaultPrefillRoute` in `core.cpp`** (`"fast"`; set it to `"bfp16"` to flip
+the default for Granite, nothing else needs to change).
 
 Why bfp16 and not int8 (the question this requirement answers): the q4_1 weight carries a scale and a min per (row, 32 k), so an
 int8 product needs an int32 rescale every 32 k or a second, per-row weight quantisation; bfp16 has the per-8-k exponent in

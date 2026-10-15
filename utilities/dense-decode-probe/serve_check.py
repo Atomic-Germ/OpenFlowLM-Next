@@ -72,6 +72,14 @@ def launch(a) -> int:
                     raise RuntimeError("oflm serve did not come up in 300 s")
                 time.sleep(2)
         res = scenarios(a, f"http://127.0.0.1:{a.port}/v1/chat/completions")
+        if a.oflm_test:
+            import tempfile
+            e = dict(env, PYTHONPATH=str(REPO / "utilities" / "oflm-test"))
+            with tempfile.TemporaryDirectory() as td:
+                r = subprocess.run([sys.executable, "-c", "import sys, oflm_test; sys.argv[0] = 'oflm-test'; oflm_test.main()", "--llm", "--port", str(a.port), "--model", a.tag,
+                                    "--gen-lim", "64"], cwd=td, env=e, capture_output=True, text=True)
+            print(r.stdout[-2500:], r.stderr[-800:])
+            print("oflm-test --llm exit code", r.returncode)
     finally:
         srv.terminate()
         try:
@@ -98,6 +106,7 @@ def compare(a, b) -> int:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--compare", nargs=2)
     ap.add_argument("--oflm")
@@ -110,6 +119,7 @@ def main() -> int:
     ap.add_argument("--env", nargs="*", default=[])
     ap.add_argument("--port", type=int, default=52631)
     ap.add_argument("--tag", default="granite:4.2-3b")
+    ap.add_argument("--oflm-test", action="store_true", help="run utilities/oflm-test --llm against the server too")
     ap.add_argument("--tokens", type=int, default=80)
     ap.add_argument("--long-tokens", type=int, default=1500)
     a = ap.parse_args()
