@@ -182,9 +182,6 @@ extern "C" void gemm_epilogue(float *__restrict pC, bfp16ebs8 *__restrict pA, in
   if (mode != 1)
     return;
   ::aie::set_rounding(::aie::rounding_mode::conv_even);
-#ifdef EPI_SATURATE
-  const auto sat = ::aie::swap_saturation(::aie::saturation_mode::EPI_SATURATE);
-#endif
   // two 32-lane chains a block: one alone is latency-bound (257 bundles), four spill (180 a chain); this is 188
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out(pA);
   AIE_LOOP_MIN_ITERATION_COUNT(4)
@@ -203,8 +200,5 @@ extern "C" void gemm_epilogue(float *__restrict pC, bfp16ebs8 *__restrict pA, in
     const unsigned r = q / colB;
     aie::store_v(pC + ((r / 8) * colB + q % colB) * 64 + (r % 8) * 8, aie::load_unaligned_v<8>(src + q * 8));
   }
-#ifdef EPI_SATURATE
-  ::aie::set_saturation(sat);
-#endif
 }
 #endif

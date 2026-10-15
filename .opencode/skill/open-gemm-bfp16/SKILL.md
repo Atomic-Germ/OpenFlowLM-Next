@@ -71,8 +71,8 @@ and rewrites the manifest (version 5). Engine build: `src/open_qwen36/build.cmd`
 
 ## Verify, in order
 
-1. No NPU: `python -m pytest specs/open-engine/tests/test_prefill_bfp16.py`; `pools_test.exe` (bfp16_gemm hash),
-   `block_host_test.exe` (pack_a hash, untile), `manifest_test.exe` (version 4).
+1. No NPU: `python -m pytest specs/open-engine/tests/test_prefill_bfp16.py`; `pools_test.exe` (bfp16_gemm and glu hashes),
+   `block_host_test.exe` (pack_a hash, untile), `manifest_test.exe` (version 5, the 4-step glu program, 6 refused).
 2. One shape on the array: `python open_kernels\designs\gemm_bfp16\make_test.py make --build <build dir> --out <dir> --M 256 --K 2560 --N 4096`,
    `open_kernels\harness\out\run_kernel.exe <dir>\run.cfg`, `make_test.py compare --out <dir>` -> kernel vs decoded-operand
    product rel_fro < 1e-4. The FFN chain: `make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560
@@ -88,6 +88,30 @@ NPU runs go under `dibs run npu --tag <you> ...`, numbers you report under `dibs
 - The mmul probe (`utilities/aie-probes/mmul_rate_probe.*`): `asm volatile("")` crashes Peano's IRTranslator ("unable to
   translate instruction: call"); `aie::mmul<8,8,8,int8,uint4>` does not instantiate.
 - A bfp16 block with a saturating +128 mantissa decodes lower than it encoded; re-encoding a decoded operand is not a fixed point.
+- **The on-core converter (`to_vector<bfp16ebs8>`) is not the host packer.** When a group's largest value rounds to 128 the
+  converter raises the shared exponent; `bfp16_encode_block` saturates at 127 (lower error for the other seven). Measured on
+  the glu harness: 745 of 262,144 blocks, and 0.28 % of H's bytes; mantissas otherwise agree (470 of 2.09 M off by one, from
+  SiLU's 2^-15). `aie::set_saturation` (saturate or symmetric) changes nothing. The 40 layers turn that into corr 0.9976 against
+  the host-encoded route, enough to move OPEN-PREFILL-BFP16's per-item extremes. Two on-core fix-ups were tried and dropped: a
+  per-group max exponent from `shuffle_down` maxima wrote wrong exponents in 80 % of blocks (cause not found) and doubled the
+  dispatch; converting h's powers of two to read the host's exponent crashed Peano's clang (a `block_vector_output_buffer_stream`
+  over a stack array).
+- Busy host threads slow the array: the glu dispatch is 1.56 ms alone in the harness, 2.14 ms min in the engine with 24 OpenMP
+  threads working beside it, 1.63-1.78 with 6 (the prefill is slower at 6: host attention needs the threads). Overlapping more
+  host work under the dispatches does not pay either: an o + FFN pipeline that hid o's residual, norm and pack under gate|up
+  cut gate|up's wait by 20 ms at pp512 and added as much to down's, CLEAN no faster at 512 / 1024 / 2048 (OPEN-PREFILL-BFP16-FFN).
+  Remove host work; do not move it under a dispatch.
+- **One context, one core program: the context's xclbin is the first step's build** (`contexts.gemmbfp` = the qkv stream's).
+  After any change to the core program, rebuild every bfp16 stream, or the new instruction streams run on the old program.
+- `Core::wait_run` clears `Inflight::k`; read the kernel's name first (a segfault only with `OFLM_OPEN_DISPATCH_LOG=1`).
+
+## Result (2026-10-15, CLEAN, the glu FFN)
+
+pp512 / 1024 / 2048, tok/s min / median: five-step 520 / 531, 381 / 388, 269 / 274 -> glu FFN 760 / 768, 487 / 492, 308 / 329.
+At pp512 what is left: host attention 196 ms, the GEMM waits 282 (gate|up 172), residual + norm 87, packs 36, qkv's copy 28,
+syncs 15. Accuracy against the bf16 route: perplexity ratio 0.9987, KL 0.00287, random-id corr min 0.9966; two per-item
+extremes of OPEN-PREFILL-BFP16 missed (one greedy continuation of six, one flip at a 0.209 margin), traced to the converter
+trap above. Numbers and procedure: OPEN-PREFILL-BFP16-FFN.
 
 ## Result (2026-10-13/14, no gate, FrameServer idle context present)
 

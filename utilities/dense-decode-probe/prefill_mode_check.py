@@ -123,7 +123,13 @@ def main() -> int:
                     x, y = res["fast"][0], res["bfp16"][0]
                     same = x == y
                     first = next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), None)
-                    print(f"decode {name}: {len(x)} vs {len(y)} tokens, {'IDENTICAL' if same else 'differ at token ' + str(first)}")
+                    where = ""
+                    if first is not None:
+                        # _t<i> holds the logits token i was picked from; both routes share tokens 0 .. i - 1
+                        top2 = np.sort(np.fromfile(t / f"{name}_fast_t{first}.bin", np.float32))[-2:]
+                        where = f" (reference top-2 margin there {float(top2[1] - top2[0]):.3f})"
+                    print(f"decode {name}: {len(x)} vs {len(y)} tokens, "
+                          f"{'IDENTICAL' if same else 'differ at token ' + str(first) + where}")
         if "ppl" in cases:
             ids = text_ids(a.model, a.tokens)
             lp = {}
