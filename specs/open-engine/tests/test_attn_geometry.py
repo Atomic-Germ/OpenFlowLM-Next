@@ -25,7 +25,7 @@ FAST_GEOMETRY = {
     "hy-mt2-7b.json": (4, 8, 4),      # same shape, norm after RoPE
     "gemma3-4b.json": (4, 2, 2),      # 8 / 4 at hd 256: 2 heads a core once og is NHL wide (was 2 cores
                                       # of 4, the whole point of the split); RB capped at 2 for hd 256
-    "granite42-3b.json": (5, 8, 4),   # 40 / 8 at hd 64: NHL == HPO (the measured family)
+    "granite42-3b.json": (5, 8, 8),   # 40 / 8 at hd 64: NHL == HPO, 8-row blocks (OPEN-ATTN-BLOCK8; ATTN_RB=4 is the old kernel)
     "phi4-mini-4b.json": (6, 4, 4),   # 24 / 8 at hd 128, a 96-dim rotation: 6 cores of 4 (was 3 of 8;
                                       # measured 2026-09-12, 123 -> 117 ms at 2048, 250/250 identical)
     "qwen25-3b.json": (4, 4, 4),      # 16 / 2 at hd 128: 4 cores of 4 heads. HPO is 2, so a core's
@@ -54,7 +54,7 @@ def test_fast_path_geometry(name, unvalidated, monkeypatch):
     # attn.h's static_assert, exactly: the heads divide NH, and tile the og element
     # they are written through (kOGH = min(kNHL, kHPO)).
     assert G.NHL * G.ACORES == G.NH and G.NHL % min(G.NHL, G.HPO) == 0
-    assert G.RB * max(G.NHL, 8) in (8, 16, 32)
+    assert G.RB * max(G.NHL, 8) in (8, 16, 32, 64)
     assert G.MLS % 32 == 0 and G.MLS >= G.NHL
 
 
@@ -116,7 +116,7 @@ def test_kv_slices_cover_every_core_head():
             assert all(kvb[c] <= h // grp < kvb[c] + kvs for h in heads), (nh, kvh, ac, c)
 
 
-@pytest.mark.parametrize("name,rows", [("granite42-3b.json", 4), ("qwen3-4b.json", 0), ("qwen25-3b.json", 0), ("gemma3-4b.json", 0)])
+@pytest.mark.parametrize("name,rows", [("granite42-3b.json", 8), ("qwen3-4b.json", 0), ("qwen25-3b.json", 0), ("gemma3-4b.json", 0)])
 def test_kvslice_is_measured_not_declared(name, rows, unvalidated, monkeypatch):
     """Traces: OPEN-ATTN-KVSLICE. On for Granite (the manifest's `kvslice` is its block rows), off elsewhere; ATTN_KVSLICE forces it
     off for an A/B build, and a q / k / v bias (Qwen2.5) or a sliding window (Gemma 3) keeps the broadcast even when forced."""
@@ -192,7 +192,7 @@ def test_moe_attn_geometry_on_the_fast_path(name, unvalidated, monkeypatch):
     A = Q36.attn(load_spec(SPECS / name))
     acores, nhl, rb, block = MOE_FAST[name]
     assert (A.VEXP, A.ACORES, A.NHL, A.RB, A.BLOCK) == (1, acores, nhl, rb, block), name
-    assert A.NHL * A.ACORES == A.NH and A.NHL % A.HPO == 0 and (A.RB == 1 or A.RB * max(A.NHL, 8) in (8, 16, 32))
+    assert A.NHL * A.ACORES == A.NH and A.NHL % A.HPO == 0 and (A.RB == 1 or A.RB * max(A.NHL, 8) in (8, 16, 32, 64))
     assert A.MLS % 32 == 0 and A.MLS >= A.NHL
     # The retirement is only ever the block kernel's own cost model: there is no such
     # thing as a block-only build with nothing to block.
@@ -252,3 +252,17 @@ def test_every_family_module_exposes_the_probe_hook():
     from recipes.families import FAMILIES, family_module
     for fam in FAMILIES:
         assert callable(getattr(family_module(fam), "probe_env", None)), fam
+
+
+def test_block8_is_granite_only_and_forced_back_by_the_probe(unvalidated, monkeypatch):
+    # Traces: OPEN-ATTN-BLOCK8
+    monkeypatch.delenv("ATTN_RB", raising=False)
+    assert DR.geometry(load_spec(SPECS / "granite42-3b.json")).RB == 8
+    assert DR.geometry(load_spec(SPECS / "qwen3-4b.json")).RB == 4
+    monkeypatch.setenv("ATTN_RB", "4")
+    assert DR.geometry(load_spec(SPECS / "granite42-3b.json")).RB == 4
+    from recipes import attnknobs
+    flags = attnknobs.tree8_flags(4)
+    assert "-DATTN_EXPA=2" in flags
+    monkeypatch.setenv("ATTN_EXPA", "0")
+    assert "-DATTN_EXPA=2" not in attnknobs.tree8_flags(4)

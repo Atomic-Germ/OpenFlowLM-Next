@@ -27,7 +27,7 @@ from .spec import ModelSpec
 # main cores: LX_NULL_DN compiles the DeltaNet arithmetic away, LX_NULL_GEMV the q4/q8 GEMV
 # tile body, both leaving every stream, fifo and DMA -- and so insts.bin -- byte-identical.
 PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV", "DXL_NULL_PREP", "DXL_NULL_LN", "ATTN_TREE8", "ATTN_REPEAT",
-              "DX_WRING", "DX_WORDER", "DX_ONECTX", "ATTN_KVSLICE", "ATTN_KVCORES", "ATTN_G5_PVROLL", "ATTN_DXL_KVSLICE", "DXL_WRING", "DXL_WDEPTH", "ATTN_EXPA")
+              "DX_WRING", "DX_WORDER", "DX_ONECTX", "ATTN_KVSLICE", "ATTN_KVCORES", "ATTN_G5_PVROLL", "ATTN_DXL_KVSLICE", "DXL_WRING", "DXL_WDEPTH", "ATTN_EXPA", "DXL_T8_UNROLL", "DXL_NULL_OUT")
 
 RB_SUPPORTED = (1, 2, 4, 8)   # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path; 8 only on the windowed kernels
 
@@ -72,9 +72,15 @@ TREE8_MEASURED = ("granite",)
 TREE8_STACK = 0x3000       # the tree spills past the usual 0x1800 stack, and the overrun reads back as NaN
 
 
+# OPEN-ATTN-BLOCK8: Granite's attention takes 8-row blocks and the fused degree-4 exponential (not bit-identical to the 4-row kernel);
+# ATTN_RB=4 / ATTN_EXPA=0 give the old kernel back for an A/B build.
+BLOCK8_MEASURED = ("granite",)
+
+
 def tree8_flags(unroll: int) -> list[str]:
     # 4 rows unrolled fit dx's attention core, only 1 fits dxl's beside its skip and pack kernels.
-    return ["-DATTN_TREE8=1", f"-DATTN_T8_UNROLL={unroll}", "-DATTN_EXP32=1", "-DATTN_KVH_MUL=1"]
+    fl = ["-DATTN_TREE8=1", f"-DATTN_T8_UNROLL={unroll}", "-DATTN_EXP32=1", "-DATTN_KVH_MUL=1"]
+    return fl + ([] if "ATTN_EXPA" in os.environ else ["-DATTN_EXPA=2"])    # tree8() already limits this to the measured family
 
 
 def tree8(spec: ModelSpec, nhl: int, rb: int, hd: int) -> bool:
@@ -239,6 +245,8 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         block_ok = gated256 and spec.family in BLOCK_ONLY_MEASURED
         cap = 4 if (spec.head_dim < 256 or block_ok) else (1 if (spec.attn_gate or nhl > 2) else 2)
         rb = max((r for r in (4, 2, 1) if r <= cap and (r * block_lanes(nhl)) in (8, 16, 32)), default=1)
+        if spec.family in BLOCK8_MEASURED and rb == 4 and nhl == 8 and spec.head_dim == 64:
+            rb = 8
         rb = _probe_rb(rb, nhl)
         # The retirement is the block kernel's OWN cost model, so it follows rb: an
         # ATTN_RB=1 probe on a measured family gets the single-row kernel back.

@@ -62,7 +62,7 @@ for _k, _v in QR.probe_env().items():
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 T8 = tree8(SPEC, G.NHL, G.RB, G.HD)           # the same bit-identical score tree as dx (OPEN-ATTN-SCORE-TREE)
 if T8:
-    ATTN_FLAGS.extend(tree8_flags(1))
+    ATTN_FLAGS.extend(tree8_flags(int(os.environ.get("DXL_T8_UNROLL", 1))))
 KVSL = dxl_kvslice(SPEC, ACORES, RB, G.QKVB, G.WINDOW) > 0   # core c of every group on one slice stream (OPEN-ATTN-KVSLICE)
 if KVSL:
     KVS, KVB = kv_slices(G.NH, G.KVH, ACORES)
@@ -84,7 +84,9 @@ if SPEC.norm_groups != 1:
 GL_FLAGS = OS + [f"-DDXL_L={LR}", f"-DDXL_JMAX={JMAX}"]
 if os.environ.get("LX_NULL_GEMV") == "1":    # probe only (attnknobs.PROBE_VARS keeps it out of shipped keys)
     GL_FLAGS.append("-DGEMV_NULL")
-NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"     # probes: the stream and fifos unchanged, the arithmetic gone
+if os.environ.get("DXL_NULL_OUT") == "1":
+    GL_FLAGS.append("-DDXL_NULL_OUT")
+NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"    # probes: the stream and fifos unchanged, the arithmetic gone
 NULL_LN = os.environ.get("DXL_NULL_LN") == "1"
 # a deeper weight fifo prefetches through the activation prep; only where L1 holds the extra chunks
 W_DEPTH = int(os.environ.get("DXL_WDEPTH", 4 if DXR._main_l1(LR, X.YB, X.BP, G.KV_PC, X.TAB_K) + 2 * CHUNK <= DXR.L1_BUDGET else 2))
