@@ -110,6 +110,12 @@ QKNORM_POST_ROPE = ("hunyuan",)
 BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
 # the same with no q/k norm: the rotation alone (attn_block.prep "rope")
 BLOCK_ATTN_ROPE = ("k2",)
+# families whose block attention is one causal flash-attention dispatch a block (OPEN-PREFILL-ATTN-FA,
+# designs/attn_fa: head dim 64, full rotary, no q/k norm, no gate, no window), by measurement
+# against their host attention
+BLOCK_ATTN_FA = ("granite",)
+# Q as a bf16 hi / lo pair; AF_QSPLIT=0 exports the single-bf16 Q experiment (its own kernel set)
+AF_QSPLIT = os.environ.get("AF_QSPLIT", "1") != "0"
 # families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
@@ -479,6 +485,14 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
                       "kernels_s": {str(Lw): f"ag_s{Lw}" for Lw in ag_tiers},
                       "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}, "prep": prep}
+    attn_fa = None
+    # AF_LMAX narrows the windows for an experimental export; a longer window then takes the host attention
+    fa_tiers = list(range(256, min(ATTN_LMAX, max_ctx, int(os.environ.get("AF_LMAX", ATTN_LMAX))) + 1, 256))
+    if (spec.family in BLOCK_ATTN_FA and not attn_block and set(spec.layer_types) == {DENSE} and T == 256
+            and spec.head_dim == 64 and spec.rotary_dim == spec.head_dim and not spec.qk_norm and not spec.attn_gate
+            and spec.num_heads % 4 == 0 and fa_tiers):
+        attn_fa = {"hd": 64, "l_max": fa_tiers[-1], "q_head": 4096 * (9 if AF_QSPLIT else 5), "qsplit": AF_QSPLIT,
+                   "kernels": {str(Lw): f"af{Lw}" for Lw in fa_tiers}}
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
@@ -542,6 +556,19 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                                   "norm_groups": spec.norm_groups}
         if attn_block:
             out["layer_types"][lt]["attn_block"] = attn_block
+        if attn_fa:
+            out["layer_types"][lt]["attn_fa"] = attn_fa
+    # one xclbin serves every window: each tier is an instruction stream over the af context
+    if attn_fa:
+        out["contexts"]["af"] = f"af{fa_tiers[0]}/final.xclbin"
+        for Lw in fa_tiers:
+            name = f"af{Lw}"
+            out["kernels"][name] = {"context": "af", "insts": f"{name}/insts.bin", "build": name}
+            out["builds"][name] = {"design": "attn_fa/attn_fa.py",
+                                   "build_dir": f"attn_fa/build_l{Lw}_h{spec.num_heads}_kv{spec.num_kv_heads}{sfx}",
+                                   "env": {"AF_L": str(Lw), "AF_HEADS": str(spec.num_heads),
+                                           "AF_KV_HEADS": str(spec.num_kv_heads), "AF_KV_LD": str(L.KV_ROW // 2),
+                                           "AF_MAX_ROWS": str(max_ctx), "AF_QSPLIT": str(int(AF_QSPLIT))}}
     # The T-wide attention scratch: the engine writes every token's q/k/v into it, then
     # shuttles one token's slice in and out of the layer's own `act` around each attention
     # dispatch (core.cpp `shuttle_buf`), and reads all T og rows back out at the end. Shared
@@ -974,6 +1001,7 @@ KERNEL_SOURCES = [
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/gemm_bfp16/*.py", "designs/gemm_bfp16/*.cc",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
+    "designs/attn_fa/attn_fa.py", "designs/attn_fa/attn_fa.cc",
     "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

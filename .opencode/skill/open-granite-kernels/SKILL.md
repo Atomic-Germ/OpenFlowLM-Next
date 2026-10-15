@@ -1,6 +1,6 @@
 ---
 name: open-granite-kernels
-description: Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for a Granite tag installed with oflm-add, or when a Granite container's attention_multiplier is refused at load.
+description: Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4, the prefill GEMMs and the attn_fa prefill attention) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for a Granite tag installed with oflm-add, debugging or speeding up attn_fa (the NPU prefill attention), or when a Granite container's attention_multiplier is refused at load.
 ---
 
 # Granite 4.2 3B on the dense recipe
@@ -393,6 +393,49 @@ at d2048 22.21 +- 0.17; Q4_0 23.14 / 21.91; this path 23.2-23.4 at ctx 0 in the 
 units without a control read Vulkan at 17-18 tok/s on the same binary and file, most likely a sibling's NPU run inside
 the unit: compare to Vulkan in one sitting with a control, or not at all.
 
+## Prefill attention on the NPU: attn_fa (2026-10-15, OPEN-PREFILL-ATTN-FA)
+
+`open_kernels/designs/attn_fa/` is Granite's block attention as ONE dispatch a 256-token block: scores, causal mask, online
+softmax and both products on the array. It is the default on both prefill routes; `OFLM_OPEN_ATTN_FA=0` is the host
+attention for A/B (and skips loading the `af` context). The load log says `gemm-block attention: NPU (attn_fa ...)`.
+
+Why not `attn_block` (two GEMMs a kv head, host softmax) at head dim 64: the fp32 score matrix is L / 64 times bigger
+than Q or K, so writing it from the array, softmaxing it on the host and writing P back (twice for the Q hi / lo split)
+costs more than the host attention it replaces. Not built.
+
+Build: the exporter builds `af256` .. `af4096` (one xclbin; the core program does not depend on L, ~15 s a stream). For a
+quick set, `AF_LMAX=2048` in the environment narrows the recipe to 8 streams; longer prompts then take the host attention.
+
+```powershell
+cd C:\dev\mlir-aie; . .\iron_env.ps1
+cd <repo>                       # copy the union set to <set> first; --only builds just these into it
+python open_kernels\export_qwen36_kernels.py --model-dir C:\models\Granite-4.2-3B-NPU2 --out <set> --only af256,af512,...,af4096
+```
+
+One shape on the array: `python open_kernels\designs\attn_fa\make_test.py --build <build dir> --out <t> --L 512`,
+`run_kernel.exe <t>\run.cfg`, `python open_kernels\designs\attn_fa\compare.py <t>` (PASS at rel_fro ~1.1e-3 vs fp64).
+The model: `utilities\dense-decode-probe\prefill_mode_check.py --arms bfp16:host,bfp16:npu` (or `fast:host,fast:npu`).
+Timing with the stage split: `utilities\granite-combined-bench\attn_bench.py --lengths 512,2048 --dispatch-log`.
+
+Traps hit building it (each cost a hardware round):
+- **`broadcast_elem` on bf16 is `vextbcst.32`**: it broadcasts a 32-bit unit, i.e. a PAIR of bf16. Double the values first
+  (`interleave_zip(v, v, 1)`) and broadcast element i of the doubled half. Without it every product reads the wrong value
+  (rel_fro 1.25, no hang, no NaN).
+- **The emulated bf16 `mmul<4,8,8>` spills**: with hi / lo operands its expanded A vectors (8 a mmul) go to the stack
+  every iteration. The kernel uses element-wise MACs with the query rows in the 32 lanes instead (S^T layout), which also
+  makes the softmax lane-wise.
+- **Peano's 8-lane float `reduce_add` kills the backend** ("Unsupported register size" in RegBankSelect); a 4x8 block
+  times ones on the MAC array is the row sum.
+- **Stack**: four interleaved exponentials in `af_sm` take a 5 KB frame; at a 4 KB stack the array hung (state 8) or,
+  slightly over, returned NaN in ~5 % of rows. `STACK = 0x2000`. Read the frame from `llvm-objdump -d` (`paddxm [sp], #N`).
+- `AF_INFLIGHT=4` (four passes' BDs queued) hangs; 2 works.
+- The harness's first runs are warm-up: take the min of 8 (make_test writes 8 runs).
+
+Where the time goes (2026-10-15, CLEAN): a dispatch is ~0.1 ms + ~0.69 ms per 256 rows of window (af512 1.47 ms, af2048
+5.6 ms; ~17 us a 64-key chunk a pass, about 1.7x the MAC-bound estimate). The first dispatch of a layer also pays the
+switch into `af` (~1.7 ms) and the out projection the switch back (~1.2 ms). Ablation at L 512 before the softmax rewrite:
+DMA and sync floor ~0.4 ms, softmax 0.62 ms, P.V 0.34, Q.K^T 0.17 (the softmax is what four interleaved chains fixed).
+
 ## Rules
 
 - Never commit the xclbins; the distributed package ships them pre-built.
@@ -404,6 +447,7 @@ the unit: compare to Vulkan in one sitting with a control, or not at all.
 - Granite has **no closed engine** to fall back on (`llama_npu` whitelists
   `hidden_size` to {2048, 3072, 4096} and refuses 2560). A missing kernel set is
   a named refusal naming the build command, not a quiet substitution.
-- Prefill is not decode-as-prefill and not `dxB`: the engine takes the block route with host attention, layer-major
-  (OPEN-PREFILL-HOST-ATTN, 60 -> 220 tok/s at pp512). Measure it with `open_qwen36_cli --gemm-block --ids-file`; a
-  kernel dir carrying the Uno `dxl` / `lmhl` entries needs the Uno engine build to parse it.
+- Prefill is not decode-as-prefill and not `dxB`: the engine takes the block route layer-major (OPEN-PREFILL-HOST-ATTN,
+  60 -> 220 tok/s at pp512), with the attention on the NPU where the set carries `attn_fa` (OPEN-PREFILL-ATTN-FA). Measure
+  it with `open_qwen36_cli --gemm-block --ids-file`; a kernel dir carrying the Uno `dxl` / `lmhl` entries needs the Uno
+  engine build to parse it.

@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "open_qwen36/manifest.hpp"
 
+using open_qwen36::AttnFa;
 using open_qwen36::Manifest;
 using open_qwen36::PackOp;
 using nlohmann::json;
@@ -590,6 +592,36 @@ int main(int argc, char** argv) {
                 rj["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "rope";
                 const Manifest r = Manifest::parse(rj, "edited");
                 check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "k2 shape: prep rope (no q/k norm) parses");
+            }
+            {
+                // OPEN-PREFILL-ATTN-FA: a dense attn_fa, a stream per 256 rows of window on one context
+                std::ifstream ff(argv[2]);
+                json fj = json::parse(ff);
+                json fa = {{"hd", 64}, {"l_max", 1024}, {"q_head", 4096 * 9}, {"qsplit", true}, {"kernels", json::object()}};
+                for (int L = 256; L <= 1024; L += 256) {
+                    const std::string k = "af" + std::to_string(L);
+                    fj["kernels"][k] = {{"context", "af"}, {"insts", k + "/insts.bin"}};
+                    fa["kernels"][std::to_string(L)] = k;
+                }
+                fj["contexts"]["af"] = "af256/final.xclbin";
+                fj["layer_types"]["dense"]["gemm_block"]["attn_fa"] = fa;
+                const Manifest fm = Manifest::parse(fj, "attn_fa");
+                const AttnFa& f = fm.layer_types.at("dense").gemm_block.attn_fa;
+                check(f.present() && f.hd == 64 && f.l_max == 1024 && f.q_head == 4096 * 9 && f.qsplit &&
+                          f.kernels.size() == 4 && f.kernels.at(768) == "af768",
+                      "attn_fa: four windows of 256 rows, Q hi / lo, head dim 64");
+                auto refused_fa = [&](const char* what, const char* label, const std::function<void(json&)>& edit) {
+                    json e = fj;
+                    edit(e["layer_types"]["dense"]["gemm_block"]["attn_fa"]);
+                    bool threw = false;
+                    try { Manifest::parse(e, "attn_fa edited"); } catch (const std::exception& x) { threw = std::string(x.what()).find(what) != std::string::npos; }
+                    check(threw, label);
+                };
+                refused_fa("has no stream for a window of 512", "attn_fa: a missing window is refused",
+                           [](json& a) { a["kernels"].erase("512"); });
+                refused_fa("wants hd 64", "attn_fa: a head dim the design does not build is refused", [](json& a) { a["hd"] = 128; });
+                refused_fa("is not the record plus Q hi", "attn_fa: a Q layout that is not the design's is refused",
+                           [](json& a) { a["qsplit"] = false; });
             }
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)

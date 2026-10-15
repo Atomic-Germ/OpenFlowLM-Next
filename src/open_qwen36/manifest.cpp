@@ -356,6 +356,31 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 for (const auto& kv : a.kernels_pv) kpv.push_back(kv.first);
                 if (ks != kpv) fail(aw, "kernels_s and kernels_pv cover different windows");
             }
+            if (g.kind == "dense" && gj.contains("attn_fa")) {
+                const json& fj = gj["attn_fa"];
+                const std::string fw = gw + ".attn_fa";
+                AttnFa& f = g.attn_fa;
+                f.hd = get<uint64_t>(fj, "hd", fw);
+                f.l_max = get<uint64_t>(fj, "l_max", fw);
+                f.q_head = get<uint64_t>(fj, "q_head", fw);
+                f.qsplit = fj.value("qsplit", true);
+                // the design: 64-dim heads, a 256-token block on 32 cores, 64-key chunks, at most 64 a pass
+                if (f.hd != 64 || g.t != 256 || f.l_max == 0 || f.l_max % 256 || f.l_max > 4096)
+                    fail(fw, "wants hd 64, t 256 and l_max a positive multiple of 256 up to 4096");
+                if (f.q_head != 4096 * (f.qsplit ? 9u : 5u))
+                    fail(fw, "q_head " + std::to_string(f.q_head) + " is not the record plus Q hi" +
+                                 (f.qsplit ? " and lo" : "") + " for 256 tokens of head dim 64");
+                for (const auto& [rows_s, kname] : need(fj, "kernels", fw).items()) {
+                    const size_t rows = static_cast<size_t>(std::stoull(rows_s));
+                    if (rows == 0 || rows % 256 || rows > f.l_max)
+                        fail(fw, "kernels: window " + rows_s + " is not a positive multiple of 256 within l_max");
+                    auto it = m.kernels.find(kname.get<std::string>());
+                    if (it == m.kernels.end()) fail(fw, "kernels names unknown kernel " + kname.get<std::string>());
+                    f.kernels[rows] = it->first;
+                }
+                for (size_t rows = 256; rows <= f.l_max; rows += 256)
+                    if (!f.kernels.count(rows)) fail(fw, "kernels has no stream for a window of " + std::to_string(rows));
+            }
             if (g.kind == "dense") {
                 // 4 steps: gate|up through the glu epilogue, down reading its H operand (OPEN-PREFILL-BFP16-FFN)
                 const bool glu = g.program.size() == 4 && g.program[2].epi == "glu" && g.program[3].a_from == "h" &&
