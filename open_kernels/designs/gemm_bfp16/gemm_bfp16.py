@@ -87,8 +87,9 @@ def gemm_bfp16(
                                compile_flags=flags + ["-DF32_FIRST"])
     k_mid = ExternalFunction("mm_f32_mid", source_file=str(_KERNEL_SRC), arg_types=[A_l1_ty, B_l1_ty, C_l1_ty],
                              compile_flags=flags + ["-DF32_MID"])
+    sat = [f"-DEPI_SATURATE={os.environ['GB_EPI_SAT']}"] if os.environ.get("GB_EPI_SAT") else []
     k_epi = ExternalFunction("gemm_epilogue", source_file=str(_KERNEL_SRC), arg_types=[C_l1_ty, A_l1_ty, np.int32],
-                             compile_flags=flags + ["-DGLU_EPILOGUE"])
+                             compile_flags=flags + ["-DGLU_EPILOGUE"] + sat)
 
     A_l3l2, A_l2l1, B_l3l2, B_l2l1, C_l2l3 = [], [], [], [], []
     C_l1l2 = [[None] * n_aie_cols for _ in range(n_aie_rows)]

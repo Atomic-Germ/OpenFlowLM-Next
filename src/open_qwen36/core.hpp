@@ -655,10 +655,12 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     void gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                     const std::function<const float*(size_t)>& prep,
                     const std::function<void(size_t, const float*)>& post, int slot = -1, bool raw = false);
-    /// OPEN-PREFILL-BFP16-FFN gate|up then down from H per block; one H buffer, as down(b) ends before gate|up(b + 1) starts
-    void glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
-                   const std::function<const float*(size_t)>& prep,
-                   const std::function<void(size_t, const float*)>& post);
+    /// OPEN-PREFILL-BFP16-FFN: o, gate|up and down from H as one pipeline; one H buffer, as down(b) ends before gate|up(b + 1)
+    void o_glu_phase(int l, const Step& so, const Step& gu, const Step& dn, size_t B, size_t T, size_t qw, size_t hid,
+                     const std::function<const float*(size_t)>& prep_o,
+                     const std::function<void(size_t, const float*)>& post_o,
+                     const std::function<const float*(size_t)>& prep_g,
+                     const std::function<void(size_t, const float*)>& post_d);
     /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
     void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);

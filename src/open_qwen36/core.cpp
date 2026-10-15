@@ -780,10 +780,13 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
             for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
                 for (const Step& s : *prog)
                     for (int a = 1; a <= 2; ++a) {
-                        // the glu H operand is one buffer (glu_phase)
+                        // the glu H operand is one buffer; gate|up's x and down's y get their own pair (o_glu_phase)
                         if ((a == 2 && s.epi == "glu") || (a == 1 && s.a_from == "h")) continue;
                         const std::string& name = s.args[a];
-                        if (!globals_.count(name + "#1")) globals_[name + "#1"] = alloc(w_->globals.at(name));
+                        const bool own = (a == 1 && s.epi == "glu") || (a == 2 && s.a_from == "h");
+                        for (const char* sfx : {"#1", "#2", "#3"})
+                            if ((own || std::string(sfx) == "#1") && !globals_.count(name + sfx))
+                                globals_[name + sfx] = alloc(w_->globals.at(name));
                     }
         }
     for (const auto& [name, rg] : w_->per_row_globals) {
@@ -3335,46 +3338,47 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
     timing_.state_ms += ms_since(ts);
     timing_.attn_ms += timing_.mid_ms - mid0;
 
-    gemm_phase(l, gb.program[1], B, T, qw, hid,
-               [&](size_t b) -> const float* { return og_all + b * T * qw; },
-               [&](size_t b, const float* y) {
-                   const double* xr = xres.data() + b * T * hid;
-                   double* r1 = res1 + b * T * hid;
-                   auto t1 = std::chrono::steady_clock::now();
-                   if (raw_o) {
-                       add_c_rows(y, T, gb.program[1].n_pad, hid, xr, r1, fuse ? post_ln_w_bf16_[l].data() : nullptr, gb.eps,
-                                  xm_all + b * T * hid);
-                   } else {
-                       auto tt = std::chrono::steady_clock::now();
-                       float* yo = BlockScratch::fit(bs_.d_o, T * hid);
-                       to_rows(y, hid, yo);
-                       timing_.part1_ms += ms_since(tt);
-                       timing_.gemm_tr_ms += ms_since(tt);
-                       t1 = std::chrono::steady_clock::now();
+    auto o_prep = [&](size_t b) -> const float* { return og_all + b * T * qw; };
+    auto o_post = [&](size_t b, const float* y) {
+        const double* xr = xres.data() + b * T * hid;
+        double* r1 = res1 + b * T * hid;
+        auto t1 = std::chrono::steady_clock::now();
+        if (raw_o) {
+            add_c_rows(y, T, gb.program[1].n_pad, hid, xr, r1, fuse ? post_ln_w_bf16_[l].data() : nullptr, gb.eps,
+                       xm_all + b * T * hid);
+        } else {
+            auto tt = std::chrono::steady_clock::now();
+            float* yo = BlockScratch::fit(bs_.d_o, T * hid);
+            to_rows(y, hid, yo);
+            timing_.part1_ms += ms_since(tt);
+            timing_.gemm_tr_ms += ms_since(tt);
+            t1 = std::chrono::steady_clock::now();
 #pragma omp parallel for
-                       for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
-                           r1[i] = xr[i] + static_cast<double>(yo[i]);
-                   }
-                   if (!fuse)
-                       rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
-                   timing_.part1_ms += ms_since(t1);
-                   timing_.tail_ms += ms_since(t1);
-               }, 1, raw_o);
-    if (gb.program.size() == 4) {
+            for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
+                r1[i] = xr[i] + static_cast<double>(yo[i]);
+        }
+        if (!fuse) rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
+        timing_.part1_ms += ms_since(t1);
+        timing_.tail_ms += ms_since(t1);
+    };
+    if (gb.program.size() == 4 && raw_o) {
         // OPEN-PREFILL-BFP16-FFN: down's residual pass also norms the next layer's input (fuse)
-        glu_phase(l, gb.program[2], gb.program[3], B, T, hid,
-                  [&](size_t b) -> const float* { return xm_all + b * T * hid; },
-                  [&](size_t b, const float* yd) {
-                      auto t1 = std::chrono::steady_clock::now();
-                      add_c_rows(yd, T, gb.program[3].n_pad, hid, res1 + b * T * hid, xres.data() + b * T * hid,
-                                 fuse_next ? ln_w_bf16_[l + 1].data() : nullptr,
-                                 fuse_next ? types_[l + 1]->gemm_block.eps : 0.0, fuse_next ? xn_next + b * T * hid : nullptr);
-                      timing_.part1_ms += ms_since(t1);
-                      timing_.tail_ms += ms_since(t1);
-                  });
+        o_glu_phase(l, gb.program[1], gb.program[2], gb.program[3], B, T, qw, hid, o_prep, o_post,
+                    [&](size_t b) -> const float* { return xm_all + b * T * hid; },
+                    [&](size_t b, const float* yd) {
+                        auto t1 = std::chrono::steady_clock::now();
+                        add_c_rows(yd, T, gb.program[3].n_pad, hid, res1 + b * T * hid, xres.data() + b * T * hid,
+                                   fuse_next ? ln_w_bf16_[l + 1].data() : nullptr,
+                                   fuse_next ? types_[l + 1]->gemm_block.eps : 0.0, fuse_next ? xn_next + b * T * hid : nullptr);
+                        timing_.part1_ms += ms_since(t1);
+                        timing_.tail_ms += ms_since(t1);
+                    });
         xn_ready_ = fuse_next ? l + 1 : -1;
         return;
     }
+    if (gb.program.size() == 4)
+        throw std::runtime_error("open_qwen36: the glu route needs a bfp16 o step over whole 128-column tiles");
+    gemm_phase(l, gb.program[1], B, T, qw, hid, o_prep, o_post, 1, raw_o);
     gemm_phase(l, gb.program[2], B, T, hid, ff,
                [&](size_t b) -> const float* { return xm_all + b * T * hid; },
                [&](size_t b, const float* y) {
@@ -3985,79 +3989,99 @@ void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t
     }
 }
 
-void Core::glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
-                     const std::function<const float*(size_t)>& prep,
-                     const std::function<void(size_t, const float*)>& post) {
+void Core::o_glu_phase(int l, const Step& so, const Step& gu, const Step& dn, size_t B, size_t T, size_t qw, size_t hid,
+                       const std::function<const float*(size_t)>& prep_o,
+                       const std::function<void(size_t, const float*)>& post_o,
+                       const std::function<const float*(size_t)>& prep_g,
+                       const std::function<void(size_t, const float*)>& post_d) {
+    StepTiming::GemmStageMs& os = timing_.gemm_stage[1];
     StepTiming::GemmStageMs& gs = timing_.gemm_stage[2];
     StepTiming::GemmStageMs& ds = timing_.gemm_stage[3];
     const Bfp16Tiling bt;
-    const size_t ff = gu.n_pad / 2, x_bytes = T * hid / 8 * BFP16_BLOCK_BYTES, y_bytes = dn.n_pad * T * 4;
-    if (T % (bt.m * bt.rows) || hid % bt.k || hid % bt.n)
+    const size_t ff = gu.n_pad / 2;
+    const size_t xo_bytes = T * qw / 8 * BFP16_BLOCK_BYTES, xg_bytes = T * hid / 8 * BFP16_BLOCK_BYTES;
+    const size_t yo_bytes = so.n_pad * T * 4, yd_bytes = dn.n_pad * T * 4;
+    if (T % (bt.m * bt.rows) || hid % bt.k || hid % bt.n || qw % bt.k)
         throw std::runtime_error("open_qwen36: glu " + gu.kernel + ": T=" + std::to_string(T) + " hidden=" +
                                  std::to_string(hid) + " do not tile");
-    Step gtw = gu, dtw = dn;
-    gtw.args[1] += "#1";
-    dtw.args[2] += "#1";
-    const Step* g_step[2] = {&gu, &gtw};
-    const Step* d_step[2] = {&dn, &dtw};
+    auto twin = [](const Step& s, std::initializer_list<int> args, const char* sfx) {
+        Step t = s;
+        for (int a : args) t.args[a] += sfx;
+        return t;
+    };
+    const Step o_step[2] = {so, twin(so, {1, 2}, "#1")};
+    const Step g_step[2] = {twin(gu, {1}, "#2"), twin(gu, {1}, "#3")};
+    const Step d_step[2] = {twin(dn, {2}, "#2"), twin(dn, {2}, "#3")};
     for (int i = 0; i < 2; ++i)
-        if (buffer(g_step[i]->args[1], 0).size() < x_bytes || buffer(gu.args[2], 0).size() < bfp16_h_bytes(T, ff, bt) ||
-            buffer(d_step[i]->args[2], 0).size() < y_bytes)
+        if (buffer(o_step[i].args[1], 0).size() < xo_bytes || buffer(o_step[i].args[2], 0).size() < yo_bytes ||
+            buffer(g_step[i].args[1], 0).size() < xg_bytes || buffer(gu.args[2], 0).size() < bfp16_h_bytes(T, ff, bt) ||
+            buffer(d_step[i].args[2], 0).size() < yd_bytes)
             throw std::runtime_error("open_qwen36: glu " + gu.kernel + ": the x / H / y globals are short of T " +
                                      std::to_string(T) + ", ff " + std::to_string(ff));
+    Kern& ko = kerns_.at(so.kernel);
     Kern& kg = kerns_.at(gu.kernel);
     Kern& kd = kerns_.at(dn.kernel);
-    auto stage_in = [&](size_t b) {
-        xrt::bo& xb = buffer(g_step[b & 1]->args[1], 0);
+    auto pack = [&](const Step& s, const std::function<const float*(size_t)>& prep, size_t b, size_t K, size_t bytes,
+                    StepTiming::GemmStageMs& st) {
+        xrt::bo& xb = buffer(s.args[1], 0);
         auto tp = std::chrono::steady_clock::now();
         const float* x = prep(b);
-        gs.prep += ms_since(tp);
+        st.prep += ms_since(tp);
         auto t0 = std::chrono::steady_clock::now();
-        host::bfp16_pack_a(x, T, hid, bt, xb.map<uint8_t*>());
+        host::bfp16_pack_a(x, T, K, bt, xb.map<uint8_t*>());
         timing_.part1_ms += ms_since(t0);
         timing_.gemm_tile_ms += ms_since(t0);
-        gs.pack += ms_since(t0);
+        st.pack += ms_since(t0);
         auto ts = std::chrono::steady_clock::now();
-        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, x_bytes, 0);
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, bytes, 0);
         timing_.sync_ms += ms_since(ts);
         timing_.part1_ms += ms_since(ts);
-        gs.sync += ms_since(ts);
+        st.sync += ms_since(ts);
     };
-    auto finish = [&](Inflight& f, StepTiming::GemmStageMs& st) {
+    auto launch = [&](Kern& k, const Step& s) {
+        Inflight f = start_run(k, s.args, l);
+        timing_.part0_ms += f.submit_ms;
+        return f;
+    };
+    auto finish = [&](Inflight& f, StepTiming::GemmStageMs& st, const Step& s, size_t y_bytes) {
         const double submit = f.submit_ms;
         const std::string& name = f.k->name;      // wait_run clears f.k
         const auto [elapsed, blocked] = wait_run(f);
         timing_.part0_ms += blocked;
         st.wait += blocked;
         if (dispatch_log_) dispatch_stats_[name].add(submit + elapsed);
-    };
-    auto post_of = [&](size_t b) {
-        auto tq = std::chrono::steady_clock::now();
-        post(b, buffer(d_step[b & 1]->args[2], 0).map<const float*>());
-        ds.post += ms_since(tq);
-    };
-    // the host packs block b + 1 under gate|up(b) and runs block b - 1's post under down(b)
-    stage_in(0);
-    Inflight cur = start_run(kg, g_step[0]->args, l);
-    timing_.part0_ms += cur.submit_ms;
-    for (size_t b = 0; b < B; ++b) {
-        if (b + 1 < B) stage_in(b + 1);
-        finish(cur, gs);
-        Inflight d = start_run(kd, d_step[b & 1]->args, l);
-        timing_.part0_ms += d.submit_ms;
-        if (b > 0) post_of(b - 1);
-        finish(d, ds);
+        if (!y_bytes) return;
         auto ts = std::chrono::steady_clock::now();
-        read_back(buffer(d_step[b & 1]->args[2], 0), y_bytes, 0);
+        read_back(buffer(s.args[2], 0), y_bytes, 0);
         timing_.sync_ms += ms_since(ts);
         timing_.part1_ms += ms_since(ts);
-        ds.sync += ms_since(ts);
-        if (b + 1 < B) {
-            cur = start_run(kg, g_step[(b + 1) & 1]->args, l);
-            timing_.part0_ms += cur.submit_ms;
-        }
+        st.sync += ms_since(ts);
+    };
+    auto post = [&](const std::function<void(size_t, const float*)>& p, const Step& s, size_t b, StepTiming::GemmStageMs& st) {
+        auto tq = std::chrono::steady_clock::now();
+        p(b, buffer(s.args[2], 0).map<const float*>());
+        st.post += ms_since(tq);
+    };
+    // o runs a block ahead, so block b's residual + norm + pack (needed before gate|up(b)) sit under o(b + 1), and
+    // b - 1's down residual and b + 2's o pack under gate|up(b)
+    pack(o_step[0], prep_o, 0, qw, xo_bytes, os);
+    Inflight f = launch(ko, o_step[0]);
+    if (B > 1) pack(o_step[1], prep_o, 1, qw, xo_bytes, os);
+    finish(f, os, o_step[0], yo_bytes);
+    for (size_t i = 0; i < B; ++i) {
+        const bool more = i + 1 < B;
+        if (more) f = launch(ko, o_step[(i + 1) & 1]);
+        post(post_o, o_step[i & 1], i, os);
+        pack(g_step[i & 1], prep_g, i, hid, xg_bytes, gs);
+        if (more) finish(f, os, o_step[(i + 1) & 1], yo_bytes);
+        Inflight g = launch(kg, g_step[i & 1]);
+        if (i >= 1) post(post_d, d_step[(i - 1) & 1], i - 1, ds);
+        if (i + 2 < B) pack(o_step[i & 1], prep_o, i + 2, qw, xo_bytes, os);
+        finish(g, gs, g_step[i & 1], 0);
+        Inflight d = launch(kd, d_step[i & 1]);
+        finish(d, ds, d_step[i & 1], yd_bytes);
     }
-    post_of(B - 1);
+    post(post_d, d_step[(B - 1) & 1], B - 1, ds);
 }
 
 void Core::staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres) {
