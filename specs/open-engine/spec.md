@@ -543,6 +543,9 @@ Plain decode, 128 tokens after N tokens of context (`--gemm-block` prefill; N = 
 - At 2048 a token costs 59.6 ms against 48.5 at context 0 (1.23x; the broadcast kernel's was 1.69x), 0.72x of Vulkan's
   speed there (was 0.52x). Uno gained less (OPEN-FAMILY-GRANITE-UNO, 2026-10-15): `dxl` has the windows, not the grouping.
 - Program memory: fullest core 14,128 B at KVCORES 1, 12,768 at 2.
+- Gates on the shipped set (KVCORES 2): the logit files 22 of 22 byte-identical at 70 + 20 and 2100 + 20, and on the
+  GGUF-direct route (`dx_f32`, a model dir holding only `granite-4.2-3b-Q4_1.gguf` as `model.gguf`) at 70 + 20 and 300 + 20;
+  the 10 greedy prompts identical; `--rows-check 17` ROWS PASS at 70 / 1030 / 2060.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
