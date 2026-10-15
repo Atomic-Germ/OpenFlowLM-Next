@@ -48,6 +48,7 @@
 #include <immintrin.h>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/spec_lookup.hpp"
 
 using open_qwen36::Core;
 using open_qwen36::CoreConfig;
@@ -150,6 +151,12 @@ struct Args {
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
     int rows_check = 0;             // OPEN-DECODE-ROWS: N decode steps, then the same positions as L-row passes
     int uno = 0;                    // OPEN-UNO-DECODE: N tokens by Uno's two-pass cycle, then by decode
+    int spec = 0;                   // OPEN-SPEC-LOOKUP: N tokens by the per-cycle policy, then by decode
+    int spec_probe = 0;             // N greedy tokens by draft passes, each position's Uno drafts to --spec-dump
+    std::string spec_mode = "adaptive";
+    int spec_nmax = 4, spec_nmin = 1;
+    bool spec_extend = true;
+    std::string spec_dump;
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -196,6 +203,7 @@ Args parse(int argc, char** argv) {
     a.cfg.model_dir = std::getenv("OFLM_MODEL_DIR") ? std::getenv("OFLM_MODEL_DIR") : "";
     a.cfg.kernel_dir = std::getenv("OFLM_OPEN_KERNELS_DIR") ? std::getenv("OFLM_OPEN_KERNELS_DIR") : "";
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) a.cfg.prefill_mode = pm;
+    bool no_draft = false;
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {
@@ -244,8 +252,21 @@ Args parse(int argc, char** argv) {
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
         else if (k == "--rows-check") a.rows_check = std::atoi(val().c_str());
         else if (k == "--uno") { a.uno = std::atoi(val().c_str()); a.cfg.draft = true; }
+        else if (k == "--spec") { a.spec = std::atoi(val().c_str()); a.cfg.draft = true; }
+        else if (k == "--spec-probe") { a.spec_probe = std::atoi(val().c_str()); a.cfg.draft = true; }
+        else if (k == "--spec-mode") a.spec_mode = val();
+        else if (k == "--spec-ngram") {
+            const std::string v = val();
+            const size_t c = v.find(':');
+            a.spec_nmax = std::atoi(v.substr(0, c).c_str());
+            if (c != std::string::npos) a.spec_nmin = std::atoi(v.substr(c + 1).c_str());
+        }
+        else if (k == "--spec-no-extend") a.spec_extend = false;
+        else if (k == "--spec-dump") a.spec_dump = val();
+        else if (k == "--no-draft") no_draft = true;
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
+    if (no_draft) a.cfg.draft = false;
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
@@ -389,6 +410,191 @@ int uno(Core& core, const Args& a, int n) {
     if (first == ar.size()) std::printf("UNO IDENTICAL to decode over %d tokens\n", n);
     else std::printf("UNO DIFFERS from decode at token %zu (%d vs %d)\n", first, out[first], ar[first]);
     return first == ar.size() ? 0 : 1;
+}
+
+// The prompt but its last token, whose row the first cycle steps: every side of a comparison starts from one cache.
+void prefill_but_last(Core& core, const Args& a) {
+    const size_t P = a.ids.size();
+    if (a.gemm_block && core.layer_major_ok() && P > 1)
+        core.step_gemm_prompt(std::vector<int>(a.ids.begin(), a.ids.end() - 1), false);
+    else
+        for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
+}
+
+// Plain greedy decode of n tokens with the app's pick, from a fresh prefill; ms is the decode loop's wall time.
+std::vector<int> plain_reference(Core& core, const Args& a, int n, double& ms) {
+    core.seek(0);
+    prefill_but_last(core, a);
+    core.step(a.ids.back(), true);
+    std::vector<int> ar;
+    const auto t1 = std::chrono::steady_clock::now();
+    for (int t = 0; t < n; ++t) {
+        ar.push_back(argmax_bf16(core.logits(), core.real_vocab()));
+        if (t + 1 < n) core.step(ar.back(), true);
+    }
+    ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    return ar;
+}
+
+bool spec_policy_mode(const std::string& s, open_qwen36::SpecPolicy::Mode& m) {
+    using M = open_qwen36::SpecPolicy::Mode;
+    if (s == "adaptive") m = M::adaptive;
+    else if (s == "lookup") m = M::lookup;
+    else if (s == "lookup-uno") m = M::lookup_uno;
+    else if (s == "uno") m = M::uno;
+    else if (s == "plain") m = M::plain;
+    else return false;
+    return true;
+}
+
+// OPEN-SPEC-LOOKUP: each cycle a lookup verify pass, Uno's two passes or a plain step, then the plain decode it must equal.
+int spec(Core& core, const Args& a, int n) {
+    using clock = std::chrono::steady_clock;
+    using open_qwen36::SpecMethod;
+    const size_t L = core.rows_l();
+    if (!L) { std::fprintf(stderr, "spec: this kernel set has no L-row pass\n"); return 1; }
+    open_qwen36::SpecPolicy pol;
+    if (!spec_policy_mode(a.spec_mode, pol.mode)) {
+        std::fprintf(stderr, "--spec-mode wants adaptive, lookup, lookup-uno, uno or plain, got %s\n", a.spec_mode.c_str());
+        return 2;
+    }
+    const bool uno_ok = core.has_draft();
+    const size_t P = a.ids.size(), cap = core.max_ctx();
+    std::mt19937 rng(0);
+    std::uniform_int_distribution<int> noise(1, std::max(1, static_cast<int>(core.uno_noise_bound()) - 1));
+    prefill_but_last(core, a);
+    std::vector<int> hist(a.ids), out, drafts, vr(L), av(L), dr(L), am(L);
+    int pending = a.ids[P - 1];
+    struct Tally { size_t cycles = 0, tokens = 0; double ms = 0; };
+    Tally tl[3];
+    size_t by_n[5] = {}, acc_n[5] = {}, passes[3] = {};
+    double lookup_ms = 0, pass_ms[3] = {};
+    std::string trace;
+    const auto t0 = clock::now();
+    while (out.size() < static_cast<size_t>(n)) {
+        const int p = core.position();
+        const auto tq = clock::now();
+        const int matched = open_qwen36::lookup_drafts(hist.data(), hist.size(), L - 1, a.spec_nmax, a.spec_nmin, drafts,
+                                                       a.spec_extend);
+        lookup_ms += std::chrono::duration<double, std::milli>(clock::now() - tq).count();
+        const SpecMethod m = pol.choose(matched, static_cast<size_t>(p) + L <= cap,
+                                        uno_ok && static_cast<size_t>(p) + 1 + L <= cap);
+        const auto tc = clock::now();
+        std::vector<int> got;
+        size_t k = 0;
+        double ms3[3] = {};
+        if (m == SpecMethod::plain) {
+            core.step(pending, true);
+            ms3[0] = core.last_timing().total_ms;
+            got.push_back(argmax_bf16(core.logits(), core.real_vocab()));
+        } else if (m == SpecMethod::lookup) {
+            vr[0] = pending;
+            for (size_t j = 1; j < L; ++j) vr[j] = j - 1 < drafts.size() ? drafts[j - 1] : vr[j - 1];
+            core.step_rows(vr.data(), av.data(), false, false);
+            ms3[1] = core.rows_ms();
+            while (k + 1 < L && vr[k + 1] == av[k]) ++k;    // draft k+1 checked by verify row k
+            for (size_t j = 0; j <= k; ++j) got.push_back(av[j]);
+            core.seek(p + 1 + static_cast<int>(k));
+            ++by_n[matched];
+            acc_n[matched] += k;
+        } else {
+            dr[0] = pending;
+            for (size_t j = 1; j < L; ++j) dr[j] = noise(rng);
+            core.step_rows(dr.data(), am.data(), false, true);
+            ms3[2] = core.rows_ms();
+            core.seek(p + 1);
+            core.step_rows(am.data(), av.data(), false, false);
+            ms3[1] = core.rows_ms();
+            while (k + 1 < L && am[k + 1] == av[k]) ++k;
+            for (size_t j = 0; j <= k; ++j) got.push_back(am[j]);
+            got.push_back(av[k]);
+            core.seek(p + 2 + static_cast<int>(k));
+        }
+        const double cyc = std::chrono::duration<double, std::milli>(clock::now() - tc).count();
+        Tally& t = tl[static_cast<int>(m)];
+        ++t.cycles;
+        t.tokens += got.size();
+        t.ms += cyc;
+        for (int i = 0; i < 3; ++i)
+            if (ms3[i] > 0) { pass_ms[i] += ms3[i]; ++passes[i]; }
+        pol.record(m, matched, static_cast<int>(k), ms3[0], ms3[1], ms3[2]);
+        if (!a.spec_dump.empty())
+            trace += std::string(trace.empty() ? "" : ",\n") + "[" + std::to_string(p) + ",\"" + open_qwen36::spec_method_name(m) + "\"," +
+                     std::to_string(matched) + "," + std::to_string(k) + "," + std::to_string(got.size()) + "," +
+                     std::to_string(cyc) + "]";
+        for (int tok : got) { out.push_back(tok); hist.push_back(tok); }
+        pending = got.back();
+    }
+    const double spec_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    out.resize(n);
+    size_t cycles = 0;
+    for (const Tally& t : tl) cycles += t.cycles;
+    std::fprintf(stderr, "spec: %d tokens in %zu cycles (%.2f a cycle), mode %s: %.1f ms/token (%.2f tok/s); lookup %.3f ms a cycle\n",
+                 n, cycles, static_cast<double>(n) / cycles, a.spec_mode.c_str(), spec_ms / n, 1000.0 * n / spec_ms,
+                 lookup_ms / cycles);
+    for (int i = 0; i < 3; ++i)
+        if (tl[i].cycles)
+            std::fprintf(stderr, "spec %-6s: %zu cycles, %zu tokens (%.2f a cycle), %.2f ms a cycle\n",
+                         open_qwen36::spec_method_name(static_cast<SpecMethod>(i)), tl[i].cycles, tl[i].tokens,
+                         static_cast<double>(tl[i].tokens) / tl[i].cycles, tl[i].ms / tl[i].cycles);
+    std::string bn;
+    for (int g = 1; g <= 4; ++g)
+        if (by_n[g]) bn += " n" + std::to_string(g) + " " + std::to_string(by_n[g]) + "/" + std::to_string(acc_n[g]);
+    if (!bn.empty()) std::fprintf(stderr, "spec lookup passes / drafts accepted by matched n:%s\n", bn.c_str());
+    std::fprintf(stderr, "spec pass ms: step %.2f (%zu), verify %.2f (%zu), draft %.2f (%zu)\n",
+                 passes[0] ? pass_ms[0] / passes[0] : 0.0, passes[0], passes[1] ? pass_ms[1] / passes[1] : 0.0, passes[1],
+                 passes[2] ? pass_ms[2] / passes[2] : 0.0, passes[2]);
+    for (int t : out) std::printf("token %d\n", t);
+    if (!a.spec_dump.empty()) {
+        std::ofstream f(a.spec_dump);
+        f << "{\"prompt_len\": " << P << ", \"mode\": \"" << a.spec_mode << "\", \"cycles\": [\n" << trace << "\n]}\n";
+    }
+    double ar_ms = 0;
+    const std::vector<int> ar = plain_reference(core, a, n, ar_ms);
+    size_t first = 0;
+    while (first < ar.size() && ar[first] == out[first]) ++first;
+    std::fprintf(stderr, "decode: %d tokens, %.1f ms/token (%.2f tok/s); spec is %.2fx\n", n, ar_ms / std::max(1, n - 1),
+                 1000.0 * (n - 1) / ar_ms, (ar_ms / std::max(1, n - 1)) / (spec_ms / n));
+    if (first == ar.size()) std::printf("SPEC IDENTICAL to decode over %d tokens\n", n);
+    else std::printf("SPEC DIFFERS from decode at token %zu (%d vs %d)\n", first, out[first], ar[first]);
+    return first == ar.size() ? 0 : 1;
+}
+
+// Greedy decode by draft passes: row 0 is the decode step, rows 1.. are the drafts a Uno cycle seeded there would verify.
+int spec_probe(Core& core, const Args& a, int n) {
+    const size_t L = core.rows_l();
+    if (!L) { std::fprintf(stderr, "spec-probe: this kernel set has no L-row pass\n"); return 1; }
+    if (a.spec_dump.empty()) { std::fprintf(stderr, "spec-probe needs --spec-dump <json>\n"); return 2; }
+    const bool draft = core.has_draft();
+    const size_t P = a.ids.size();
+    std::mt19937 rng(0);
+    std::uniform_int_distribution<int> noise(1, std::max(1, static_cast<int>(core.uno_noise_bound()) - 1));
+    prefill_but_last(core, a);
+    std::vector<int> seq(a.ids), dr(L), am(L);
+    std::string uno;
+    double ms = 0;
+    int done = 0;
+    for (; done < n; ++done) {
+        const int p = core.position();
+        if (static_cast<size_t>(p) + L > core.max_ctx()) break;
+        dr[0] = seq.back();
+        for (size_t j = 1; j < L; ++j) dr[j] = draft ? noise(rng) : dr[0];
+        core.step_rows(dr.data(), am.data(), false, draft);
+        ms += core.rows_ms();
+        uno += std::string(uno.empty() ? "" : ",") + "[";
+        for (size_t j = 1; j < L; ++j) uno += std::to_string(am[j]) + (j + 1 < L ? "," : "");
+        uno += "]";
+        seq.push_back(am[0]);
+        core.seek(p + 1);
+    }
+    std::ofstream f(a.spec_dump);
+    const double per = done ? ms / done : 0.0;
+    f << "{\"prompt_len\": " << P << ", \"draft\": " << (draft ? "true" : "false") << ", \"pass_ms\": " << per
+      << ", \"ids\": [";
+    for (size_t i = 0; i < seq.size(); ++i) f << (i ? "," : "") << seq[i];
+    f << "], \"uno\": [" << uno << "]}\n";
+    std::fprintf(stderr, "spec-probe: %zu tokens after %zu, %.2f ms a pass -> %s\n", seq.size() - P, P, per, a.spec_dump.c_str());
+    return 0;
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -622,6 +828,8 @@ int main(int argc, char** argv) {
         }
         if (a.rows_check) return rows_check(core, a, a.rows_check) ? 1 : 0;
         if (a.uno) return uno(core, a, a.uno);
+        if (a.spec) return spec(core, a, a.spec);
+        if (a.spec_probe) return spec_probe(core, a, a.spec_probe);
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;
