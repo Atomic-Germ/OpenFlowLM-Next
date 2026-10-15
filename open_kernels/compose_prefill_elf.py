@@ -32,8 +32,8 @@ ELF = "prefill.elf"
 META = "prefill_elf.json"
 
 
-def streams_of(man: dict) -> dict[str, list[str]]:
-    out = {c: [] for c in SET_CONTEXTS}
+def streams_of(man: dict, contexts=SET_CONTEXTS) -> dict[str, list[str]]:
+    out = {c: [] for c in contexts}
     for name, k in man["kernels"].items():
         if k["context"] in out:
             out[k["context"]].append(name)
@@ -51,10 +51,11 @@ def arg_bytes(prj: Path) -> list[int]:
     return out
 
 
-def build_elf(kdir: Path, designs: Path = DESIGNS, jobs: int = 4, log=print) -> Path:
+def build_elf(kdir: Path, designs: Path = DESIGNS, jobs: int = 4, log=print, contexts=SET_CONTEXTS, elf=ELF,
+              meta_name=META) -> Path:
     t0 = time.time()
     man = json.loads((kdir / "manifest.json").read_text(encoding="utf-8"))
-    streams = streams_of(man)
+    streams = streams_of(man, contexts)
     prjs = {}
     for s, ns in streams.items():
         for n in ns:
@@ -121,17 +122,17 @@ def build_elf(kdir: Path, designs: Path = DESIGNS, jobs: int = 4, log=print) -> 
                             "instance": inst})
     cfg_json = work / "full_elf_config_prefill.json"
     cfg_json.write_text(json.dumps({"xrt-kernels": out_kernels}, indent=2))
-    tmp = kdir / (ELF + ".tmp")
+    tmp = kdir / (elf + ".tmp")
     r = subprocess.run(["aiebu-asm", "-t", "aie2_config", "-j", str(cfg_json), "-o", str(tmp)],
                        capture_output=True, text=True)
     if r.returncode or not tmp.is_file():
         raise SystemExit(f"aiebu-asm failed:\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
-    tmp.replace(kdir / ELF)
-    meta = {"elf": ELF, "sets": sets, "streams": streams, "nargs": nargs, "arg_bytes": sizes,
+    tmp.replace(kdir / elf)
+    meta = {"elf": elf, "sets": sets, "streams": streams, "nargs": nargs, "arg_bytes": sizes,
             "cfg": {s: [f"main:cfg_{s}_a", f"main:cfg_{s}_b"] for s in sets}}
-    (kdir / META).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    log(f"  {ELF} {(kdir / ELF).stat().st_size / 2**20:.2f} MiB, done in {time.time() - t0:.0f} s")
-    return kdir / META
+    (kdir / meta_name).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    log(f"  {elf} {(kdir / elf).stat().st_size / 2**20:.2f} MiB, done in {time.time() - t0:.0f} s")
+    return kdir / meta_name
 
 
 def main() -> int:
@@ -139,8 +140,12 @@ def main() -> int:
     ap.add_argument("--kernels", required=True)
     ap.add_argument("--designs", default=str(DESIGNS))
     ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--contexts", default=",".join(SET_CONTEXTS), help="manifest contexts to assemble, comma separated")
+    ap.add_argument("--elf", default=ELF)
+    ap.add_argument("--meta", default=META)
     a = ap.parse_args()
-    build_elf(Path(a.kernels).resolve(), Path(a.designs).resolve(), a.jobs)
+    build_elf(Path(a.kernels).resolve(), Path(a.designs).resolve(), a.jobs, contexts=tuple(a.contexts.split(",")),
+              elf=a.elf, meta_name=a.meta)
     return 0
 
 

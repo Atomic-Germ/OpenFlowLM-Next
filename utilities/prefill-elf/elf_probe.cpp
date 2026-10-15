@@ -49,7 +49,7 @@ int main(int argc, char** argv) try {
     fs::path kdir = argv[1];
     int reps = 9;
     unsigned prio = 0x180, xprio = 0;
-    std::string tier = "af512", mode = "all";
+    std::string tier = "af512", mode = "all", meta_name = "prefill_elf.json";
     int layers = 40;
     for (int i = 2; i + 1 < argc; i += 2) {
         std::string a = argv[i];
@@ -57,11 +57,12 @@ int main(int argc, char** argv) try {
         else if (a == "--prio") prio = static_cast<unsigned>(std::strtoul(argv[i + 1], nullptr, 0));
         else if (a == "--xprio") xprio = static_cast<unsigned>(std::strtoul(argv[i + 1], nullptr, 0));
         else if (a == "--tier") tier = argv[i + 1];
+        else if (a == "--meta") meta_name = argv[i + 1];
         else if (a == "--mode") mode = argv[i + 1];
         else if (a == "--layers") layers = std::atoi(argv[i + 1]);
     }
     json man = json::parse(read_file(kdir / "manifest.json"));
-    json meta = json::parse(read_file(kdir / "prefill_elf.json"));
+    json meta = json::parse(read_file(kdir / meta_name));
     xrt::device dev(0);
 
     // ---- buffers: per set, per argument index, the largest any stream of the set needs
@@ -228,6 +229,38 @@ int main(int argc, char** argv) try {
         long n = 0;
         while (clk::now() < end) { x_waited(ga); n += static_cast<long>(ga.size()); }
         std::printf("hammer: %ld ops in %d s\n", n, reps);
+        return 0;
+    }
+    if (mode == "third") {
+        // configure cost of every set in the ELF, alone and in a GEMM / other / GEMM / attention cycle
+        std::vector<std::string> sets;
+        for (auto& s : meta.at("sets")) sets.push_back(s.get<std::string>());
+        auto timed = [&](const std::vector<std::string>& seq, bool queued) {
+            std::vector<xrt::run> rs;
+            auto t = clk::now();
+            for (auto& s : seq) {
+                rs.push_back(cfg_run(s));
+                rs.back().start();
+                if (!queued) rs.back().wait();
+            }
+            for (auto& r : rs) r.wait();
+            return ms(t, clk::now()) / seq.size();
+        };
+        auto show = [&](const std::string& what, const std::vector<std::string>& seq) {
+            for (bool q : {true, false}) {
+                std::vector<double> v;
+                timed(seq, q);
+                for (int i = 0; i < reps; ++i) v.push_back(timed(seq, q));
+                std::printf("  %-34s %s per cfg %7.3f ms (min %.3f)\n", what.c_str(), q ? "queued" : "waited", med(v),
+                            *std::min_element(v.begin(), v.end()));
+            }
+            std::fflush(stdout);
+        };
+        for (auto& s : sets) show("cfg " + s + " repeated", std::vector<std::string>(20, s));
+        std::vector<std::string> cyc;
+        for (int i = 0; i < 5; ++i)
+            for (auto& s : sets) if (s != G) { cyc.push_back(G); cyc.push_back(s); }
+        show("cycle G,x,G,y,... over all sets", cyc);
         return 0;
     }
     if (mode == "all" || mode == "switch") {

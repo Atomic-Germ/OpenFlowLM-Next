@@ -115,6 +115,7 @@ struct StepTiming {
     double moe_run_ms = 0;    ///< the mx dispatch itself
     double moe_read_ms = 0;   ///< xres back
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
+    double idle_ms = 0;       ///< host time between a dispatch returning and the next one starting (the NPU's idle, as the host sees it)
     double prep_ms = 0;       ///< OPEN-PREFILL-GLUE-PREP: the prep dispatches (rope, Q pack, cache write), host-blocked time
     double rope_ms = 0, qpack_ms = 0, qsync_ms = 0;   ///< the host path's rope + cache write, Q pack, and the Q / cache syncs (of mid)
     double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
@@ -401,7 +402,7 @@ private:
     size_t af_blocks_ = 0;       ///< af_q#b / af_o#b buffers allocated: one Q and one O a 256-token block
     bool attn_prep_on_ = false;  ///< attn_fa prep stream does the bfp16 route rope / Q pack / cache write (OFLM_OPEN_PREFILL_PREP=1 on; slower today)
     bool prep_run_ = false;      ///< this prompt runs it (prep_setup)
-    bool phase_overlap_ = false; ///< the next phase's first GEMM starts before the last block's host post (OFLM_OPEN_PREFILL_OVERLAP=1)
+    int phase_overlap_ = 0;      ///< 1: the next phase's first GEMM starts before the last block's host post; 2: also o behind attention (OFLM_OPEN_PREFILL_OVERLAP)
     size_t prep_pos0_ = 0;       ///< its first position
     std::map<std::tuple<int, size_t, size_t>, xrt::bo> kv_sub_;   ///< (layer, block, pos0) -> the cache rows the block writes
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)

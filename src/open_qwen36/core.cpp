@@ -325,7 +325,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     std::map<std::string, bool> wanted;
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_FA")) attn_fa_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_PREFILL_PREP")) attn_prep_on_ = std::string(env) == "1";
-    if (const char* env = std::getenv("OFLM_OPEN_PREFILL_OVERLAP")) phase_overlap_ = std::string(env) == "1";
+    if (const char* env = std::getenv("OFLM_OPEN_PREFILL_OVERLAP")) phase_overlap_ = std::atoi(env);
     for (int l = 0; l < nl_; ++l) {
         for (const auto& s : types_[l]->program) wanted[s.kernel] = true;
         // an A/B arm with the host attention does not register the attention context at all
@@ -954,6 +954,7 @@ Core::Inflight Core::start_run(Kern& k, const std::vector<std::string>& args, in
     f.gap_ms = last_done_.time_since_epoch().count()
                    ? std::chrono::duration<double, std::milli>(f.t0 - last_done_).count()
                    : -1.0;
+    if (f.gap_ms > 0) timing_.idle_ms += f.gap_ms;
     f.ctx_change = last_dispatched_ && last_dispatched_->ctx != k.ctx;
     // a register-write set is configured again whenever the dispatch before it was not in that set
     const bool need_cfg = k.ek && !(last_dispatched_ && last_dispatched_->ek && last_dispatched_->elf_set == k.elf_set);
@@ -3478,6 +3479,11 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
         timing_.state_ms += ms_since(ts);
     }
     timing_.attn_ms += timing_.mid_ms - mid0;
+    // OPEN-PREFILL-PHASE-OVERLAP: o's last post, and down's, run under the next GEMM instead of in front of it
+    Inflight glu_first, o_first;
+    const bool overlap = phase_overlap_ && B >= 2 && gb.program.size() == 4 && gb.program[2].fmt == "bfp16";
+    // in the shared ELF context o's first block queues behind the last attention pass, so its pack hides under that pass
+    const bool o_ahead = overlap && phase_overlap_ >= 2 && prep && elf_ctx_ && gb.program[1].fmt == "bfp16";
     if (npu_attn) {
         // every block's attention in one visit to the af context: one switch in, one back out
         // prep and attention of a block are queued back to back, and the next block's before this one's read-back
@@ -3515,12 +3521,10 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
             read_back(*af_o[b], T * qw * 4, 0);
             timing_.sync_ms += ms_since(tr);
             timing_.part1_ms += ms_since(tr);
+            if (o_ahead && b + 2 == B) o_first = begin_bfp16(l, gb.program[1], T, qw, af_o[0]->map<const float*>(), nullptr);
         }
     }
 
-    // OPEN-PREFILL-PHASE-OVERLAP: o's last post, and down's, run under the next GEMM instead of in front of it
-    Inflight glu_first;
-    const bool overlap = phase_overlap_ && B >= 2 && gb.program.size() == 4 && gb.program[2].fmt == "bfp16";
     std::function<void()> o_hook, d_hook;
     if (overlap) o_hook = [&] { glu_first = begin_bfp16(l, gb.program[2], T, hid, xm_all, nullptr); };
     if (overlap && fuse_next && types_[l + 1] == types_[l])
@@ -3552,7 +3556,7 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
                        rmsnorm_rows_d(r1, T, hid, post_ln_w_bf16_[l].data(), gb.eps, gb.norm_groups, xm_all + b * T * hid);
                    timing_.part1_ms += ms_since(t1);
                    timing_.tail_ms += ms_since(t1);
-               }, 1, raw_o, o_hook);
+               }, 1, raw_o, o_hook, nullptr, &o_first);
     if (gb.program.size() == 4) {
         // OPEN-PREFILL-BFP16-FFN: down's residual pass also norms the next layer's input (fuse)
         glu_phase(l, gb.program[2], gb.program[3], B, T, hid,
