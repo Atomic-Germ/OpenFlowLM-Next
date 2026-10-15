@@ -156,20 +156,19 @@ context (a whole-file bug fix 3.1x, 43.6 tok/s; an edit 1.8x; quoting / document
 reasoning text; Uno pays on math / code and loses on chat; the adaptive choice is the best geomean at short context and
 2048 and within ~3% elsewhere, but up to 9% behind the best single method on a given prompt. The pass cost is the
 lever: a verify pass is 1.33 / 1.26 / 1.24 plain steps at context 0 / 1024 / 2048 and the draft pass 1.56 / 1.44 /
-1.37. Offline, a verify pass
-at 1.10 steps would lift adaptive on reasoning text from ~1.15x to ~1.30x (estimate); 2 or 8 rows would not (8 helps
-only whole-file rewrites).
+1.37. Offline, a verify pass at 1.10 steps would lift adaptive on reasoning text from ~1.15x to ~1.30x (estimate); 2 or
+8 rows would not (8 helps only whole-file rewrites).
 
 Traps:
 - In a worktree-isolated agent, `cmd.exe /c` and `powershell -File` are refused (they could run git). Run a `.cmd`
   wrapper directly (`./.claude/build_cli.cmd`) and keep it in the gitignored `.claude/`.
-- dibs does not keep your own session's `dibs run npu` out of your own `--measure` unit. An untimed probe of mine ran
-  inside two of my measured units, which still read CLEAN while plain decode fell from 12-14 to 4-10 tok/s. Start no
-  NPU work while your own matrix runs, and check every unit's plain-decode figure against the previous rep's
-  (`table` sets aside a run whose plain decode is 5% under the prompt's median). Stage a CLI copy as
+- dibs treats the subagents of one session as one holder. While a `--measure` unit of mine held the machine, a sibling
+  track's `dibs run npu` held the npu at the same time (`dibs status` showed both), and an untimed probe of my own got
+  in the same way; those units still read CLEAN while plain decode fell to a third. Start no NPU work while your own
+  matrix runs; give `matrix --expect <json of plain tok/s>` so a unit 5% slow is rerun like a NOISY one, and read the
+  table, which sets aside a run whose plain decode or pass time is 5% off the prompt's median. Stage a CLI copy as
   `<dir>/open_qwen36_cli.exe`, not `cli_v4.exe`: dibs's NOISY verdicts named `open_qwen36_cli.exe` processes and
-  missed the renamed copy that hit mine. One more unit read CLEAN with plain decode at a third of its usual speed and
-  no cause found (a GPU job sharing the memory bus is a suspect): the filter is why the table can be trusted.
+  missed a renamed copy.
 - `presence_penalty 1e-6` (the old served "decode plainly" trick) is not plain greedy at an exact bf16 tie: the penalty
   breaks the tie. Serve a second time with `OFLM_SPECULATIVE` unset for the reference instead.
 - The app's AVX2 greedy scan kept the lower *lane* on a tie, not the lower id (fixed with OPEN-SPEC-LOOKUP); a served
