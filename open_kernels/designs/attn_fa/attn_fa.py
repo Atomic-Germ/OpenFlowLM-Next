@@ -299,9 +299,11 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
                 for cc in range(GROUP_COLS):
                     col = g * GROUP_COLS + cc
                     # the column's 4 cores, hi then lo each (2048 bf16), at their slots of the pass's Q regions
-                    drains.append(lambda tg, col=col, h=h, cc=cc: o_conses[col].drain(
-                        q, offset=h * qh_elems + ELEM + cc * N_ROWS * (TQ * HD), sizes=[N_ROWS, 2, TQ * HD],
-                        strides=[TQ * HD, ELEM * Q_ELEMS, 1], wait=True, group=tg))
+                    # a drain a core: a fourth size would be read as the repeat count
+                    for r in range(N_ROWS):
+                        drains.append(lambda tg, col=col, h=h, cc=cc, r=r: o_conses[col].drain(
+                            q, offset=h * qh_elems + ELEM + (cc * N_ROWS + r) * (TQ * HD), sizes=[2, TQ * HD],
+                            strides=[ELEM * Q_ELEMS, 1], wait=True, group=tg))
             pass_group(fills, drains, first=k == 0)
         for j in range(PREP_KV_PER_GROUP):
             fills, drains = [], []
@@ -314,9 +316,10 @@ def attn_fa(Q: In, KV: In, O: Out, TB: In, *, L: CompileTime[int], heads: Compil
                     strides=[2 * 128, 1], group=tg))
                 for cc in range(GROUP_COLS):
                     col = g * GROUP_COLS + cc
-                    drains.append(lambda tg, col=col, kvh=kvh, cc=cc: o_conses[col].drain(
-                        kv, offset=kvh * HD + cc * N_ROWS * TQ * kv_ld, sizes=[N_ROWS, 2, TQ, HD],
-                        strides=[TQ * kv_ld, kv_heads * HD, kv_ld, 1], wait=True, group=tg))
+                    for r in range(N_ROWS):
+                        drains.append(lambda tg, col=col, kvh=kvh, cc=cc, r=r: o_conses[col].drain(
+                            kv, offset=kvh * HD + (cc * N_ROWS + r) * TQ * kv_ld, sizes=[2, TQ, HD],
+                            strides=[kv_heads * HD, kv_ld, 1], wait=True, group=tg))
             pass_group(fills, drains)
         for tg in inflight:
             tg.finish()
