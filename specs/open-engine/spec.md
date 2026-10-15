@@ -342,9 +342,10 @@ arithmetic add. The score loop ran 8 times a block, a trip count the bundle coun
 `h / 5` each time; the tree removes both.
 
 **Measured (2026-10-15, Granite 4.2 3B -- OPEN-ATTN-KVSLICE):** per-core windows (the stream off the critical path) and
-attention cores by kv head (16 cores, each kv head's 5 heads as 3 + 2) take a step at 2048 from 79.0 to 58.3 ms against
-46.3 / 47.3 at 0 (`--bench-step`, CLEAN, one sitting): 1.23x of position 0, and the growth per layer per position from
-0.399 to 0.134 us (0.182 at 8 cores of 5 heads). Bit-identical throughout; the tok/s table is in OPEN-ATTN-KVSLICE.
+attention cores by kv head (16 cores, each kv head's 5 heads as 3 + 2) take a step at 2048 from 79.2 to 57.9 ms against
+46.1 / 46.9 at 0 (`--bench-step`, CLEAN with a control, one sitting): 1.23x of position 0, and the growth per layer per
+position from 0.404 to 0.134 us (0.177 at 8 cores of 5 heads). Plain decode at 2048 goes from 12.21 to 16.78 tok/s, context
+0 stays at 20.6. Bit-identical throughout; the tables are in OPEN-ATTN-KVSLICE.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
@@ -505,26 +506,42 @@ of one kv head share every K and V row they load, and give logits byte-identical
 
 **Procedure (manual):** build `dx` (and `dxl`, `dxl_lora`) with the knob set and unset (`export_qwen36_kernels.py --only dx
 --out <copy of the union set>`, ~2 min), run the criteria against each, and profile with `OFLM_OPEN_STEP_TRACE=1 open_qwen36_cli
---ids 100264 --at-position P --bench-decode 5 --bench-step 20` at P = 0, 1024, 2048 under `dibs run --measure`.
+--ids 100264 --at-position P --bench-decode 5 --bench-step 20` at P = 0, 1024, 2048 under `dibs run --measure`, each unit
+inside `utilities/granite-combined-bench/controlled.py` (a context-0 control decode before and after, within 5 % of its
+calibration, and no other process's NPU submissions while it runs).
 
-**Result 2026-10-15** (`dibs run --measure` CLEAN, pipelined step wall min / one `dx` dispatch min; the broadcast and KVCORES
-columns are one sitting, `kvslice` alone an earlier one, whose broadcast row read 46.3 / 63.1 / 79.7):
+**Result 2026-10-15** (one binary; broadcast = the decode-depth kernels; every unit `dibs run --measure` CLEAN inside
+`utilities/granite-combined-bench/controlled.py`: the 32-token context-0 control on the broadcast set within 2.4 % of its
+21.20 tok/s calibration before and after each unit, no other process's NPU submissions, the decode reps within 1 %).
+
+`--bench-step 20`, pipelined step wall min / one `dx` dispatch min, the four sets in one unit:
 
 | position | broadcast (decode-depth) | `kvslice`, 5 cores x 8 | KVCORES 1 (8 x 5) | KVCORES 2 (16, 3 + 2) |
 |---|---|---|---|---|
-| 0 | 46.3 ms / 1.091 | 46.5 / 1.102 | 46.6 / 1.098 | 47.3 / 1.096 |
-| 1024 | 63.0 / 1.510 | 57.7 / 1.381 | 54.1 / 1.277 | 52.6 / 1.227 |
-| 2048 | 79.0 / 1.915 | 69.0 / 1.649 | 61.5 / 1.467 | 58.3 / 1.366 |
-| growth a layer a position | 0.399 us | 0.275 | 0.182 | 0.134 |
+| 0 | 46.1 ms / 1.083 | 46.3 / 1.091 | 46.4 / 1.086 | 46.9 / 1.090 |
+| 1024 | 63.2 / 1.526 | 57.3 / 1.367 | 53.6 / 1.265 | 52.3 / 1.226 |
+| 2048 | 79.2 / 1.910 | 68.7 / 1.656 | 60.9 / 1.460 | 57.9 / 1.363 |
+| growth a layer a position | 0.404 us | 0.273 | 0.177 | 0.134 |
+
+Plain decode, 128 tokens after N tokens of context (`--gemm-block` prefill; N = 0 is one prompt token), 3 runs, min / median tok/s:
+
+| context | broadcast | KVCORES 2 (default) | change (median) | KVCORES 1 | llama.cpp Vulkan on the 890M (not re-measured) |
+|---|---|---|---|---|---|
+| 0 | 20.64 / 20.66 | 20.62 / 20.63 | -0.1 % | 20.70 / 20.72 | 24.2 |
+| 512 | 17.48 / 17.56 | 19.30 / 19.30 | +9.9 % | - | not recorded |
+| 1024 | 15.37 / 15.38 | 18.32 / 18.46 | +20.0 % | - | 23.1 |
+| 2048 | 12.20 / 12.21 | 16.76 / 16.78 | +37.4 % | 15.84 / 15.86 | 23.3 |
 
 - The windows alone took the 0.28 ms a layer the stream cost at 2048 (`ATTN_NULL`, OPEN-ATTN-SCORE-TREE); the rest is the
   arithmetic, which the kv-head grouping cuts: a block of 4 rows is ~1,460 Peano bundles at 8 heads (TREE8), ~1,150 at 5 (257
   of them the exponential), ~890 at 3 and ~770 at 2.
 - **KVCORES 2 is Granite's default.** Its context reloads 8 more core programs at every switch to and from `ln` / `lm`: the
-  first `dx` of a step costs 3.16 ms against 2.22 (broadcast) and 2.48 (KVCORES 1), ~1 ms of `--bench-step` wall at every
-  depth. In the 128-token decode that leaves context 0 where the broadcast kernel was (the tok/s table below) and gives up
-  what KVCORES 1 gains there (~0.6 %); from 512 tokens on KVCORES 2 is the faster one. With `dx` alone in its context the
-  reload would go and it would win everywhere.
+  first `dx` after a switch costs 3.23 ms at position 0 against 2.44 (broadcast) and 2.72 (KVCORES 1), ~0.8 ms of
+  `--bench-step` wall at every depth. In the 128-token decode context 0 stays where the broadcast kernel was (-0.1 %;
+  KVCORES 1 +0.3 %, both inside the drift between sittings); from 512 tokens on KVCORES 2 is the faster one (+5.8 % over
+  KVCORES 1 at 2048). With `dx` alone in its context the reload would go.
+- At 2048 a token costs 59.6 ms against 48.5 at context 0 (1.23x; the broadcast kernel's was 1.69x), 0.72x of Vulkan's
+  speed there (was 0.52x). Uno gained less (OPEN-FAMILY-GRANITE-UNO, 2026-10-15): `dxl` has the windows, not the grouping.
 - Program memory: fullest core 14,128 B at KVCORES 1, 12,768 at 2.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
@@ -1727,6 +1744,27 @@ an outlier among five figures at 20.6-20.8; that run's 1.08x is not quoted.)
 - The slope is not gone. At 2048 plain decode is still ~1.9x slower than Vulkan: 78.7 ms a step against 45.8 at context 0 (81 / 48 ms a
   token at 12.35 / 20.84 tok/s); what remains is the window stream (0.28 ms a layer at 2048) plus the arithmetic, 0.59 ms a pass with the
   tree before the conditional exponential (`ATTN_REPEAT` 3 against 1, OPEN-ATTN-SCORE-TREE).
+
+**Result 2026-10-15, attention by kv head (`perf/granite-attn-kvslice`, OPEN-ATTN-KVSLICE: `dx` at KVCORES 2, `dxl` / `dxl_lora`
+with the per-core windows; one binary; before = the decode-depth kernels; every unit `dibs run --measure` CLEAN inside
+`utilities/granite-combined-bench/controlled.py`, the context-0 control within 2.4 % of its calibration before and after each):**
+
+| context | prompt | tokens a cycle | Uno before -> after | plain before -> after | speedup before -> after |
+|---|---|---|---|---|---|
+| 1024 | chat | 2.67 | 15.14 -> 16.19 | 15.44 -> 18.56 | 0.98x -> 0.87x |
+| 1024 | code | 3.20 | 18.15 -> 19.45 | 15.48 -> 18.50 | 1.17x -> 1.05x |
+| 2048 | chat | 2.78 | 13.05 -> 14.59 | 12.25 -> 16.88 | 1.06x -> 0.86x |
+| 2048 | code | 3.12 | 14.67 -> 16.46 | 12.27 -> 16.84 | 1.20x -> 0.98x |
+
+Six prompts x 128 tokens at short context (`uno_bench.py`), before -> after: 3.04 tokens a cycle both ways, every prompt identical
+to decode; Uno 17.16 -> 17.25 (chat), 18.64 -> 18.65, 22.73 -> 22.85, 22.72 -> 22.75, 26.72 -> 26.83, 24.49 -> 24.66 tok/s; plain
+decode 20.59 / 20.66 / 20.44 / 20.48 / 20.52 / 20.58 -> 20.73 / 20.58 / 20.76 / 20.66 / 20.66 / 20.53; geometric-mean speedup 1.06x both ways.
+
+- Every run identical to plain decode; `--rows-check 17` prints `ROWS PASS` at 70, 1030 and 2060 tokens.
+- Uno is faster at depth (+7 % at 1024, +12 % at 2048) but plain decode gained more (+20 %, +37 %): `dxl` took the per-core
+  windows only. Its 4 row groups x 5 attention cores use rows 3-5, so 8 cores of 5 heads a group (32 cores) do not fit, and
+  Uno now trails plain decode at depth on chat (0.86-0.87x) and breaks even on code (0.98-1.05x). The greedy-only policy
+  above still sends a long-context greedy request to Uno; whether it should switch to plain decode past ~1024 tokens is open.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,

@@ -128,7 +128,10 @@ then reads DIFFERS at token 27).
 
 Measuring: `utilities/granite-combined-bench/matrix.py` runs prefill / decode / Uno-at-depth / the six-prompt sweep as small units, each
 under `dibs run --measure`, rerunning a NOISY unit. A stray CPU-bound process (an orphaned `find`, a browser tab) makes every unit
-NOISY; read which process `dibs` names before retrying.
+NOISY; read which process `dibs` names before retrying. When other agents share the box, wrap each unit's command in
+`utilities/granite-combined-bench/controlled.py` (a 32-token context-0 decode on the base set before and after, calibrated once
+without a command, plus an `xrt-smi` watch for other processes' NPU submissions) and rerun the unit when it prints `UNIT OFF`:
+`dibs` counts every agent of one Claude session as one holder, so a sibling's `dibs run npu` can run inside your CLEAN unit.
 
 ## Result — 2026-09-06, mlir-aie 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301
 
@@ -258,10 +261,22 @@ Traps met on the way:
 - **Do not name a helper script `profile.py`**: `transformers` imports `cProfile`, which imports `profile`, and Python finds
   the script in the caller's directory first.
 - **An Edit of attn.h fails while a build reads it** (EPERM on the rename): wait for the build's compile phase.
+- **`dibs run --measure` does not wait for your own session's `npu` / `build` runs** (nor a sibling agent's in the same
+  session). A decode unit that overlapped this session's own `--rows-check` gate read 6.8 tok/s at context 0 and still said
+  CLEAN. Put gates and measured units in one serial queue, run NPU gates under `--measure` too, and use `controlled.py`.
 
 What the arithmetic costs now (Peano bundles a 4-row block, `utilities/dxl-asm/attn_tu_check.py` + `bb_bundles.py`): 8 heads
 (TREE8) ~1,460; 5 heads (G5) ~1,150 with 257 of them the 32-lane exponential; 3 heads ~890; 2 heads ~770. The exponential is
 latency-bound (a 64-lane one is 292), so it does not shrink with the head count.
+
+Measured 2026-10-15 (every unit `dibs run --measure` CLEAN inside `controlled.py`; OPEN-ATTN-KVSLICE has the tables):
+- `--bench-step` growth a layer a position 0.404 us (broadcast) -> 0.273 (windows) -> 0.177 (KVCORES 1) -> 0.134 (KVCORES 2);
+  a step at 2048 79.2 -> 57.9 ms against 46.1 / 46.9 at 0. KVCORES 2's bigger context costs ~0.8 ms a step at every depth
+  (the first `dx` after a switch 3.23 ms against 2.44 broadcast, 2.72 KVCORES 1).
+- tg128 at 0 / 512 / 1024 / 2048: 20.66 / 17.56 / 15.38 / 12.21 -> 20.63 / 19.30 / 18.46 / 16.78 tok/s (medians); KVCORES 1
+  reads 20.72 at 0 and 15.86 at 2048.
+- Uno at depth gained 7-12 % but plain decode gained more, so Uno now trails it on chat (0.86x at 2048) and breaks even on
+  code (0.98x): `dxl` has the windows only, and its 4 groups x 5 attention cores leave no tiles for 8 cores of 5 heads a group.
 
 ## Rules
 

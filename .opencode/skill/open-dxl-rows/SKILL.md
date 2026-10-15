@@ -121,7 +121,9 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
 
   Use `dibs run npu --label "<what>" --eta <t> -- <cmd>` for correctness runs. `--measure` waits until no other
   declared work runs and the CPU is quiet, and prints `dibs: CLEAN` before and `CLEAN after` (or `NOISY after`:
-  rerun, never quote it).
+  rerun, never quote it). dibs counts every agent of one Claude session as one holder, so with sibling agents on the
+  box run correctness runs under `--measure` too and wrap timed units in `utilities/granite-combined-bench/controlled.py`
+  (a context-0 control decode before and after, plus an `xrt-smi` watch for other processes' NPU work).
 - **Measured 2026-10-08/09 (K2-7B, L = 4):**
   - A verify pass costs 1.39x a decode step at short context (quiet; the 1.17-1.28x first noted
     came from a busy machine). The draft pass ~1.7x.
