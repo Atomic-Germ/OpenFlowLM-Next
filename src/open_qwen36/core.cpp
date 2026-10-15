@@ -3449,16 +3449,28 @@ void Core::layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t
     timing_.attn_ms += timing_.mid_ms - mid0;
     if (npu_attn) {
         // every block's attention in one visit to the af context: one switch in, one back out
+        // prep and attention of a block are queued back to back, and the next block's before this one's read-back
+        auto launch = [&](size_t b) {
+            Inflight p = start_run(kerns_.at(fa.prep_kernel),
+                                   {"af_q#" + std::to_string(b), "afkv#" + std::to_string(b), y_names[b],
+                                    "af_tbl#" + std::to_string(b)}, l);
+            Inflight a = start_run(kerns_.at(fa.kernels.at(af_window(b))), af_args(b), l);
+            timing_.part0_ms += p.submit_ms + a.submit_ms;
+            timing_.prep_ms += p.submit_ms;
+            timing_.attn_ms += a.submit_ms;
+            return std::make_pair(std::move(p), std::move(a));
+        };
+        std::pair<Inflight, Inflight> cur;
+        if (prep) cur = launch(0);
         for (size_t b = 0; b < B; ++b) {
             double ms = 0;
             if (prep) {
-                const double pm = run(kerns_.at(fa.prep_kernel),
-                                      {"af_q#" + std::to_string(b), "afkv#" + std::to_string(b), y_names[b],
-                                       "af_tbl#" + std::to_string(b)}, l);
+                const double pm = wait_run(cur.first).second;
+                ms = wait_run(cur.second).second;
                 timing_.part0_ms += pm;
                 timing_.prep_ms += pm;
-            }
-            if (b == 0 && af_early.k) {
+                if (b + 1 < B) cur = launch(b + 1);
+            } else if (b == 0 && af_early.k) {
                 const double submit = af_early.submit_ms;
                 const auto [elapsed, blocked] = wait_run(af_early);
                 ms = blocked;
