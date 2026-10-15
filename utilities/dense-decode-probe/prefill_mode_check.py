@@ -38,8 +38,11 @@ def run(cli: Path, model: Path, kernels: Path, ids: list[int], arm: str, prefix:
     env.pop("OFLM_OPEN_ATTN_FA", None)
     if mode != "fast":
         env["OFLM_OPEN_PREFILL_MODE"] = mode
+    env.pop("OFLM_OPEN_PREFILL_PREP", None)
     if attn == "host":
         env["OFLM_OPEN_ATTN_FA"] = "0"
+    if attn == "prep":      # NPU attention with the rope / Q pack / cache write on the NPU too (OPEN-PREFILL-GLUE-PREP)
+        env["OFLM_OPEN_PREFILL_PREP"] = "1"
     cmd = [str(cli), "--model", str(model), "--kernels", str(kernels), "--ids", ",".join(map(str, ids)),
            "--max-tokens", str(max_tokens), "--gemm-block"]
     if prefix:
