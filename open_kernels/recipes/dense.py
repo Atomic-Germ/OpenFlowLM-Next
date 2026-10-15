@@ -249,7 +249,8 @@ def per_call(spec: ModelSpec) -> int:
 # MoE / Qwen3.5 recipe, which compiles the same attn.h); re-exported here because the
 # dense recipe is where they were first exposed and where cache.py and the tests look.
 from .attnknobs import (PROBE_VARS, RB_SUPPORTED, FAST_ATTENTION, MAX_ATTN_CORES,  # noqa: E402,F401
-                        probe_env, fast_attention, attn_cores, knobs as attn_knobs, kvslice as attn_kvslice)
+                        probe_env, fast_attention, attn_cores, knobs as attn_knobs, kvslice as attn_kvslice,
+                        dxl_kvslice)
 
 
 def geometry(spec: ModelSpec) -> DenseGeometry:
@@ -757,12 +758,14 @@ def rows_route(spec: ModelSpec) -> dict | None:
         return None
     n_head = 8
     bd = f"dxl/build_{spec.family}_h{spec.hidden}_l{ROWS_L}"
+    G = geometry(spec)
+    ks = {"kvslice": k} if (k := dxl_kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW)) else {}
     # dxl_lora is the draft pass's stream for the same core programs: it runs in dxl's context
     return {
         "contexts": {"dxl": "dxl/final.xclbin", "lmhl": "lmhl/final.xclbin"},
-        "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl"},
+        "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl", **ks},
                     "dxl_lora": {"context": "dxl", "insts": "dxl_lora/insts.bin", "patch": "attnrows",
-                                 "build": "dxl_lora"},
+                                 "build": "dxl_lora", **ks},
                     "lmhl": {"context": "lmhl", "insts": "lmhl/insts.bin", "build": "lmhl"}},
         "rows": {"l": ROWS_L, "kernel": "dxl", "head": "lmhl", "act_bytes": X.AD_BYTES,
                  "head_act_bytes": head_act_bytes(spec, ROWS_L), "head_cores": n_head,

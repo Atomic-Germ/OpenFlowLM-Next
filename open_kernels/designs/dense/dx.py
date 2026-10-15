@@ -164,22 +164,29 @@ for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see 
     if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8", "ATTN_KVSLICE"):   # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
-# KVSLICE (OPEN-ATTN-KVSLICE): each attention core streams only its kv heads of the cached rows, a block of RB rows
-# an element, on its own shim channel; the cache stays row-major, so no capacity is baked into the descriptors.
 NSHIM = 8                                              # NPU2 shim columns, two MM2S channels each
-KVSL = kvslice(SPEC, ACORES, RB, QKVB, G.WINDOW) > 0
-# KVCORES: one attention core per kv head (attn.h ATTN_G5), two cores on each window stream, og joined in memtiles.
-KVC = kv_cores(SPEC, G.NH, G.KVH, G.HD, RB, KVSL)
+KVSL = kvslice(SPEC, ACORES, RB, QKVB, G.WINDOW) > 0    # per-core windows on their own channels (OPEN-ATTN-KVSLICE)
+KVC = kv_cores(SPEC, G.NH, G.KVH, G.HD, RB, KVSL)       # attention cores per kv head (attn.h ATTN_G5): 0, 1 or 2
+GRP = G.NH // G.KVH
+if KVC == 2:
+    SPLIT = (3, 2)                                     # the 5 heads of a kv head: the longer part sets the pace
+    ACORES = 2 * G.KVH
+    CORE_NHL = [SPLIT[c % 2] for c in range(ACORES)]
+    CORE_H0 = [(c // 2) * GRP + (0 if c % 2 == 0 else SPLIT[0]) for c in range(ACORES)]
+    NHL = max(SPLIT)
+elif KVC:
+    ACORES, NHL = G.KVH, GRP
 if KVC:
-    ACORES, NHL = G.KVH, G.NH // G.KVH
     ATTN_FLAGS = [f for f in ATTN_FLAGS if not f.startswith("-DATTN_NHL=")] + [f"-DATTN_NHL={NHL}"]
+if KVC != 2:
+    CORE_NHL, CORE_H0 = [NHL] * ACORES, [c * NHL for c in range(ACORES)]
 T8 = tree8(SPEC, NHL, G.RB, G.HD)
 if T8:
     ATTN_FLAGS.extend(tree8_flags(4))
 elif KVC:                                              # TREE8's companions, the G5 tree in its place
     ATTN_FLAGS.extend([f for f in tree8_flags(4) if not f.startswith("-DATTN_TREE8")] + ["-DATTN_G5=1"])
 if KVSL:
-    KVS, KVB = kv_slices(G.NH, G.KVH, ACORES, 2 if KVC else 1)
+    KVS, KVB = kv_slices(G.NH, G.KVH, ACORES, 2 if KVC else 1, CORE_H0)
     KW_GROUPS = sorted(set(KVB))                       # one window stream per distinct slice, read by its cores
     _mm2s = [0] * NSHIM                                # this design's own shim MM2S producers: lni, w_c, x, ain
     for _c in [0, 1, 2] + list(range(N_CORES)):
@@ -231,8 +238,9 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
 
     inc = include_dirs() + [str(GEMV), str(ATTN), str(LN), str(LINL)]
 
-    def ef(sym, src, args, flags=OS):
-        return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
+    def ef(sym, src, args, flags=OS, prefix=None):
+        return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags,
+                                symbol_prefix=prefix)
 
     # One ExternalFunction per name in KN, in that order: a q4_1 entry only while a
     # projection still uses it, a q8 one only when a role is q8 -- an ExternalFunction that
@@ -273,6 +281,20 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
                       ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
+    # another head count compiles attn.h at its own ATTN_NHL under prefixed symbols; each core links only its own set
+    CT = {NHL: (foacc, og_ty, [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else []))}
+    for n in sorted(set(CORE_NHL) - {NHL}):
+        fl, px = [f for f in ATTN_FLAGS if not f.startswith("-DATTN_NHL=")] + [f"-DATTN_NHL={n}"], f"h{n}"
+        fa, ot = np.ndarray[(n * G.HD,), np.dtype[np.float32]], np.ndarray[(min(n, G.HPO) * G.HD,), np.dtype[bfloat16]]
+        CT[n] = (fa, ot, [ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a] + pz + [bhd, bhd, fcs, pb_ty], fl, px),
+                          ef("attn_q", ATTN / "attn_q.cc", [u8_a] + bz + [bhd, fcs, fq, i32], fl, px),
+                          ef("attn_k", ATTN / "attn_k.cc", [u8_a] + bz + [bhd, fcs, fhd, brow, i32], fl, px),
+                          ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], fl, px),
+                          ef("attn_init", ATTN / "attn_init.cc", [fa, fml], fl, px),
+                          ef("attn_tailw", ATTN / "attn_tailw.cc", [u8_w, fq, fa, fml, pb_ty, i32], fl, px),
+                          ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, fa, fml] + h0_arg, fl, px),
+                          ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [fa, fml, ot, i32], fl, px),
+                          ef("attn_stepw", ATTN / "attn_stepw.cc", [u8_w, fq, fa, fml, pb_ty, i32], fl, px)])
 
     # ---- fifos
     of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
@@ -293,12 +315,14 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # heads, and core 0 has a fifo like every other core.
     of_aout = ObjectFifo(brow, name="aout", depth=2)
     if KVC:
-        # eight og streams are more shim S2MM channels than are free: four cores join in each of two memtiles
-        OGJ = [list(range(g, min(g + 4, ACORES))) for g in range(0, ACORES, 4)]
-        ogj_ty = [np.ndarray[(len(cs) * OGH * G.HD,), np.dtype[bfloat16]] for cs in OGJ]
+        # more og streams than free shim S2MM channels: consecutive cores join in memtiles (at most 6 inputs each)
+        OGJ_N = 4 if KVC == 1 else 6
+        OGJ = [list(range(g, min(g + OGJ_N, ACORES))) for g in range(0, ACORES, OGJ_N)]
+        ogj_ty = [np.ndarray[(sum(CORE_NHL[c] for c in cs) * G.HD,), np.dtype[bfloat16]] for cs in OGJ]
         of_ogj = [ObjectFifo(ogj_ty[j], name=f"ogj{j}", depth=1) for j in range(len(OGJ))]
-        _parts = [of_ogj[j].prod().join([i * OGH * G.HD for i in range(len(cs))], tile=Tile(2 + j, 1),
-                                        obj_types=[og_ty] * len(cs), names=[f"og{c}" for c in cs], depths=[1] * len(cs))
+        _parts = [of_ogj[j].prod().join([sum(CORE_NHL[c] for c in cs[:i]) * G.HD for i in range(len(cs))], tile=Tile(2 + j, 1),
+                                        obj_types=[CT[CORE_NHL[c]][1] for c in cs], names=[f"og{c}" for c in cs],
+                                        depths=[1] * len(cs))
                   for j, cs in enumerate(OGJ)]
         of_og = [p for ps in _parts for p in ps]
     else:
@@ -530,7 +554,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, None, kw)
 
         def make_attn_body(c):
-            h0 = c * NHL
+            h0 = CORE_H0[c]
             def body(ain, kw, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
                 _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                       f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, None, kw)
@@ -590,18 +614,20 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         s = "" if c == 0 else str(c)
         return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),
                 Buffer(fq, name=f"qs{s}"), Buffer(fhd, name=f"tmp{s}"), Buffer(brow, name=f"kout{s}"),
-                Buffer(brow, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
+                Buffer(brow, name=f"vout{s}"), Buffer(CT[CORE_NHL[c]][0], name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
                 Buffer(pb_ty, name=f"pb{s}")]
 
-    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+    afns = lambda c: CT[CORE_NHL[c]][2]
     bcons = (lambda: [of_abias.cons()]) if QKVB else (lambda: [])
     kwc = (lambda c: [of_kw[KW_GROUPS.index(KVB[c])].cons()]) if KVSL else (lambda c: [])
-    att_tile = (lambda c: Tile(c, 4)) if KVC else (lambda c: Tile(2 + c, 3))   # row 4 is idle in dx
-    workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + kwc(0) + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
+    # rows 4 and 5 are idle in dx; at two cores a kv head the pair shares a column
+    att_tile = ((lambda c: Tile(c // 2, 4 + c % 2)) if KVC == 2 else (lambda c: Tile(c, 4)) if KVC
+                else (lambda c: Tile(2 + c, 3)))
+    workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + kwc(0) + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns(0),
                           tile=att_tile(0), stack_size=ASTACK))
     # The rest of the attention cores: same broadcast stream in, their own og out.
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + kwc(c) + bcons() + [of_og[c].prod()] + abufs(c) + afns,
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + kwc(c) + bcons() + [of_og[c].prod()] + abufs(c) + afns(c),
                               tile=att_tile(c), stack_size=ASTACK))
 
     BB_H, BB_Q, BB_F = (role_band_bytes("attn", HID), role_band_bytes("attn", QW),
@@ -636,18 +662,17 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
 
-        if KVC:                                                             # the joined og rows, four cores each
+        if KVC:                                                             # the joined og rows
             for j, cs in enumerate(OGJ):
-                pa_out.drain(og_cs[j], a_act, bt(L.AD_BYTES, L.AD_OG + cs[0] * NHL * G.HD * 2, len(cs) * NHL * G.HD * 2))
+                pa_out.drain(og_cs[j], a_act, bt(L.AD_BYTES, L.AD_OG + CORE_H0[cs[0]] * G.HD * 2,
+                                                 sum(CORE_NHL[c] for c in cs) * G.HD * 2))
         else:
             for c in range(ACORES):                                         # heads NHL*c ..
                 pa_out.drain(og_cs[c], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
         pa_in.fill(ain_p, a_consts, bt(L.CD_BYTES, L.CD_META, E_A))            # [qn | kn]
         pa_in.fill(ain_p, a_ptab, bt(L.PTAB_BYTES, L.PTAB_ROW, L.PTAB_ROW))    # the position record (attnpos)
-        if kw_ps:
-            # Each core's window, compiled for one block of rows and sized per token (attnpos, kvslice). Issued
-            # before the GEMVs finish: it reads only rows the earlier tokens wrote.
-            for g, kvb in enumerate(KW_GROUPS):
+        if kw_ps:                                                           # issued early: it reads only rows earlier tokens wrote
+            for g, kvb in enumerate(KW_GROUPS):                             # compiled for one block, sized per token (attnpos)
                 pa_in.fill(kw_ps[g], a_kv, TensorAccessPattern((1, L.KV_BYTES), kvb * G.HD * 2,
                                                                [1, RB, 2, KVS * G.HD * 2], [0, L.KV_ROW, L.KV_ROW // 2, 1]))
         py.finish(*y_conss)                                       # q, k, v are in DDR

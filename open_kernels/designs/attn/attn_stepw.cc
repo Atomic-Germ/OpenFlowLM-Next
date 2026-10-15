@@ -1,5 +1,4 @@
-// One block of ATTN_RB cached rows from this core's own window element (attn.h ATTN_KVS):
-// row r is [K slice | V slice], ATTN_KVS kv heads each, so the pointers are fixed offsets.
+// One block of ATTN_RB rows from this core's window element (attn.h ATTN_KVS): row r is [K slice | V slice].
 #include "attn.h"
 #if ATTN_KVS
 extern "C" {

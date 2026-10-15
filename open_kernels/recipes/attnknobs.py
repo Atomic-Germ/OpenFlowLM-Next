@@ -27,7 +27,7 @@ from .spec import ModelSpec
 # main cores: LX_NULL_DN compiles the DeltaNet arithmetic away, LX_NULL_GEMV the q4/q8 GEMV
 # tile body, both leaving every stream, fifo and DMA -- and so insts.bin -- byte-identical.
 PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV", "DXL_NULL_PREP", "DXL_NULL_LN", "ATTN_TREE8", "ATTN_REPEAT",
-              "ATTN_KVSLICE", "ATTN_KVCORES")
+              "ATTN_KVSLICE", "ATTN_KVCORES", "ATTN_G5_PVROLL", "ATTN_DXL_KVSLICE")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 
@@ -88,12 +88,13 @@ def tree8(spec: ModelSpec, nhl: int, rb: int, hd: int) -> bool:
 KVSLICE_MEASURED = ("granite",)
 
 
-def kv_slices(nh: int, kvh: int, acores: int, share: int = 1) -> tuple[int, list[int]]:
-    """(kv heads in every core's window slice, each core's first kv head) -- attn.h attn_kvb, the same rule. share 1:
-    the widest span of kv heads one core's q heads touch, the start clamped inside the row (ATTN_KVB_ALIGN 0).
-    share n: one kv head a core, n cores' heads per slice, starts aligned so those cores read one stream."""
-    nhl, grp = nh // acores, nh // kvh
-    spans = [((c * nhl) // grp, (c * nhl + nhl - 1) // grp) for c in range(acores)]
+def kv_slices(nh: int, kvh: int, acores: int, share: int = 1, h0s: list[int] | None = None) -> tuple[int, list[int]]:
+    """(kv heads a window slice, each core's first kv head), attn.h attn_kvb's rule: clamped inside the row, or with
+    share > 1 aligned so the cores of `share` kv heads read one stream; h0s are the cores' first heads when unequal."""
+    grp = nh // kvh
+    h0s = h0s or [c * (nh // acores) for c in range(acores)]
+    ends = h0s[1:] + [nh]
+    spans = [(h0 // grp, (e - 1) // grp) for h0, e in zip(h0s, ends)]
     if share > 1:
         assert all(a == b for a, b in spans) and kvh % share == 0, "kv_slices: sharing needs one kv head a core"
         return share, [a - a % share for a, _ in spans]
@@ -101,22 +102,31 @@ def kv_slices(nh: int, kvh: int, acores: int, share: int = 1) -> tuple[int, list
     return kvs, [min(a, kvh - kvs) for a, _ in spans]
 
 
-# One attention core per kv head (attn.h ATTN_G5): the 5 q heads of a kv head share each K / V row it loads.
-KVCORES_MEASURED: tuple[str, ...] = ()
+# Granite: 1 (8 cores); 2 (16) is faster at depth but reloads 8 more core programs at each ln / lm context switch (~1 ms a token).
+KVCORES_MEASURED: dict[str, int] = {"granite": 1}
 
 
-def kv_cores(spec: ModelSpec, nh: int, kvh: int, hd: int, rb: int, kvsl: int) -> bool:
+def kv_cores(spec: ModelSpec, nh: int, kvh: int, hd: int, rb: int, kvsl: int) -> int:
+    """Attention cores per kv head: 0 (the head split of attn_cores), 1 or 2 (attn.h ATTN_G5)."""
     forced = os.environ.get("ATTN_KVCORES")
-    on = (forced == "1") if forced is not None else spec.family in KVCORES_MEASURED
-    return on and bool(kvsl) and kvh == 8 and nh == 5 * kvh and hd == 64 and rb == 4
+    n = int(forced) if forced is not None else KVCORES_MEASURED.get(spec.family, 0)
+    return n if n in (1, 2) and kvsl and kvh == 8 and nh == 5 * kvh and hd == 64 and rb == 4 else 0
 
 
-def kvslice(spec: ModelSpec, acores: int, rb: int, qkv_bias: bool = False, window: int = 0) -> int:
-    """Rows a per-core window element holds (the manifest's `kvslice`), 0 for the one broadcast window. The bias
-    stream takes the shim column a fifth core's window would need, and a sliding window is unmeasured."""
-    forced = os.environ.get("ATTN_KVSLICE")
-    on = (forced == "1") if forced is not None else spec.family in KVSLICE_MEASURED
+def kvslice(spec: ModelSpec, acores: int, rb: int, qkv_bias: bool = False, window: int = 0,
+            env: str = "ATTN_KVSLICE", measured: tuple[str, ...] | None = None) -> int:
+    """Rows a per-core window element holds (the manifest's `kvslice`); 0 keeps the broadcast (bias: no free column)."""
+    forced = os.environ.get(env)
+    on = (forced == "1") if forced is not None else spec.family in (KVSLICE_MEASURED if measured is None else measured)
     return rb if on and acores > 1 and rb > 1 and not qkv_bias and not window else 0
+
+
+# The L-row pass (designs/dxl) joins by its own measurement: ROWS PASS and Uno identical on its kernels.
+DXL_KVSLICE_MEASURED: tuple[str, ...] = ("granite",)
+
+
+def dxl_kvslice(spec: ModelSpec, acores: int, rb: int, qkv_bias: bool = False, window: int = 0) -> int:
+    return kvslice(spec, acores, rb, qkv_bias, window, "ATTN_DXL_KVSLICE", DXL_KVSLICE_MEASURED)
 
 
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):
