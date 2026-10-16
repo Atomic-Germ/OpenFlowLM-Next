@@ -7,6 +7,7 @@
 #include "model_downloader.hpp"
 #include "utils/utils.hpp"
 #include "download_model.hpp"
+#include <algorithm>
 #include <sstream>
 #include <iomanip>
 #include <fstream>
@@ -157,6 +158,20 @@ ResolvedModelFile resolve_model_file(const nlohmann::json& model_info,
             ? record.at("sha256").get<std::string>()
             : (is_lfs ? record.at("lfs").at("oid").get<std::string>()
                       : record.at("oid").get<std::string>())};
+}
+
+}  // namespace
+
+namespace {
+
+std::vector<pull::RegistryFile> registry_for(const nlohmann::json& model_info, const std::string& tag,
+                                             const std::vector<std::string>& files,
+                                             std::vector<std::string>* unlisted) {
+    nlohmann::json manifest;
+    try {
+        manifest = load_model_file_records(model_info, tag);
+    } catch (const std::exception&) {}   // no manifest: every file is unlisted, checked for presence only
+    return pull::registry_files(manifest, files, unlisted);
 }
 
 }  // namespace
@@ -339,79 +354,77 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         }
 
         ModelDownloader::ModelStatus status = is_model_downloaded(new_model_tag);
-        switch (status) {
-            case ModelStatus::Ready:
-                if (!force_redownload) {
-                    header_print("OFLM", "Model already downloaded. Use --force to re-download.");
-                    return true;
-                }
-                verify_and_clean_files(new_model_tag, use_modelscope);
-                break;
-            case ModelStatus::Missing:
-                if (uses_pinned_sources(model_info)) {
-                    // Preserve valid finals, but remove corrupt pinned finals
-                    // before deciding which files need to be downloaded.
-                    verify_and_clean_files(new_model_tag, use_modelscope, true);
-                }
-                break;
-            case ModelStatus::Outdated:
-                break;
-            case ModelStatus::Incompatible:
-                return true;
-        }
-        
-        // Get missing files
-        auto missing_files = get_missing_files(new_model_tag);
-        if (missing_files.empty() && !force_redownload) {
-            header_print("OFLM", "All files already present.");
+        if (status == ModelStatus::Incompatible) {
             return true;
         }
-        
-        if (!missing_files.empty()) {
-            header_print("OFLM", "Missing files (" + std::to_string(missing_files.size()) + "):");
-            for (const auto& file : missing_files) {
-                std::cout << "  - " << file << std::endl;
-            }
-        } else {
-            header_print("OFLM", "All required files are present.");
-        }
-        
-        // Show present files if any
-        auto present_files = get_present_files(new_model_tag);
-        if (!present_files.empty()) {
-            header_print("OFLM", "Present files (" + std::to_string(present_files.size()) + "):");
-            for (const auto& file : present_files) {
-                std::cout << "  - " << file << std::endl;
-            }
-        }
-        
-        // Build download list
-        auto download_list = build_download_list(new_model_tag, use_modelscope, force_redownload);
-        auto downloads = download_list.first;
-        float sum_fize_size = download_list.second;
-        if (downloads.empty()) {
-            header_print("OFLM", "No files to download for model: " + new_model_tag);
-            return !uses_pinned_sources(model_info) ||
-                   verify_and_clean_files(new_model_tag, use_modelscope);
-        }
-        
-        header_print("OFLM", "Downloading " + std::to_string(downloads.size()) + " missing files...");
+        const bool pinned = uses_pinned_sources(model_info);
 
-        header_print("OFLM", "Files to download (" << std::fixed << std::setprecision(2) << sum_fize_size << " MB): ");
-        for (const auto& download : downloads) {
-            float file_size = download["size"];
-            std::string filename = download["file"];
-            std::cout << "  - " << filename << " ("
-                << std::fixed << std::setprecision(2) << file_size << " MB)";
-            const std::string revision = download.value("revision", std::string());
-            if (!revision.empty()) {
-                std::cout << " @ " << revision;
-            }
-            std::cout << std::endl;
+        const std::string model_path = supported_models.get_model_path(new_model_tag);
+        std::vector<std::string> model_files = model_info["files"];
+        std::vector<std::string> unlisted;
+        const auto registry = registry_for(model_info, new_model_tag, model_files, &unlisted);
+        if (!unlisted.empty()) {
+            std::string names;
+            for (const auto& n : unlisted) names += (names.empty() ? "" : ", ") + n;
+            header_print("ERROR", "model_info.json describes none of these files required by model_list.json, "
+                                  "so they cannot be downloaded: " + names);
+            header_print("ERROR", "Adding a model needs an entry in BOTH files.");
+            return false;
         }
-        
-        // Download files with progress
-        bool success = download_utils::download_multiple_files(downloads, get_progress_callback());
+        if (pinned && (force_redownload || status == ModelStatus::Missing)) {
+            // a pinned file must be the pinned bytes: drop corrupt finals so the plan refetches them
+            verify_and_clean_files(new_model_tag, use_modelscope, status == ModelStatus::Missing);
+        }
+
+        // a pinned transport resumes its .part and verifies it; an unpinned one starts clean
+        for (const auto& f : registry) {
+            if (pinned) break;
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::path(model_path) / (f.path + ".part"), ec);   // a killed pull's leftovers
+        }
+        pull::Record record = pull::read_record(model_path);
+        const bool all_recorded = std::all_of(registry.begin(), registry.end(), [&](const pull::RegistryFile& f) {
+            return f.oid.empty() || record.count(f.path) != 0;
+        });
+        if (status == ModelStatus::Ready && all_recorded && !force_redownload) {
+            header_print("OFLM", "Model already downloaded. Use --force to re-download.");
+            return true;
+        }
+
+        std::filesystem::create_directories(model_path);
+        if (!all_recorded && !force_redownload) {
+            header_print("OFLM", "No install record yet: checking the files already present against the registry (once)...");
+        }
+        const size_t recorded_before = record.size();
+        const auto plan = pull::plan_pull(registry, model_path, &record, force_redownload);
+        if (record.size() != recorded_before) {
+            pull::write_record(model_path, record);
+        }
+        if (plan.empty()) {
+            header_print("OFLM", "All files are present and current.");
+            return !pinned || verify_and_clean_files(new_model_tag, use_modelscope);
+        }
+
+        auto [downloads, sum_file_size] = build_download_list(new_model_tag, plan, use_modelscope);
+        header_print("OFLM", "Files to download (" << plan.size() << ", " << std::fixed << std::setprecision(2)
+                                                   << sum_file_size << " MB):");
+        for (const auto& [f, why] : plan) {
+            std::cout << "  - " << f.path << " (" << std::fixed << std::setprecision(2)
+                      << static_cast<double>(f.size) / 1024 / 1024 << " MB, " << pull::describe(why) << ")" << std::endl;
+        }
+
+        // record each file as it lands, so an interrupted pull keeps what it finished
+        auto progress = get_progress_callback();
+        size_t recorded = 0;
+        auto on_file = [&](size_t completed, size_t total) {
+            for (; recorded < completed && recorded < plan.size(); ++recorded) {
+                const pull::RegistryFile& f = plan[recorded].first;
+                if (!f.oid.empty()) record[f.path] = f.oid;
+            }
+            pull::write_record(model_path, record);
+            progress(completed, total);
+        };
+        bool success = download_utils::download_multiple_files(downloads, on_file);
 
         if (success) {
             header_print("OFLM", "Model downloaded successfully!");
@@ -461,65 +474,29 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
 
     try {
         auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
-        std::string model_name = model_info["name"];
         std::string model_path = supported_models.get_model_path(new_model_tag);
         std::vector<std::string> model_files = model_info["files"];
+        std::vector<std::string> unlisted;
+        const auto registry = registry_for(model_info, new_model_tag, model_files, &unlisted);
+        const pull::Record record = pull::read_record(model_path);
 
-        // Check if this is a VLM model (default to false if key doesn't exist)
-
-        // The manifest, for the expected sizes below. Absent or unreadable is
-        // not an error here -- build_download_list() is where that is
-        // reported; this only means the size check is skipped.
-        nlohmann::json manifest;
-        try {
-            std::ifstream mf(utils::find_model_info());
-            manifest = nlohmann::json::parse(mf).at(new_model_tag);
-        } catch (const std::exception&) {}
-
-        // Check each required model file
-        for (int i = 0; i < model_files.size(); ++i) {
-            std::string filename = model_files[i];
-            std::string file_path = get_model_file_path(model_path, filename);
-            if (!file_exists(file_path)) {
-                missing_files.push_back(filename);
-                continue;
+        // PULL-STALE: the same test pull_model fetches by, so status and download agree
+        for (const auto& f : registry) {
+            const pull::Fetch why = pull::status_of(f, model_path, record);
+            if (why == pull::Fetch::No) continue;
+            if (why == pull::Fetch::Size) {
+                std::error_code ec;
+                const auto on_disk = std::filesystem::file_size(get_model_file_path(model_path, f.path), ec);
+                // stderr, not stdout: `oflm list --json` reaches this and its stdout is one JSON document (#133)
+                header_print_r("WARNING", f.path + " is " + std::to_string(on_disk) + " bytes, the manifest says " +
+                                          std::to_string(f.size) + " -- treating it as missing");
+            } else if (why == pull::Fetch::Oid) {
+                header_print_r("WARNING", f.path + " was downloaded for another revision -- treating it as missing");
             }
-            // PRESENT IS NOT THE SAME AS COMPLETE. Existence was the only
-            // check, so an interrupted download left a truncated file that
-            // every later run treated as done: the next `pull` skipped it
-            // (build_download_list only downloads what does not exist) and
-            // pull_model went on to print "All files verified successfully",
-            // which is this predicate's answer. Observed for real: a 50 MB
-            // model.safetensors where the manifest says 417 MB, reported as
-            // verified.
-            //
-            // The manifest already carries every file's size, so comparing it
-            // turns "exists" into "is the file we asked for" -- which is what
-            // a caller deciding whether to re-pull actually needs to know. A
-            // hash would be stronger and costs a full read of every file on
-            // every status check; size catches truncation, which is what
-            // interruption produces.
-            if (manifest.is_array()) {
-                for (const auto& f : manifest) {
-                    if (!f.contains("path") || f["path"] != filename) continue;
-                    if (!f.contains("size")) break;
-                    std::error_code ec;
-                    const auto on_disk =
-                        std::filesystem::file_size(file_path, ec);
-                    const auto expect =
-                        static_cast<std::uintmax_t>(f["size"].get<double>());
-                    if (!ec && on_disk != expect) {
-                        // stderr, not stdout: `oflm list --json` reaches this
-                        // and its stdout has to stay one JSON document (#133).
-                        header_print_r("WARNING", filename + " is " +
-                                       std::to_string(on_disk) + " bytes, the "
-                                       "manifest says " + std::to_string(expect) +
-                                       " -- treating it as missing");
-                        missing_files.push_back(filename);
-                    }
-                    break;
-                }
-            }
+            missing_files.push_back(f.path);
+        }
+        for (const auto& name : unlisted) {
+            if (!file_exists(get_model_file_path(model_path, name))) missing_files.push_back(name);
         }
     } catch (const std::exception& e) {
         header_print("ERROR", "Error checking missing files: " + std::string(e.what()));
@@ -591,100 +568,29 @@ std::string ModelDownloader::get_model_file_path(const std::string& model_path, 
 /// \param modelscope true to download from ModelScope instead of HuggingFace
 /// \param force_redownload true to re-queue files already on disk
 /// \return the download list
-/// \note Pinned (file_sources) entries resolve each file to its immutable
-///       revision URL and carry expected_size + hash_algorithm + revision, so
-///       the transport takes its resume/verify/promote path. Unpinned entries
-///       build exactly the JSON they always have.
 std::pair<nlohmann::json, float> ModelDownloader::build_download_list(
-    const std::string& model_tag, bool modelscope, bool force_redownload) {
-    
+    const std::string& model_tag, const std::vector<std::pair<pull::RegistryFile, pull::Fetch>>& plan, bool modelscope) {
     nlohmann::json downloads = nlohmann::json::array();
     float sum_file_size = 0;
-    // Files model_list.json requires that model_info.json does not describe.
-    // Collected rather than skipped -- see where they are reported below.
-    std::vector<std::string> missing_from_manifest;
-
-    try {
-        auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
-        const std::vector<std::string> model_files = model_info.at("files");
-        
-        // Create model directory
-        const std::string model_path = supported_models.get_model_path(new_model_tag);
-        std::filesystem::create_directories(model_path);
-        
-        // GET HF api/models
-        // The live HuggingFace API path would have made the local manifest
-        // unnecessary; it stays commented out, so model_info.json is the
-        // record source. model_info_key lets one tag share another entry's
-        // per-generation records.
-        const nlohmann::json records = load_model_file_records(model_info, new_model_tag);
-
-        for (const auto& filename : model_files) {
-            const std::string local_path = get_model_file_path(model_path, filename);
-
-            if (!force_redownload && file_exists(local_path)) {
-                continue;
-            }
-
-            const auto record = std::find_if(
-                records.begin(),
-                records.end(),
-                [&](const nlohmann::json& f) {
-                    return f.at("path") == filename;
-                }
-            );
-            if (record == records.end()) {
-                missing_from_manifest.push_back(filename);
-                continue;
-            }
-
-            const auto file = resolve_model_file(model_info, records, filename, modelscope);
-            const float file_size = static_cast<float>(file.size) / 1024 / 1024;
-            sum_file_size += file_size;
-
-            nlohmann::json entry = {
-                {"file", filename},
-                {"size", file_size},
-                {"expected_size", file.size},
-                {"url", file.source.url},
-                {"localpath", local_path},
-                {"oid", file.hash},
-                {"is_lfs", file.is_lfs},
-                {"hash_algorithm", file.hash_algorithm == download_utils::HashAlgorithm::Sha256
-                                       ? "sha256" : "git_blob_sha1"},
-                {"revision", file.revision},
-            };
-            downloads.push_back(entry);
-        }
-    } 
-    catch (const std::exception& e) {
-        header_print("ERROR", "Error building download list: " + std::string(e.what()));
+    auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
+    const std::string model_path = supported_models.get_model_path(new_model_tag);
+    // one entry per planned file, in plan order: pull_model's record keys off that order
+    for (const auto& [f, why] : plan) {
+        const ModelFileSource source = resolve_file_source(model_info, f.path, modelscope);
+        const float file_size = static_cast<float>(f.size) / 1024 / 1024;
+        sum_file_size += file_size;
+        downloads.push_back(nlohmann::json{
+            {"file", f.path},
+            {"size", file_size},
+            {"expected_size", f.size},
+            {"url", source.url},
+            {"localpath", get_model_file_path(model_path, f.path)},
+            {"oid", f.oid},
+            {"is_lfs", f.lfs},
+            {"hash_algorithm", f.lfs ? "sha256" : "git_blob_sha1"},
+            {"revision", source.revision},
+        });
     }
-
-    // A FILE THE MODEL ENTRY REQUIRES AND THE MANIFEST DOES NOT LIST is a
-    // model that cannot be downloaded, and it used to be silent: the loop
-    // above simply `continue`d, so pull_model() fetched nothing and reported
-    // success. The omission then surfaced much later, as a missing-file error
-    // from whatever tried to load the model -- naming the file rather than the
-    // reason, and pointing at the download rather than at model_info.json.
-    //
-    // Adding a model needs an entry in BOTH files: model_list.json says which
-    // files the model consists of, model_info.json says where each one is and
-    // how big it is. (The HuggingFace API path that would have made the second
-    // one unnecessary is commented out just above.)
-    if (!missing_from_manifest.empty()) {
-        std::string names;
-        for (const auto& n : missing_from_manifest)
-            names += (names.empty() ? "" : ", ") + n;
-        header_print("ERROR", "model_info.json describes none of these files "
-                              "required by model_list.json, so they cannot be "
-                              "downloaded: " + names);
-        header_print("ERROR", "Adding a model needs an entry in BOTH files. "
-                              "Refusing to report a partial download as "
-                              "success.");
-        return std::make_pair(nlohmann::json::array(), 0.0f);
-    }
-
     return std::make_pair(downloads, sum_file_size);
 }
 
