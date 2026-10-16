@@ -69,9 +69,14 @@ inline ParamTypes param_types(const json& tools) {
             if (spec.is_object() && spec.contains("type")) {
                 const json& ty = spec["type"];
                 if (ty.is_string()) type = ty.get<std::string>();
-                else if (ty.is_array())
-                    for (const auto& x : ty)
-                        if (x.is_string() && x != "null") { type = x.get<std::string>(); break; }
+                else if (ty.is_array()) {
+                    bool nullable = false;
+                    for (const auto& x : ty) {
+                        if (x == "null") nullable = true;
+                        else if (type.empty() && x.is_string()) type = x.get<std::string>();
+                    }
+                    if (nullable && type == "string") type = "string?";
+                }
             }
             params[name] = type;
         }
@@ -82,6 +87,7 @@ inline ParamTypes param_types(const json& tools) {
 // The template writes string values raw and everything else as JSON, so "42" stays a string only by schema.
 inline json arg_value(const std::string& raw, const std::string& type) {
     if (type == "string") return raw;
+    if (type == "string?") return trim(raw) == "null" ? json(nullptr) : json(raw);
     const std::string t = trim(raw);
     const json v = json::parse(t, nullptr, false);
     return v.is_discarded() ? json(t) : v;

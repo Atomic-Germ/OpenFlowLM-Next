@@ -60,7 +60,9 @@ static void test_reasoning_split() {
 
 static void test_calls() {
     const auto types = k2_chat::param_types(TOOLS);
-    CHECK(types.at("get_weather").at("note") == "string");
+    CHECK(types.at("get_weather").at("note") == "string?");
+    CHECK(k2_chat::arg_value("null", "string?").is_null());
+    CHECK(k2_chat::arg_value("hi", "string?") == "hi");
     const std::string text =
         "Need weather.</ifm|think>\n<ifm|tool_calls>\n<ifm|tool_call>get_weather\n"
         "<ifm|arg_key>city</ifm|arg_key>\n<ifm|arg_value>Paris</ifm|arg_value>\n"

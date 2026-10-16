@@ -433,7 +433,7 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
         }
         committed.clear();
         // a cycle writes up to L + 1 positions past the seed; with less room left, decode one token at a time
-        const bool plain = this->total_tokens + 8 >= this->MAX_L;
+        const bool plain = this->total_tokens + eng->core().rows_l() + 1 >= this->MAX_L;
         int p = 0;
         this->profiler_list[DECODING_TIME].start();
         if (plain) {
