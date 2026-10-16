@@ -46,6 +46,46 @@ still applies to a `nix develop` shell; the flake just supplies the toolchain
 
 ## Presets Overview
 
+### Faster Linux builds
+
+Both repository-root and `src/` builds automatically use `mold` for C/C++
+linking and `ccache` for C/C++ compilation when installed:
+
+```bash
+sudo apt install mold ccache ninja-build  # Ubuntu/Debian
+# Fedora: sudo dnf install mold ccache ninja-build
+cmake --preset linux-default -DOFLM_BUILD_KERNELS=OFF
+cmake --build --preset linux-default
+ccache --show-stats
+```
+
+Use `OFLM_BUILD_KERNELS=OFF` for engine development when the required kernels
+have already been exported. Reconfigure with `-DOFLM_BUILD_KERNELS=ON` before
+building a full distribution. `linux-debug` also skips kernel export and now
+honors Debug instead of silently compiling Release.
+
+Configuration reports the selected tools; missing optional tools fall back to
+the configured compiler/linker. GCC must support `-fuse-ld=mold` (GCC 12+), or
+use Clang. Explicit compiler launchers are preserved. To opt out, configure
+with `-DOFLM_USE_MOLD=OFF -DOFLM_USE_CCACHE=OFF`. When choosing another linker
+through a toolchain or linker flags, disable `OFLM_USE_MOLD`.
+
+The Docker builder installs both tools. `build_in_docker.sh` keeps up to 10 GiB
+of compiler cache in the named volume `oflm-ccache`, including across container
+and builder-image recreation. Inspect it with:
+
+```bash
+docker run --rm -v oflm-ccache:/var/cache/oflm-ccache \
+  openflowlm-build:ubuntu26 ccache --show-stats
+```
+
+`ccache` accelerates repeated C/C++ compilation; it does not cache Rust or NPU
+kernel compilation. Keep the build directory for incremental Cargo builds.
+These settings do not alter the Peano toolchain used to compile NPU kernels.
+
+The linker capability probe uses CMake's
+[CheckLinkerFlag](https://cmake.org/cmake/help/v3.22/module/CheckLinkerFlag.html).
+
 All builds use CMake presets in `CMakePresets.json`. Presets define configure, build, and test steps.
 
 ### Configure Presets
@@ -67,7 +107,9 @@ These are the **repository-root** presets, which build the full distribution
 | Preset | Description |
 |---|---|
 | `linux-default` | Build the configured preset |
+| `fedora-default` | Build the configured preset |
 | `linux-debug` | Debug build |
+| `fedora-debug` | Debug build |
 | `linux-portable` | Portable build |
 | `windows-default` | Windows build |
 
@@ -95,6 +137,14 @@ Test presets exist only in the repository-root `CMakePresets.json`. Run
 |---|---|
 | `linux-default` | Configure + Build + Test (one command) |
 | `linux-package` | Configure + Build + Test + Package RPM/TGZ (one command) |
+
+Kernel export is owned by the build, not by hand. The `-default` presets
+configure `OFLM_BUILD_KERNELS=ON`, and building them runs
+`utilities/export-kernels.py` for every spec in `open_kernels/recipes/specs/`
+(an incremental per-spec `build_key` cache). The `-debug` presets set it `OFF`,
+and on Windows it is always `OFF` regardless of preset (`src/CMakeLists.txt`).
+What lands in `src/xclbins/` after a `-default` build is the distribution asset
+set -- build it and ship it, do not re-run the export by hand.
 
 ---
 
@@ -166,25 +216,27 @@ cmake --build --preset linux-debug
 Export only specific kernel families.
 
 ```bash
-# Build only Qwen3.5 4B kernel
-cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-4b
+# Build only Qwen3.5 9B kernel
+cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-9b
 
 # Build specific kernel composition
 cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
 ```
 
-**Available specs:**
-- `qwen3-4b` -- Qwen3 dense (all sizes)
-- `qwen25-3b` -- Qwen2.5 dense 3B
-- `gemma3-4b`, `gemma3-12b` -- Gemma 3 dense
+**Available specs** -- the twelve `open_kernels/recipes/specs/*.json`, all built by
+default:
+- `qwen3-4b` -- Qwen3 dense 4B
+- `qwen35-9b` -- Qwen3.5 dense 9B
+- `qwen36-35b-a3b` -- Qwen3.6-MoE 35B-A3B
+- `gemma3-4b` -- Gemma3 dense 4B
+- `gemma3-12b` -- Gemma3 dense 12B
 - `llama31-8b` -- Llama 3.1 8B
 - `hy-mt2-7b` -- Hy-MT2-7B
 - `granite42-3b` -- IBM Granite 4.2 3B
-- `qwen35-9b` -- Qwen3.5 dense (all sizes)
-- `qwen36-35b-a3b` -- Qwen3.6-MoE 35B-A3B
+- `qwen25-3b` -- Qwen2.5 3B (q/k/v bias attention, split position records)
+- `lfm2-1.2b` -- LFM2-1.2B hybrid (SSM short-convolution layers)
 - `phi4-mini-4b` -- Phi-4-mini
-- `lfm2-1.2b` -- LFM2 1.2B
-- `minicpm5-2b` -- MiniCPM 5 2B
+- `minicpm5-2b` -- MiniCPM5 2B
 
 ### 4. Build Open NPUE Kernels Only
 

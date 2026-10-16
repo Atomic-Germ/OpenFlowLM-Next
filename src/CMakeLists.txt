@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(oflm LANGUAGES CXX VERSION 0.1.0)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildAcceleration.cmake")
+
 if(POLICY CMP0207)
     cmake_policy(SET CMP0207 NEW)
 endif()
@@ -13,8 +15,10 @@ if(NOT DEFINED NPU_VERSION)
     message(FATAL_ERROR "NPU_VERSION must be specified externally. Use -DNPU_VERSION=<version> when running cmake.")
 endif()
 
-# Set build type to Release
-set(CMAKE_BUILD_TYPE Release)
+# Default to Release while honoring presets and multi-config generators.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -299,6 +303,7 @@ if(NOT OFLM_USE_HRX)
     # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
     list(APPEND SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
@@ -1470,6 +1475,14 @@ if(MSVC)
 endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# src/test holds two kinds of tests. The per-model NPU ones need a device and
+# the prebuilt engine libraries, so they are built standalone and are NOT added
+# here. The host-only ones (device registry, npu_platform helpers, downloader
+# pinning) need neither, and were standalone projects that nothing added -- so
+# they never built and never ran anywhere, CI included. src/test/CMakeLists.txt
+# adds exactly those three.
+add_subdirectory(test)
 
 # OPEN-DIFFUSION-TOKENS: `oflm image`'s prompt path against klein_pipeline.token_ids'
 # goldens. It needs the installed model's tokenizer.json and fails naming the path

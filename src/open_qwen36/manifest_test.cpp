@@ -307,14 +307,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = both;
+        Manifest fast = Manifest::parse(g, "lean");   // Manifest is move-only (its gguf twin)
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = both;
+        Manifest lean = Manifest::parse(g, "lean");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -502,8 +502,7 @@ int main(int argc, char** argv) {
                 std::ifstream f(argv[2]);
                 json g = json::parse(f);
                 with_dit(g);
-                Manifest both = Manifest::parse(g, "dit");
-                Manifest fast = both, lean = both;
+                Manifest fast = Manifest::parse(g, "dit"), lean = Manifest::parse(g, "dit");
                 fast.select_prefill_route("");
                 lean.select_prefill_route("lean");
                 const auto& fg = fast.layer_types.at("dense").gemm_block;

@@ -191,11 +191,22 @@ jobs:
     name: deb + rpm + tgz
     needs: verify
     runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.verify.outputs.checkout_ref }}
           submodules: recursive
+
+      - name: Cache C/C++ compilation
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ runner.os }}-${{ runner.arch }}-release-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ runner.arch }}-release-
 
       - name: Install build dependencies
         run: |
@@ -204,6 +215,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             software-properties-common \
             libboost-all-dev uuid-dev libdrm-dev cmake ninja-build g++ \
+            mold ccache \
             libreadline-dev libcurl4-openssl-dev libfftw3-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
             python3 rpm
