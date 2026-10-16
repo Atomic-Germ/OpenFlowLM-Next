@@ -81,15 +81,16 @@ N_OG = NHL // OGH
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 if SPEC.norm_groups != 1:
     LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")
-GL_FLAGS = OS + [f"-DDXL_L={LR}", f"-DDXL_JMAX={JMAX}"]
+GL_FLAGS = OS + [f"-DDXL_L={LR}", f"-DDXL_JMAX={JMAX}", f"-DDXL_TABS={X.TABS}", f"-DDXL_TABK={X.TAB_K}"]
 if os.environ.get("LX_NULL_GEMV") == "1":    # probe only (attnknobs.PROBE_VARS keeps it out of shipped keys)
     GL_FLAGS.append("-DGEMV_NULL")
 if os.environ.get("DXL_NULL_OUT") == "1":
     GL_FLAGS.append("-DDXL_NULL_OUT")
+NPREP_F = DXR.FIELDS.index("NPREP")
 NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"    # probes: the stream and fifos unchanged, the arithmetic gone
 NULL_LN = os.environ.get("DXL_NULL_LN") == "1"
 # a deeper weight fifo prefetches through the activation prep; only where L1 holds the extra chunks
-W_DEPTH = int(os.environ.get("DXL_WDEPTH", 4 if DXR._main_l1(LR, X.YB, X.BP, G.KV_PC, X.TAB_K) + 2 * CHUNK <= DXR.L1_BUDGET else 2))
+W_DEPTH = int(os.environ.get("DXL_WDEPTH", 4 if DXR._main_l1(LR, X.YB, X.BP, G.KV_PC, X.TAB_K, X.TABS) + 2 * CHUNK <= DXR.L1_BUDGET else 2))
 WRING = int(os.environ.get("DXL_WRING", 0))     # memtile weight ring depth (dx's OPEN-DECODE-STREAM); 0: shim straight to the core
 # fewer accumulator spills in the tile loop (154 -> 140 bundles a k-block); scheduling only, no arithmetic
 GEMV_SCHED = ["-mllvm", "-aie-aggressive-realloc", "-mllvm", "-aie-gpr-realloc"]
@@ -109,7 +110,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     elem = np.ndarray[(CHUNK,), np.dtype[np.uint8]]
     x_ty = np.ndarray[(DXR.XE // 2,), np.dtype[bfloat16]]
     y_ty = np.ndarray[(YE,), np.dtype[np.float32]]
-    tab_ty = np.ndarray[(LR * DXR.tab_bytes(X.TAB_K),), np.dtype[np.uint8]]
+    tab_ty = np.ndarray[(DXR.tab_alloc(LR, X.TAB_K, X.TABS),), np.dtype[np.uint8]]
     acc_ty = np.ndarray[((YB + BP) * YE,), np.dtype[np.float32]]
     u8_ln = np.ndarray[(ELN,), np.dtype[np.uint8]]
     u8_a = np.ndarray[(E_A,), np.dtype[np.uint8]]
@@ -149,7 +150,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
 
     f_njobs = ef("dxl_njobs", HERE / "dxl_njobs.cc", [table_ty, rtp_ty, q4_ty], GL_FLAGS)
     f_job = ef("dxl_job", HERE / "dxl_job.cc", [table_ty, rtp_ty, i32, jp_ty], GL_FLAGS)
-    f_prep = ef("dxl_prep_job", HERE / "dxl_prep_job.cc", [x_ty, tab_ty, i32, jp_ty], GL_FLAGS)
+    f_prep = ef("dxl_prep_slot", HERE / "dxl_prep_slot.cc", [x_ty, tab_ty, i32, i32, jp_ty], GL_FLAGS)
     f_gemv = ef("dxl_gemv_job", HERE / "dxl_gemv_job.cc",
                 [elem, tab_ty, acc_ty, jp_ty, i32, i32, i32], GL_FLAGS + GEMV_SCHED)
     f_out = ef("dxl_out_job", HERE / "dxl_out_job.cc", [acc_ty, y_ty, jp_ty, i32], GL_FLAGS)
@@ -221,10 +222,10 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
         for j in range_(nj[0]):
             fjob(table, rtp, j, jp)                       # jp = the job's row; jp[0..3] its loop counts
             for s in range_(jp[0]):
-                for tok in range_(LR):
+                for tok in range_(jp[NPREP_F]):               # 0: the tables of this activation are already in tab
                     xe = xin.acquire(1)
                     if not NULL_PREP:
-                        fprep(xe, tab, tok, jp)
+                        fprep(xe, tab, tok, s, jp)
                     xin.release(1)
                 for b in range_(jp[1]):
                     for c in range_(jp[2]):
@@ -466,7 +467,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                     zwait = False
                 if job not in early:
                     y_drain(job)
-                x_fill(job)
+                if not job.reuse:
+                    x_fill(job)
                 if job not in early:
                     w_fill(job)
 

@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from recipes import dense as DR
@@ -56,9 +57,26 @@ def test_verify_jobs_cover_every_band_once(spec):
 
 
 def test_k2_7b_tables_are_unchanged_by_the_wider_widths():
-    t = DXR.job_table(K2_7B, 4).tobytes()
-    assert hashlib.sha256(t).hexdigest() == "f69676338a3a437a507f3e73d2690a91497321762a794cc2b66ae577c674c77b"
+    t = DXR.job_table(K2_7B, 4)
+    nf = DXR.NF - 1                                  # the old twelve fields; NPREP is the thirteenth
+    rows = t[:, 1:].reshape(2, DXR.JMAX, DXR.NF)
+    assert DXR.FIELDS[-1] == "NPREP" and set(rows[:, :, nf].ravel()) <= {0, 4}
+    old = np.concatenate([np.concatenate([[t[m, 0]], rows[m, :, :nf].ravel()]) for m in range(2)]).astype(np.int32)
+    assert hashlib.sha256(old.tobytes()).hexdigest() == "f69676338a3a437a507f3e73d2690a91497321762a794cc2b66ae577c674c77b"
+    assert DXR.layout(K2_7B, 4).TABS == 1 and all(j.core["NPREP"] == 4 and not j.reuse for j in DXR.jobs(K2_7B, 4, False))
     assert DR.rows_route(K2_7B)["rows"]["head_act_bytes"] == 4 * K2_7B.hidden * 2
+
+
+def test_granite_keeps_five_slice_tables_and_its_jobs_on_one_activation_prepare_it_once():
+    # Traces: OPEN-DXL-TABS
+    X = DXR.layout(GRANITE, 4)
+    assert X.TABS == 5 and DXR._main_l1(4, 5, 4, 1, X.TAB_K, X.TABS) <= DXR.L1_REUSE
+    for draft, reused, blocks in ((False, 9, 1984), (True, 12, 3424)):
+        js = DXR.jobs(GRANITE, 4, draft)
+        assert sum(j.reuse for j in js) == reused
+        assert sum(j.core["NPREP"] * j.core["S"] * j.core["KS"] // 32 for j in js) == blocks
+        assert all((j.core["NPREP"] == 0) == j.reuse for j in js)
+        assert not js[0].reuse and not any(j.reuse for j in js if j.x[0] == "z" or j.core["MODE"] == DXR.PREP_F32)
 
 
 def test_an_odd_multiple_of_512_takes_half_slices():
