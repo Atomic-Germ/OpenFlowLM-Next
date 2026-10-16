@@ -120,6 +120,17 @@
 #ifndef ATTN_T8_UNROLL
 #define ATTN_T8_UNROLL 1     // rows of ATTN_TREE8's score loop unrolled (1, 2 or 4)
 #endif
+#ifndef ATTN_T8_SPLIT
+#define ATTN_T8_SPLIT 0      // 1: TREE8 scores in two passes (dot products, then trees), bit-identical; _U1 / _U2 unroll the passes
+#endif
+#define ATTN_PRAGMA_(x) _Pragma(#x)
+#define ATTN_PRAGMA(x) ATTN_PRAGMA_(x)
+#ifndef ATTN_T8_SPLIT_U1
+#define ATTN_T8_SPLIT_U1 1
+#endif
+#ifndef ATTN_T8_SPLIT_U2
+#define ATTN_T8_SPLIT_U2 1
+#endif
 #ifndef ATTN_TREE8
 #define ATTN_TREE8 0         // 1: the 8-head block kernel reduces its scores as a tree (attn_score2g); bit-identical to reduce_add
 #endif
@@ -1044,6 +1055,23 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
     unsigned t8ko[8];                               // each head's K slice offset in a window row, the same for every row
     AIE_LOOP_UNROLL_FULL
     for (unsigned h = 0; h < 8; ++h) t8ko[h] = ATTN_T8_KV(hb + h) * kHD;
+#if ATTN_T8_SPLIT
+    // few live values per pass lets the compiler unroll rows: 4,000 B of program for the one-pass loop, 5,056 B here
+    alignas(128) static float t8z[kRB * 4 * 32];
+    ATTN_PRAGMA(clang loop unroll_count(ATTN_T8_SPLIT_U1))
+    for (unsigned r = 0; r < kRB; ++r) {
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned hp = 0; hp < 4; ++hp)
+        aie::store_v(t8z + (r * 4 + hp) * 32, attn_score2g(Kb[r] + t8ko[2 * hp], Kb[r] + t8ko[2 * hp + 1],
+                                                           q0 + 2 * hp * kHD, q0 + (2 * hp + 1) * kHD));
+    }
+    ATTN_PRAGMA(clang loop unroll_count(ATTN_T8_SPLIT_U2))
+    for (unsigned r = 0; r < kRB; ++r) {
+      const v32f w0 = attn_tree2(aie::load_v<32>(t8z + r * 128), aie::load_v<32>(t8z + r * 128 + 32), 8);
+      const v32f w1 = attn_tree2(aie::load_v<32>(t8z + r * 128 + 64), aie::load_v<32>(t8z + r * 128 + 96), 8);
+      aie::store_v(sv + r * kNL, attn_tree1<16>(attn_tree1<32>(attn_tree2(w0, w1, 4), 2), 1));
+    }
+#else
 #if ATTN_T8_UNROLL == 2
     _Pragma("clang loop unroll_count(2)")
 #elif ATTN_T8_UNROLL == 4
@@ -1059,6 +1087,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
       const v32f w1 = attn_tree2(z[2], z[3], 8);   // heads 4..7
       aie::store_v(sv + r * kNL, attn_tree1<16>(attn_tree1<32>(attn_tree2(w0, w1, 4), 2), 1));
     }
+#endif
 #undef ATTN_T8_KV
   }
 #elif ATTN_G5

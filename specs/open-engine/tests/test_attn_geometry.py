@@ -266,3 +266,13 @@ def test_block8_is_granite_only_and_forced_back_by_the_probe(unvalidated, monkey
     assert "-DATTN_EXPA=2" in flags
     monkeypatch.setenv("ATTN_EXPA", "0")
     assert "-DATTN_EXPA=2" not in attnknobs.tree8_flags(4)
+
+
+def test_dxl_score_split_is_on_by_default_and_the_probe_turns_it_off(monkeypatch):
+    # Traces: OPEN-ATTN-SPLIT8
+    from recipes import attnknobs
+    monkeypatch.delenv("ATTN_T8_SPLIT", raising=False)
+    assert attnknobs.t8_split_flags() == ["-DATTN_T8_SPLIT=1", "-DATTN_T8_SPLIT_U1=2", "-DATTN_T8_SPLIT_U2=4"]
+    monkeypatch.setenv("ATTN_T8_SPLIT", "0")
+    assert attnknobs.t8_split_flags() == []
+    assert "ATTN_T8_SPLIT" in attnknobs.PROBE_VARS

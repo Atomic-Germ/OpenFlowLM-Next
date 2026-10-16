@@ -25,7 +25,7 @@ sys.path.insert(0, str(DESIGNS.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
-from recipes.attnknobs import TREE8_STACK, dxl_kvslice, kv_slices, tree8, tree8_flags  # noqa: E402
+from recipes.attnknobs import TREE8_STACK, dxl_kvslice, kv_slices, t8_split_flags, tree8, tree8_flags  # noqa: E402
 from recipes import dxl as DXR  # noqa: E402
 from recipes.dxl import JMAX, NF, Z_ROW, job_table, jobs  # noqa: E402
 
@@ -62,7 +62,7 @@ for _k, _v in QR.probe_env().items():
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 T8 = tree8(SPEC, G.NHL, G.RB, G.HD)           # the same bit-identical score tree as dx (OPEN-ATTN-SCORE-TREE)
 if T8:
-    ATTN_FLAGS.extend(tree8_flags(int(os.environ.get("DXL_T8_UNROLL", 1))))
+    ATTN_FLAGS.extend(tree8_flags(int(os.environ.get("DXL_T8_UNROLL", 1))) + t8_split_flags())
 KVSL = dxl_kvslice(SPEC, ACORES, RB, G.QKVB, G.WINDOW) > 0   # core c of every group on one slice stream (OPEN-ATTN-KVSLICE)
 if KVSL:
     KVS, KVB = kv_slices(G.NH, G.KVH, ACORES)
