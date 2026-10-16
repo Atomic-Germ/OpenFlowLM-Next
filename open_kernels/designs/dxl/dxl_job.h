@@ -1,11 +1,11 @@
 #pragma once
-// Must match recipes/dxl.py job_table: per mode (rtp[0]: 0 verify, 1 draft) a job count, then FIELDS-order rows.
+// Must match recipes/dxl.py job_table: per mode (rtp[0]: 0 verify, 1 draft, 2 head) a job count, then FIELDS-order rows.
 #include "dxl_gemv.h"
 
 #ifndef DXL_JMAX
 #define DXL_JMAX 32
 #endif
-enum { F_S, F_BT, F_CPS, F_NDRAIN, F_KS, F_MODE, F_OFF, F_B0, F_S0, F_KT, F_DMODE, F_G0, F_NPREP, F_N };
+enum { F_S, F_BT, F_CPS, F_NDRAIN, F_KS, F_MODE, F_OFF, F_B0, F_S0, F_KT, F_DMODE, F_G0, F_NPREP, F_REP, F_N };
 
 #ifndef DXL_TABS
 #define DXL_TABS 1       // slices whose tables a core keeps (recipes/dxl.py TABS)

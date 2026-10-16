@@ -825,6 +825,16 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         globals_["rows_act"] = alloc(man_.rows.act_bytes);
         globals_["rows_hact"] = alloc(man_.rows.head_act_bytes);
         globals_["rows_out"] = alloc(man_.rows.head_out_floats * 4);
+        if (man_.rows.mode_elem) {
+            // every dispatch of the L-row pass opens with one of these x elements; its first word is the mode (0 verify, 1 draft, 2 head)
+            xrt::bo& ra = globals_.at("rows_act");
+            uint8_t* pm = ra.map<uint8_t*>() + man_.rows.mode_off;
+            std::memset(pm, 0, 3 * man_.rows.mode_elem);
+            const int32_t one = 1, two = 2;
+            std::memcpy(pm + man_.rows.mode_elem, &one, 4);
+            std::memcpy(pm + 2 * man_.rows.mode_elem, &two, 4);
+            ra.sync(XCL_BO_SYNC_BO_TO_DEVICE, 3 * man_.rows.mode_elem, man_.rows.mode_off);
+        }
         lora_.clear();
         noise_high_ = 0;
         lora_none_ = alloc(4096);
@@ -4592,6 +4602,43 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
     timing_.route_ms += ms_since(tp);
 }
 
+// The app's greedy (Sampler::sample_greedy) over one row, 8 lanes at a time: logits rounded to bf16 (nearest even, subnormals
+// to zero), the lowest id on a tie. The same answer as the scalar loop in cli.cpp argmax_bf16.
+static int argmax_bf16_row(const float* p, size_t n) {
+    const __m256i exp_mask = _mm256_set1_epi32(0x7f800000), one = _mm256_set1_epi32(1), bias = _mm256_set1_epi32(0x7fff);
+    const __m256i hi_mask = _mm256_set1_epi32(static_cast<int>(0xffff0000u));
+    __m256 lv = _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+    __m256i li = _mm256_set1_epi32(-1), idx = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    const __m256i eight = _mm256_set1_epi32(8);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        const __m256i u = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
+        const __m256i r = _mm256_and_si256(_mm256_add_epi32(_mm256_add_epi32(u, bias), _mm256_and_si256(_mm256_srli_epi32(u, 16), one)), hi_mask);
+        const __m256i sub = _mm256_cmpeq_epi32(_mm256_and_si256(u, exp_mask), _mm256_setzero_si256());
+        const __m256 x = _mm256_castsi256_ps(_mm256_andnot_si256(sub, r));
+        const __m256 gt = _mm256_cmp_ps(x, lv, _CMP_GT_OQ);
+        lv = _mm256_blendv_ps(lv, x, gt);
+        li = _mm256_blendv_epi8(li, idx, _mm256_castps_si256(gt));
+        idx = _mm256_add_epi32(idx, eight);
+    }
+    alignas(32) float fv[8];
+    alignas(32) int fi[8];
+    _mm256_store_ps(fv, lv);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(fi), li);
+    int best = 0;
+    float bv = -std::numeric_limits<float>::infinity();
+    for (int j = 0; j < 8; ++j)
+        if (fi[j] >= 0 && (fv[j] > bv || (fv[j] == bv && fi[j] < best))) { bv = fv[j]; best = fi[j]; }
+    for (; i < n; ++i) {
+        uint32_t u;
+        std::memcpy(&u, p + i, 4);
+        float x = 0.0f;
+        if (u & 0x7f800000u) { u = (u + 0x7fffu + ((u >> 16) & 1u)) & 0xffff0000u; std::memcpy(&x, &u, 4); }
+        if (x > bv) { bv = x; best = static_cast<int>(i); }
+    }
+    return best;
+}
+
 void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) {
     const size_t L = man_.rows.l, hid = w_->hidden;
     if (!L) throw std::runtime_error("open_qwen36: this kernel set has no L-row pass (manifest `rows`)");
@@ -4630,19 +4677,29 @@ void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) 
     if (prev.active()) rows_phase_.blocked_ms += wait_run(prev).second;
     rows_phase_.layers_ms = ms_since(tl);
     const auto th = std::chrono::steady_clock::now();
-    run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_hact", "rows_out"}, 0);
-    rows_phase_.head_ms = ms_since(th);
     xrt::bo& out = buffer("rows_out", 0);
     const size_t lb = L * w_->vocab * 4, cores = man_.rows.head_cores, el = L * 64;
-    read_back(out, cores * el * 4, lb);
-    const int32_t* am = reinterpret_cast<const int32_t*>(out.map<uint8_t*>() + lb);
-    for (size_t j = 0; j < L; ++j) {
-        int32_t best = INT32_MIN, tok = -1;
-        for (size_t c = 0; c < cores; ++c)                   // a core's rows precede the next's: first on a tie
-            if (am[c * el + j] > best) { best = am[c * el + j]; tok = am[c * el + L + j]; }
-        argmax[j] = tok;
+    if (man_.rows.head_fold) {
+        // the head's stream over dxl's image: slot 3 (an InOut one) takes the logits [L][vocab], 5 is the layer act (the mode element), 6 is unused
+        run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_out", "rows_hact", "rows_act", "rows_hact"}, 0);
+        rows_phase_.head_ms = ms_since(th);
+        read_back(out, lb, 0);
+        const float* lg = out.map<float*>();
+        for (size_t j = 0; j < L; ++j) argmax[j] = argmax_bf16_row(lg + j * w_->vocab, w_->real_vocab);
+        rows_phase_.head_ms = ms_since(th);
+    } else {
+        run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_hact", "rows_out"}, 0);
+        rows_phase_.head_ms = ms_since(th);
+        read_back(out, cores * el * 4, lb);
+        const int32_t* am = reinterpret_cast<const int32_t*>(out.map<uint8_t*>() + lb);
+        for (size_t j = 0; j < L; ++j) {
+            int32_t best = INT32_MIN, tok = -1;
+            for (size_t c = 0; c < cores; ++c)                   // a core's rows precede the next's: first on a tie
+                if (am[c * el + j] > best) { best = am[c * el + j]; tok = am[c * el + L + j]; }
+            argmax[j] = tok;
+        }
+        if (want_logits) read_back(out, lb, 0);
     }
-    if (want_logits) read_back(out, lb, 0);
     rows_phase_.total_ms = rows_ms_ = ms_since(t0);
 }
 
