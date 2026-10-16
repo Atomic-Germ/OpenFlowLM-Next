@@ -116,4 +116,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build private production-layout DeltaNet control and triple-BF16 recurrence kernels and validate causal head precision without model residency.</description>
     <location>.opencode/skill/open-qwen38-recurrence-replay/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-factored-readout</name>
+    <description>Build and validate isolated compensated factored DeltaNet readout with causal state and unchanged head precision gates.</description>
+    <location>.opencode/skill/open-qwen38-factored-readout/SKILL.md</location>
+  </skill>
 </available_skills>

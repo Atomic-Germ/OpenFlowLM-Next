@@ -2,7 +2,7 @@
 import argparse,json
 from pathlib import Path
 import numpy as np
-from recurrence_common import digest,geometry,sources,replay_cfg,score
+from recurrence_common import digest,geometry,sources,replay_cfg,score,factored_reference
 import deltanet_state as ds
 from decode_reference import sfx
 
@@ -103,12 +103,16 @@ def compare(inputs,build,out):
         for t in range(m['tokens']):
             cap=ds.read_boundaries((captures/f'y_act{l}{sfx(t)}.bin').read_bytes(),
                 (captures/f'y_state{l}{sfx(t)}.bin').read_bytes(),spec,off,conv_dtype=dtype)
+            algebra=factored_reference(ref,cap['records']) if b['mode']=='factored' else None
             ref,ref_o=ds.step_reference(ref,cap['records'])
             for h in range(48):
                 name=f'L{l}_H{h}_T{t}'
                 sp=out/(name+'-state.bin');op=out/(name+'-output.bin')
                 got=read_f32(sp,(130,128));o=read_f32(op,(128,));hashes[sp.name]=digest(sp);hashes[op.name]=digest(op)
                 row=score(got,o,cap['state'][h],cap['output'][h],ref[h],ref_o[h],control=b['mode']=='control',query=cap['records'][h,128:256])
+                if algebra is not None:
+                    row['factored_algebra']={'state':ds.metric(algebra[0][h],ref[h]),'output':ds.metric(algebra[1][h],ref_o[h])}
+                    if not all(v['passed'] for v in row['factored_algebra'].values()):raise ValueError('factored reference disagrees with primary')
                 rows.append(dict(layer=l,token=t,head=h,**row))
     return dict(mode=b['mode'],passed=all(x['passed'] for x in rows),
         head_precision_passed=all(x['state']['passed'] and x['output']['passed'] and x['padding_zero'] for x in rows),

@@ -22,11 +22,26 @@ def geometry(spec):
 
 
 def sources(mode):
-    if mode not in ('control','triple'):raise ValueError('unknown recurrence mode')
+    if mode not in ('control','triple','factored'):raise ValueError('unknown recurrence mode')
     p=ROOT/'open_kernels/designs/layer_x/gen_kernels.py'
     sp=importlib.util.spec_from_file_location('_recurrence_gen',p);m=importlib.util.module_from_spec(sp);sp.loader.exec_module(m)
-    return {**m.DNX,'dnx.h':(ROOT/'open_kernels/designs/layer_x/dnx.h' if mode=='control' else HERE/'precise.h').read_text(),
+    header=ROOT/'open_kernels/designs/layer_x/dnx.h' if mode=='control' else HERE/('factored.h' if mode=='factored' else 'precise.h')
+    extra={'precise.h':(HERE/'precise.h').read_text()} if mode=='factored' else {}
+    return {**m.DNX,**extra,'dnx.h':header.read_text(),
             'design.py':"import sys\nsys.path.insert(0,"+repr(str(ROOT/'open_kernels'))+")\n"+(HERE/'design.py').read_text()}
+
+
+def factored_reference(state,records):
+    """FP64 algebra check only; primary acceptance stays step_reference."""
+    state,records=finite(state),finite(records)
+    if records.ndim!=2 or records.shape[1]!=512 or state.shape!=(len(records),128,128):
+        raise ValueError('invalid factored reference shape')
+    k,q,v=(records[:,i:i+128] for i in (0,128,256))
+    decay,beta=records[:,384,None],records[:,385,None]
+    delta=beta*(v-decay*np.einsum('hij,hi->hj',state,k))
+    updated=decay[:,:,None]*state+k[:,:,None]*delta[:,None,:]
+    output=(decay*np.einsum('hij,hi->hj',state,q)+np.einsum('hi,hi->h',k,q)[:,None]*delta)/np.sqrt(128)
+    return finite(updated),finite(output)
 
 
 def replay_cfg(build,inputs,out,layers,tokens,heads=48):
