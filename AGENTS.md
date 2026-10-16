@@ -121,4 +121,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate isolated compensated factored DeltaNet readout with causal state and unchanged head precision gates.</description>
     <location>.opencode/skill/open-qwen38-factored-readout/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-factored-full-layer</name>
+    <description>Build private full-lx factored DeltaNet with shared helpers, audit compiler dependencies and resource budgets, and validate causal full-layer replay.</description>
+    <location>.opencode/skill/open-qwen38-factored-full-layer/SKILL.md</location>
+  </skill>
 </available_skills>
