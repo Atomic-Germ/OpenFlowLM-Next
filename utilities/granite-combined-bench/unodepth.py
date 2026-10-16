@@ -31,7 +31,12 @@ def main() -> int:
     rows, flip = [], 0
     for n in (int(x) for x in a.lengths.split(",")):
         for kind in a.kinds.split(","):
-            ids = bench.chat_prompt(tok, a.model, kind, n)
+            f = a.work / f"unodepth_{kind}_{n}.ids"       # frozen on first use: the prompts are repo text, which keeps changing
+            if f.exists():
+                ids = [int(x) for x in f.read_text().split(",")]
+            else:
+                ids = bench.chat_prompt(tok, a.model, kind, n)
+                f.write_text(",".join(map(str, ids)))
             for label, cli, kern in (cfgs if flip % 2 == 0 else cfgs[::-1]):
                 ns = type("A", (), {"cli": cli, "model": a.model, "kernels": kern})
                 txt = bench.run_cli(ns, "fast", ids, ["--gemm-block", "--uno", str(a.tokens)], a.work)
