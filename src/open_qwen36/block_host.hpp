@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace open_qwen36 {
 namespace host {
@@ -44,16 +45,43 @@ struct DeltaGeom {
     double eps = 1e-6;      ///< the gated norm's eps
 };
 
+/// What one verify block's DeltaNet produced per token, enough to put the layer's state back
+/// to any prefix of it (OPEN-SPEC-VERIFY). The block-start state is in here too: a rollback
+/// replays forwards from it, so it is the tape's business to keep it rather than the caller's.
+struct DeltaTape {
+    std::vector<uint16_t> conv_state0;  ///< [taps-1, nch] bf16: the conv state the block started from
+    std::vector<float> S0;              ///< [value_heads, s_rows, head_dim]: the S it started from
+    std::vector<float> key;             ///< [t_real, key_heads * head_dim], normed (phase 1's k)
+    std::vector<float> val;             ///< [t_real, value_heads * head_dim]
+    std::vector<float> decay, beta;     ///< [t_real, value_heads] each
+    size_t t_real = 0;                  ///< tokens the block ran: the largest k a rollback takes
+};
+
 /// The linear-attention layer's middle over a block. qkv [T, 2*key_w + vw] and z [T, vw]
 /// are the fused projection's outputs (pre-activation), xn [T, hid] the normed layer
 /// input; convw [taps, nch], Wa / Wb [hid, lanes], A / dtb [value_heads], nw [head_dim].
 /// conv_state [taps-1, nch] (bf16) and S [value_heads, s_rows, head_dim] (f32) are the
 /// layer's state, updated in place through the first t_real tokens. og [T, vw] out
 /// (zero past t_real). phase_ms, if given, gets the two halves' wall time: the
-/// per-token one then the delta rule.
+/// per-token one then the delta rule. tape, if given, records what deltanet_rollback needs.
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
                     const float* Wa, const float* Wb, const float* A, const float* dtb, const float* nw,
-                    uint16_t* conv_state, float* S, float* og, double* phase_ms = nullptr);
+                    uint16_t* conv_state, float* S, float* og, double* phase_ms = nullptr,
+                    DeltaTape* tape = nullptr);
+
+/// The layer's DeltaNet state after the first `k` tokens of the block `tape` came from: what
+/// a decode that had stopped at the accepted prefix would have left (OPEN-SPEC-VERIFY). The
+/// recurrence cannot be run backwards, so this restores the state the block STARTED from -- in
+/// the tape, which is why it holds it -- and replays k of the tape's tokens, k rank-1 updates
+/// per head and no projection. `qkv` is the same pointer the block was given (the conv window
+/// is k of its rows). conv_state and S are overwritten.
+///
+/// The other two pieces of state need no function. A full-attention layer's KV rows are written
+/// per token from that token's own k / v, so rows [pos0, pos0 + k) are already what k sequential
+/// tokens would have written and rolling back is moving the position; and the rows past them are
+/// read by nothing until a later block overwrites them.
+void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, const float* qkv,
+                       uint16_t* conv_state, float* S);
 
 struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;
