@@ -234,11 +234,7 @@ arithmetic 0.2, norms 0.01; attention 0.43 from context 0 to 2048 of which 0.16 
 switches ~0.1 a pass. Weight fifo depth (2, 4, 6) and a memtile ring change nothing, and a pass with all compute compiled out is still
 ~1.2 steps: the main cores' prep and GEMV partly sit on the critical path, and ~0.2 of a step is structure no probe here separates.
 
-Not done, in order of what a probe says it is worth: fold `lmhl` into `dxl`'s context as a second stream (like `dxh` on `dx`): the head
-was 1.33x a plain head's time and each pass pays two context switches (first `dxl` dispatch after the head takes 2.5x a steady layer,
-measured with a per-layer wait and a head run twice, an `OFLM_ROWS_PROBE`-style patch in `step_rows` that is not committed); the head
-needs the GEMV job table to repeat a tile job (196 bands a core, 28 tiles of 7 fit the 30-entry table) and the host argmax of
-plain decode (`cli.cpp argmax_bf16`), no device argmax. About 0.1 of a step a pass.
+Done after that (OPEN-DXL-HEAD): the head folded into `dxl`'s context, below.
 
 Traps, each met this time:
 1. **`-S` compiles what `-c` cannot.** `attn_tu_check.py` with `ATTN_TU_OBJ=1` builds the object. A one-pass unroll-2 of the score loop
@@ -262,3 +258,29 @@ Measuring: `utilities/granite-combined-bench/unodepth.py --lengths 64,512,1024,2
 b=<cli>@<set>` inside `controlled.py` under `dibs run --measure`, about 3.5 minutes a kind; `dprobe.py --what rows|uno|tg` for the pass
 times. Rebuild only the two streams that changed: `export_qwen36_kernels.py --model-dir <model> --out <copy of the set> --only dxl,dxl_lora`
 (~4.7 minutes at BelowNormal).
+
+## The Uno head on dxl's own cores (OPEN-DXL-HEAD, 2026-10-16, Granite)
+
+`dxl_head` is a third instruction stream over `dxl`'s image (like `dxl_lora`, `DXL_HEAD=1`): the ln core's entry norm with the final
+norm's weight, then each main core's 196 head bands as 28 tiles of 7, from `head_table` (mode 2): row 0 prepares the normed rows and runs
+tile 0, row 1 repeats (`REP` 27) on the cached tables (`NPREP` 0, which needs OPEN-DXL-TABS). The logits [L][vocab] go to the host, which
+takes each row's argmax with plain decode's rule (`core.cpp argmax_bf16_row`, AVX2). No `lmhl`, no context switch: manifest `rows.head`
+is `dxl_head`, `rows.head_fold` true; K2 keeps `lmhl`. Args: pool = the head pool, xres, normw, slot 3 (an InOut one) the logits, 4 the
+normed rows, 5 the layer act (the mode element), 6 unused.
+
+Traps, each met this time:
+1. **An rtp word written in-context does not take effect.** `rtps[c][0] = mode` plus the runtime barrier only worked across a context
+   reload (draft after `lmhl`); a draft layer right after verify layers, and the head after them, ran the previous mode's table and
+   hung (proved with a one-line probe that ran a `dxl_lora` layer after the verify layers: ERT state 8). dx reads its mode late
+   ("it was the previous dispatch's word"). `dxl` now opens every dispatch with an x element whose first word is the mode (`dxl_mode.cc`,
+   act `AD_MODE`: 0, 1, 2, written by the engine at start); the cores copy it into rtp before reading the table. Delaying the barrier
+   behind a DMA round trip did not help.
+2. **A hung head looks like a bug in the head.** Four hypotheses (stride, offsets, tile height, output slot) were each cleared by a
+   probe before the mode was: a tile height of 5 completed because the cores ran the verify table, whose first job is 5 bands. Bisect with
+   probes that end the stream early (norm only; norm + one slice of x; + weights; + y) and with a stream that is valid for the table the
+   cores really run.
+3. **`export_qwen36_kernels.py --only a,b,c` can skip the first ones** (it rebuilt only the last of `dxl,dxl_lora,dxl_head`, serving
+   `dxl` and `dxl_lora` from the cache): build each stream in its own invocation, and make a probe's variables part of the build key
+   (`attnknobs.PROBE_VARS`) or the cache serves the old core table against the new stream.
+4. **The Pipeline depth makes a stream wait on its own earlier BDs.** The first tiles' weights go out before `pl.finish()` (the norm), x
+   after it; a tile is a BD per core, so the head is ~450 BDs.
