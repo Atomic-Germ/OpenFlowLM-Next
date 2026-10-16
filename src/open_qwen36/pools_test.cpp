@@ -862,6 +862,13 @@ int main() {
             src[2 * i + 1] = value >> 8;
         }
         auto path = write_container("oflm_banked_ab", {{"ab", hidden * 2, &src, "BF16", hidden}});
+        // Q4nxFile memory-maps the file with an open handle on Windows
+        // (FILE_SHARE_READ only), so it must be destroyed BEFORE the file is
+        // unlinked: std::filesystem::remove(path) (throwing overload) fails
+        // with a sharing violation while the mapping lives, and the uncaught
+        // filesystem_error aborts the test (0xC0000409). POSIX unlink tolerates
+        // open handles, which is why upstream CI never saw this.
+        {
         open_qwen36::Q4nxFile file(path);
         open_qwen36::PackOp op;
         op.op = "transpose_banked";
@@ -899,7 +906,9 @@ int main() {
         } catch (const std::exception& e) {
             check(false, std::string("transpose_banked: ") + e.what());
         }
-        std::filesystem::remove(path);
+        }  // Q4nxFile destroyed here: handle released before unlink (Windows)
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
     }
 
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
