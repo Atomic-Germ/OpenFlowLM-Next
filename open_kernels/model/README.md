@@ -583,7 +583,48 @@ The [full-layer skill](../../.opencode/skill/open-qwen38-factored-full-layer/SKI
 records build and validation commands. The measured candidate passes all 144
 full-layer residual/recurrence cases and 6912 head-state/output checks, with
 worst residual error 0.0013026962 <0.005. All 13824 head captures match the
-isolated candidate bytewise. This does not establish propagation
-across the 64-layer model. Production integration and full-depth regression
-remain pending; current production kernels still have 92 failing head-output
-diagnostics.
+isolated candidate bytewise. These forced-input measurements are separate from
+the integrated full-depth validation below.
+
+### Production compensated DeltaNet recurrence
+
+The validated wide dense Q4_1 recipe selects `dnx_factored.h` and shares its
+arithmetic helpers across full-layer entry points. It computes the output from
+the old state and rank-one update with compensated accumulation, while using
+triple-BF16 products for the stored state. Other geometries and Q8/mixed-role
+configurations retain the legacy recurrence. Weight packing, activation/state
+buffers and scheduling are unchanged.
+
+The manifest's `linear_recurrence: factored_compensated` distinguishes the new
+arithmetic from an older export with the same buffer ABI. Rebuild the export
+through the normal recipe and create fresh decode fixtures; existing model
+weights need no repacking. The
+[integration skill](../../.opencode/skill/open-qwen38-factored-integration/SKILL.md)
+documents build, dependency/resource audits and full-depth validation commands.
+Private experiments retain their own recurrence-header injection; reproduce
+historical control results with their recorded checkout and export.
+
+The fresh 41-set export passes 64-layer, three-position residual/logit checks:
+192 residuals pass, with worst maxrel 0.0033520097 <0.005. All 6912 recurrence
+head-state/output checks pass at unchanged maxrel <1e-4 and cosine >0.9999999;
+worst state/output errors are 9.3486e-7 / 2.0365e-6. Attention, FFN and LM-head
+boundary checks pass. This does **not** close numerical acceptance: the full
+DeltaNet input checker passes 143/144 cases, with normalized K at L34/T0
+measuring 0.0058359393 >0.005. Its failure status remains visible.
+
+To separate norm and QKV projection effects on retained layer captures:
+
+```bash
+OPENBLAS_NUM_THREADS=1 python utilities/deltanet_projection.py \
+  --model-dir MODEL_DIR --kernel-dir KERNEL_DIR --out FIXTURE_DIR --layer 34
+```
+
+This CPU diagnostic loads one layer's Q4_1 weights. Each variant carries its
+own unrounded conv history from zero; matching a diagnostic never replaces the
+primary record gate. Invalid/incomplete captures fail, and primary failures
+return exit 1 with complete JSON and source/weight/capture hashes. Q8 projection
+diagnostics are not implemented. At L34/T0 the norm-only K effect is 1.8758e-5
+and QKV-only effect 0.0058319225. A controlled hardware replay gives identical
+entry records with legacy and factored recurrence on the same forced inputs.
+The next precision investigation targets QKV projection; these observations
+do not prove a particular activation-table or accumulation fix.
