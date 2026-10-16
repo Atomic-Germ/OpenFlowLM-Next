@@ -535,3 +535,27 @@ replaces the primary reference or its bounds. All layers/positions, sizes,
 finite values and export identity are required; hashes pin the captures and
 script. Exit status 1 preserves the complete JSON when any primary whole-tensor
 or per-head gate fails, even when a diagnostic estimate fits the observations.
+
+
+### Isolated DeltaNet recurrence precision replay
+
+`utilities/deltanet-replay/` extracts all production DeltaNet records and runs
+one head at a time with the original padded state/slice layout. The control uses
+the unchanged production header and entry points; both state and output must
+match bytewise across every position. The candidate uses three BF16 components
+and all nine products, with its own causal state from zero. Neither path loads
+model weights or substitutes a captured state into the primary FP64 reference.
+
+Build, resource audit, preparation and serial hardware commands are in the
+[recurrence replay skill](../../.opencode/skill/open-qwen38-recurrence-replay/SKILL.md).
+Copied sources, binaries, records, complete outputs and run identity are hashed;
+configure removes stale dumps. Missing, incorrectly sized or non-finite captures
+fail. The control's identity gate is reported separately from numerical head
+precision. Candidate acceptance retains maxrel <1e-4 and cosine >0.9999999 for
+every head and zero padding; numerical failure returns 1 with complete JSON.
+
+The measured control reproduces all 6912 head steps bytewise. The isolated
+triple-component candidate reduces head-output failures from 92 to 4, with all
+state checks passing. It is not integrated into production. Full-layer resource
+fit and propagation must be validated after the remaining precision failures
+are addressed; the isolated core's resource PASS does not establish either.
