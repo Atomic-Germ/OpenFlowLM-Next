@@ -91,19 +91,20 @@ def test_raw_output_reader_refuses_stale_or_partial_dumps(tmp_path,damage):
     with pytest.raises(ValueError):replay.read_f32(p,(128,))
 
 
-def test_altered_binary_or_private_header_is_refused(tmp_path):
+@pytest.mark.parametrize("mode",["control","triple","factored"])
+def test_altered_binary_or_private_header_is_refused(tmp_path,mode):
     import json
     import recurrence_replay as replay
     (tmp_path/'source').mkdir()
-    for n,s in mod.sources('control').items():(tmp_path/'source'/n).write_text(s)
+    for n,s in mod.sources(mode).items():(tmp_path/'source'/n).write_text(s)
     for n in ('final.xclbin','insts.bin'):(tmp_path/n).write_bytes(b'binary')
-    b=dict(mode='control',production_build_key='key',source_sha256={n:mod.digest(tmp_path/'source'/n) for n in mod.sources('control')},
+    b=dict(mode=mode,production_build_key='key',source_sha256={n:mod.digest(tmp_path/'source'/n) for n in mod.sources(mode)},
            sha256={n:mod.digest(tmp_path/n) for n in ('final.xclbin','insts.bin')})
     (tmp_path/'build.json').write_text(json.dumps(b))
     assert replay.verify_build(tmp_path,dict(build_key='key'))==b
     (tmp_path/'source/dnx.h').write_text('stale')
     with pytest.raises(ValueError,match='source'):replay.verify_build(tmp_path,dict(build_key='key'))
-    (tmp_path/'source/dnx.h').write_text(mod.sources('control')['dnx.h'])
+    (tmp_path/'source/dnx.h').write_text(mod.sources(mode)['dnx.h'])
     (tmp_path/'insts.bin').write_bytes(b'wrong')
     with pytest.raises(ValueError,match='binary'):replay.verify_build(tmp_path,dict(build_key='key'))
 
@@ -138,3 +139,44 @@ def test_failed_configure_invalidates_previous_run(tmp_path,monkeypatch):
     monkeypatch.setattr(replay,'verify_inputs',fail)
     with pytest.raises(ValueError):replay.configure(tmp_path,tmp_path,out)
     assert not (out/'run.json').exists()
+
+
+def test_factored_build_pins_base_header_without_changing_control():
+    candidate=mod.sources('factored')
+    original=mod.sources('triple')
+    assert candidate['precise.h']==original['dnx.h']
+    assert candidate['dnx.h']==(mod.HERE/'factored.h').read_text()
+    assert candidate['dnx_row.cc']==mod.sources('control')['dnx_row.cc']
+    assert mod.sources('control')['dnx.h']==(mod.ROOT/'open_kernels/designs/layer_x/dnx.h').read_text()
+
+
+def test_factored_reference_matches_independent_recurrence_with_causal_carry():
+    from recurrence_common import factored_reference
+    from deltanet_state import step_reference
+    rng=np.random.default_rng(654)
+    s=np.zeros((2,128,128))
+    for t in range(3):
+        record=np.zeros((2,512))
+        record[:,:384]=rng.normal(size=(2,384))*.1
+        record[:,384:386]=[.7,.4]
+        expected,y=step_reference(s,record)
+        state,output=factored_reference(s,record)
+        np.testing.assert_allclose(state,expected,rtol=1e-12,atol=1e-14)
+        np.testing.assert_allclose(output,y,rtol=1e-12,atol=1e-14)
+        s=state
+
+
+def test_factored_readout_avoids_cancellation_in_rounded_updated_state():
+    from recurrence_common import factored_reference
+    from deltanet_state import step_reference
+    record=np.zeros((1,512))
+    record[0,:2]=[1.,1.+2**-12]
+    record[0,128:130]=[1.+2**-12,-1.]
+    record[0,256:384]=np.linspace(.1,1.,128)
+    record[0,384:386]=[.9,.4]
+    state,expected=step_reference(np.zeros((1,128,128)),record)
+    rounded=np.einsum('hij,hi->hj',state.astype(np.float32).astype(np.float64),record[:,128:256])/np.sqrt(128)
+    factored_state,output=factored_reference(np.zeros_like(state),record)
+    assert np.max(np.abs(rounded))>1e-10
+    np.testing.assert_allclose(output,expected,rtol=0,atol=1e-16)
+    assert np.max(np.abs(output))==0

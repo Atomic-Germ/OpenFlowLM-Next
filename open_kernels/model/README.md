@@ -556,6 +556,15 @@ every head and zero padding; numerical failure returns 1 with complete JSON.
 
 The measured control reproduces all 6912 head steps bytewise. The isolated
 triple-component candidate reduces head-output failures from 92 to 4, with all
-state checks passing. It is not integrated into production. Full-layer resource
-fit and propagation must be validated after the remaining precision failures
-are addressed; the isolated core's resource PASS does not establish either.
+state checks passing. The `factored` mode closes those remaining failures using
+compensated sums and `decay*S_old^T*q + (k^T*q)*delta`, avoiding readout of the
+rounded updated state. All 6912 state/output/padding checks pass at unchanged
+bounds; worst output maxrel is 2.6966e-6. Stored states match the triple candidate
+bytewise. The independent primary oracle and causal carry are unchanged.
+
+The [factored readout skill](../../.opencode/skill/open-qwen38-factored-readout/SKILL.md)
+records commands and evidence. Its standalone core uses 8720 bytes of text,
+L1 buffer end 22016 and stack 6144. Full-layer resource fit and propagation must
+still be validated before integration; isolated acceptance does not establish
+either. Production kernels and their 92 failing head-output diagnostics remain
+unchanged.

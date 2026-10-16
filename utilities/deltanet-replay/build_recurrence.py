@@ -10,7 +10,7 @@ from decode_bundle import load_bundle
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--kernel-dir',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
-    p.add_argument('--mode',choices=['control','triple'],required=True);a=p.parse_args()
+    p.add_argument('--mode',choices=['control','triple','factored'],required=True);a=p.parse_args()
     if a.out.resolve()==a.kernel_dir.resolve() or a.out.resolve().is_relative_to(a.kernel_dir.resolve()):
         raise ValueError('private build must be outside production export')
     spec=load_spec(a.kernel_dir/'spec.json');old=json.loads((a.kernel_dir/'manifest.json').read_text())
