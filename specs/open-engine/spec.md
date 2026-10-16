@@ -618,6 +618,30 @@ does not help; about 15 of the 52 operations are the 32-lane max as shifts and c
 1.70 before) and a draft pass 1.75 / 1.75 (1.86 / 1.91): a Uno cycle is 4.4 % cheaper at 0 and 7.9 % at 2048 (tables in
 OPEN-FAMILY-GRANITE-UNO).
 
+### OPEN-DXL-HEAD: the Uno head as tile jobs on `dxl`'s own cores, no context switch
+**Applies to:** openflowlm-next (`open_kernels/recipes/dxl.py` `head_plan`, `head_table`, `AD_MODE`, `recipes/dense.py` `HEAD_FOLD_FAMILIES`,
+`designs/dxl/dxl.py` `DXL_HEAD`, `dxl_mode.cc`, `src/open_qwen36/core.cpp` `step_rows`, `manifest.cpp` `head_fold`)
+**Verification:** test (`tests/test_dxl.py`); manual (the hardware procedure below)
+
+Where the table cache holds the whole hidden (OPEN-DXL-TABS; Granite 4.2 3B), the L-row pass's final norm and head shall run as a third
+instruction stream, `dxl_head`, over `dxl`'s image, not as `lmhl` in a context of its own: the ln core's entry norm with the final norm's
+weight, then each main core's 196 head bands as 28 tiles of 7. The core table's third mode (2) has two rows: tile 0, which prepares the
+normed rows, and one row that repeats 27 times (`REP`) on the cached tables (`NPREP` 0). The logits [L][vocab] go to the host, which takes
+each row's argmax by plain decode's rule (bf16-rounded, subnormals to zero, the lowest id on a tie; AVX2 in `core.cpp`), so Uno's verify rows
+pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent).
+
+**The mode rides in the dispatch's first x element.** A mode written to the cores' rtp word in-context did not take effect: the cores ran the
+previous dispatch's table (a draft layer right after verify layers, and the head after them, hung), and the mode had only ever switched
+across a context reload. Every dispatch of the L-row pass now opens with one x element of act (`AD_MODE`: three elements holding 0, 1, 2,
+written by the engine at start; `manifest rows.mode_off`), whose first word `dxl_mode` copies into the rtp before the table is read.
+
+**Acceptance criteria:**
+- Granite's head plan is 196 bands a core in 28 tiles of 7 (the accumulators hold 9); the table's mode 2 has 2 rows, 1 with `NPREP` 4 and
+  1 with `NPREP` 0, `REP` 27; K2-7B and K2-3.7B have no plan. Every route has `mode_off` and the three elements lie inside act.
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set; K2-7B's `dxl` rebuilt with the mode element prints ROWS PASS at
+  70 and 1030.
+- Uno IDENTICAL to plain decode on chat / code at 64, 512, 1024 and 2048 and on the six short prompts; plain decode's kernels byte-identical.
+
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
 **Test category:** unit
