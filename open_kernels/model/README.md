@@ -564,7 +564,26 @@ bytewise. The independent primary oracle and causal carry are unchanged.
 
 The [factored readout skill](../../.opencode/skill/open-qwen38-factored-readout/SKILL.md)
 records commands and evidence. Its standalone core uses 8720 bytes of text,
-L1 buffer end 22016 and stack 6144. Full-layer resource fit and propagation must
-still be validated before integration; isolated acceptance does not establish
-either. Production kernels and their 92 failing head-output diagnostics remain
-unchanged.
+L1 buffer end 22016 and stack 6144.
+
+The private full-lx builder, `utilities/deltanet-replay/build_full_layer.py`,
+uses `--shared` to deduplicate identical arithmetic helpers at link time.
+The direct build exceeds program memory (18592 bytes); sharing reduces it to
+15840 bytes, leaving 544 bytes on each main core. All 11 cores fit, with L1
+buffer end 62336 and unchanged 6144-byte stacks. Compiler dependency files
+must prove that the private recurrence headers were selected: IRON copies TUs,
+so their original source directory is insufficient for quoted includes.
+
+`full_layer_replay.py` runs all linear layers with forced incoming residuals
+and each variant's own causal state. The control must reproduce complete
+production buffers bytewise. The candidate must retain identical recurrence
+inputs and match the isolated factored state/output captures for every head;
+independent residual and recurrence oracles retain their existing thresholds.
+The [full-layer skill](../../.opencode/skill/open-qwen38-factored-full-layer/SKILL.md)
+records build and validation commands. The measured candidate passes all 144
+full-layer residual/recurrence cases and 6912 head-state/output checks, with
+worst residual error 0.0013026962 <0.005. All 13824 head captures match the
+isolated candidate bytewise. This does not establish propagation
+across the 64-layer model. Production integration and full-depth regression
+remain pending; current production kernels still have 92 failing head-output
+diagnostics.
