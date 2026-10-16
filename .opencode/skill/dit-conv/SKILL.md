@@ -16,6 +16,36 @@ adds the VAE's attention streams to the gemm and fa sets. `--no-vae` skips all o
 
 Design note: `.claude/plans/image-diffusion-phase5-vae.md`.
 
+## Building (both platforms are active here; the generator runs on Linux or WSL,
+## the NPU runs on Windows or Linux)
+
+This Linux box (learned 2026-10-16):
+
+```
+# one-time: ironvenv/ with mlir-aie 1.4.2 + Peano (uv is available; system python is 3.15,
+# which has no wheel — use uv's managed CPython 3.11: ~/.local/bin/python3.11)
+uv venv --python 3.11 ironvenv && uv pip install --python ironvenv/bin/python -r ironvenv-requirements.txt
+```
+
+Build (`gitignored` output: `src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`, per-stream
+build caches make reruns skip everything unchanged):
+
+```
+PEANO="$PWD/ironvenv/lib/python3.11/site-packages/llvm-aie/bin"
+export PATH="$PWD/ironvenv/bin:$PEANO:/opt/xilinx/xrt/bin:$PATH"   # ALL THREE: aiecc is in
+  # ironvenv/bin (compose_elf calls it bare); 'opt'/'llc' and clang are in $PEANO
+ironvenv/bin/python open_kernels/export_dit_kernels.py            # --resolutions 512,1024 default
+```
+
+~10 min cold (12 cores: each of the 138 streams ≈ 10-50 s at -j4 inside; ELF composition
++385 s). The compose-ELF stage shells out to `aiecc` — if it dies with `tool 'opt' not
+found`, the PATH above was incomplete; just rerun, cached streams are kept by shape stamp.
+
+Full-ELF pipeline progress lines are noisy; filter them out.
+
+(Windows builds went through `C:\dev\mlir-aie\iron_env.ps1` — see the Run blocks in
+`utilities/dit-chain/README.md` for the original examples.)
+
 ## What was learned getting here (don't re-derive it)
 
 1. **VAE numerics don't matter.**
