@@ -85,7 +85,7 @@ binary fixtures and compiled files belong under the ignored build directories.
 
 This validates only AB and its nonlinearities. Seven independent AB inputs do
 not validate recurrent state. The subsequent chain is documented in
-`.opencode/skill/open-wide-deltanet-chain/SKILL.md`, including the A7 procedure
+`.agents/skills/open-wide-deltanet-chain/SKILL.md`, including the A7 procedure
 and a known stricter head-local precision limitation. Keep
 catalogue promotion, model packing and Flash-specific architecture work behind
 the user's A7/full-model gates. No closed kernels or CPU compute fallback.
