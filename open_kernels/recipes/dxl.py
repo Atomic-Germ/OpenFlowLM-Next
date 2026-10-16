@@ -21,8 +21,9 @@ CHUNK = 5120
 Z_ROW = 2048        # one row of z: 512 fp32, one x element
 LORA_K = 256        # the B tile's width
 JMAX = 32           # jobs a table holds
+HEAD_JMAX = 2       # the head's table (mode 2): its first tile, then every other tile
 # a job's fields, as the cores' table stores them (dxl_job.cc reads the same order)
-FIELDS = ("S", "BT", "CPS", "NDRAIN", "KS", "MODE", "OFF", "B0", "S0", "KT", "DMODE", "G0", "NPREP")
+FIELDS = ("S", "BT", "CPS", "NDRAIN", "KS", "MODE", "OFF", "B0", "S0", "KT", "DMODE", "G0", "NPREP", "REP")
 NF = len(FIELDS)
 PREP_BF16, PREP_F32, PREP_Z = 0, 1, 2          # MODE: the slice's activation format
 OUT_COPY, OUT_ACT = 0, 1                       # DMODE: a band as is, or silu(gate) * up
@@ -61,6 +62,7 @@ class DxlLayout:
     AD_ZGU: int
     AD_ZD: int
     AD_ZERO: int     # one x element nothing writes: the seed row's z
+    AD_MODE: int     # three x elements holding 0, 1, 2: the first x element of a dispatch names its mode
     AD_JUNK: int
     AD_BYTES: int
     XN_ROW: int      # bytes per row of each region
@@ -143,6 +145,8 @@ def layout(spec: ModelSpec, L: int) -> DxlLayout:
         off += L * row
     a["zero"] = off
     off += XE
+    a["mode"] = off
+    off += 3 * XE
     a["junk"] = off
     off += D.ELN
     lora, loff = {}, 0
@@ -152,7 +156,7 @@ def layout(spec: ModelSpec, L: int) -> DxlLayout:
     return DxlLayout(
         L=L, AD_XN=a["xn"], AD_Q=a["q"], AD_K=a["k"], AD_V=a["v"], AD_OG=a["og"], AD_OUT=a["out"],
         AD_RES=a["res"], AD_XM=a["xm"], AD_H=a["h"], AD_OUT2=a["out2"], AD_ZQKV=a["zqkv"], AD_ZO=a["zo"],
-        AD_ZGU=a["zgu"], AD_ZD=a["zd"], AD_ZERO=a["zero"], AD_JUNK=a["junk"],
+        AD_ZGU=a["zgu"], AD_ZD=a["zd"], AD_ZERO=a["zero"], AD_MODE=a["mode"], AD_JUNK=a["junk"],
         AD_BYTES=-(-off // ELEM) * ELEM,
         XN_ROW=rows["xn"], Q_ROW=rows["q"], KV_ROW_ACT=rows["k"], OG_ROW=rows["og"], HID_ROW=hid * 4,
         XM_ROW=rows["xm"], H_ROW=rows["h"], XRES_FLOATS=L * hid, BTQ=btq, BTO=bto, BTD=btd, BP=bp,
@@ -184,7 +188,7 @@ def jobs(spec: ModelSpec, L: int, draft: bool) -> list[Job]:
 
     def core(S, BT, KS, mode, ndrain=0, off=0, b0=0, s0=0, kt=0, dmode=OUT_COPY, g0=0):
         return {"S": S, "BT": BT, "CPS": 2 * KS // 256, "NDRAIN": ndrain, "KS": KS, "MODE": mode, "OFF": off,
-                "B0": b0, "S0": s0, "KT": kt, "DMODE": dmode, "G0": g0, "NPREP": L}
+                "B0": b0, "S0": s0, "KT": kt, "DMODE": dmode, "G0": g0, "NPREP": L, "REP": 1}
 
     def a_job(stage, name, xoff, xrow, K, KS, f32, zoff):
         loff, _, c = X.LORA[name]
@@ -262,6 +266,47 @@ def jobs(spec: ModelSpec, L: int, draft: bool) -> list[Job]:
             else:
                 cur = job.x
     return out
+
+
+@dataclass(frozen=True)
+class HeadPlan:
+    """The head as tile jobs on the main cores (OPEN-DXL-HEAD): `nb` bands a core in `nt` tiles of `bt`."""
+    nb: int
+    bt: int
+    nt: int
+    bb: int          # bytes of one band in the head pool
+    rows: list       # the table's job rows (field dicts): tile 0, then the other nt - 1 tiles from the cached tables
+    out_floats: int  # L logits rows
+
+
+def head_plan(spec: ModelSpec, L: int) -> HeadPlan | None:
+    """None where the head cannot ride the layer's cores: tables not cached (TABS 1), bands not a whole number a core."""
+    from .dense import cores_for, lm_rows
+    X = layout(spec, L)
+    n = cores_for(spec)
+    bands = lm_rows(spec) // BAND_ROWS
+    S = spec.hidden // X.KS_H
+    if X.TABS == 1 or spec.hidden % X.KS_H or S > X.TABS or n != 8 or bands % n:
+        return None
+    nb = bands // n
+    cap = X.YB + X.BP                    # the accumulator bands a core holds
+    bt = max(b for b in range(1, min(nb, cap) + 1) if nb % b == 0)
+    nt = nb // bt
+    f = lambda nprep, rep: {"S": S, "BT": bt, "CPS": 2 * X.KS_H // 256, "NDRAIN": bt, "KS": X.KS_H, "MODE": PREP_BF16, "OFF": 0,
+                            "B0": 0, "S0": 0, "KT": spec.hidden // 256, "DMODE": OUT_COPY, "G0": 0, "NPREP": nprep, "REP": rep}
+    rows = [f(L, 1)] + ([f(0, nt - 1)] if nt > 1 else [])
+    return HeadPlan(nb=nb, bt=bt, nt=nt, bb=_band_bytes(spec.hidden), rows=rows, out_floats=L * lm_rows(spec))
+
+
+def head_table(spec: ModelSpec, L: int) -> np.ndarray:
+    """int32 [1 + HEAD_JMAX * NF]: mode 2's job count, then each job's FIELDS."""
+    t = np.zeros(1 + HEAD_JMAX * NF, np.int32)
+    p = head_plan(spec, L)
+    if p:
+        t[0] = len(p.rows)
+        for j, r in enumerate(p.rows):
+            t[1 + j * NF:1 + (j + 1) * NF] = [r[f] for f in FIELDS]
+    return t
 
 
 def job_table(spec: ModelSpec, L: int) -> np.ndarray:
