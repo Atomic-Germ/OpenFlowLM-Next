@@ -353,6 +353,7 @@ class Linear:
     GLUE_HALF_OUTER: bool = False
     XN_F32: bool = False
     CONV_F32: bool = False
+    FACTORED_READOUT: bool = False
 
 
 def paired_attention(spec: ModelSpec) -> bool:
@@ -372,6 +373,13 @@ def linear_fp32(spec: ModelSpec) -> bool:
 def attention_entry_fp32(spec: ModelSpec) -> bool:
     """Validated FP32 entry route on the paired, split dense attention geometry."""
     return paired_attention(spec) and norm_split(spec) and bool(down_split(spec))
+
+
+def factored_recurrence(spec: ModelSpec) -> bool:
+    """Compensated readout with validated full-lx program/data memory budgets."""
+    return (spec.has_linear and spec.intermediate == 17408 and spec.num_experts == 0 and
+            linear_fp32(spec) and all(spec.quant_of(role) == "q4_1"
+                                     for role in ("linear", "linear_out", "attn", "ffn")))
 
 
 @dataclass(frozen=True)
@@ -975,6 +983,7 @@ def linear(spec: ModelSpec) -> Linear | None:
     xn_elems = roundup(spec.hidden * (4 if fp32 else 2), ELEM) // ELEM
     return Linear(
         AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes), XN_F32=fp32, CONV_F32=fp32,
+        FACTORED_READOUT=factored_recurrence(spec),
         GLUE_HALF_OUTER=glue_fills(xn_elems, False) > LIMITS["shim_fills"],
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=spec.hidden // BAND_ROWS // n,
         QKV_DIM=nch, VW=vw,

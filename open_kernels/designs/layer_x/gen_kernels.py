@@ -19,6 +19,13 @@ from recipes import qwen36moe as Q  # noqa: E402
 
 
 
+def dnx_files(R) -> dict[str, str]:
+    """Keep legacy wrappers unless the recipe selects validated factored readout."""
+    if R.linear is not None and R.linear.FACTORED_READOUT:
+        return {name: code.replace('"dnx.h"', '"dnx_factored.h"') for name, code in DNX.items()}
+    return DNX
+
+
 def q8_gy(pc: int) -> str:
     """The q8 projection entry: the q4 `gemv_q4_gy` with the half-tile band law
     (OPEN-QUANT-Q8). One symbol, one TU, generated only when a role is q8."""
@@ -226,7 +233,7 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
         # pair becomes one folded entry with a runtime destination. Nothing else moves.
         out = {"gemv_q4_gyms.cc": q4_gyms(C.PER_CALL, F.MS_U, F.MS_G),
                **{k: v for k, v in out.items() if k not in ("gemv_q4_gy.cc", "gemv_q4_gms.cc")}}
-    out.update(DNX)
+    out.update(dnx_files(R))
     out.update(q8_files(R))
     return out
 
@@ -400,7 +407,7 @@ void moe_out(const float *__restrict ms, float *__restrict y, int32_t j) {{
 }}
 ''',
     }
-    out.update(DNX)
+    out.update(dnx_files(R))
     out.update(q8_files(R))
     return out
 

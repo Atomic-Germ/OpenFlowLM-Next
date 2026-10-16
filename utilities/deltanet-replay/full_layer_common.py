@@ -18,7 +18,10 @@ def geometry(spec):
 
 def production_sources(spec):
     p=LAYER/'gen_kernels.py';sp=importlib.util.spec_from_file_location('_full_recurrence_gen',p)
-    m=importlib.util.module_from_spec(sp);sp.loader.exec_module(m);return m.files(recipe(spec))
+    m=importlib.util.module_from_spec(sp);sp.loader.exec_module(m)
+    # Private experiments inject dnx.h, even after production selects a new header.
+    # Keep all non-recurrence TUs from the current recipe.
+    return {**m.files(recipe(spec)),**m.DNX}
 
 
 def generated_sources(spec,shared=False):

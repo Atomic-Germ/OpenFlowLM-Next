@@ -126,4 +126,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build private full-lx factored DeltaNet with shared helpers, audit compiler dependencies and resource budgets, and validate causal full-layer replay.</description>
     <location>.opencode/skill/open-qwen38-factored-full-layer/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-factored-integration</name>
+    <description>Build the production compensated factored DeltaNet export and validate all 64 layers with causal head gates and streamed weights.</description>
+    <location>.opencode/skill/open-qwen38-factored-integration/SKILL.md</location>
+  </skill>
 </available_skills>
