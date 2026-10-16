@@ -213,3 +213,52 @@ first control read -7.6 % (void by the rule, so indicative), ms of one pass:
   (178 / 183 a block), `-O3` (143) and a per-token fused float stage (152) are all worse.
 - Dead end: unrolling `dxl`'s TREE8 score loop by 2 rows. The frame passes 8 KB and the backend dies encoding a stack offset
   ("immediate operand out of range"); the rolled loop keeps every offset under 8,000.
+
+## Depth and the table cache (track D2, 2026-10-16, Granite 4.2 3B, `perf/granite-uno-depth`)
+
+Result: verify pass 1.48 -> 1.39 plain steps at context 0 and 1.70 -> 1.55 at 2048, draft pass 1.86 / 1.91 -> 1.75 / 1.75; Uno +5-7 % at
+64-1024 tokens and +8.5 % at 2048 (tables in spec OPEN-FAMILY-GRANITE-UNO), every run bit-identical on the rows pass (`ROWS PASS`) and
+IDENTICAL to plain decode. Plain decode's kernels do not change (byte-identical xclbins and instruction streams).
+
+What was built, both bit-identical to the pass before them:
+- **OPEN-DXL-TABS** (`recipes/dxl.py TABS`, `Job.reuse`, field `NPREP`, `dxl_prep_slot.cc`, `dxl_tab_off` in `dxl_job.h`). A main core
+  prepared the same x table 3 times for q / k / v and 8 times for up / gate (4,864 blocks a core a layer, ~52 Peano bundles a block,
+  ~10 % of a pass); with five slice tables resident (+18 KB of L1, weight fifo 4 -> 2) a job on an activation the cache holds skips
+  both its prep and the stream's x fills (they must agree: the core's `xin` fifo and the stream's fills are one sequence). 1,984 blocks
+  a verify layer, 3,424 a draft layer. A family whose tables do not fit (K2) keeps `TABS` 1 and runs the old loop.
+- **OPEN-ATTN-SPLIT8** (`attn.h ATTN_T8_SPLIT`, `_U1 = 2`, `_U2 = 4`). The 8-head score block as two loops (dot products into a 4 KB
+  scratch, then the trees) instead of one: 382 -> 232 bundles a cached row.
+
+Where a pass goes (steps are plain decode steps; probe builds, see spec OPEN-DECODE-ROWS for the table): prep 0.15 of a step, GEMV
+arithmetic 0.2, norms 0.01; attention 0.43 from context 0 to 2048 of which 0.16 is the window stream; the head and its two context
+switches ~0.1 a pass. Weight fifo depth (2, 4, 6) and a memtile ring change nothing, and a pass with all compute compiled out is still
+~1.2 steps: the main cores' prep and GEMV partly sit on the critical path, and ~0.2 of a step is structure no probe here separates.
+
+Not done, in order of what a probe says it is worth: fold `lmhl` into `dxl`'s context as a second stream (like `dxh` on `dx`): the head
+was 1.33x a plain head's time and each pass pays two context switches (first `dxl` dispatch after the head takes 2.5x a steady layer,
+measured with a per-layer wait and a head run twice, an `OFLM_ROWS_PROBE`-style patch in `step_rows` that is not committed); the head
+needs the GEMV job table to repeat a tile job (196 bands a core, 28 tiles of 7 fit the 30-entry table) and the host argmax of
+plain decode (`cli.cpp argmax_bf16`), no device argmax. About 0.1 of a step a pass.
+
+Traps, each met this time:
+1. **`-S` compiles what `-c` cannot.** `attn_tu_check.py` with `ATTN_TU_OBJ=1` builds the object. A one-pass unroll-2 of the score loop
+   compiles to assembly fine and crashes the backend in the object (frame offsets past ~8 KB; `grep -o "\[sp, #-[0-9]*\]"` the `.s` for
+   the largest offset: 9,728 crashes, 6,656 builds). Check bundles with `bb_bundles.py` (15 s a TU) before a 2-minute design build.
+2. **Sources here are CRLF.** `git diff` hides it; a `str.replace` on text with `\n` silently matches nothing. Normalise, edit, write back.
+3. **A heredoc turns a typed `\n` in a Python or C string into a real newline** (trap 5 above, again, in a C `printf` that then failed to compile).
+   Use the edit tool for anything with an escape in it.
+4. **`bench.py`'s chat / code prompts are this repo's own text** (`spec.md`, `dxl.py`): editing either between two runs changes the prompt
+   and the acceptance (code at 2048: 3.31 then 3.43 tokens a cycle). `unodepth.py` freezes each prompt in its work dir on first use.
+5. **`dibs` verdicts name the culprit.** A stray `find /` of mine made every unit NOISY ("find.exe"); a CPU at 27 % of the box (not mine)
+   made one NOISY with no foreign NPU work. Rerun both; never quote either.
+6. **The rows pass against 4 plain steps is a bit compare; a different but valid kernel needs a corr gate.** `--rows-check` now prints each
+   row's corr and, when every row differs but with equal argmax and corr >= 0.9998, `ROWS CLOSE` (exit 0). A variant that put q hi and lo
+   in one accumulator chain gave corr 0.99999 and still flipped one argmax of 8 (a near-tie), then Uno DIFFERS at 2048: keep the bits.
+7. **Seen, not chased:** block prefill (`--gemm-block`) of a prompt of exactly 512 or 520 tokens read corr 0.33-0.77 against a
+   token-at-a-time prefill on the older sets as well (528 and 2056 fine; `decode_gates.py corr --block`); Uno-against-plain
+   compares are unaffected because both sides prefill alike.
+
+Measuring: `utilities/granite-combined-bench/unodepth.py --lengths 64,512,1024,2048 --kinds chat,code --tokens 96 --cfg a=<cli>@<set> --cfg
+b=<cli>@<set>` inside `controlled.py` under `dibs run --measure`, about 3.5 minutes a kind; `dprobe.py --what rows|uno|tg` for the pass
+times. Rebuild only the two streams that changed: `export_qwen36_kernels.py --model-dir <model> --out <copy of the set> --only dxl,dxl_lora`
+(~4.7 minutes at BelowNormal).
