@@ -167,10 +167,14 @@ def test_l_must_be_a_multiple_of_four():
         DXR.layout(K2_7B, 6)
 
 
-def test_only_k2_and_granite_ship_the_rows_route():
+def test_only_k2_and_granite_ship_the_rows_route(monkeypatch):
+    monkeypatch.setenv("DXL_HEAD_FOLD", "1")
     assert DR.rows_route(K2_7B)["rows"]["lora_kernel"] == "dxl_lora"
     assert DR.rows_route(K2_37B)["rows"]["head_act_bytes"] == 4 * 2560 * 2 + 1024
     g = DR.rows_route(GRANITE)
+    monkeypatch.delenv("DXL_HEAD_FOLD")
+    assert DR.rows_route(GRANITE)["rows"]["head"] == "lmhl" and "head_fold" not in DR.rows_route(GRANITE)["rows"]
+    monkeypatch.setenv("DXL_HEAD_FOLD", "1")
     assert g["rows"]["head_out_floats"] == 4 * 100352 and g["rows"]["head_fold"] and g["rows"]["lora_pool_bytes"] > 0
     assert g["rows"]["head"] == "dxl_head" and g["kernels"]["dxl_head"]["context"] == "dxl" and "lmhl" not in g["builds"]
     assert "head_fold" not in DR.rows_route(K2_7B)["rows"]

@@ -628,7 +628,8 @@ instruction stream, `dxl_head`, over `dxl`'s image, not as `lmhl` in a context o
 weight, then each main core's 196 head bands as 28 tiles of 7. The core table's third mode (2) has two rows: tile 0, which prepares the
 normed rows, and one row that repeats 27 times (`REP`) on the cached tables (`NPREP` 0). The logits [L][vocab] go to the host, which takes
 each row's argmax by plain decode's rule (bf16-rounded, subnormals to zero, the lowest id on a tie; AVX2 in `core.cpp`), so Uno's verify rows
-pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent).
+pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent), and so does Granite unless the set is exported with `DXL_HEAD_FOLD=1`:
+the fold is opt-in until a clean unit shows it at parity or faster (see the result below).
 
 **The mode rides in the dispatch's first x element.** A mode written to the cores' rtp word in-context did not take effect: the cores ran the
 previous dispatch's table (a draft layer right after verify layers, and the head after them, hung), and the mode had only ever switched
@@ -640,7 +641,16 @@ written by the engine at start; `manifest rows.mode_off`), whose first word `dxl
   1 with `NPREP` 0, `REP` 27; K2-7B and K2-3.7B have no plan. Every route has `mode_off` and the three elements lie inside act.
 - `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set; K2-7B's `dxl` rebuilt with the mode element prints ROWS PASS at
   70 and 1030.
-- Uno IDENTICAL to plain decode on chat / code at 64, 512, 1024 and 2048 and on the six short prompts; plain decode's kernels byte-identical.
+- Uno IDENTICAL to plain decode on chat / code at 64, 512, 1024 and 2048 (seen in every noisy run below) and on the six short prompts;
+  plain decode's kernels byte-identical to the set without the fold (dx, dxh, dx_f32, ln, lm_head_q4, lmhl: xclbin and insts.bin).
+- The non-folded route on the new `dxl` (mode element, `REP`) still runs: Uno IDENTICAL over 16 tokens.
+
+**Result (2026-10-16): correct, speed not established.** `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set (0 of
+100352 logits differ on every row); K2-7B's rebuilt `dxl` (mode element, no fold) ROWS PASS at 70 and 1030. In the one paired unit that
+read sensibly the fold took the head from ~1.11 to ~0.93 of a plain step, but no unit of mine was clean: another session's CPU jobs (a
+conversion, builds, an `oflm` using the NPU) ran from 15:30 to past 21:30, and every `--measure` unit came back NOISY or with a control
+10-50 % off. The pairs that did run disagree on the layers (draft layers 67 -> 77 and verify 56 -> 59 in one, the other way in another).
+No tok/s figure for the fold is quoted, and the route stays opt-in until a quiet unit decides it.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
