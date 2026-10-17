@@ -295,6 +295,9 @@ struct Manifest {
     /// refused as lacking otherwise.
     void check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
+    /// Why the host attention (OPEN-HOST-ATTN-GUARD) cannot compute this model, or "" when it can.
+    /// It implements K2's attention only; any other family is refused by name.
+    std::string host_attention_refusal() const;
     /// OPEN-PREFILL-MODE: gemm_block becomes variant `name` ("" keeps it), and the other routes and the
     /// globals only they name are dropped. False when no layer type has a variant `name`.
     bool select_prefill_route(const std::string& name);

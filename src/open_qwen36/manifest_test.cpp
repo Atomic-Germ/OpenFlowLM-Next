@@ -994,6 +994,42 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- OPEN-HOST-ATTN-GUARD: the host attention computes K2's attention and refuses every other family
+    for (int i = 1; i < argc; ++i) {
+        try {
+            Manifest f = Manifest::load(argv[i]);
+            const std::string why = f.host_attention_refusal();
+            check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
+                  "host attention: " + f.family + " is refused by name");
+            if (f.family == "qwen3") {
+                Manifest k = f;
+                k.family = "k2";
+                check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
+                Manifest half = k;
+                half.rotary_dim = half.rotary_dim / 2;
+                check(half.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest with a partial rotation is refused on geometry");
+                Manifest odd = k;
+                const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
+                odd.hf_config_check["head_dim"] = hd;
+                odd.rotary_dim = hd;
+                odd.rope_inv_freq.resize(hd / 2);
+                for (auto& [n, t] : odd.layer_types) {
+                    t.gemm_block.qw = odd.hf_config_check["num_attention_heads"].get<size_t>() * hd;
+                    t.gemm_block.kvw = odd.hf_config_check["num_key_value_heads"].get<size_t>() * hd;
+                }
+                check(odd.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest with an odd head_dim is refused on geometry");
+                Manifest wide = k;
+                wide.layer_types.begin()->second.gemm_block.qw += 1;
+                check(wide.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");
+            }
+        } catch (const std::exception& e) {
+            check(false, std::string("host attention guard: ") + e.what());
+        }
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

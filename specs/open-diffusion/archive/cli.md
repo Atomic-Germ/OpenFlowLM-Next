@@ -194,7 +194,7 @@ oflm image <tag> "<prompt>" [-o FILE] [--size 512|1024] [--seed N]
 
 ### 8. Skill
 
-Update `.opencode/skill/open-diffusion/SKILL.md` with the build, package and pull path, per
+Update `.agents/skills/open-diffusion/SKILL.md` with the build, package and pull path, per
 AGENTS.md.
 
 ## The outward-facing step
