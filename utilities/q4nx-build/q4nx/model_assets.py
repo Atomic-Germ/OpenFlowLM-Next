@@ -654,7 +654,7 @@ _OFLM_FAMILY_OF_MODEL_TYPE = {
     "gemma3": "gemma3", "gemma3_text": "gemma3", "gemma3_text_only": "gemma3",
     "gemma4_text": "gemma4", "gemma4": "gemma4",
     "hunyuan_v1_dense": "hunyuan", "granite": "granite",
-    "phi3": "phi3", "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss",
+    "phi3": "phi3", "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss", "k2_horizon": "k2",
 }
 
 # Tags every OFLM conversion carries. `npu2`/`q4nx` say what the file IS;
@@ -1105,6 +1105,37 @@ def ensure_hf_tokenizer_ids(output_dir: Path) -> None:
         print(f"[INFO] Patched {path.name} with EOS/BOS/PAD token ids from HF tokenizer")
 
 
+def merge_generation_eos(output_dir: Path, candidates: List[str]) -> None:
+    """Add the source's generation_config.json eos ids to tokenizer_config.json (OPEN-CONVERT-EOS-GENCONFIG)."""
+    path = output_dir / "tokenizer_config.json"
+    if not path.exists():
+        return
+    gen = None
+    for candidate in candidates:
+        text = _read_source_file(candidate, "generation_config.json") if candidate else None
+        if text:
+            try:
+                gen = json.loads(text)
+            except Exception:
+                gen = None
+            break
+    if not gen or gen.get("eos_token_id") is None:
+        return
+    extra = gen["eos_token_id"] if isinstance(gen["eos_token_id"], list) else [gen["eos_token_id"]]
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    eos = cfg.get("eos_token_id")
+    eos = [] if eos is None else eos if isinstance(eos, list) else [eos]
+    added = [int(t) for t in extra if int(t) not in eos]
+    if not added and cfg.get("eos_token_id") == eos:
+        return
+    cfg["eos_token_id"] = eos + added
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    # HF generate() stops on generation_config's ids; the runtime only reads tokenizer_config's
+    print(f"[INFO] {path.name}: eos_token_id {cfg['eos_token_id']} (added {added} from generation_config.json)")
+
+
 def apply_granite_fold_to_config(config: dict, reader) -> dict:
     """Record Granite's multipliers as they are AFTER `models/granite.py` folds them.
 
@@ -1322,8 +1353,6 @@ def assemble_model_assets_hf(
         config = {}
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
-    if model_arch is ModelArch.GRANITE:
-        apply_granite_fold_to_config(config, reader)
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
@@ -1334,6 +1363,7 @@ def assemble_model_assets_hf(
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     ensure_hf_tokenizer_ids(output_dir)
+    merge_generation_eos(output_dir, candidates)
 
     assemble_readme(
         output_dir, candidates, build_readme_meta(output_dir, oflm_version), source_file
@@ -1396,6 +1426,8 @@ def assemble_model_assets(
 
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
+    if model_arch is ModelArch.GRANITE:
+        apply_granite_fold_to_config(config, reader)
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     # The FFN in model.q4nx is NARROWER than the source model's, so the config
     # that ships beside it has to say so. Left at the source width, the kernel
@@ -1482,6 +1514,7 @@ def assemble_model_assets(
                 json.dump(generated, f, indent=2, ensure_ascii=False)
 
     ensure_runtime_tokenizer_ids(reader, output_dir)
+    merge_generation_eos(output_dir, candidates)
 
     chat_template_path = output_dir / "chat_template.jinja"
     if not chat_template_path.exists():
