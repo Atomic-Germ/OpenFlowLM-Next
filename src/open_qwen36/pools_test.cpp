@@ -850,6 +850,29 @@ int main() {
         check(g8 == 0xa1e333116f424dafull && g4 == 0x7018cee99915f0b9ull, "bf16_gemm: byte-identical to the NumPy packer");
     }
 
+    // ---- bfp16_dit: 24 shared chunks at q4_1 as a [128, 1536] projection, dit_gemm's B (OPEN-PREFILL-GEMM8)
+    {
+        const size_t C24 = 24, R = 128, K = 1536, NCOL = K / 256;
+        std::vector<uint8_t> s24 = q8_vector(C24), q24(C24 * 5120), b(R * K * 9 / 8);
+        requant_q4_1_chunks(s24.data(), C24, q24.data());
+        open_qwen36::pools::bfp16_dit_pack(q24.data(), R, K, b.data());
+        bool within = true;
+        for (size_t n = 0; n < R && within; ++n)
+            for (size_t k = 0; k < K && within; ++k) {
+                const uint8_t* blk = b.data() + ((n / 128) * (K / 64) + k / 64) * 9216 +
+                                     ((((n % 128) / 8) * 8 + (k % 64) / 8) * 8 + n % 8) * 9;
+                const double scale = std::ldexp(1.0, static_cast<int>(blk[0]) - 127) / 64.0;
+                const double got = static_cast<int8_t>(blk[1 + k % 8]) * scale;
+                const double want = q4_read(q24.data() + ((n / 32) * NCOL + k / 256) * 5120, static_cast<unsigned>(n % 32),
+                                            static_cast<unsigned>((k % 256) / 32), static_cast<unsigned>(k % 32));
+                within = std::abs(got - want) <= scale;
+            }
+        check(within, "bfp16_dit: every value decodes within one mantissa step of its q4_1 reading, at W^T's place");
+        const uint64_t g = fnv1a(b.data(), b.size());
+        std::printf("      bfp16_dit fnv1a = 0x%016llx\n", static_cast<unsigned long long>(g));
+        check(g == 0xf9c5bb308b534125ull, "bfp16_dit: byte-identical to dit_gemm's pack_b");
+    }
+
     // ---- transpose: [32, 64] of 2-byte values
     std::vector<uint8_t> t_src(32 * 64 * 2), t_dst(32 * 64 * 2);
     for (size_t i = 0; i < t_src.size(); ++i) t_src[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
