@@ -1407,7 +1407,8 @@ sampled request decodes as usual.
 
 **Every argmax is the app's greedy pick.** The app's plain greedy argmaxes the logits after
 `Engine::forward` rounds them to bf16 (nearest even, subnormals to zero), the lowest id winning a
-tie. So:
+tie, on the scalar and the AVX2 scan alike (`src/test/sampler_greedy` pins ties across vector
+lanes and into the tail). So:
 - `lmhl` compares each logit rounded the same way (`greedy_key`), keeping the first row on a tie
   within a core, and the engine keeps the first core on a tie across cores.
 - The CLI's `--uno` and `--rows-check` decode references use the same pick (`argmax_bf16`), and so

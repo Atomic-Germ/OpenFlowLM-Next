@@ -119,5 +119,15 @@ class TestUnoMetadata(unittest.TestCase):
         self.assertEqual(metadata(self.ACFG, 64.0, {"q_proj": 0.125}, None)["uno_folds"], '{"q_proj": 0.125}')
 
 
+class DeployTest(unittest.TestCase):
+    def test_deploy_copies_the_drafter_beside_the_base(self):
+        import tempfile
+        from q4nx.deploy import deployed_files_in
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("config.json", "model.q4nx", "uno.q4nx"):
+                (Path(d) / name).write_bytes(b"")
+            self.assertIn("uno.q4nx", deployed_files_in(Path(d)))
+
+
 if __name__ == "__main__":
     unittest.main()

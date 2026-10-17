@@ -972,6 +972,13 @@ def main(argv=None) -> int:
             source_repo=source_repo,
         )
 
+    # the drafter is written first so --deploy copies it with the base
+    if getattr(args, "uno_adapter", None):
+        from q4nx.uno import build as build_uno, fetch_adapter
+
+        build_uno(fetch_adapter(args.uno_adapter), Path(output_folder) / "config.json", Path(output_folder),
+                  Path(__file__).resolve().parents[1] / "configs" / "k2.json", args.uno_noise_high)
+
     if args.deploy_tag:
         from q4nx.deploy import deploy_model
 
@@ -986,12 +993,6 @@ def main(argv=None) -> int:
 
     if getattr(args, "build_spec", False):
         _build_spec(output_folder)
-
-    if getattr(args, "uno_adapter", None):
-        from q4nx.uno import build as build_uno, fetch_adapter
-
-        build_uno(fetch_adapter(args.uno_adapter), Path(output_folder) / "config.json", Path(output_folder),
-                  Path(__file__).resolve().parents[1] / "configs" / "k2.json", args.uno_noise_high)
 
     print(f"[INFO] Conversion complete! Output saved to {output_folder}")
     return 0
