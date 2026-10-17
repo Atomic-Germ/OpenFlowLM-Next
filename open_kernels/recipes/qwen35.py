@@ -315,6 +315,7 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
         **({"attn_entry_dtype": "float32"} if M.attention_entry_fp32(spec) else {}),
         **({"linear_entry_dtype": "float32", "linear_conv_dtype": "float32"} if M.linear_fp32(spec) else {}),
         **({"linear_recurrence": "factored_compensated"} if M.factored_recurrence(spec) else {}),
+        **({"q4_activation_sum": "quantized_fp32"} if M.consistent_q4_sum(spec) else {}),
         **({"ffn_norm_dtype": "float32"} if ffn_geometry(spec).XM_F32 else {}),
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
         "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,

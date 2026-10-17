@@ -206,11 +206,20 @@ __attribute__((noinline)) inline void gemv_q4_prep_f32_direct_blocks(
     if (s > 126) s = 126;
     sh[kb] = s;
     aie::store_v(xi + kb * 32, aie::to_fixed<int16_t>(x, s));
+#if defined(GEMV_Q4_CONSISTENT_SUM) && GEMV_Q4_CONSISTENT_SUM
+    // Use the same quantized activation in both Q4 affine terms.
+    // Otherwise a constant zero-weight block can produce a nonzero dot product.
+    const auto sx = aie::to_float<float>(aie::load_v<32>(xi + kb * 32), s);
+    aie::accum<accfloat, 16> a16, b16;
+    a16.from_vector(sx.template extract<16>(0));
+    b16.from_vector(sx.template extract<16>(1));
+#else
     // Sum the original FP32 values, preserving the same reduction tree and
     // BF16 hi/lo ABI as the BF16 preparation path.
     aie::accum<accfloat, 16> a16, b16;
     a16.from_vector(x.template extract<16>(0));
     b16.from_vector(x.template extract<16>(1));
+#endif
     const auto v16 = aie::add(a16, b16).template to_vector<float>();
     aie::accum<accfloat, 8> a8, b8;
     a8.from_vector(v16.template extract<8>(0));

@@ -382,6 +382,11 @@ def factored_recurrence(spec: ModelSpec) -> bool:
                                      for role in ("linear", "linear_out", "attn", "ffn")))
 
 
+def consistent_q4_sum(spec: ModelSpec) -> bool:
+    """Validated full-lx Q4 affine terms use the same quantized FP32 activation."""
+    return factored_recurrence(spec) and attention_entry_fp32(spec)
+
+
 @dataclass(frozen=True)
 class Attn:
     """ax.py's geometry."""
@@ -421,6 +426,7 @@ class Ffn:
     # GEMV into its own act region. Empty -- one GEMV over FF -- for every size that fits.
     DOWN_SPLIT: tuple = ()
     XM_F32: bool = False  # split dense FFN preserves the post-attention norm input
+    CONSISTENT_SUM: bool = False  # direct FP32 table: sum reconstructed INT16 values
 
 
 @dataclass(frozen=True)
@@ -682,7 +688,7 @@ def ffn_geometry(spec: ModelSpec) -> Ffn:
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=FFN_MS_FLOATS,
         XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * (4 if fp32 else 2), ELEM) // ELEM,
         H_ELEMS=roundup(ff * 4, ELEM) // ELEM,
-        DOWN_SPLIT=down_split(spec), XM_F32=fp32,
+        DOWN_SPLIT=down_split(spec), XM_F32=fp32, CONSISTENT_SUM=consistent_q4_sum(spec),
     )
 
 

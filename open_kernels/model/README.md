@@ -604,13 +604,14 @@ documents build, dependency/resource audits and full-depth validation commands.
 Private experiments retain their own recurrence-header injection; reproduce
 historical control results with their recorded checkout and export.
 
-The fresh 41-set export passes 64-layer, three-position residual/logit checks:
+The retained recurrence-only 41-set export passes 64-layer, three-position residual/logit checks:
 192 residuals pass, with worst maxrel 0.0033520097 <0.005. All 6912 recurrence
 head-state/output checks pass at unchanged maxrel <1e-4 and cosine >0.9999999;
 worst state/output errors are 9.3486e-7 / 2.0365e-6. Attention, FFN and LM-head
 boundary checks pass. This does **not** close numerical acceptance: the full
 DeltaNet input checker passes 143/144 cases, with normalized K at L34/T0
-measuring 0.0058359393 >0.005. Its failure status remains visible.
+measuring 0.0058359393 >0.005. Its failure status remains visible in that
+historical export. The integrated consistent-sum correction below addresses it.
 
 To separate norm and QKV projection effects on retained layer captures:
 
@@ -683,3 +684,43 @@ entry norms and QKV match their respective controls in all 144 cases. L34/T0
 K error is **0.0003889343** (control **0.0058359393**); worst candidate K and
 residual errors are **0.0004466512 / 0.0006191985**. FFN front and both down
 partials pass all cases. The control's numerical input gate remains 143/144.
+
+
+### Production consistent Q4 activation sums
+
+The validated wide dense Q4_1 recipe now uses the same INT16-reconstructed
+activation for both affine Q4 terms in direct FP32 preparation. This avoids
+cancellation error when quantized dot products are combined with original-input
+sums. Selection is restricted to the validated factored-recurrence and FP32
+attention-entry geometry. Both full `lx` and `ax` use it, including their FFN;
+other geometries and Q8/mixed-role recipes retain their existing arithmetic.
+
+The manifest records `q4_activation_sum: quantized_fp32`. Buffer ABI, weight
+packing, compensated recurrence and scheduling are unchanged. Rebuild through
+the normal recipe; existing weights require no repacking. The compiled-source
+and dependency audit is `utilities/audit-consistent-sum.py`. Build and validation
+commands are in the [production runbook](../../.agents/skills/open-qwen38-consistent-integration/SKILL.md).
+
+The fresh export contains 41 sets / 82 verified binary hashes. Maximum lx/ax
+text is 15936 / 13760 bytes, L1 buffer ends 62336 / 59920, and stacks remain
+6144. All 66 model/pool hashes and 195 independently regenerated CPU reference
+files match retained provenance; CPU oracle arithmetic and thresholds are unchanged.
+
+The fresh 64-layer × three-position NPU run passes all 192 residual checks
+(worst 0.0030399006 <0.005). Logit correlations are
+0.9999989597 / 0.9999982780 / 0.9999986060; argmax 8678 / 198 / 2 matches CPU.
+DeltaNet input and composed state/output pass all 144 cases. Worst normalized
+K error is 0.0009785607 at L34/T0; this is a new propagated-input measurement,
+separate from the forced-input private replay above. All 6912 strict head
+cases pass, with worst state/output errors 1.2624e-6 / 2.3722e-6. All seven
+boundary checkers pass, including 1152 attention heads, 48 attention projection/
+sublayer cases, three LM-head cases and 192 FFN front/down cases each. Worst
+FFN front/partial0/partial1 errors are 0.0002516594 / 0.0000958907 / 0.0000693562.
+
+The complete model also passes resident runtime validation: all three logits
+are byte-identical to the harness after a repeated request, and full-buffer
+reset reports zero differing replays out of three. This validates the tested
+three-position decode and lifecycle. Separate all-layer FFN up/gate captures,
+remaining source/packing checks, block-prefill parity, serving isolation and
+resource/performance acceptance remain open. Paired-KV block attention still
+uses host attention; these sequential NPU checks do not establish fully NPU prefill.

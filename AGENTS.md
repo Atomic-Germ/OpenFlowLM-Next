@@ -141,4 +141,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build private full-lx consistent Q4 sums and validate causal DeltaNet, Z/out projections, FFN and residuals with streamed weights.</description>
     <location>.agents/skills/open-qwen38-consistent-full-layer/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-consistent-integration</name>
+    <description>Build production consistent Q4 sums and validate full-depth lx/ax decode, independent boundaries and resident identity/reset.</description>
+    <location>.agents/skills/open-qwen38-consistent-integration/SKILL.md</location>
+  </skill>
 </available_skills>
