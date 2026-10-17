@@ -131,4 +131,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build the production compensated factored DeltaNet export and validate all 64 layers with causal head gates and streamed weights.</description>
     <location>.opencode/skill/open-qwen38-factored-integration/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-qkv-precision</name>
+    <description>Build isolated Q4 QKV control and consistent-sum probes, capture activation tables, and validate causal record precision without full-model residency.</description>
+    <location>.opencode/skill/open-qwen38-qkv-precision/SKILL.md</location>
+  </skill>
 </available_skills>
