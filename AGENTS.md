@@ -136,4 +136,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build isolated Q4 QKV control and consistent-sum probes, capture activation tables, and validate causal record precision without full-model residency.</description>
     <location>.agents/skills/open-qwen38-qkv-precision/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-consistent-full-layer</name>
+    <description>Build private full-lx consistent Q4 sums and validate causal DeltaNet, Z/out projections, FFN and residuals with streamed weights.</description>
+    <location>.agents/skills/open-qwen38-consistent-full-layer/SKILL.md</location>
+  </skill>
 </available_skills>

@@ -652,5 +652,34 @@ records pass. Worst candidate K error is 0.0004477865; worst QKV error is
 
 The [QKV precision skill](../../.agents/skills/open-qwen38-qkv-precision/SKILL.md)
 documents private builds, resource audits, single-layer replay and the causal
-sweep. Full-layer fit, affected projection/FFN gates and fresh full-depth
-validation are required before production integration.
+sweep. Full-layer validation is described below; production integration needs
+a fresh export and full-depth validation.
+
+### Consistent Q4 sums in a complete linear layer
+
+`utilities/qkv-full-layer/` applies the same private table correction to a
+complete `lx`, retaining the production compensated recurrence and unchanged
+streams, ABI, packing and stack. Actual compiler dependency files must resolve
+the private table/GEMV headers and production factored recurrence headers.
+All 11 cores fit: maximum text **15936 bytes**, **448 bytes** program headroom,
+maximum L1 buffer end **62336**, stack **6144**.
+
+Each layer receives retained production residuals, starts from zero state and
+carries its own conv/recurrent history over three positions. The control must
+reproduce complete buffers bytewise; candidate QKV must match the isolated
+consistent-sum kernel bytewise. Independent checks cover records and composed
+state/output, strict per-head recurrence, Z/post/output projections, FFN front,
+both down partials and the whole-layer residual. The residual reference uses
+the existing mixed FP64/FP32 replica; all thresholds remain unchanged.
+
+Commands and measured results are in the
+[full-layer runbook](../../.agents/skills/open-qwen38-consistent-full-layer/SKILL.md).
+These forced-input layer checks use one layer's weights at a time. Production
+selection and new full-depth propagation checks remain separate requirements.
+
+The complete private replay passes **144/144 cases** and **6912 strict head
+cases**. All **432 control buffers** are byte-exact to production; candidate
+entry norms and QKV match their respective controls in all 144 cases. L34/T0
+K error is **0.0003889343** (control **0.0058359393**); worst candidate K and
+residual errors are **0.0004466512 / 0.0006191985**. FFN front and both down
+partials pass all cases. The control's numerical input gate remains 143/144.
