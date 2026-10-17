@@ -833,13 +833,13 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 # Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
 ROWS_FAMILIES = ("k2", "granite")
 ROWS_L = 4
-# The L-row head as tile jobs on dxl's own cores (OPEN-DXL-HEAD): no lmhl context, the host takes the argmax. Opt-in
-# (DXL_HEAD_FOLD=1 at export) until a clean unit shows it at parity or faster.
+# The L-row head as tile jobs on dxl's own cores (OPEN-DXL-HEAD): no lmhl context, the host takes the argmax. On by
+# default (clean unit: 3.7-4.7% faster Uno in every cell); DXL_HEAD_FOLD=0 at export keeps lmhl.
 HEAD_FOLD_FAMILIES = ("granite",)
 
 
 def head_fold_on() -> bool:
-    return os.environ.get("DXL_HEAD_FOLD") == "1"
+    return os.environ.get("DXL_HEAD_FOLD") != "0"
 
 
 def rows_route(spec: ModelSpec) -> dict | None:

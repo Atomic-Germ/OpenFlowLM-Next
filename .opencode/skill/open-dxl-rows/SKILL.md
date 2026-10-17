@@ -265,7 +265,7 @@ times. Rebuild only the two streams that changed: `export_qwen36_kernels.py --mo
 norm's weight, then each main core's 196 head bands as 28 tiles of 7, from `head_table` (mode 2): row 0 prepares the normed rows and runs
 tile 0, row 1 repeats (`REP` 27) on the cached tables (`NPREP` 0, which needs OPEN-DXL-TABS). The logits [L][vocab] go to the host, which
 takes each row's argmax with plain decode's rule (`core.cpp argmax_bf16_row`, AVX2). No `lmhl`, no context switch: manifest `rows.head`
-is `dxl_head`, `rows.head_fold` true; K2 keeps `lmhl`. Opt-in (`DXL_HEAD_FOLD=1` at export): bit-identical (ROWS PASS at 70 / 1030 / 2060,
+is `dxl_head`, `rows.head_fold` true; K2 keeps `lmhl`. On by default for Granite (`DXL_HEAD_FOLD=0` at export keeps `lmhl`): bit-identical (ROWS PASS at 70 / 1030 / 2060,
 Uno IDENTICAL) but no clean speed unit was possible (another session's CPU/NPU jobs for six hours), so it is not the default; the
 paired noisy unit read the head at 0.93 of a plain step against 1.11, the layers disagreed. Measure it first: `unodepth.py` with `a=<set
 with lmhl>` and `b=<set exported with DXL_HEAD_FOLD=1>`. Args: pool = the head pool, xres, normw, slot 3 (an InOut one) the logits, 4 the
