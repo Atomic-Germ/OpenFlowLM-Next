@@ -44,6 +44,9 @@ struct PackOp {
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)
     std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
+    uint64_t row0 = 0, n_total = 0;                                     ///< bfp16_gemm: this tensor's first row in the stacked
+                                                                        ///< weight, and the weight's padded row count
+    std::string glu;                                                    ///< bfp16_gemm: "gate" | "up" half of OPEN-PREFILL-BFP16-FFN's gate|up
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -56,6 +59,11 @@ struct Step {
     std::string kernel;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
+    std::string fmt;                         ///< run, block route: "" = the q4_1 / bf16 GEMMs, "bfp16" = gemm_bfp16
+                                             ///< (x packed bfp16, y c-tiled with `n_pad` rows)
+    uint64_t n_pad = 0;                      ///< fmt bfp16: the weight's rows padded to a whole number of tile groups
+    std::string epi;                         ///< fmt bfp16: "glu" = y is the H operand, silu(gate) * up as the next step's A
+    std::string a_from;                      ///< fmt bfp16: "h" = x is the previous glu step's y, already on the device
     bool split = false;                      ///< run, block route: the weight is a q8 projection's exact q4_1
                                              ///< split, [hi | lo]; the GEMM runs twice the rows and the halves add
 };
@@ -109,9 +117,26 @@ struct AttnBlock {
     std::vector<std::string> args;                         ///< the a / b / c globals
     size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
     /// A dense layer's host half before the products: "qknorm_rope" (q/k RMSNorm, then the
-    /// half-split rotation; no bias, no gate). Empty on a full-attention layer, whose is fixed.
+    /// half-split rotation; no bias, no gate) or "rope" (the rotation alone). Empty on a
+    /// full-attention layer, whose is fixed.
     std::string prep;
     bool present() const { return !kernels_s.empty(); }
+};
+
+/// A dense layer's block attention as one causal flash-attention dispatch a 256-token block (OPEN-PREFILL-ATTN-FA,
+/// open_kernels/designs/attn_fa): scores, mask, softmax and both products on the array. One stream per 256 rows of
+/// window up to l_max on one xclbin. Its buffers are the engine's: the block's Q (per head the record with p0, Q hi,
+/// Q lo, q_head bf16 a head), the layer's KV cache (`state`) and the block's fp32 [t, qw] output.
+struct AttnFa {
+    std::map<size_t, std::string> kernels;   ///< window rows -> the stream for that width
+    size_t hd = 0, l_max = 0, q_head = 0;
+    bool qsplit = true;                      ///< Q as a bf16 hi / lo pair
+    /// OPEN-PREFILL-GLUE-PREP: one more stream of the same context that rotates the bfp16 qkv GEMM's c-tiled output,
+    /// packs Q and writes the cache rows. With it every stream takes a fourth buffer, the block's cos / sin table.
+    std::string prep_kernel;
+    size_t prep_npad = 0;                    ///< the qkv GEMM's padded width the prep stream was built for
+    bool present() const { return !kernels.empty(); }
+    bool has_prep() const { return !prep_kernel.empty(); }
 };
 
 struct GemmBlockProgram {
@@ -165,6 +190,8 @@ struct GemmBlockProgram {
     bool has_dense_ffn() const { return !ffn_program.empty(); }
     // full: the attention products on the NPU (absent: attention on the host)
     AttnBlock attn_block;
+    // dense: the whole block attention on the NPU (absent: host attention or dxB)
+    AttnFa attn_fa;
 };
 
 struct LayerType {
@@ -181,12 +208,32 @@ struct LayerType {
 struct KernelDesc {
     std::string context;                     ///< name in Manifest::contexts
     std::string insts;                       ///< relative path of insts.bin
-    std::string patch;                       ///< "" | moeroute2 | attnpos
+    std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
     /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
     /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
     /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
     uint64_t rb = 1;
+    /// attnpos: rows of one per-core window element (OPEN-ATTN-KVSLICE); 0 = the one broadcast window fill.
+    uint64_t kvslice = 0;
+};
+
+// OPEN-DECODE-ROWS: `kernel` reuses each layer's pool / consts / state / ptab; l == 0 means no rows pass.
+struct RowsDesc {
+    uint64_t l = 0;
+    std::string kernel, head;
+    uint64_t act_bytes = 0;          ///< the L-row scratch
+    uint64_t head_act_bytes = 0;     ///< the head's normed rows (bf16 [L][hidden])
+    uint64_t head_cores = 0;         ///< cores whose [value L | row L] argmax elements end the head's output
+    uint64_t head_out_floats = 0;    ///< logits [L][vocab] then head_cores elements of L * 64
+    /// OPEN-DXL-HEAD: `head` is a stream over `kernel`'s image (the head as tile jobs on its cores, no argmax elements): the
+    /// host takes each row's argmax from the logits.
+    bool head_fold = false;
+    uint64_t mode_off = 0, mode_elem = 0;   ///< act: three x elements holding 0, 1, 2 (the mode a dispatch opens with)
+    // OPEN-UNO-LORA: `lora_kernel` is another stream for the same core programs; empty means no draft pass.
+    std::string lora_kernel, lora_file;
+    uint64_t lora_pool_bytes = 0;
+    std::vector<PackOp> lora_pack;
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -223,6 +270,7 @@ struct Manifest {
     std::map<std::string, KernelDesc> kernels;
     std::map<std::string, LayerType> layer_types;
     std::vector<Step> tail;
+    RowsDesc rows;
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;

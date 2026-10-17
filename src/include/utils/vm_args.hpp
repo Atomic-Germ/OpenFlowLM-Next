@@ -119,8 +119,10 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prefill-chunk-len,pcl", po::value<int>(&parsed_args.prefill_chunk_len)->default_value(-1),
              "Set prefill chunk length")
             ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
-             "fast (default) or lean: lean uses less memory and processes prompts more slowly, "
-             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill)")
+             "fast (default), lean or bfp16: lean uses less memory and processes prompts more slowly, "
+             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill); "
+             "bfp16 runs the dense prefill on bfp16 operands with the attention, RoPE and cache write on the NPU "
+             "(Granite 4.2 3B: about 3x faster prefill, +1.7 GiB)")
             ("img-pre-resize,r", po::value<int>(&parsed_args.img_pre_resize)->default_value(2),
              "Pre-resize the image, 0: original size, 1: height = 480, 2: height = 720, 3: height = 1080, 4: height = 1440, 5: height = 2160, 6: height = 2880, 7: height = 3240, 8: height = 4320")
             ("socket,s", po::value<size_t>(&parsed_args.max_socket_connections)->default_value(10),
@@ -215,8 +217,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     std::cerr << "Error: --prefill-mode is only supported with the run, serve and bench commands!" << std::endl;
                     return false;
                 }
-                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean") {
-                    std::cerr << "Error: --prefill-mode is fast or lean, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean" &&
+                    parsed_args.prefill_mode != "bfp16") {
+                    std::cerr << "Error: --prefill-mode is fast, lean or bfp16, not '" << parsed_args.prefill_mode << "'" << std::endl;
                     return false;
                 }
             }

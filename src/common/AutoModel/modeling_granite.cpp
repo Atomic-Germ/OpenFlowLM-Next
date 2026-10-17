@@ -4,7 +4,24 @@
 #include "AutoModel/modeling_granite.hpp"
 
 /************              Granite family            **************/
-Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") {}
+// granite-4.2's template thinks unless told otherwise, so thinking stays on until a request says "think": false
+Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") { this->enable_think = true; }
+
+bool Granite::configure_parameter(std::string parameter_name, const std::any& value) {
+    if (parameter_name == "enable_think") {
+        try {
+            this->enable_think = std::any_cast<bool>(value);
+            return true;
+        } catch (const std::bad_any_cast&) {
+            return false;
+        }
+    }
+    if (parameter_name == "toggle_think") {
+        this->enable_think = !this->enable_think;
+        return true;
+    }
+    return AutoModel::configure_parameter(parameter_name, value);
+}
 
 void Granite::load_model(std::string model_path, json model_info, int default_context_length,
                          bool enable_preemption) {
@@ -28,9 +45,13 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
                                  ". Granite runs on the open kernels only: build them with "
                                  "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
                                  "OFLM_OPEN_KERNELS_DIR at a built set.");
-    header_print("OFLM", "Granite on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
+    header_print("OFLM", "Granite on the open kernels (" + kernels + ")" +
+                             (eng->spec_ok() ? std::string("; greedy requests (top_k 1, no penalty) decode speculatively: "
+                                                           "prompt lookup") + (eng->uno_ok() ? ", Uno's draft pass" : "") +
+                                                   " or a plain step, each cycle (OFLM_SPEC_MODE)"
+                                             : std::string()));
     this->lm_engine = std::move(eng);
 #else
     throw std::runtime_error("Granite needs the open engine, which this build does not have "
@@ -67,6 +88,7 @@ std::string Granite::apply_chat_template(nlohmann::ordered_json& messages,
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    inputs.extra_context["enable_thinking"] = this->enable_think;
     // granite-4.2's own chat_template.jinja branches on `tools` (it emits a
     // <tools> block and changes the system turn when the list is non-empty), so
     // dropping the argument here would not fail -- it would silently produce a
@@ -101,7 +123,8 @@ bool Granite::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
 
 std::string Granite::generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os,
                               std::function<bool()> is_cancelled) {
-    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
+    return this->_uno_applies() ? this->_shared_generate_uno(meta_info, length_limit, os, is_cancelled)
+                               : this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 std::string Granite::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
@@ -109,5 +132,5 @@ std::string Granite::generate_with_prompt(chat_meta_info_t& meta_info, lm_unifor
     if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }

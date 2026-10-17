@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -48,6 +49,8 @@ constexpr uint64_t Q4K_POOL_FNV1A = 0xb02083912551d9d3ull;
 // container into a 3072-wide pool (OPEN-PACK-CHUNK-FUSE).
 // specs/open-engine/tests/test_chunk_fuse.py asserts this number on the same bytes.
 constexpr uint64_t FUSE_POOL_FNV1A = 0x21f7e3b732137cb2ull;
+// test_prefill_bfp16.py asserts the same hash of the glu halves (OPEN-PREFILL-BFP16-FFN)
+constexpr uint64_t BFP16_GLU_FNV1A = 0xe608fa0b59e37843ull;
 
 int failures = 0;
 
@@ -155,13 +158,13 @@ struct Tensor {
                                   ///< right for I8 and half the byte count for BF16
 };
 
-std::string write_container(const std::string& stem, const std::vector<Tensor>& ts) {
-    std::string hdr = "{";
+std::string write_container(const std::string& stem, const std::vector<Tensor>& ts, const std::string& meta = "") {
+    std::string hdr = meta.empty() ? "{" : "{\"__metadata__\":" + meta;
     size_t off = 0;
     for (size_t i = 0; i < ts.size(); ++i) {
         const size_t n = ts[i].data->size();
         const size_t cols = ts[i].cols ? ts[i].cols : ts[i].ch;
-        hdr += (i ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"" + ts[i].dtype +
+        hdr += (i || !meta.empty() ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"" + ts[i].dtype +
                "\",\"shape\":[" + std::to_string(n / ts[i].ch) + "," + std::to_string(cols) +
                "],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + n) + "]}";
         off += n;
@@ -196,6 +199,21 @@ open_qwen36::PackOp std_perm_op(const char* tensor, uint64_t dst) {
     op.nch = NCH;
     op.in_dim = IN_DIM;
     return op;
+}
+
+// Traces: OPEN-UNO-LORA (uno.q4nx records its adapter's noise range in __metadata__)
+void metadata_tests() {
+    const std::vector<uint8_t> q4 = lcg_bytes(0x5EEDu, NCH * Q4_CH);
+    const std::string path = write_container("open_qwen36_meta_test", {{Q4_NAME, Q4_CH, &q4}},
+                                             "{\"uno_noise_high\":\"100256\",\"uno_scale\":\"64.0\"}");
+    {
+        open_qwen36::Q4nxFile f(path);
+        check(f.metadata("uno_noise_high") == "100256" && f.metadata("uno_scale") == "64.0",
+              "__metadata__: the header's strings are kept (uno_noise_high)");
+        check(f.metadata("absent").empty() && f.tensor_count() == 1 && f.has(Q4_NAME),
+              "__metadata__: a missing key reads empty, and the metadata is not a tensor");
+    }
+    std::filesystem::remove(path);
 }
 
 void mixed_container_tests() {
@@ -850,6 +868,27 @@ int main() {
         check(g8 == 0xa1e333116f424dafull && g4 == 0x7018cee99915f0b9ull, "bf16_gemm: byte-identical to the NumPy packer");
     }
 
+    // ---- bfp16_gemm (OPEN-PREFILL-BFP16): the q4_1 chunks twice, a [128, 1536] tensor at row 256 of a 1024-row weight
+    {
+        const size_t R = 128, K = 1536, N_TOTAL = 1024;
+        std::vector<uint8_t> two(out.begin(), out.begin() + 12 * 5120);
+        two.insert(two.end(), out.begin(), out.begin() + 12 * 5120);
+        std::vector<uint8_t> dst(N_TOTAL * K / 8 * open_qwen36::BFP16_BLOCK_BYTES, 0);
+        open_qwen36::pools::bfp16_gemm_pack(two.data(), R, K, 256, N_TOTAL, dst.data());
+        const uint64_t gb = fnv1a(dst.data(), dst.size());
+        std::printf("      bfp16_gemm fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gb));
+        check(gb == 0xb7aece12e88c13afull, "bfp16_gemm: byte-identical to the NumPy packer");
+        // OPEN-PREFILL-BFP16-FFN: the same chunks four times as a [512, 1536] gate and up, halves of a 1024-row glu weight
+        std::vector<uint8_t> four;
+        for (int i = 0; i < 4; ++i) four.insert(four.end(), two.begin(), two.end());
+        std::vector<uint8_t> glu(N_TOTAL * K / 8 * open_qwen36::BFP16_BLOCK_BYTES, 0);
+        open_qwen36::pools::bfp16_gemm_pack(four.data(), 512, K, 0, N_TOTAL, glu.data(), "gate");
+        open_qwen36::pools::bfp16_gemm_pack(four.data(), 512, K, 0, N_TOTAL, glu.data(), "up");
+        const uint64_t gg = fnv1a(glu.data(), glu.size());
+        std::printf("      bfp16_gemm glu fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gg));
+        check(gg == BFP16_GLU_FNV1A, "bfp16_gemm glu: byte-identical to the NumPy packer");
+    }
+
     // ---- transpose: [32, 64] of 2-byte values
     std::vector<uint8_t> t_src(32 * 64 * 2), t_dst(32 * 64 * 2);
     for (size_t i = 0; i < t_src.size(); ++i) t_src[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
@@ -931,6 +970,7 @@ int main() {
 
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
     mixed_container_tests();
+    metadata_tests();
     q4k_container_tests();
     ptab_scale_tests();
     ptab_switch_tests();

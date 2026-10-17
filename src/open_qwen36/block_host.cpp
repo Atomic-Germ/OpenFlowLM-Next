@@ -13,6 +13,7 @@
 #include <omp.h>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -219,6 +220,43 @@ void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
                         for (size_t t = 0; t < MAC; ++t)
                             *w++ = f32_to_bf16(x[(nb * TN + ti * MAC + t) * K + kb * TK + si * MAC + s]);
         }
+}
+
+void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint8_t* out) {
+    if (T % (t.m * t.rows) || K % t.k) throw std::runtime_error("open_qwen36: bfp16_pack_a: T or K does not tile");
+    // a 16-row group's K chunk is one contiguous run of the operand; row-parallel 9-byte writes shared cache lines
+    const size_t nk = K / t.k, kb = t.k / 8;
+#pragma omp parallel for
+    for (long long gk = 0; gk < static_cast<long long>(T / 16 * nk); ++gk) {
+        const size_t r0 = static_cast<size_t>(gk) / nk * 16, c0 = static_cast<size_t>(gk) % nk * kb;
+        uint8_t* o = out + bfp16_a_offset(r0, c0, K, t);
+        for (size_t cb = c0; cb < c0 + kb; ++cb)
+            for (size_t r = r0; r < r0 + 16; ++r, o += BFP16_BLOCK_BYTES) bfp16_encode_block(x + r * K + cb * 8, o);
+    }
+}
+
+void bfp16_untile_rows(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* out) {
+    if (n_real % t.n) throw std::runtime_error("open_qwen36: bfp16_untile_rows: n_real is not whole tiles");
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+#pragma omp parallel for
+    for (long long rr = 0; rr < static_cast<long long>(M); ++rr) {
+        const size_t r = static_cast<size_t>(rr);
+        const float* base = c + (r / rb) * J * blk + (r % rb) * t.n;
+        for (size_t ct = 0; ct < n_real / t.n; ++ct)
+            std::memcpy(out + r * n_real + ct * t.n, base + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk,
+                        t.n * sizeof(float));
+    }
+}
+
+void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y) {
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+#pragma omp parallel for
+    for (long long nn = 0; nn < static_cast<long long>(n_real); ++nn) {
+        const size_t n = static_cast<size_t>(nn), ct = n / t.n, j = n % t.n;
+        const float* base = c + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk + j;
+        float* o = y + n * M;
+        for (size_t r = 0; r < M; ++r) o[r] = base[(r / rb) * J * blk + (r % rb) * t.n];
+    }
 }
 
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
@@ -470,12 +508,16 @@ void attention_prep(const AttnGeom& g, const float* q, const float* k, const flo
         const size_t t = static_cast<size_t>(tt), p = g.pos0 + t;
         for (size_t h = 0; h < g.nh; ++h) {
             float* dst = Q + t * qw + h * g.hd;
-            rms_vec(q + t * qw + h * g.hd, g.hd, qn, g.eps, dst);
+            const float* src = q + t * qw + h * g.hd;
+            if (qn) rms_vec(src, g.hd, qn, g.eps, dst);
+            else std::copy(src, src + g.hd, dst);
             rope(dst, half, inv_freq, static_cast<double>(p));
             for (size_t j = 0; j < g.hd; ++j) dst[j] *= scale;
         }
         for (size_t h = 0; h < g.kvh; ++h) {
-            rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
+            const float* src = k + t * kvw + h * g.hd;
+            if (kn) rms_vec(src, g.hd, kn, g.eps, kh.data() + h * g.hd);
+            else std::copy(src, src + g.hd, kh.data() + h * g.hd);
             rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p));
         }
         for (size_t j = 0; j < kvw; ++j) {

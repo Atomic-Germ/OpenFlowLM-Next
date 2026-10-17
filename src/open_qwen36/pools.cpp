@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
 #include "open_qwen36/gguf_file.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
@@ -335,7 +336,25 @@ void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint1
     }
 }
 
+void bfp16_gemm_pack(const uint8_t* src, size_t rows, size_t cols, size_t row0, size_t n_total, uint8_t* dst,
+                     const std::string& glu) {
+    const Bfp16Tiling t;
+    const size_t ncol = cols / 256;
+    const size_t up = glu == "up" ? 8 : 0;
+#pragma omp parallel for
+    for (long long rr = 0; rr < static_cast<long long>(rows); ++rr) {
+        const size_t r = static_cast<size_t>(rr);
+        const size_t br = glu.empty() ? row0 + r : bfp16_glu_row(r, n_total / 2, t) + up;
+        float w[8];
+        for (size_t cb = 0; cb < cols / 8; ++cb) {
+            for (size_t i = 0; i < 8; ++i) w[i] = q4_1_value(src, ncol, r, cb * 8 + i);
+            bfp16_encode_block(w, dst + bfp16_b_offset(br, cb, n_total, cols, t));
+        }
+    }
+}
+
 uint64_t op_bytes(const PackOp& op, size_t chunk_bytes) {
+    if (op.op == "bfp16_gemm") return op.n_total * op.in_dim / 8 * BFP16_BLOCK_BYTES;
     return op.op == "bf16_gemm" ? op.nch * 2 * 8192 : op.nch * chunk_bytes;
 }
 
@@ -638,6 +657,30 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             std::vector<uint8_t> tmp;
             bf16_gemm_pack(q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp), false, rows, op.in_dim, out);
         }
+    } else if (op.op == "bfp16_gemm") {
+        // `nch` q4_1 SOURCE chunks from `chunk0`, rows [row0, row0 + rows) of an `n_total`-row weight (OPEN-PREFILL-BFP16)
+        const std::string name = with_layer(op.tensor, layer);
+        const Bfp16Tiling t;
+        if (op.in_dim % 256 || op.in_dim % t.k) fail("bfp16_gemm " + name + ": in_dim " + std::to_string(op.in_dim) + " does not tile");
+        const size_t ncol = op.in_dim / 256;
+        if (op.nch % ncol) fail("bfp16_gemm " + name + ": " + std::to_string(op.nch) + " chunks is not whole rows of a " +
+                                std::to_string(op.in_dim) + "-wide tensor");
+        const size_t rows = op.nch / ncol * 32;
+        if (op.row0 % t.n || rows % 32 || op.row0 + rows > op.n_total || op.n_total % (t.n * t.cols))
+            fail("bfp16_gemm " + name + ": rows [" + std::to_string(op.row0) + ", " + std::to_string(op.row0 + rows) +
+                 ") of " + std::to_string(op.n_total) + " do not tile by " + std::to_string(t.n) + " rows x " +
+                 std::to_string(t.cols) + " columns");
+        if (!op.glu.empty() && (op.row0 || 2 * rows != op.n_total || rows % (t.n / 2)))
+            fail("bfp16_gemm " + name + ": a glu half is rows [0, ff) of a 2 ff-row weight, ff whole " +
+                 std::to_string(t.n / 2) + "-row chunks");
+        bounds(op, op_bytes(op, ch), dst_bytes);
+        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
+        if (!q4) fail("bfp16_gemm " + name + " is not in a q4nx container; only std_perm_gguf packs GGUF tensors");
+        if (q4->chunk_bytes(name) == Q8_CHUNK)
+            fail("bfp16_gemm " + name + ": the container stores this tensor at q8; only q4_1 sources are packed to bfp16");
+        std::vector<uint8_t> tmp;
+        bfp16_gemm_pack(q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp), rows, op.in_dim, op.row0, op.n_total,
+                        dst + op.dst, op.glu);
     } else if (op.op == "q8_perm") {
         // The projection stays at q8: `nch` counts POOL half-tiles (5120 B each, twice the
         // q4_1 bytes of the same tensor) and `chunk0` is a SOURCE file-chunk offset, as it

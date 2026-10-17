@@ -1,0 +1,129 @@
+r"""One layer of the L-row pass against L decode steps on a make_decode fixture: row j must equal dx's token j bit for bit."""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+from recipes import dxl as DXR  # noqa: E402
+from recipes.families import for_spec  # noqa: E402
+from recipes.load import load_spec  # noqa: E402
+
+
+def greedy_view(x: np.ndarray) -> np.ndarray:
+    """The logits as the app's greedy compares them: rounded to bf16 (nearest even), subnormals to zero."""
+    u = x.astype(np.float32).view(np.uint32).astype(np.uint64)
+    r = ((u + 0x7FFF + ((u >> 16) & 1)) & 0xFFFF0000).astype(np.uint32)
+    r[(u & 0x7F800000) == 0] = 0
+    return r.view(np.float32)
+
+
+def tok_file(fx: Path, stem: str, j: int) -> Path:
+    return fx / (f"{stem}.bin" if j == 0 else f"{stem}_t{j}.bin")
+
+
+def head(a, fx: Path, spec, R) -> int:
+    """lmhl on layer 0's L rows: logits bit-identical to the fixture's ln + lm_head_q4 run, argmax the app's greedy pick."""
+    from recipes.dense import lm_rows
+    hid, vocab, L0 = spec.hidden, lm_rows(spec), R.layout
+    row = DXR.head_layout(spec, a.l).ROW_FLOATS if a.head2 else vocab    # lmhl2 pads its logits rows
+    out_floats = a.l * row + 8 * a.l * 64
+    if a.compare:
+        out = np.fromfile(fx / "y_lmhl.bin", np.float32)
+        lg = out[:a.l * row].reshape(a.l, row)[:, :vocab]
+        am = out[a.l * row:].view(np.int32).reshape(8, a.l * 64)
+        ok = True
+        for j in range(a.l):
+            ref = np.fromfile(tok_file(fx, "y_logits", j), np.float32)[:vocab]
+            diff = int((ref.view(np.uint32) != lg[j].view(np.uint32)).sum())
+            host = int(np.argmax(greedy_view(ref[:spec.real_vocab])))
+            vals, rows = am[:, j], am[:, a.l + j]
+            npu = int(rows[int(np.argmax(vals))])          # np.argmax: the first core on a tie
+            good = diff == 0 and npu == host
+            ok &= good
+            print(f"row {j}: {'PASS' if good else 'FAIL'} logits vs ln+lm: {diff} of {vocab} differ; "
+                  f"argmax npu {npu} host {host}")
+        print("PASS" if ok else "FAIL")
+        return 0 if ok else 1
+    xres = np.concatenate([np.fromfile(tok_file(fx, "y_res0", j), np.float32)[:hid] for j in range(a.l)])
+    (fx / "xres_head.bin").write_bytes(xres.astype(np.float32).tobytes())
+    b = Path(a.build).resolve().as_posix()
+    cfg = ["device", f"xclbin lmhl {b}/final.xclbin", f"kernelx lmhl lmhl {b}/insts.bin",
+           f"buf lmpool {L0.LMHEAD_POOL_BYTES} {(fx / 'pools' / 'pool_lmhead.bin').as_posix()}",
+           f"buf xresh {xres.nbytes} {(fx / 'xres_head.bin').as_posix()}",
+           f"buf normw {hid * 2} {(fx / 'normw.bin').as_posix()}",
+           f"buf acth {a.l * hid * 2}", f"buf outh {out_floats * 4}"]
+    cfg += ["run lmhl lmpool xresh normw acth outh"] * a.runs
+    cfg += [f"dump outh {(fx / 'y_lmhl.bin').as_posix()} {out_floats * 4}", ""]
+    (fx / "run_lmhl.cfg").write_text("\n".join(cfg), newline="\n")
+    print(f"wrote {fx / 'run_lmhl.cfg'}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fixture", required=True)
+    ap.add_argument("--build", default=None)
+    ap.add_argument("--l", type=int, default=4)
+    ap.add_argument("--spec", default=str(HERE.parents[1] / "recipes" / "specs" / "k2-horizon-7b.json"))
+    ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--compare", action="store_true")
+    ap.add_argument("--head", action="store_true", help="the L-row head (lmhl) on the rows dx left after layer 0")
+    ap.add_argument("--lora", default=None, help="layer 0's LoRA pool (pack_lora.py), for a draft build")
+    ap.add_argument("--head2", action="store_true", help="with --head: lmhl2's padded logits rows")
+    a = ap.parse_args()
+    fx = Path(a.fixture).resolve()
+    spec = load_spec(Path(a.spec))
+    R = for_spec(spec).recipe(spec)
+    X = DXR.layout(spec, a.l)
+    hid = spec.hidden
+
+    if a.head or a.head2:
+        return head(a, fx, spec, R)
+    if a.compare:
+        y = np.fromfile(fx / "y_dxl_res.bin", np.float32).reshape(a.l, hid)
+        ok = True
+        for j in range(a.l):
+            dx = np.fromfile(tok_file(fx, "y_res0", j), np.float32)
+            ref = np.fromfile(tok_file(fx, "ref_res0", j), np.float32).astype(np.float64)
+            diff = int((dx.view(np.uint32) != y[j].view(np.uint32)).sum())
+            g = y[j].astype(np.float64)
+            corr = float(np.corrcoef(g, ref)[0, 1])
+            rel = float(np.abs(g - ref).max() / (np.abs(ref).max() + 1e-30))
+            good = diff == 0
+            ok &= good
+            print(f"row {j}: {'PASS' if good else 'FAIL'} vs dx: {diff} of {hid} differ; "
+                  f"vs fp64: corr {corr:.6f} maxrel {rel:.2e}")
+        print("PASS" if ok else "FAIL")
+        return 0 if ok else 1
+
+    xres = np.concatenate([np.fromfile(fx / f"xres{j}.bin", np.float32)[:hid] for j in range(a.l)])
+    (fx / "xres_l.bin").write_bytes(xres.astype(np.float32).tobytes())
+    b = Path(a.build).resolve().as_posix()
+    L0 = R.layout
+    cfg = ["device", f"xclbin dxl {b}/final.xclbin", f"kernelx dxl dxl {b}/insts.bin",
+           f"buf ptab {L0.PTAB_BYTES} {(fx / 'ptab.bin').as_posix()}",
+           f"buf pool0 {L0.POOL_BYTES} {(fx / 'pools' / 'pool_L0.bin').as_posix()}",
+           f"buf consts0 {L0.CD_BYTES} {(fx / 'consts_0.bin').as_posix()}",
+           f"buf xresl {xres.nbytes} {(fx / 'xres_l.bin').as_posix()}",
+           f"buf actl {X.AD_BYTES}", f"buf state0 {L0.KV_BYTES}",
+           f"buf lora0 {X.LORA_BYTES}" + (f" {Path(a.lora).resolve().as_posix()}" if a.lora else ""),
+           f"attngeom {L0.KV_ROW} {L0.PTAB_ROW} 0", f"attnrows dxl 0 {a.l}"]
+    for r in range(a.runs):
+        if r:
+            cfg.append(f"load xresl {(fx / 'xres_l.bin').as_posix()}")
+        cfg.append("run dxl pool0 xresl consts0 state0 actl ptab lora0")
+    cfg += [f"dump xresl {(fx / 'y_dxl_res.bin').as_posix()} {xres.nbytes}",
+            f"dump actl {(fx / 'y_dxl_act.bin').as_posix()} {X.AD_BYTES}", ""]
+    (fx / "run_dxl.cfg").write_text("\n".join(cfg), newline="\n")
+    print(f"wrote {fx / 'run_dxl.cfg'}: L={a.l}, act {X.AD_BYTES} B, {a.runs} runs")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -28,6 +28,23 @@ SPLIT_MANIFEST_VERSION = 2
 # 2 plus the bf16_gemm pack op (OPEN-PACK-PLAN), which an engine that reads 2 cannot pack
 GEMM_POOL_MANIFEST_VERSION = 3
 GEMM_POOL_OPS = ("bf16_gemm",)
+# 3 plus the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16)
+BFP16_MANIFEST_VERSION = 4
+# 4 plus OPEN-PREFILL-BFP16-FFN's glu steps and pack halves, which an engine that reads 4 would misrun
+GLU_MANIFEST_VERSION = 5
+# 5 plus OPEN-PREFILL-GLUE-PREP: every attn_fa stream takes a fourth buffer, which an engine that reads 5 would not pass
+PREP_MANIFEST_VERSION = 6
+
+
+def has_attn_fa_prep(layer_types: dict) -> bool:
+    return any((g.get("attn_fa") or {}).get("prep") for g in routes(layer_types))
+
+
+def has_glu_step(layer_types: dict) -> bool:
+    return any(st.get("epi") or st.get("a")
+               for g in routes(layer_types)
+               for key in ("program", "shared_program", "ffn_program")
+               for st in g.get(key, []))
 
 
 def routes(layer_types: dict) -> list[dict]:
@@ -38,6 +55,14 @@ def routes(layer_types: dict) -> list[dict]:
 
 def has_gemm_pool_op(layer_types: dict) -> bool:
     return any(op.get("op") in GEMM_POOL_OPS
+               for g in routes(layer_types)
+               for key in ("weights", "shared_weights", "ffn_weights")
+               for w in (g.get(key) or {}).values()
+               for op in w.get("pack", []))
+
+
+def has_bfp16_route(layer_types: dict) -> bool:
+    return any(op.get("op") == "bfp16_gemm"
                for g in routes(layer_types)
                for key in ("weights", "shared_weights", "ffn_weights")
                for w in (g.get(key) or {}).values()
@@ -76,6 +101,8 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         "globals": prog["globals"],
         "builds": F.builds(spec),
     }
+    if "rows" in prog:
+        m["rows"] = prog["rows"]
     plan = F.pack_plan(spec)
     for lt, d in plan.pop("layer_types").items():
         m["layer_types"][lt]["pack"] = d
@@ -90,6 +117,12 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["manifest_version"] = SPLIT_MANIFEST_VERSION
     if has_gemm_pool_op(m["layer_types"]):
         m["manifest_version"] = GEMM_POOL_MANIFEST_VERSION
+    if has_bfp16_route(m["layer_types"]):
+        m["manifest_version"] = BFP16_MANIFEST_VERSION
+    if has_glu_step(m["layer_types"]):
+        m["manifest_version"] = GLU_MANIFEST_VERSION
+    if has_attn_fa_prep(m["layer_types"]):
+        m["manifest_version"] = PREP_MANIFEST_VERSION
     return m
 
 

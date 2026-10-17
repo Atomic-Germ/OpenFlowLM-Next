@@ -30,12 +30,17 @@ the offending key named.
 **Acceptance criteria:**
 - `Manifest::load` on the checked-in fixture (`tests/fixtures/manifest_qwen36.json`) yields 40 layers, two layer types with the 27B's buffer sizes and three-step programs, four contexts, six kernels with their patch kinds (`ax0` attnpos, `lx1`/`ax1` moeroute2), the tail `ln` → `lm`, and the MoE pool geometry `stripe 163840, up 655360, down_core 81920, pool_down 335544320, share 503316480 / 503971840 / 504627200`.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
-- `manifest_version: 4` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`).
+- `manifest_version: 6` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`). Version 4 adds the `bfp16_gemm` pack op and the `bfp16` step format (OPEN-PREFILL-BFP16), version 5 the `glu` epilogue, steps reading its H operand and the `glu` pack halves (OPEN-PREFILL-BFP16-FFN); each is written exactly when a route uses it and refused below it.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
 - `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name. A `linear` / `full` route carries exactly one FFN tail: the MoE block (`moe_kernel`, `shared_program`, requiring `layout.moe`) or a dense `ffn_program` of two steps (up|gate, down) whose buffers `ffn_weights` defines, with its width `ff`; both, or neither, is refused by name. A route weight is normally a run of the layer type's pool or consts ops; `from: "pack"` instead carries its own `std_perm` ops, which the engine packs into that buffer alone, and any other op there is refused. A `std_perm` may carry `split: "hi" | "lo"` (anything else, or on another op, is refused): one half of a q8 source's exact q4_1 split. A `linear` route with `out_split` runs its out projection over both halves stacked, 2 x hidden rows, and adds them.
 - A layer type may carry `gemm_block_variants`, a map of whole routes the engine may load in place of `gemm_block` (OPEN-PREFILL-MODE). Each variant is parsed and refused exactly as `gemm_block` is; a variant without a `gemm_block`, one whose `t` or `kind` differs from it, and a set whose layer types carry different variant names are refused by name. `files()` names every variant's streams, so a set missing one is not a kernel set. An engine that predates the field ignores it and runs `gemm_block` (`manifest_test.cpp`).
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
+- A kernel may carry `kvslice` (OPEN-ATTN-KVSLICE): the rows of one per-core window element, read only with the `attnpos`
+  or `attnrows` patch table and `rb` 1, and only 2 or 4; anything else is refused by name. With it every KV transfer below
+  one row is a window fill whose length and offset `attn_table` / `attn_rows_table` patch per fill, and the KV buffer is
+  allocated `kvslice - 1` rows past the capacity. Absent means 0, the one window fill of every other kernel; a plain table
+  refuses a stream with more than one window fill ("unexpected kv transfer") (`manifest_test.cpp`).
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
 
 ### OPEN-ADD-KERNEL-LINK: `oflm-add` links a model to the kernel set matching its spec
@@ -176,7 +181,12 @@ A family enters the path by measurement, never by declaration:
 `recipes/attnknobs.py: FAST_ATTENTION` lists the measured families; every
 other family compiles the single-core attention it compiled before, byte for
 byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
-measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
+measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE). So are
+the knobs of OPEN-ATTN-KVSLICE beside it: `ATTN_KVSLICE=0|1` (per-core windows in
+`dx`), `ATTN_DXL_KVSLICE=0|1` (the same in `dxl`), `ATTN_KVCORES=0|1|2` (attention
+cores per kv head) and `ATTN_G5_PVROLL=0|1` (the G5 value loop rolled), each with
+its own measured list (`KVSLICE_MEASURED`, `DXL_KVSLICE_MEASURED`,
+`KVCORES_MEASURED`).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
 - With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 4 with the single-row kernel retired (RB 2 from 2026-09-22 until Track E the same day); Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
@@ -216,7 +226,7 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 
 | family | geometry | step @ 2048, shipped -> fast | greedy agreement |
 |---|---|---|---|
-| Granite-4.2-3B (hd 64) | 5 x 8, RB 4 | 1216 s TTFT -> 59 s on 1005 tokens | fp64 replica, coherent chat |
+| Granite-4.2-3B (hd 64) | 5 x 8, RB 4 | 1216 s TTFT -> 59 s on 1005 tokens; step @ 2048 91.1 -> 78.7 ms with the score tree (46 ms at 0, 2026-10-14 below) | fp64 replica, coherent chat |
 | Qwen3-4B (hd 128) | 4 x 8, RB 4 | 5050 -> 258 ms (19.6x) | 300/300, corr min 0.99993 |
 | Llama-3.1-8B (hd 128) | 4 x 8, RB 4 | 4024 -> 427 ms (loaded box) | 54, then a 0.008-logit near-tie |
 | Hy-MT2-7B (hd 128) | 4 x 8, RB 4 | 3395 -> 165 ms (20.6x) | 43, then a 0.05-logit near-tie |
@@ -308,6 +318,35 @@ continuation is 64/64 identical to RB 2's. Teacher-forced over 64 positions at R
 the routed experts flipping on near-ties, as recorded for this family's first
 fast-attention pass.
 
+**Measured (2026-10-14, Granite 4.2 3B plain decode against depth -- OPEN-ATTN-SCORE-TREE):**
+Plain decode fell from 20.7 tok/s to 10.7 at 2048 tokens of context while llama.cpp on the 890M's Vulkan stayed at 23-24, and the
+OPEN-ATTN-CONTEXT bound ("within 2x of position 0") held only barely: a step at 2048 cost 1.96x a step at 0 (91.1 / 46.4 ms), and
+1.72x after the score tree (78.7 / 45.8). The tok/s figures are the 128-token decode, which adds the host's sampling to a step. The profile is one decode step at
+`--at-position` P (`OFLM_OPEN_STEP_TRACE=1 ... --bench-decode 5 --bench-step 10`, 21 steps, `dibs run --measure` CLEAN), the
+pipelined schedule, minimum wall and minimum per-dispatch time:
+
+| position | wall before | wall after | one `dx` dispatch before | one `dx` dispatch after | `lm` | `ln` | host embed / patch / route |
+|---|---|---|---|---|---|---|---|
+| 0 | 46.4 ms | 45.8 | 1.081 ms | 1.082 | 3.6 | 0.21 | 0.03 / 0.00 / 0.00 |
+| 1024 | 69.2 | 62.2 | 1.663 | 1.491 | 3.6 | 0.21 | 0.03 / 0.00 / 0.00 |
+| 2048 | 91.1 | 78.7 | 2.212 | 1.929 | 3.6 | 0.22 | 0.03 / 0.00 / 0.00 |
+
+Everything that grows with the position is inside the 40 `dx` dispatches: 21.7 us per step per position before (0.54 us a layer),
+16.2 after (0.41) (medians 46.9 / 91.4 before and 46.4 / 79.6 after; the 21 steps of a run spread within 1 ms). One `dx` dispatch at
+2048, change by change: 2.212 ms, `h / 5` as a 32-bit multiply 2.092, the rolled tree 2.057, four rows unrolled with the 32-lane
+exponential 1.996, the rescale exponential only when a max rose 1.929. Nothing host-side scales (no KV copy or re-upload: the cache is a resident buffer and a step patches two words and
+a position record), and the window is read to `pos`, not to a fixed stride. The attention is on the NPU, in `dx`: 5 cores x 8 heads, RB 4.
+At 2048 one layer's growth of 1.12 ms splits as the window stream alone 0.28 ms (`ATTN_NULL`), the score phase 0.41, the softmax
+0.19, the value accumulation 0.24 (`ATTN_ABL` 1 / 2 / 3); `ATTN_REPEAT=3` prices the arithmetic at 0.83 ms a pass before the tree (0.59 after), so stream and
+arithmetic add. The score loop ran 8 times a block, a trip count the bundle count of the function leaves out, and called `__muldi3` for
+`h / 5` each time; the tree removes both.
+
+**Measured (2026-10-15, Granite 4.2 3B -- OPEN-ATTN-KVSLICE):** per-core windows (the stream off the critical path) and
+attention cores by kv head (16 cores, each kv head's 5 heads as 3 + 2) take a step at 2048 from 79.2 to 57.9 ms against
+46.1 / 46.9 at 0 (`--bench-step`, CLEAN with a control, one sitting): 1.23x of position 0, and the growth per layer per
+position from 0.404 to 0.134 us (0.177 at 8 cores of 5 heads). Plain decode at 2048 goes from 12.21 to 16.78 tok/s, context
+0 stays at 20.6. Bit-identical throughout; the tables are in OPEN-ATTN-KVSLICE.
+
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
 Until an og element was NHL wide, ACORES was the largest divisor of `NH / HPO`,
@@ -382,6 +421,237 @@ at that position, so it is **quadratic in the prompt length** -- 1005 tokens
 took 1216 s before the fix. On a short prompt it reads as a flat per-token cost
 and is invisible. Nothing here batches a prompt; that is untouched, and it is
 now the dominant term for any document-shaped input.
+
+### OPEN-ATTN-SCORE-TREE: Granite's attention score phase is a tree, bit-identical to the loop it replaced
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `recipes/attnknobs.py` `tree8()`, `designs/dense/dx.py`, `designs/dxl/dxl.py`)
+**Verification:** manual (the NPU and the model container; every number below is `dibs run --measure` CLEAN)
+
+On the 8-heads-a-core block kernel (Granite 4.2 3B: head dim 64, 40 heads over 5 cores, RB 4) the score phase shall reduce a
+block's 32 head x row dot products as one tree whose levels pair lanes the way `aie::reduce_add` does (`ATTN_TREE8`, with
+`ATTN_T8_UNROLL` 4 rows on `dx` and 1 on `dxl`, `ATTN_EXP32`, `ATTN_KVH_MUL`), evaluate the softmax rescale's exponential only for a
+block that raised a running max, and the result shall be bit-identical to the kernel without it.
+- Plain decode at depth is cheaper per position: Granite's growth per layer per position falls from 0.54 to 0.41 us (16.2 us per step
+  at 2048; the table in OPEN-ATTN-CONTEXT, 2026-10-14).
+- Every other family's attention translation units preprocess token-identical to the base (`utilities/attn_pp_identical.sh`,
+  58 of 58 including Granite with `ATTN_TREE8=0`).
+- `ATTN_TREE8=0` / `1` forces it off / on for an A/B build; it is a probe variable in the build key (OPEN-BUILD-CACHE), as is
+  `ATTN_REPEAT` (the block computed n times, a pricing probe).
+
+**Acceptance criteria:**
+- A set built with the tree and the same set without it, `open_qwen36_cli --dump-logits` over 70 prompt tokens + 20 decoded, and over
+  2100 + 20 (one token at a time, so the window is 2100 rows): all 20 logit files byte-identical in both.
+- Ten prompts (the six of `utilities/uno-ref/prompts.jsonl`, and the 1024 / 2048-token chat and code prompts of
+  `utilities/granite-combined-bench`) x 96 greedy tokens: every token list identical to the base kernel's.
+- `open_qwen36_cli --rows-check 17` on the set prints `ROWS PASS` (0 of 100352 logits differ for every row), which holds `dxl` to `dx`.
+- `specs/open-engine/tests/test_attn_geometry.py::test_score_tree_is_granite_only`.
+
+**Procedure (manual):** build `dx` with `ATTN_TREE8=0` and without it (`export_qwen36_kernels.py --only dx --out <dir>`, ~75 s each), overlay
+`dx/final.xclbin` + `dx/insts.bin` on a copy of the union set, and run the criteria above against each. Profile with
+`OFLM_OPEN_STEP_TRACE=1 open_qwen36_cli --ids 100264 --at-position P --bench-decode 5 --bench-step 10` at P = 0, 1024, 2048.
+
+**Where the cost sits, and what is left (2026-10-14):** one `dx` dispatch
+per layer carries everything that grows with position; the host's embed / patch / route and the `ln` / `lm` dispatches are flat. At
+2048 one layer's growth (1.12 ms) is the window stream alone 0.28 (an `ATTN_NULL` build), the score phase 0.41, the softmax 0.19 and
+the value accumulation 0.24 (`ATTN_ABL` 1 / 2 / 3), and the stream and the arithmetic **add**. A deeper `ain` ring cannot overlap
+them: the lowered ring is the largest acquire plus one (9 buffers of 1 KB for an 8-element block) whatever depth the design declares
+(10 and 24 lowered alike; `lni` 5 -> 6, `x` 2 -> 3), so the DMA has one spare buffer while the core holds eight. Copying each block
+into local buffers and releasing the fifo before computing (so the ring refills during the arithmetic) was bit-identical and slower,
+2.080 against 1.986 ms a dispatch at 2048 (both with the rolled tree: the copy overflows program memory beside the unrolled one, which
+reads 1.929), so the copy cost what it was expected to (~0.1 ms) and bought nothing: the 0.28 ms is not DMA wait; the per-block acquire / release and pointer selection is the suspect (RB 2 costs 0.2 ms a layer
+more), unmeasured. The score loop ran 8 times a block and called `__muldi3` for `h / 5` each time. Still open: that per-block cost,
+the stream's volume (2 KB a position broadcast to every core, of which a core needs a quarter to three eighths), and the arithmetic's
+spills (358 vector stores in the 795-bundle score block). OPEN-ATTN-KVSLICE (2026-10-15) takes the stream off the critical path.
+
+### OPEN-ATTN-KVSLICE: attention cores by kv head, each on its own slice of the window, bit-identical
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h` `ATTN_KVS` / `ATTN_G5`, `attn_stepw.cc`, `attn_tailw.cc`,
+`designs/dense/dx.py`, `designs/dxl/dxl.py`, `dxl_attn_skipw.cc`, `recipes/attnknobs.py` `kvslice()` / `kv_slices()` / `kv_cores()`,
+`harness/stream_patch.hpp`, `src/open_qwen36/manifest.cpp` / `core.cpp`)
+**Verification:** test (the patch tables and the manifest key: `src/open_qwen36/manifest_test.cpp`; the slice geometry and the
+knobs: `tests/test_attn_geometry.py`); manual (the hardware procedure below)
+
+For a family in the measured lists (Granite 4.2 3B), `dx` shall feed each attention core the cached rows of its own kv heads on
+a shim channel of its own instead of broadcasting whole rows to every core, group the attention cores by kv head so the q heads
+of one kv head share every K and V row they load, and give logits byte-identical to the broadcast kernel's:
+- **Per-core windows (`kvslice`).** A core reads kv heads [kvb, kvb + KVS) of every cached row as one 3-D BD over the row-major
+  cache ([rows][K | V][KVS x HD x 2 B]). The cache layout does not change, so the host block prefill, checkpoints and `kv_row`
+  read it as before, and no context capacity is compiled into a descriptor (`--max-ctx` and the server's registry length work
+  unchanged). A fifo element is one block of RB rows: the core's ring is two elements, so the DMA fills block b + 1 while the
+  core computes block b, and the per-block 8-way pointer switch goes. The window fills are issued before the q / k / v GEMVs
+  finish (they read only rows earlier tokens wrote). The window is padded to whole blocks; the real rows of the last block go
+  one at a time through `attn_step_impl`, the new row last, as before.
+- **Cores by kv head (`KVCORES`, attn.h `ATTN_G5`).** 1: 8 cores of 5 heads (row 4); 2: 16 cores, each kv head's heads as 3 + 2
+  (rows 4 and 5; the 2-head cores compile attn.h at `ATTN_NHL=2` under prefixed symbols). The score tree is TREE8's over head
+  pairs of one K row, the value pass covers all of a core's heads per head-dim slice with every head's chain in its old order,
+  and the per-head rescale test is skipped when no head of the block raised its max. The two kv heads of an aligned slice
+  share one window stream (4 streams of 512 B a position); the og elements join in memtiles (at most 6 inputs each, 4
+  where OPEN-DECODE-STREAM's weight ring holds the memtile's S2MM channel 0: 4 x 4 on memtiles 2..5).
+- **The manifest's `kvslice`** (rows an element) tells `attnpos` / `attnrows` the layout (OPEN-MANIFEST): every KV transfer
+  below one row is a window fill, its BD length patched to the padded rows times its own per-row words, its offset to its base
+  plus `start * kv_row`; the KV buffer keeps `kvslice - 1` rows of slack.
+- `dx.py` counts its own shim MM2S producers and refuses, naming the free columns, a design with more window streams than
+  free channels (Granite: columns 3..7); a q / k / v bias or a sliding window keeps the broadcast.
+- **`dxl`** (the L-row pass) takes the same per-core windows when its family is in `DXL_KVSLICE_MEASURED`: core c of every row
+  group reads one slice stream shared by the groups, each group walking its own blocks and tail element and skipping the rest
+  (`dxl_attn_skipw`), so `dxl` stays bit-identical to `dx`.
+- Probe variables (OPEN-ATTN-CONTEXT): `ATTN_KVSLICE`, `ATTN_DXL_KVSLICE`, `ATTN_KVCORES`, `ATTN_G5_PVROLL`.
+
+**Acceptance criteria:**
+- `--dump-logits` over 70 prompt tokens + 20 decoded, one token at a time, on the set and on the broadcast set: every logit file
+  byte-identical (22 of 22), and the same over 2100 + 20.
+- The six `utilities/uno-ref` prompts and the chat / code prompts at 1024 and 2048 x 96 greedy tokens: identical to the broadcast set.
+- `open_qwen36_cli --rows-check 17` prints `ROWS PASS` (prompts of 70, 1030 and 2060 tokens), and Uno is identical to plain
+  decode on the six-prompt sweep and at 1024 / 2048.
+- `manifest_test`: five fills of 192 words a row patch to the padded rows at each position (attnpos and attnrows), the row drain
+  and records as before; a plain geometry refuses the same stream; `kvslice` beside `rb` 4, or of 3 rows, is refused.
+- `test_attn_geometry.py`: every core's heads lie inside its slice at 5, 8 and 16 cores; the knobs are on for Granite only.
+
+**Procedure (manual):** build `dx` (and `dxl`, `dxl_lora`) with the knob set and unset (`export_qwen36_kernels.py --only dx
+--out <copy of the union set>`, ~2 min), run the criteria against each, and profile with `OFLM_OPEN_STEP_TRACE=1 open_qwen36_cli
+--ids 100264 --at-position P --bench-decode 5 --bench-step 20` at P = 0, 1024, 2048 under `dibs run --measure`, each unit
+inside `utilities/granite-combined-bench/controlled.py` (a context-0 control decode before and after, within 5 % of its
+calibration, and no other process's NPU submissions while it runs).
+
+**Result 2026-10-15** (one binary; broadcast = the decode-depth kernels; every unit `dibs run --measure` CLEAN inside
+`utilities/granite-combined-bench/controlled.py`: the 32-token context-0 control on the broadcast set within 2.4 % of its
+21.20 tok/s calibration before and after each unit, no other process's NPU submissions, the decode reps within 1 %).
+
+`--bench-step 20`, pipelined step wall min / one `dx` dispatch min, the four sets in one unit:
+
+| position | broadcast (decode-depth) | `kvslice`, 5 cores x 8 | KVCORES 1 (8 x 5) | KVCORES 2 (16, 3 + 2) |
+|---|---|---|---|---|
+| 0 | 46.1 ms / 1.083 | 46.3 / 1.091 | 46.4 / 1.086 | 46.9 / 1.090 |
+| 1024 | 63.2 / 1.526 | 57.3 / 1.367 | 53.6 / 1.265 | 52.3 / 1.226 |
+| 2048 | 79.2 / 1.910 | 68.7 / 1.656 | 60.9 / 1.460 | 57.9 / 1.363 |
+| growth a layer a position | 0.404 us | 0.273 | 0.177 | 0.134 |
+
+Plain decode, 128 tokens after N tokens of context (`--gemm-block` prefill; N = 0 is one prompt token), 3 runs, min / median tok/s:
+
+| context | broadcast | KVCORES 2 (default) | change (median) | KVCORES 1 | llama.cpp Vulkan on the 890M (not re-measured) |
+|---|---|---|---|---|---|
+| 0 | 20.64 / 20.66 | 20.62 / 20.63 | -0.1 % | 20.70 / 20.72 | 24.2 |
+| 512 | 17.48 / 17.56 | 19.30 / 19.30 | +9.9 % | - | not recorded |
+| 1024 | 15.37 / 15.38 | 18.32 / 18.46 | +20.0 % | - | 23.1 |
+| 2048 | 12.20 / 12.21 | 16.76 / 16.78 | +37.4 % | 15.84 / 15.86 | 23.3 |
+
+- The windows alone took the 0.28 ms a layer the stream cost at 2048 (`ATTN_NULL`, OPEN-ATTN-SCORE-TREE); the rest is the
+  arithmetic, which the kv-head grouping cuts: a block of 4 rows is ~1,460 Peano bundles at 8 heads (TREE8), ~1,150 at 5 (257
+  of them the exponential), ~890 at 3 and ~770 at 2.
+- **KVCORES 2 is Granite's default.** Its context reloads 8 more core programs at every switch to and from `ln` / `lm`: the
+  first `dx` after a switch costs 3.23 ms at position 0 against 2.44 (broadcast) and 2.72 (KVCORES 1), ~0.8 ms of
+  `--bench-step` wall at every depth. In the 128-token decode context 0 stays where the broadcast kernel was (-0.1 %;
+  KVCORES 1 +0.3 %, both inside the drift between sittings); from 512 tokens on KVCORES 2 is the faster one (+5.8 % over
+  KVCORES 1 at 2048). With `dx` alone in its context the reload would go.
+- At 2048 a token costs 59.6 ms against 48.5 at context 0 (1.23x; the broadcast kernel's was 1.69x), 0.72x of Vulkan's
+  speed there (was 0.52x). Uno gained less (OPEN-FAMILY-GRANITE-UNO, 2026-10-15): `dxl` has the windows, not the grouping.
+- Program memory: fullest core 14,128 B at KVCORES 1, 12,768 at 2.
+- Gates on the shipped set (KVCORES 2): the logit files 22 of 22 byte-identical at 70 + 20 and 2100 + 20, and on the
+  GGUF-direct route (`dx_f32`, a model dir holding only `granite-4.2-3b-Q4_1.gguf` as `model.gguf`) at 70 + 20 and 300 + 20;
+  the 10 greedy prompts identical; `--rows-check 17` ROWS PASS at 70 / 1030 / 2060.
+
+### OPEN-ATTN-BLOCK8: Granite's attention takes 8-row blocks and a cheaper exponential
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h` `ATTN_RB`, `ATTN_EXPA`, `recipes/attnknobs.py` `BLOCK8_MEASURED`, `src/open_qwen36/manifest.cpp`)
+**Verification:** test (the knobs and the manifest key: `tests/test_attn_geometry.py`, `manifest_test.cpp`); manual (the hardware procedure below)
+
+For Granite 4.2 3B the 3-head and 2-head cores of `dx` and the 8-head cores of `dxl` shall take blocks of 8 cached rows (`ATTN_RB=8`,
+manifest `kvslice` 8) with one 64-lane exponential a block and the fused-Horner degree-4 exponential (`ATTN_EXPA=2`). The result is
+not bit-identical to the 4-row kernel (the running max moves once a block of 8, and the polynomial is shorter), so the gates are
+correlation, not bytes: logits against the 4-row kernel over 20 steps with corr >= 0.9998 and the same top-1, every greedy prompt
+identical, Uno IDENTICAL, and `--rows-check 17` ROWS PASS, which holds `dxl` to `dx` because both compile the same block structure.
+`ATTN_RB=4` / `ATTN_EXPA=0` give the old kernel back for an A/B build.
+
+**Acceptance criteria:**
+- `decode_gates.py corr` of the set against the 4-row set: corr min >= 0.9998 and top-1 equal 20 of 20, with the prompt prefilled
+  a token at a time (520) and as blocks (504, 536, 1024, 2048).
+- The six `uno-ref` prompts and the chat / code prompts at 1024 and 2048 x 96 greedy tokens identical to the 4-row set.
+- `test_attn_geometry.py::test_block8_is_granite_only_and_forced_back_by_the_probe`.
+
+**Procedure (manual):** build `dx` and `dxl` / `dxl_lora` with the defaults and with `ATTN_RB=4,ATTN_EXPA=0`
+(`export_qwen36_kernels.py --only dx,dxl,dxl_lora --out <copy of the union set>`) and run the criteria. Measured by the track that landed
+it (2026-10-15): corr min 0.999909 (mean 0.999972) over 20 steps after a 2048-token block prefill, top-1 20 of 20.
+
+### OPEN-ATTN-SPLIT8: `dxl`'s score loop in two passes, bit-identical
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h` `ATTN_T8_SPLIT`, `recipes/attnknobs.py` `t8_split_flags`,
+`designs/dxl/dxl.py`)
+**Verification:** test (`tests/test_attn_geometry.py::test_dxl_score_split_is_on_by_default_and_the_probe_turns_it_off`); manual (the hardware procedure below)
+
+The TREE8 score block of the L-row pass (8 heads a core, 8-row blocks) shall run as two loops over the block's rows: first every
+row's four head-pair dot products into a 4 KB scratch (`attn_score2g`, unchanged), then every row's reduction tree from it. The
+arithmetic is the one-pass loop's operation for operation, so `dxl` stays bit-identical to `dx`: `--rows-check 17` prints ROWS PASS.
+The point is register pressure: one pass keeps a row's four 1,024-bit accumulators pairs and its tree live together and compiles to
+382 bundles a row; unrolling that pass by 2 spills past a frame offset of 8 KB and the object compile crashes ("immediate operand out
+of range"). The two passes unroll 2 (dot products) and 4 (trees) at 158 + 72 bundles a row, +1,056 B of program (the fullest core
+15,808 of 16,384 B). `ATTN_T8_SPLIT=0` gives the one-pass loop back.
+
+**Acceptance criteria:**
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens (0 of 100352 logits differ on every row).
+- Uno IDENTICAL to plain decode on the six uno-ref prompts and on chat / code at 64, 512, 1024 and 2048 (96 tokens).
+- Plain decode's kernels (`dx`, `dxh`, `ln`, `lm_head_q4`) byte-identical to the set built without the knob.
+
+**Result (2026-10-16, Granite 4.2 3B, `dxl` alone, before OPEN-DXL-TABS):** a verify pass at 2048 tokens 1.68 -> 1.61 decode steps and a
+draft pass 1.91 -> 1.83; Uno +1.0 / +1.2 / +2.5 / +3.8 % on chat and +0.2 / +0.7 / +2.7 / +4.1 % on code at 64 / 512 / 1024 / 2048.
+A variant that adds q hi and lo into one accumulator chain (not bit-identical) compiled smaller and unrolled by 2 as well, but moved
+Uno's argmax at a near-tie (ROWS FAIL, 1 argmax flip in 8 rows; Uno DIFFERS at 2048); it was dropped.
+
+### OPEN-DXL-TABS: a main core keeps five slice tables, so the jobs on one activation prepare it once
+**Applies to:** openflowlm-next (`open_kernels/recipes/dxl.py` `TABS`, `tab_alloc`, `jobs`, `designs/dxl/dxl.py`, `dxl_job.h`,
+`dxl_prep_slot.cc`, `dxl_gemv_job.cc`)
+**Verification:** test (`tests/test_dxl.py`); manual (the hardware procedure below)
+
+Where the cores' L1 holds them (`L1_REUSE`, 62 KB: Granite 4.2 3B's 5 slices of 512), a main core shall keep the activation table of
+each slice of the stage's activation, not just the slice it is on. A job whose activation is the one the cached tables were prepared
+from (`Job.reuse`: q after nothing, then k and v; the up and gate jobs of every tile; a draft's LoRA A job, which comes first) skips its
+prep (`NPREP` 0) and the stream skips its x fills, so the fifo and the core agree. The LoRA's z rows (MODE 2) have a region of their
+own, so a B job does not spoil the cache, and an fp32 job or one on more than 5 slices rebuilds slot 0 and drops it. A family whose
+tables do not fit (K2-7B, K2-3.7B) keeps `TABS` 1 and every `NPREP` at L: its job table is the old twelve fields byte for byte.
+The weight fifo falls to depth 2 to make room, which costs nothing (depth 2, 4 and 6 read alike: the pass is not waiting on weights).
+
+**Acceptance criteria:**
+- Granite's verify table has 9 reusing jobs of 13 and its draft table 12 of 30; a verify layer prepares 1,984 blocks a core, not 4,864,
+  a draft layer 3,424, not 7,264. The first job of a stage, every z job and every fp32 job prepares.
+- K2-7B's old twelve fields hash as before and no K2 job reuses.
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060; Uno IDENTICAL on the six prompts and on chat / code at 64-2048.
+- Plain decode's kernels byte-identical to the set built without it.
+
+**Result (2026-10-16):** a prep block costs 52 Peano bundles (`dxl_prep_group`: 211 bundles for 4 blocks, 417 for 8, so batching more
+does not help; about 15 of the 52 operations are the 32-lane max as shifts and compares). Nulling prep (`DXL_NULL_PREP`) takes a verify pass from
+1.48 to 1.33 decode steps at context 0; with the cache (and OPEN-ATTN-SPLIT8) a verify pass is 1.39 steps at 0 and 1.55 at 2048 (1.48 /
+1.70 before) and a draft pass 1.75 / 1.75 (1.86 / 1.91): a Uno cycle is 4.4 % cheaper at 0 and 7.9 % at 2048 (tables in
+OPEN-FAMILY-GRANITE-UNO).
+
+### OPEN-DXL-HEAD: the Uno head as tile jobs on `dxl`'s own cores, no context switch
+**Applies to:** openflowlm-next (`open_kernels/recipes/dxl.py` `head_plan`, `head_table`, `AD_MODE`, `recipes/dense.py` `HEAD_FOLD_FAMILIES`,
+`designs/dxl/dxl.py` `DXL_HEAD`, `dxl_mode.cc`, `src/open_qwen36/core.cpp` `step_rows`, `manifest.cpp` `head_fold`)
+**Verification:** test (`tests/test_dxl.py`); manual (the hardware procedure below)
+
+Where the table cache holds the whole hidden (OPEN-DXL-TABS; Granite 4.2 3B), the L-row pass's final norm and head shall run as a third
+instruction stream, `dxl_head`, over `dxl`'s image, not as `lmhl` in a context of its own: the ln core's entry norm with the final norm's
+weight, then each main core's 196 head bands as 28 tiles of 7. The core table's third mode (2) has two rows: tile 0, which prepares the
+normed rows, and one row that repeats 27 times (`REP`) on the cached tables (`NPREP` 0). The logits [L][vocab] go to the host, which takes
+each row's argmax by plain decode's rule (bf16-rounded, subnormals to zero, the lowest id on a tie; AVX2 in `core.cpp`), so Uno's verify rows
+pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent), and so does Granite when the set is exported with `DXL_HEAD_FOLD=0`:
+the fold is on by default for Granite since a clean unit showed Uno 3.7-4.7% faster in all eight chat/code cells at 64-2048 tokens
+(see the result below).
+
+**The mode rides in the dispatch's first x element.** A mode written to the cores' rtp word in-context did not take effect: the cores ran the
+previous dispatch's table (a draft layer right after verify layers, and the head after them, hung), and the mode had only ever switched
+across a context reload. Every dispatch of the L-row pass now opens with one x element of act (`AD_MODE`: three elements holding 0, 1, 2,
+written by the engine at start; `manifest rows.mode_off`), whose first word `dxl_mode` copies into the rtp before the table is read.
+
+**Acceptance criteria:**
+- Granite's head plan is 196 bands a core in 28 tiles of 7 (the accumulators hold 9); the table's mode 2 has 2 rows, 1 with `NPREP` 4 and
+  1 with `NPREP` 0, `REP` 27; K2-7B and K2-3.7B have no plan. Every route has `mode_off` and the three elements lie inside act.
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set; K2-7B's `dxl` rebuilt with the mode element prints ROWS PASS at
+  70 and 1030.
+- Uno IDENTICAL to plain decode on chat / code at 64, 512, 1024 and 2048 (seen in every noisy run below) and on the six short prompts;
+  plain decode's kernels byte-identical to the set without the fold (dx, dxh, dx_f32, ln, lm_head_q4, lmhl: xclbin and insts.bin).
+- The non-folded route on the new `dxl` (mode element, `REP`) still runs: Uno IDENTICAL over 16 tokens.
+
+**Result (2026-10-16): correct, speed not established.** `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set (0 of
+100352 logits differ on every row); K2-7B's rebuilt `dxl` (mode element, no fold) ROWS PASS at 70 and 1030. In the one paired unit that
+read sensibly the fold took the head from ~1.11 to ~0.93 of a plain step, but no unit of mine was clean: another session's CPU jobs (a
+conversion, builds, an `oflm` using the NPU) ran from 15:30 to past 21:30, and every `--measure` unit came back NOISY or with a control
+10-50 % off. The pairs that did run disagree on the layers (draft layers 67 -> 77 and verify 56 -> 59 in one, the other way in another).
+**Clean unit 2026-10-17 (`dibs run --measure`, control within 3.8%, Uno IDENTICAL in 16 of 16 runs, 96 tokens, one run per cell):** Uno tok/s unfolded -> folded, chat at 64 / 512 / 1024 / 2048 tokens 21.66 -> 22.66, 19.25 -> 20.12, 17.08 -> 17.78, 14.83 -> 15.39; code 25.53 -> 26.71, 21.03 -> 22.02, 18.58 -> 19.36, 20.12 -> 20.86 (+3.7 to +4.7%). Served through `oflm serve` with `OFLM_SPECULATIVE=1`: chat, streamed chat, a long prompt and a three-turn conversation identical to the unfolded set and to plain decode. The fold is the Granite default.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
@@ -1117,7 +1387,7 @@ token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`, `src/common/AutoModel/modeling_granite.cpp`)
 **Test category:** manual (needs the NPU and `vegahyo/Granite-4.2-3B-NPU2`); the derivation, the multiplier fold and the 3B layout are unit-tested in `tests/test_granite.py`
 
 An IBM Granite dense model (GQA without q/k norms, unscaled RoPE, eps 1e-5,
@@ -1144,7 +1414,7 @@ originals under `q4nx_folded_multipliers`.
 - HF and GGUF derivations agree; the RoPE table is the plain unscaled `1e7^(-2i/64)`; `rope_scaling` and tied embeddings are refused by name.
 - An unfolded `attention_multiplier`, or any of the other three unequal to 1.0, is refused by name and names q4nx-build as the fix — from HF `config.json` and from GGUF metadata alike.
 - `hf_config_check` carries `attention_multiplier`, so the **engine** refuses an unfolded container at load, not only the recipe at generation.
-- The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `ln` + `lm` tail.
+- The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `dxh` tail in `dx`'s context (OPEN-DECODE-ONE-CONTEXT-DENSE; the GGUF-direct section keeps `ln` + `lm`).
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Granite-4.2-3B-NPU2`, `out_gr`, prompt id 100264 (`<|start_of_role|>` — *not* `config.json`'s `bos_token_id` 100283, which is `</documents>` and disagrees with `tokenizer_config.json`'s own bos). Three catalogue points entered with it: `attn.head_dim 64`, `attn.num_heads 40`, `gemv_q4.K 8192`.
 
@@ -1178,6 +1448,11 @@ sets `think: true`, but `Granite` implements no `parse_stream_content` /
 `parse_nstream_content`, so the chain of thought is printed raw and only the
 closing tag appears. Cosmetic, and separate from the kernel path.
 
+**Thinking is the request's choice (2026-10-15).** `Granite` takes `enable_think` / `toggle_think` and hands
+`enable_thinking` to its template, on by default as the template's own default, so a request's `"think": false`
+renders `<think></think>` and the reply starts with the answer. Before, the flag was dropped and every reply reasoned
+first.
+
 **At zero context `dx` beats the hand-written kernels**: `part0` 60.0 ms over
 40 layers is **1500 µs/layer**, against those kernels' 1744.7 µs at four
 dispatches — 1.16×, the direction one dispatch per layer was expected to give.
@@ -1185,6 +1460,683 @@ dispatches — 1.16×, the direction one dispatch per layer was expected to give
 Everything above that is the context term, and it is **not** Granite's: see
 OPEN-ATTN-CONTEXT below. Decode measured 5.92 tok/s over 63 tokens because the
 context grew underneath it, not because the family is slow.
+
+### OPEN-FAMILY-K2: K2-Horizon on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `designs/ln`, `designs/lin_layer/ln_nr.cc`, `src/open_qwen36/`, `utilities/q4nx-build`)
+**Verification:** test (the derivation, the norm groups and the converter's q/k order: `tests/test_k2.py`, `utilities/q4nx-build/tests/test_k2_arch.py`); manual (the hardware procedure below)
+
+An IFM K2-Horizon dense model (`model_type: k2_horizon`: GQA 32/8 at head_dim 128
+without q/k norms, gate or bias, split-half RoPE with the base under
+`rope_parameters.rope_theta`, silu FFN, an untied q4_1 head over 250624 rows) shall
+run on the open kernels from its `config.json` alone through the dense recipe. Its
+one feature no other family has is **GroupRMSNorm**: `layernorm_num_groups`
+contiguous groups, each normalised by its own RMS (mean over the group, eps inside
+the rsqrt), with a channel-wise weight over the whole width. The 3.7B (hidden 2560)
+has 2 groups and the 7B (hidden 4096) has 4. The `ln` kernels take any even group
+count whose groups are whole vectors and stay inside one fp32 half; per group the
+arithmetic is the 2-group path's, and a 1-group build is untouched.
+
+**The q/k row order is the GGUF's own.** llama.cpp ropes K2 NEOX-style and writes
+HF's split-half q/k rows, so `q4nx-build -f k2` must not apply Llama's
+un-interleave. A scrambled container is still fluent and does not crash, so the
+check is a likelihood, not a look: on the 7B a text's NLL is 2.44 in the file's
+order and 2.96 reordered (CPU, bf16), and an adapter trained on the HF order
+(K2-Horizon-7B-Uno) drafts nonsense on the scrambled base. Only a llama-arch K2
+GGUF (`-f llama`) is interleaved and keeps the reorder.
+
+**Acceptance criteria (unit):**
+- The 3.7B and 7B configs derive `family k2`, `norm_groups` 2 and 4, `real_vocab` 250620 and the checked-in specs; `layernorm_num_groups` 3, a q/k norm, a gate, a bias, a window, a non-silu FFN, a partial rotation or rope scaling are refused.
+- `ln` builds at `ln/build_<hidden>_<eps>_g<groups>` with `LN_GROUPS` in its env only when groups > 1; `hf_config_check` carries `layernorm_num_groups`.
+- A `k2-horizon` GGUF's q/k rows are kept; a llama-arch one is reordered (`_gguf_qk_interleaved`).
+
+**Procedure (manual):**
+1. `q4nx-build -i <K2-Horizon-7B-BF16.gguf> -o <dir>/K2-Horizon-7B-NPU2 -f k2 -t language -s <dir with IFM's config/tokenizer> --quant Q4_1`.
+2. `python open_kernels/export_qwen36_kernels.py --model-dir <dir>/K2-Horizon-7B-NPU2` (Windows, `iron_env.ps1`).
+3. `designs/ln`: `LN_N=4096 LN_GROUPS=4 python build_design.py designs/ln/ln.py ...`, `make_test.py` (each group scaled differently, so pooled statistics fail), `run_kernel run.cfg`, `compare.py`.
+4. `make_decode.py --model-dir <dir> --layers 4 --tokens 2 --out model/out_k2` (prompt id 0, `<|ifm|begin_of_text|>`), `run_kernel`, `compare_decode.py --tokens 2`.
+5. `open_qwen36_cli --model <dir> --kernels src/xclbins/K2-Horizon-7B-NPU2/open_kernels --ids <ids> --max-tokens 120` with the ids from the model's own chat template (transformers' `apply_chat_template`; `chat.py` would pick the Llama 3 template, because K2's tokenizer also has `<|start_header_id|>`), then decode the tokens.
+
+**Result 2026-10-08 (K2-Horizon-7B):** `ln` 4096 x 4 PASS on the NPU (xn cos 0.99999999, 5 of 4096 bf16 values one ulp off), with 2560 x 2 and 4096 x 1 re-run as regressions, both PASS. The 4-layer slice: logits corr 0.999999 / 0.999999, argmax 2125 / 1316 matching the fp64 replica, top-5 identical at position 1 and one tail slot swapped at position 0, residual corr >= 0.999999 in every layer (maxrel <= 3.1e-3). Through the engine: a coherent reasoning preamble over 120 tokens, **105 ms/token (9.56 tok/s)** at positions 20-83. `ln (4096, 4)` entered the catalogue with this run.
+
+### OPEN-DECODE-ROWS: L positions through a dense model in one pass, bit-identical to L steps
+**Applies to:** openflowlm-next (`open_kernels/designs/dxl`, `open_kernels/recipes/dxl.py`, `recipes/dense.py` `rows_route`, `harness/stream_patch.hpp`, `src/open_qwen36/core.cpp` `step_rows`)
+**Verification:** test (the layout and job tables: `tests/test_dxl.py`); manual (the hardware procedure below)
+
+For a family in `ROWS_FAMILIES` (K2 and Granite), the kernel set shall ship an L-row pass (L = 4)
+at any hidden, q width and intermediate that are multiples of 512. `dxl` takes L consecutive
+positions through one dense layer in one dispatch, and `lmhl` takes their final norm, the head
+and each row's argmax in another. The weights are streamed once for the L rows.
+
+Row j, at position pos0 + j, shall be bit-identical to the decode step at that position:
+- The same bf16 logits, every one of them, and so the same argmax.
+- The GEMV does gemv_q4_tile's arithmetic per token in its order (`dxl_gemv.h`).
+- The norms, the attention and silu are dx's own kernels.
+- Each row has its own group of attention cores, all fed by one stream: every row's prologue,
+  then one window of pos0 + L cache rows. Group j walks the first rows exactly as decode at
+  pos0 + j would (the same blocks and singles), skips the rest, and adds its own row last. The L
+  new KV rows reach the cache, joined into one drain, before that window fill is issued.
+- A pass's attention therefore costs about one decode step's, not L of them.
+- Every stream to DDR leaves the compute rows through row 2's south ports, four a column, 32 in
+  all. Each group's core 0 drains its own new KV row, unless the og, KV, y and norm outflows would
+  exceed 32 (Granite's 5 cores a group make 33). Then group 0's core 0 packs every row's KV from
+  the prologues it would otherwise skip, and one stream carries all L.
+
+Other properties:
+- The pass writes the L rows' KV and leaves the position alone, so the caller seeks to the
+  prefix it keeps.
+- It reads dx's per-layer pool, consts, kv and ptab. It adds only its own L-row residual,
+  scratch and head buffers, so it costs no second copy of any weight.
+
+The main cores run a job table. The table for this dispatch's mode (`rtp[0]`) is written by its
+stream behind a runtime barrier, so the verify and draft streams (OPEN-UNO-LORA) share one
+xclbin and one hardware context.
+
+**Widths.** A job walks K in slices, one 2 KB x element per token per slice:
+- bf16 inputs in 1024-wide slices where the width is a multiple of 1024, else 512-wide. A 512
+  slice still fills a whole element; the other half is over-read from what follows in act and
+  never prepped.
+- The fp32 down input in 512-wide slices.
+- Each of q, o and down takes its own tile: the largest divisor of its bands a core, up to 8,
+  whose resident accumulators fit. Granite 4.2 3B's 5 bands a core make tiles of 5, not 1.
+  up | gate pairs take up to 6. At 4096 (K2-7B) and 2560 (K2-3.7B, Granite 4.2 3B) both tables
+  hold 13 and 30 jobs.
+
+`lmhl` preps each row's hidden in 1024-wide x elements. A last partial element (2560 = 2 x 1024
++ 512) is read whole, the head's act is padded so the last row's stays in the buffer, and only
+its real blocks are prepped. `lmhl2` refuses a hidden that is not whole 1024 slices.
+
+**Every main-core buffer is a whole number of 64 B, and the build asserts it.** The allocator
+places buffers back to back. A 512-bit access at an address that is only 32 B aligned reads
+the wrong bytes without faulting. A 3,080 B table did exactly that, and `designs/dxl/glj.py`
+is the probe that isolated it.
+
+The attention sites are compiled for the placeholder positions 1 .. L. `attnrows` (harness
+and engine) moves row j's position record to pos0 + j and the joined KV drain to pos0, and
+sizes the shared window to pos0 + L rows.
+
+**Acceptance criteria (unit):**
+- The act regions do not overlap.
+- The main cores fit 60 KB at L = 4 and L = 8 (62 KB where OPEN-DXL-TABS keeps its slice tables).
+- The verify table covers every band of every projection exactly once.
+- Each draft base tile is followed by its LoRA k-tile at S0 = K / 256, and the band drains
+  only after that tile.
+- The LoRA pack plan is contiguous whole chunks.
+- At hidden 2560 (K2-3.7B, Granite 4.2 3B) the layout fits at L = 4 and 8, both tables hold 13 and
+  30 jobs, and every x element, half slices included, reads inside act.
+- A width off the 512 grid is refused.
+- K2-7B's job tables and rows route are byte-identical to the 1024-only recipe's.
+- The head's act holds every row's whole x elements.
+- Only K2 and Granite ship the route.
+
+**Procedure (manual):**
+1. `python designs/dxl/make_dxl_test.py --fixture model/out_k2l --build <dxl build> --l 4`, then
+   `run_kernel`, then `--compare`. Every row must equal dx's layer output for the same token:
+   0 of 4096 values differ.
+2. The same with `--head` for `lmhl`: 0 of 250624 logits differ from `ln` + `lm_head_q4`, and
+   the NPU argmax is the app's greedy pick (OPEN-UNO-DECODE).
+3. `python designs/dxl/dxl_at_test.py --pos0 P --build <dxl build>`, then `run_kernel` on the
+   cfg it writes, then `--compare`: P + L decode steps fill the cache, then the L rows at P on
+   that cache, 0 of 4096 values differ on every row. Run P = 1, 5, 8 (block boundaries) and one
+   deep window (1022).
+4. `open_qwen36_cli ... --rows-check 17`: N decode steps, then the same positions as L-row
+   passes. It prints `ROWS PASS`.
+
+**Result 2026-10-08 (K2-Horizon-7B, L = 4):**
+- Layer 0 bit-identical on all four rows.
+- The head bit-identical, the argmax matching.
+- `--rows-check` over 16 rows: every row's 250624 logits equal the decode step's.
+- The main cores are at 8,304 of 16,384 B of program memory.
+
+**Result 2026-10-09 (row-parallel attention):** layer 0 bit-identical at pos0 0, 1, 5, 8 and
+1022. One layer in the harness, quiet machine:
+
+| position | 0 | 1024 | 2048 | 3072 |
+|---|---|---|---|---|
+| dx (decode) | 2.63 ms | 3.34 | 4.07 | 4.85 |
+| dxl, one row at a time (before) | 3.75 | 6.60 | 9.55 | 12.5 |
+| dxl, a core group per row | 3.63 | 4.38 | 5.08 | 5.95 |
+
+**Result 2026-10-10 (any multiple of 512):**
+- K2-3.7B (hidden 2560, q width 4096): 512-wide slices on q, k, v, up and gate, 1024 on o, and
+  `lmhl`'s partial last element. `--rows-check 17` from a 20-token prompt (positions 19-34) and
+  a 158-token one (157-172): 32 rows, 0 of 250624 logits differ on every one.
+- K2-7B on `dxl`, `dxl_lora` and `lmhl` rebuilt from the same sources: `ROWS PASS`, its job
+  tables byte-identical.
+
+**Result 2026-10-16 (Granite 4.2 3B, hidden 2560; where a pass goes, `perf/granite-uno-depth`):** every figure a `dibs run --measure`
+unit inside `controlled.py` (context-0 control within 2 % before and after), a pass in plain decode steps (one step: 23.4 / 22.3 /
+21.4 / 19.7 tok/s at 0 / 512 / 1024 / 2048 tokens, tg128, fresh after the firmware update).
+- A verify pass was 1.48 steps at context 0 and 1.70 at 2048 (a draft pass 1.86 / 1.91). With OPEN-ATTN-SPLIT8 and OPEN-DXL-TABS they
+  are 1.39 / 1.55 and 1.75 / 1.75. Each pass also pays the head: `lmhl` takes 1.33x a plain head's time (the same 160 MB at ~39
+  against 52 GB/s) and two context switches (the first `dxl` dispatch after it takes 2.5x a steady layer's time, and the head's first
+  run 1.17x its second): ~7 % of a pass, which only folding the head into `dxl`'s context (as `dxh` is on `dx`) would remove.
+- Ablations of a verify pass at context 0 / 2048 (probe builds, percent of the pass): the L-row GEMV arithmetic -13 / -10 %, the
+  activation prep -10 / -4 %, prep + GEMV + norms -17 / -10 %, the norms alone -1 / +2 %, the silu epilogue -3 / +1 %, attention
+  arithmetic 0 / -20 %. A weight fifo of depth 2, 4 or 6 and a 16-deep memtile ring read alike: the pass is not waiting on
+  weights; the cores' prep and GEMV sit on its critical path in part.
+- Attention growth of a pass from context 0 to 2048 was 0.52 decode steps, 0.43 with OPEN-ATTN-SPLIT8; with the arithmetic compiled
+  out (`ATTN_NULL`) 0.16 remain, the window streams and block handshakes.
+- **`dxl` cannot reuse `dx`'s 16-core layout by kv head, and it would not pay if it could.** Four row groups of 16 cores are 64 cores
+  and the array has 32 compute tiles, of which 23 are free beside the 8 main cores and `ln`. The row-sequential variant (a core
+  takes one kv head's heads for all 4 rows over a shared window) is 12 head-rows a core (3 heads x 4 rows), against 8 now. A 3-head
+  `dx` core runs ~1,000 bundles an 8-row block for one row (~125 a cached row, so ~500 for 4 rows) and a 2-head one ~850; `dxl`'s
+  8-head TREE8 core ~3,550 a block (~440 a cached row) before OPEN-ATTN-SPLIT8 and ~2,350 (~290) after, so the row-sequential core
+  would be ~1.7x slower than what runs. The bound is the work: 160 head-rows (4 rows x 40 heads) over at most 23 cores is 7 a
+  core, against 8 on 20 cores now: 12 % of an attention walk (0.03 steps at 2048) even with perfect balance and no cost per
+  head-row to pay for it. (Bundle counts are Peano's, from `utilities/dxl-asm/attn_tu_check.py` and `bb_bundles.py`; the loop
+  trip counts are inferred.)
+- `ROWS PASS` and Uno IDENTICAL on every run below; K2-7B's `dxl` rebuilt from these sources (TABS 1, NPREP 4 in every row) builds
+  (14,912 of 16,384 B on the fullest core) and prints ROWS PASS at 70 and 1030 tokens on its own set.
+
+### OPEN-UNO-LORA: A Uno diffusion LoRA as q4_1 bands
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/uno.py`, `--uno-adapter`, `open_kernels/recipes/dxl.py`, `designs/dxl`, `src/open_qwen36/core.cpp`)
+**Verification:** test (`utilities/q4nx-build/tests/test_uno.py`, `tests/test_dxl.py`); manual (the draft layer below)
+
+The draft pass shall compute a Uno adapter's conditional LoRA `y += f * s * (m * (x A^T)) B^T`
+(IFM's K2-Horizon-7B-Uno first) on q, k, v, o, gate, up and down:
+- s = lora_alpha / r: 64 for K2's adapter, not rsLoRA.
+- f is the factor the base's builder folded into that projection's weights, 1 when nothing was
+  folded. Granite folds `attention_multiplier * sqrt(head_dim)` into q and `residual_multiplier`
+  into o and down. The pre-fold values are read from `config.json`'s `q4nx_folded_multipliers`.
+  Without f, the update would be off by f against the folded W.
+- m is 0 on the seed row and 1 on the rest.
+- Embedding, norms and head get no LoRA.
+
+`--uno-noise-high N` records the noise ids the adapter was trained on, `[1, N)`, as
+`uno.q4nx` metadata (`uno_noise_high`). The folds are recorded too (`uno_folds`).
+
+It is computed inside the L-row GEMV, from `uno.q4nx` beside `model.q4nx`:
+- `q4nx-build --uno-adapter <dir or repo>`, or `python -m q4nx.uno`, writes it, quantized to
+  q4_1 by the converter's own path.
+- The A matrices sharing an input are stacked and zero-padded to one 64-row band per core:
+  [A_q; A_k] with A_v from row 256, [A_o], [A_g; A_u], [A_d].
+- Each z = x A^T is drained to act.
+- s * B is zero-padded to one 256-column k-tile, appended to every band of its projection,
+  reading a 256-wide window of z: q and k read [z_q | z_k], v reads [z_v | 0], gate and up read
+  [z_g | z_u].
+- The seed row's mask is a DMA: its z is read from a zero row nobody writes.
+
+The LoRA at q4_1 costs no acceptance: the CPU reference (`utilities/uno-ref`) measures 3.98
+tokens per cycle against 3.94 at bf16. The draft's precision moves only the speed, never the
+output.
+
+**Acceptance criteria (unit):**
+- A's rows are where each window reads them, at any rank up to 128.
+- B is s * B in its window and zero elsewhere.
+- The padded tensors reproduce s * B (A x).
+- A rank that does not fit is refused.
+- A projection whose base was folded by f has f * s * B in its window. For Granite 4.2 3B,
+  q is x0.125 and nothing else. A base with no recorded folds gets exactly the unfolded tensors.
+- `uno_noise_high` is recorded only when given, and an empty range is refused.
+
+**Procedure (manual):**
+1. `python designs/dxl/draft_ref.py --fixture model/out_k2l --model <dir with uno.q4nx> --pack`.
+2. `make_dxl_test.py --build <draft build> --lora model/out_k2l/lora_L0.bin`, then `run_kernel`.
+3. `draft_ref.py --compare`: the fp64 draft layer from the same padded tensors.
+
+**Result 2026-10-08:**
+- The seed row is bit-identical to dx.
+- Rows 1-3 match at corr >= 0.999998, where the LoRA moves them by 41-49%.
+- The draft layer is 6.7 ms against the verify stream's 5.9 ms in the harness.
+
+### OPEN-UNO-DECODE: greedy Uno on the NPU, the same tokens as greedy decode
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `core.cpp` the draft pack, `cli.cpp` `--uno`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `common/AutoModel/modeling_k2.cpp`, `common/modules/sampler.cpp` `sample_greedy`)
+**Verification:** manual (an implementation error changes the output, and the procedure compares it token for token)
+
+**Off unless asked.** The draft adapter is packed, and Uno runs, only when `OFLM_SPECULATIVE=1`
+is set (the CLI's `--uno` asks for it itself). With it unset, a model directory that has
+`uno.q4nx` decodes by plain decode, packs no LoRA pools and loads no `dxl_lora`, and the load log
+says the adapter is present and how to turn it on. Whether speculation pays depends on the model
+and the context length, so it is the user's switch until per-model settings exist.
+
+With the switch on, a model directory of a family that opts in (K2), with `uno.q4nx` and a kernel
+set that has `dxl_lora`, shall decode greedy requests by IFM's two-pass cycle:
+1. **Draft.** `[seed, noise_1 .. noise_{L-1}]`, with the LoRA on every row but the seed's.
+   - The noise is uniform in [1, N): N is the adapter's `uno_noise_high` (OPEN-UNO-LORA), else the vocab.
+   - Row 0's argmax is the base model's next token c; rows 1.. are drafts.
+2. **Verify.** `[c, drafts]` at the next position, without the LoRA.
+3. **Commit.** c, the drafts the verify agrees with in order, then the verify's next token: 2 to
+   L + 1 tokens a cycle.
+
+Because the L-row pass is bit-identical to decode, the output is exactly plain greedy decode's.
+
+In the app, AutoModel's shared Uno generate runs OPEN-SPEC-LOOKUP's per-cycle choice, of which this
+cycle is one method (`OFLM_SPEC_MODE=uno` runs it every cycle), for a family that opts in (K2 and
+Granite do) when the request is greedy: top_k 1, and no penalty that reorders the logits. A cycle
+cut short by EOS or a length limit is sought back to where plain decode would have left the cache.
+A sampled request decodes as usual.
+
+**Every argmax is the app's greedy pick.** The app's plain greedy argmaxes the logits after
+`Engine::forward` rounds them to bf16 (nearest even, subnormals to zero), the lowest id winning a
+tie. So:
+- `lmhl` compares each logit rounded the same way (`greedy_key`), keeping the first row on a tie
+  within a core, and the engine keeps the first core on a tie across cores.
+- The CLI's `--uno` and `--rows-check` decode references use the same pick (`argmax_bf16`), and so
+  does the CPU oracle (`utilities/uno-ref`).
+- `Sampler::sample_greedy`'s AVX2 scan keeps a running argmax in each of 8 lanes (lane j holds the
+  ids j mod 8), so its cross-lane step asks for the lower id on a tie. Before 2026-10-15 it kept the
+  lower lane, which is not the lower id: ids 89 and 96 tied went to 96, where `lmhl` takes 89.
+- An f32 argmax splits from it wherever the top two share a bf16 value, which is common: logits
+  near 25 are 0.125 apart in bf16. K2-7B's six prompts split at tokens 6, 18, 28 and 124 on four
+  of them; the train prompt at token 128 (' =' 25.494 against ':' 25.439, both 25.5).
+
+**Procedure (manual):** `open_qwen36_cli --model <dir> --kernels <set> --ids <chat ids> --uno N`
+runs N tokens by the cycle, then by plain decode with the app's pick. It prints `UNO IDENTICAL
+to decode over N tokens` and both speeds.
+
+**Procedure (manual, the switch):** `oflm serve` the K2 model with `OFLM_SPECULATIVE` unset: the
+load log says `uno.q4nx is present but off`, and a greedy request decodes plainly. Set it to 1
+and restart: the log says greedy requests decode by Uno, and the same request returns the same
+text.
+
+**Result 2026-10-09 (K2-Horizon-7B-Uno, 6 prompts x 128 tokens, quiet machine under the shared
+lock's `timing` gate):**
+
+| prompt | tokens a cycle | Uno | plain decode | speedup |
+|---|---|---|---|---|
+| chat | 3.56 | 94.6 ms/token (10.58 tok/s) | 106.7 ms/token (9.37 tok/s) | 1.13x |
+| chat2 | 3.05 | 109.4 (9.14) | 107.1 (9.34) | 0.98x |
+| code | 3.46 | 96.8 (10.34) | 107.3 (9.32) | 1.11x |
+| code2 | 3.12 | 107.1 (9.34) | 107.2 (9.33) | 1.00x |
+| math | 3.88 | 86.2 (11.60) | 107.2 (9.33) | 1.24x |
+| reason | 3.76 | 89.6 (11.16) | 107.3 (9.32) | 1.20x |
+
+- All six identical to plain decode.
+- Mean 3.47 tokens a cycle (the CPU oracle predicted 3.45); geometric-mean speedup 1.11x.
+- A cycle costs 3.12-3.16 decode steps (~335 ms) on every prompt. Its parts measured
+  separately (two L-row passes at 1.17-1.28x a step, the draft layer +14%) add to ~2.6, so
+  ~0.5 step a cycle is unaccounted for.
+- Earlier runs on a busy machine (1.68x over 64 tokens; 1.35-1.73x over these prompts with the
+  CPU at 100%) overstated the gain: contention slowed plain decode, with more dispatches per
+  token, about 3x, and Uno less.
+
+**Result 2026-10-09, after the noise range and the shared generate (`feat/uno-any-dense`):**
+- **CLI:** the same six prompts give exactly the tokens a cycle above (3.56, 3.05, 3.46, 3.12, 3.88, 3.76), all identical to decode.
+- **Served by `oflm serve`:**
+  - A greedy request decodes by Uno: 10.65 against 7.69 tok/s for a forced plain decode on a busy machine.
+  - A reply cut at 37 tokens is identical to plain decode's.
+  - Streamed matches non-streamed, apart from one trailing newline.
+  - Sampled requests decode as usual.
+  - The 160-token reply splits at the bf16 tie above.
+
+**Result 2026-10-10 (every argmax the app's pick):**
+- **CLI:** the tie prefix differs from decode at token 0 on #184's `lmhl` (427 against 27) and
+  is identical on this one. The six prompts x 128 are all identical: 3.46, 3.12, 3.37, 3.05, 4.00
+  and 3.76 tokens a cycle (mean 3.43).
+- **Served by `oflm serve`:** the 160-token train reply is identical to plain decode's, the 37-token
+  cut and the streamed reply match too, and a sampled request decodes as before.
+
+### OPEN-SPEC-LOOKUP: prompt-lookup drafts on the verify pass, and the speculative method chosen each cycle
+**Applies to:** openflowlm-next (`src/open_qwen36/spec_lookup.hpp`, `engine.cpp` `spec_cycle`, `cli.cpp` `--spec` / `--spec-probe`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `modeling_granite.cpp`, `modeling_k2.cpp`, `utilities/spec-lookup`, `utilities/granite-combined-bench` `spec`)
+**Verification:** test (the drafter: `tests/test_spec_lookup.py` and `src/open_qwen36/spec_lookup_test.cpp`, both on `tests/fixtures/spec_lookup_cases.json`); manual (the output and the speed, the procedures below)
+
+A greedy request on a kernel set with the L-row pass (OPEN-DECODE-ROWS) shall decode cycle by cycle, each cycle one of:
+1. **Lookup.** One verify pass on `[seed, d_1 .. d_{L-1}]` without the LoRA, the drafts from the drafter below. It
+   commits the drafts the pass agrees with, in order, then the pass's own next token: 1 to L tokens for one pass.
+2. **Uno.** OPEN-UNO-DECODE's draft and verify passes, when `uno.q4nx` is packed: 2 to L + 1 tokens for two passes.
+3. **Plain.** One decode step: 1 token.
+
+Every pass is bit-identical to decode at its rows, so the output is plain greedy decode's whatever the choice.
+
+**The drafter.** Up to L - 1 drafts: the tokens that followed the most recent earlier occurrence, in the prompt and
+the output so far, of the context's longest suffix n-gram, n = 4 down to 1. A continuation that runs into the end of
+the context is extended by looking up again on the context plus the drafts so far. Rows the drafts do not fill repeat
+the last draft (a lucky repeat is accepted like any draft). It reads token ids only, on the host, between passes: a
+linear scan, 0.014 ms a cycle at 2048 tokens of context.
+
+**The choice.** The method with the most committed tokens per millisecond expected:
+- A method's expected tokens are 1 + its running mean of accepted drafts (lookup: per matched n; Uno: 2 + the mean;
+  plain: 1). Each running mean weighs the newest cycle 0.3; a mean not refreshed this cycle moves 0.1 of the way back
+  to its prior (lookup n = 1..4: 0.3, 0.8, 1.0, 2.0; Uno: 1.0), so a method that lost is tried again later.
+- A method's cost is the running mean of its measured passes: plain step, verify pass, draft + verify. A pass not yet
+  timed costs its prior ratio to whichever pass has been (verify 1.33, draft 1.58 plain steps).
+- `--spec-mode` (CLI) / `OFLM_SPEC_MODE` (app) pin a rule instead: `lookup` (lookup when it drafts, else plain),
+  `lookup-uno` (lookup, else Uno, else plain), `uno`, `plain`.
+
+**Capacity.** A lookup pass writes rows pos .. pos + L - 1 and can leave the next position at pos + L, so it needs
+pos + L < max_ctx; a Uno cycle needs pos + 1 + L < max_ctx. Without the room the cycle is a plain step, so neither the
+`step_rows` refusal (`pos + L > max_ctx`, OPEN-FAMILY-GRANITE-UNO) nor a seek past the capacity is reached.
+
+**Served.** With `OFLM_SPECULATIVE=1`, the shared generate of a family that opts into OPEN-UNO-DECODE runs this cycle
+for greedy requests, with OPEN-UNO-DECODE's cut rules: committed token i sits at the cycle's position + 1 + i, all but
+the cycle's last are cached. The policy starts each request from its priors. A plain cycle is the app's own forward and
+sampler. A kernel set with the rows route and no `uno.q4nx` gets lookup and plain.
+
+**Acceptance criteria (unit):** the fixture's cases, each derived by hand: no repeated token gives no draft; the most
+recent occurrence wins; a longer match beats a more recent shorter one; a continuation cut by the end is extended (and
+is not without extension); nmin 2 refuses a unigram; a single token drafts nothing; a period-2 run matches itself.
+Random histories (a small alphabet, so matches are common) agree with the rule restated with slices.
+
+**Procedure (manual):**
+1. `open_qwen36_cli --model <dir> --kernels <set> --ids-file <ids> [--gemm-block] --spec N [--spec-mode M]` runs N
+   tokens by the cycle, then plain greedy decode from the same cache (the prompt but its last token prefilled, the last
+   one stepped, as `--uno`). It prints `SPEC IDENTICAL to decode over N tokens`, each method's cycles and tokens a
+   cycle, the drafts accepted by matched n, each pass's mean ms, and both speeds.
+2. `utilities/spec-lookup/spec_lookup.py prompts` writes the prompt sets; `matrix --units ... --gap 75 --expect <json>`
+   runs `--spec` per unit under `dibs run --measure`, rerunning a NOISY unit or one whose plain decode is 5% under the
+   prompt's known figure; `table` prints the medians, setting aside a run whose plain decode or pass time is 5% off.
+3. `--spec-probe N --spec-dump <json>` decodes greedily by draft passes: row 0 is the decode step, rows 1.. are what a
+   Uno cycle seeded there would verify. `spec_lookup.py sim` / `ngrams` replay those transcripts through each rule.
+4. Served: `spec_lookup.py serve-launch --oflm <oflm.exe> --registry <model_list.json> --models-root <root> --kernels
+   <set> --env OFLM_SPECULATIVE=1 --out a.json`, the same without `--env` into `b.json` (plain decode), then
+   `serve-compare a.json b.json`: a greedy request, the same cut by `max_tokens`, and the same streamed equal plain
+   decode's reply, on a chat prompt (thinking on) and a whole-file bug fix (`"think": false`); a sampled request
+   replies.
+   Not `presence_penalty 1e-6` for the reference: at an exact bf16 tie the penalty picks the token.
+5. Capacity: `--max-ctx 96 --spec 68` from a 26-token prompt, `--spec-mode uno` and `lookup`: the last cycles fall back to
+   plain steps (a Uno cycle last at position 90, a lookup pass at 91), `SPEC IDENTICAL`.
+
+**Result 2026-10-15 (Granite 4.2 3B, the decode-depth kernel set, L = 4):**
+- The C++ and Python drafters pass the fixture's 13 cases; the full `specs/open-engine/tests` suite passes (858, 21
+  skipped); `build.cmd`'s unit tests pass; `--rows-check 17` prints `ROWS PASS` (63.1 ms a pass, 1.32x a 47.7 ms step).
+- `SPEC IDENTICAL` on every CLI run (fourteen prompts, every mode, every rep) and on the capacity check. K2-Horizon-7B
+  on its own kernel set (`feat/k2-horizon-7b`'s): `--spec 96` adaptive on a whole-file bug fix is identical too, mixing
+  13 lookup and 18 Uno cycles (untimed: the machine was busy).
+- Served (`oflm serve`, `OFLM_SPECULATIVE=1` against unset): the chat reply (133 tokens, to its end) and the bug fix
+  (200, cut by `max_tokens`), their 37-token cuts and their streamed forms are identical to plain decode's; sampled
+  requests reply. Measured (one `dibs run --measure` unit, both servers, CLEAN; the server's own decode tok/s): the
+  bug fix returning the whole file 42.60 against 13.90 tok/s (3.06x, the CLI's 3.1x), chat 20.82 against 20.42
+  (1.02x). A first A/B read 1.15x on the bug fix: the server had dropped the request's `"think": false`, so the reply
+  reasoned before answering; `Granite` now passes it to its template (OPEN-FAMILY-GRANITE).
+- The numbers are in OPEN-FAMILY-GRANITE-UNO.
+
+### OPEN-FAMILY-GRANITE-UNO: Granite 4.2 3B's Uno drafter
+**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py` `ROWS_FAMILIES`, `src/common/AutoModel/modeling_granite.cpp`, `utilities/q4nx-build` `--uno-adapter`)
+**Verification:** manual (the procedure below compares every token with greedy decode)
+
+Granite 4.2 3B with its Uno adapter (`Cyronius/granite-4.2-3b-uno`: r 128, alpha 8192, all seven projections of
+the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, identical to greedy decode:
+- The kernel set ships `dxl`, `dxl_lora` and `lmhl` at hidden 2560 (OPEN-DECODE-ROWS).
+- `uno.q4nx` carries s·B with q's fold of 0.125 (OPEN-UNO-LORA) and `uno_noise_high` 100256.
+- Granite's AutoModel opts in as K2's does. Its sampling defaults are unchanged, so speculation serves only requests
+  that ask for greedy (top_k 1, no penalty), and since 2026-10-15 by OPEN-SPEC-LOOKUP's per-cycle choice, of which this
+  cycle is one method (the results below).
+
+**Procedure (manual):**
+1. `q4nx-build -i granite-4.2-3b-bf16.gguf -s <granite-4.2-3b dir> -f granite -t language --quant Q4_1
+   --uno-adapter <adapter> --uno-noise-high 100256`, then `export_qwen36_kernels.py --model-dir <out>`.
+2. `open_qwen36_cli ... --rows-check 17` prints `ROWS PASS`.
+3. `utilities/uno-bench` over `utilities/uno-ref/prompts.jsonl` at 128 tokens: every prompt identical to decode,
+   and tokens a cycle within 5% of the CPU reference (the adapter's training repo, `uno_generate` at L = 4 on a
+   q4_1 fake-quantized base, the same prompts).
+4. `oflm serve` with the model registered: a request with `top_k` 1 and `repetition_penalty` 1 equals one that
+   decodes plainly, also when cut by `max_tokens`; streamed equals non-streamed; a sampled request replies. Since
+   2026-10-15 the plain reply comes from a second server with `OFLM_SPECULATIVE` unset (OPEN-SPEC-LOOKUP's served
+   procedure), not from adding `presence_penalty` 1e-6, which breaks exact bf16 ties.
+
+**Result 2026-10-10 (q4_1, L = 4, six prompts x 128 tokens, quiet machine under the shared lock's `timing` gate):**
+
+| prompt | tokens a cycle (CPU reference) | Uno | plain decode | speedup |
+|---|---|---|---|---|
+| chat | 2.42 (2.56) | 14.77 tok/s | 20.16 tok/s | 0.73x |
+| chat2 | 2.61 (2.78) | 16.05 | 20.06 | 0.80x |
+| code | 3.20 (3.28) | 19.60 | 19.72 | 0.99x |
+| code2 | 3.20 (3.37) | 19.62 | 20.24 | 0.97x |
+| math | 3.76 (3.77) | 22.99 | 20.04 | 1.15x |
+| reason | 3.46 (3.46) | 21.15 | 20.13 | 1.05x |
+
+- All six identical to decode; `--rows-check 17` prints `ROWS PASS`.
+- Mean 3.04 tokens a cycle against the CPU reference's 3.15 (3.4% under); geometric-mean speedup 0.94x.
+- A cycle costs 3.2-3.3 decode steps. K2's adapter commits 3.47 tokens a cycle and gains 1.11x; this one commits
+  fewer at four rows, so the cycle does not pay yet.
+
+**Result 2026-10-13 (dxl tile scheduling, weight fifo depth 4; measured with FrameServer's idle NPU context present and normal host CPU load, no timing gate):**
+
+| prompt | tokens a cycle | Uno | plain decode | cycle / step | speedup |
+|---|---|---|---|---|---|
+| chat | 2.42 | 16.90 tok/s | 19.03 | 2.73 | 0.89x |
+| chat2 | 2.61 | 18.34 | 19.17 | 2.73 | 0.96x |
+| code | 3.20 | 22.36 | 19.11 | 2.73 | 1.17x |
+| code2 | 3.20 | 22.55 | 19.03 | 2.70 | 1.18x |
+| math | 3.76 | 26.46 | 18.99 | 2.70 | 1.39x |
+| reason | 3.46 | 24.24 | 18.89 | 2.70 | 1.28x |
+
+- All six identical to decode; geometric-mean speedup 1.13x. `--rows-check 17`: ROWS PASS on Granite and K2-3.7B.
+- Verify pass 67.0 -> 64.2 ms; the cycle is 2.7-2.73 decode steps (was 2.88). Nulling the GEMV leaves 57 ms and the prep 61 ms, so 10 and 6 ms of core compute are still exposed.
+
+**Result 2026-10-14, combined tree (`perf/granite-npu-combined`: Uno decode kernels + host-attention prefill + bfp16 route in one kernel set, one `manifest.json`; every row `dibs run --measure`, CLEAN; `utilities/granite-combined-bench`):**
+
+Short context, six prompts x 128 tokens (`uno_bench.py`; the prompt prefilled one token at a time), tokens a cycle as before:
+
+| prompt | tokens a cycle | Uno tok/s | plain decode tok/s | speedup |
+|---|---|---|---|---|
+| chat | 2.42 | 17.17 | 20.25 | 0.85x |
+| chat2 | 2.61 | 18.58 | 20.54 | 0.90x |
+| code | 3.20 | 22.74 | 20.31 | 1.12x |
+| code2 | 3.20 | 22.76 | 20.20 | 1.13x |
+| math | 3.76 | 26.66 | 20.26 | 1.32x |
+| reason | 3.46 | 24.50 | 19.98 | 1.23x |
+
+- All six identical to decode; mean 3.04 tokens a cycle, geometric-mean speedup **1.08x**. The same sweep with the prompt prefilled by `--gemm-block` (bf16 route) is 3.02 tokens a cycle, 1.06x, and with `--gemm-block --prefill-mode bfp16` 3.05, 1.08x; all identical. The prefill route moves the cache by a few bf16 ulps, so math (3.66 on the bf16 block route, 3.76 otherwise) and reason (3.56 on bfp16, 3.46 otherwise) shift by 0.1 tokens a cycle.
+- Against the 2026-10-13 table above the Uno speeds are the same within 2 % (chat 16.90 -> 17.17, code 22.36 -> 22.74) and plain decode is 6 % faster (19.0 -> 20.2), so the ratio is 1.08x, not 1.13x. The cycle costs 2.85 decode steps on chat (was 2.73): the gain over the earlier table is in plain decode, not in the cycle.
+- `--rows-check 17` prints `ROWS PASS` on the combined set (every row, 0 of 100352 logits differ).
+
+At depth: the prompt is real repo text cut to the exact token count (chat: spec prose and a summarize request; code: python designs and a Fibonacci request), prefilled with `--gemm-block` on the named route, then 128 tokens by Uno and 128 by plain decode from the same cache. One run each; every one identical to decode.
+
+| context | prompt | prefill route | tokens a cycle | Uno tok/s | plain tok/s | speedup |
+|---|---|---|---|---|---|---|
+| 1024 | chat | bf16 | 2.67 | 14.36 | 13.73 | 1.05x |
+| 1024 | code | bf16 | 3.28 | 17.28 | 14.18 | 1.22x |
+| 1024 | chat | bfp16 | 2.72 | 14.74 | 14.04 | 1.05x |
+| 1024 | code | bfp16 | 3.12 | 16.77 | 14.08 | 1.19x |
+| 2048 | chat | bf16 | 2.78 | 12.11 | 10.69 | 1.13x |
+| 2048 | code | bf16 | 3.12 | 13.34 | 10.74 | 1.24x |
+| 2048 | chat | bfp16 | 2.72 | 11.88 | 10.75 | 1.11x |
+| 2048 | code | bfp16 | 3.20 | 13.99 | 10.71 | 1.31x |
+
+- (Before the score tree; the next result has the rebuilt kernels.) Plain decode falls from 20.3 tok/s (short) to 13.7 at 1024 and 10.7 at 2048 tokens of context (attention grows with position, OPEN-ATTN-CONTEXT); Uno's gain holds, since its verify and draft rows carry the same window: 1.05-1.22x at 1024, 1.11-1.31x at 2048, the code prompts ahead of chat as at short context.
+- The route is limited by `pos + L > max_ctx` (the manifest's 4096, `core.cpp` `step_rows`): a row pass within L = 4 of the capacity is refused by name. Nothing near it was run; 2048 + 128 is half the capacity.
+- `--uno` now takes `--gemm-block`. Its plain-decode reference prefills all but the last token that way and steps the last one, as Uno's seed row is stepped; with the whole prompt block-prefilled instead, the two start from caches that differ by a few bf16 ulps in the seed's K/V and the 1024-token chat prompt read DIFFERS at token 27.
+
+**Result 2026-10-14, decode depth (`perf/granite-decode-depth`: OPEN-ATTN-SCORE-TREE on `dx` and `dxl`; `utilities/granite-combined-bench/matrix.py --lengths 0,512,1024,2048 --routes fast`, one binary, before = the combined tree's `dx` / `dxl`, after = the same set with `dx`, `dxl` and `dxl_lora` rebuilt; every row `dibs run --measure --tag ctx-decode`, CLEAN, the before and after runs back to back; an earlier "after" matrix on the tree without the conditional rescale exponential read 20.80 / 17.52 / 15.12 / 11.92 tok/s at 0 / 512 / 1024 / 2048):**
+
+Plain decode, 128 tokens after N tokens of context (`--gemm-block` bf16 prefill; N = 0 is one prompt token), 3 runs, min / median tok/s:
+
+| context | before | after | change (median) | llama.cpp Vulkan on the 890M (not re-measured here) |
+|---|---|---|---|---|
+| 0 | 20.66 / 20.67 | 20.84 / 20.84 | +0.8 % | 24.2 |
+| 512 | 16.70 / 16.72 | 17.69 / 17.86 | +6.8 % | not recorded |
+| 1024 | 13.66 / 14.01 | 15.46 / 15.52 | +10.8 % | 23.1 |
+| 2048 | 10.65 / 10.67 | 12.30 / 12.35 | +15.7 % | 23.3 |
+
+Uno on the same kernels (one run each, 128 tokens, both sides from one cache, every one identical to plain decode):
+
+| context | prompt | tokens a cycle | Uno before -> after | plain before -> after | speedup before -> after |
+|---|---|---|---|---|---|
+| 1024 | chat | 2.67 | 14.34 -> 15.20 | 14.14 -> 15.51 | 1.01x -> 0.98x |
+| 1024 | code | 3.28 | 17.81 -> 18.79 | 14.19 -> 15.52 | 1.25x -> 1.21x |
+| 2048 | chat | 2.78 | 12.14 -> 13.16 | 10.77 -> 12.37 | 1.13x -> 1.06x |
+| 2048 | code | 3.12 -> 3.20 (see below) | 13.62 -> 14.76 | 10.71 -> 12.38 | 1.27x -> 1.19x |
+
+Six prompts x 128 tokens at short context (`uno_bench.py`, token-at-a-time prefill), before -> after: 3.04 tokens a cycle both ways, every
+prompt identical to decode; Uno 17.26 -> 17.30 (chat), 18.66 -> 18.76, 22.68 -> 22.91, 22.80 -> 22.91, 26.77 -> 26.91, 24.58 -> 24.71 tok/s;
+plain decode 20.73 / 20.75 / 20.61 / 20.64 / 20.58 / 20.20 -> 20.66 / 20.77 / 20.60 / 20.69 / 20.62 / 20.47; geometric-mean speedup 1.06x -> 1.07x.
+(A second "after" run of the sweep, on the tree without the conditional exponential, read the chat row's plain decode as 18.68 in a CLEAN run,
+an outlier among five figures at 20.6-20.8; that run's 1.08x is not quoted.)
+
+- `dx` (rows unrolled 4) gained 7-16 % of plain decode at 512-2048, `dxl` (rolled, the program memory leaves no room for more) 5-8 % of Uno;
+  so Uno's ratio over plain decode fell by 0.03-0.08 at depth while both sped up.
+- The code prompt at 2048 read 3.12 tokens a cycle (41 cycles) in four runs of the matrix (the combined tree's, this branch's before and
+  after, and a `dxl`-only check) and 3.20 (40 cycles) in this branch's last two matrix runs and in six runs of a separate script (3 each of
+  the base kernels and the final ones: all 3.20). So the acceptance is not a property of the kernels here; the output is identical to decode
+  every time. The cause is not isolated (it may be the process, the host block prefill, or the dibs wrapper).
+- The slope is not gone. At 2048 plain decode is still ~1.9x slower than Vulkan: 78.7 ms a step against 45.8 at context 0 (81 / 48 ms a
+  token at 12.35 / 20.84 tok/s); what remains is the window stream (0.28 ms a layer at 2048) plus the arithmetic, 0.59 ms a pass with the
+  tree before the conditional exponential (`ATTN_REPEAT` 3 against 1, OPEN-ATTN-SCORE-TREE).
+
+**Result 2026-10-15, prompt lookup and the per-cycle choice (OPEN-SPEC-LOOKUP) on the decode-depth kernel set, unchanged
+(`utilities/spec-lookup/spec_lookup.py matrix`, every unit `dibs run --measure --tag d3`, CLEAN, 75 s between units; each
+figure the median of the runs kept, n of them, Uno 1 run; a run is set aside when its plain decode or a pass time is 5% off
+the prompt's median, which is what another track's NPU run inside a CLEAN unit looks like; every run against its own
+plain-decode reference in the same process; 128 tokens, the lookup prompts 256, every window inside the reply; every run
+SPEC IDENTICAL):**
+
+| prompt | context | plain tok/s | Uno tok/s (tokens a cycle) | Uno | lookup tok/s (tokens a cycle) | lookup | adaptive tok/s (tokens a cycle) | adaptive |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| chat | 26 | 20.54 | 17.25 (2.42) | 0.84x | 20.97 (1.11) | 1.02x | 19.95 (1.28) | 0.97x |
+| chat2 | 23 | 20.54 | 18.55 (2.61) | 0.91x | 19.56 (1.05) | 0.95x | 20.59 (1.32) | 1.00x |
+| code | 35 | 20.47 | 22.63 (3.20) | 1.11x | 23.27 (1.31) | 1.13x | 24.01 (1.75) | 1.17x |
+| code2 | 30 | 20.46 | 22.73 (3.20) | 1.11x | 21.58 (1.19) | 1.05x | 23.15 (1.86) | 1.14x |
+| math | 42 | 20.33 | 26.67 (3.76) | 1.31x | 24.65 (1.45) | 1.21x | 25.66 (2.25) | 1.26x |
+| reason | 44 | 20.33 | 24.49 (3.46) | 1.21x | 26.59 (1.52) | 1.30x | 24.87 (2.29) | 1.22x |
+| chat_1024 | 1024 | 15.36 | 15.14 (2.67) | 0.99x | 16.77 (1.24) | 1.09x | 16.26 (1.62) | 1.06x |
+| code_1024 | 1024 | 15.43 | 18.56 (3.28) | 1.21x | 19.12 (1.41) | 1.24x | 19.37 (2.29) | 1.25x |
+| chat_2048 | 2048 | 12.25 | 12.94 (2.78) | 1.06x | 12.93 (1.19) | 1.06x | 12.85 (1.80) | 1.05x |
+| code_2048 | 2048 | 12.22 | 15.07 (3.20) | 1.24x | 15.80 (1.47) | 1.29x | 16.38 (2.46) | 1.34x |
+| edit_py | 1347 | 14.01 | 19.08 (3.61) | 1.36x | 25.34 (2.15) | 1.81x | 25.35 (2.67) | 1.82x |
+| fix_py | 1390 | 13.89 | 23.44 (4.49) | 1.69x | 42.51 (3.82) | 3.06x | 43.64 (4.00) | 3.14x |
+| quote_doc | 1032 | 15.15 | 19.53 (3.51) | 1.31x | 23.58 (1.88) | 1.56x | 22.79 (2.49) | 1.51x |
+| qa_doc | 728 | 16.34 | 22.82 (3.82) | 1.40x | 28.44 (2.10) | 1.74x | 27.15 (2.64) | 1.66x |
+
+The six short prompts are the uno-ref set (thinking on); chat / code at 1024 and 2048 are real repo text with a
+summarize / Fibonacci request; the lookup prompts (thinking off) are a whole-file edit (`edit_py`), a bug fix replying
+with the whole file (`fix_py`), quoting a spec section's procedures (`quote_doc`) and answering from a skill's traps
+section (`qa_doc`). 98 runs, all identical to plain decode.
+
+- Geometric means over plain decode, short / 1024 / 2048 / lookup prompts: Uno 1.07 / 1.09 / 1.14 / 1.43x, lookup
+  1.10 / 1.16 / 1.17 / 1.97x, adaptive 1.12 / 1.15 / 1.19 / 1.94x. Chat stops losing (Uno 0.84x, lookup 1.02x); a
+  whole-file reply runs at 43.6 tok/s.
+- The passes, ms (plain step / verify / draft): 48.7 / 64.8 / 76.1 at short context, 65.1 / 82.3 / 93.5 at 1024,
+  81.9 / 101.4 / 112.3 at 2048. A verify pass is 1.33 / 1.26 / 1.24 plain steps and a Uno cycle 2.9 / 2.7 / 2.6, so a
+  lookup pass pays from 0.33 / 0.26 / 0.24 accepted drafts and a Uno cycle from 0.9 / 0.7 / 0.6.
+- In adaptive mode on the short prompts a lookup cycle runs at 27-51 tok/s, a Uno cycle at 18-23 and a plain step at
+  20.4: the gain is the lookup cycles, and Uno barely beats a plain step outside math and code.
+- Lookup and Uno repeat run to run (the same tokens a cycle, the speed within 1%). Adaptive does not: its choice reads
+  measured pass times, so two runs of one prompt can choose differently (code: 1.75 and 1.54 tokens a cycle, 1.23x and
+  1.16x); the output never differs. Against the better single method of each prompt it is 6% behind (reason, against
+  lookup) to 5% ahead (chat2).
+- Against llama.cpp Vulkan (24.2 / 23.1 / 23.3 tok/s at context 0 / 1024 / 2048, 2026-10-14, without its own lookup
+  decoding): plain decode is 0.85 / 0.66 / 0.52x of it, adaptive ~0.95x on the short prompts, 0.70-0.84x at 1024,
+  0.55-0.70x at 2048, and 1.0-1.9x on the lookup prompts at 0.7-1.4k context.
+- Served by `oflm serve` (OPEN-SPEC-LOOKUP's result): the whole-file bug fix at 42.60 against 13.90 tok/s, chat at
+  20.82 against 20.42, the replies identical.
+- The offline replay of `--spec-probe` transcripts (`plans/archive/granite-spec-lookup.md`) predicted each group within
+  ~0.03x of these.
+
+**Result 2026-10-15, attention by kv head (`perf/granite-attn-kvslice`, OPEN-ATTN-KVSLICE: `dx` at KVCORES 2, `dxl` / `dxl_lora`
+with the per-core windows; one binary; before = the decode-depth kernels; every unit `dibs run --measure` CLEAN inside
+`utilities/granite-combined-bench/controlled.py`, the context-0 control within 2.4 % of its calibration before and after each):**
+
+| context | prompt | tokens a cycle | Uno before -> after | plain before -> after | speedup before -> after |
+|---|---|---|---|---|---|
+| 1024 | chat | 2.67 | 15.14 -> 16.19 | 15.44 -> 18.56 | 0.98x -> 0.87x |
+| 1024 | code | 3.20 | 18.15 -> 19.45 | 15.48 -> 18.50 | 1.17x -> 1.05x |
+| 2048 | chat | 2.78 | 13.05 -> 14.59 | 12.25 -> 16.88 | 1.06x -> 0.86x |
+| 2048 | code | 3.12 | 14.67 -> 16.46 | 12.27 -> 16.84 | 1.20x -> 0.98x |
+
+Six prompts x 128 tokens at short context (`uno_bench.py`), before -> after: 3.04 tokens a cycle both ways, every prompt identical
+to decode; Uno 17.16 -> 17.25 (chat), 18.64 -> 18.65, 22.73 -> 22.85, 22.72 -> 22.75, 26.72 -> 26.83, 24.49 -> 24.66 tok/s; plain
+decode 20.59 / 20.66 / 20.44 / 20.48 / 20.52 / 20.58 -> 20.73 / 20.58 / 20.76 / 20.66 / 20.66 / 20.53; geometric-mean speedup 1.06x both ways.
+
+- Every run identical to plain decode; `--rows-check 17` prints `ROWS PASS` at 70, 1030 and 2060 tokens.
+- Uno is faster at depth (+7 % at 1024, +12 % at 2048) but plain decode gained more (+20 %, +37 %): `dxl` took the per-core
+  windows only. Its 4 row groups x 5 attention cores use rows 3-5, so 8 cores of 5 heads a group (32 cores) do not fit, and
+  Uno now trails plain decode at depth on chat (0.86-0.87x) and breaks even on code (0.98-1.05x). This was measured
+  against `--uno` (every cycle Uno); a served greedy request takes OPEN-SPEC-LOOKUP's per-cycle choice, which prices
+  each method's passes as it runs and takes a plain step where Uno's cycle does not pay.
+
+**Result 2026-10-15, the overnight tracks on one kernel set (`perf/granite-overnight`: OPEN-DECODE-STREAM and
+OPEN-DECODE-ONE-CONTEXT-DENSE's `dx` ring and `dxh` head, OPEN-ATTN-KVSLICE's windows and 16 attention cores, OPEN-SPEC-LOOKUP,
+OPEN-PREFILL-BFP16-FFN, OPEN-PREFILL-ATTN-FA; one `export_qwen36_kernels.py` run, 34 sets, manifest_version 5; one CLI):**
+
+Gates on the union set, all passed:
+- decode against the decode-depth kernels (`utilities/decode-gates/decode_gates.py logits`, one token at a time): the logit
+  files of 70 + 20 and of 2100 + 20 positions byte-identical (20 / 20 each), the tokens identical;
+- 96 greedy tokens identical to the decode-depth kernels on the six uno-ref prompts and the chat / code prompts at 1024 and
+  2048 (block prefill with the host attention on both sides, so the gate is decode's);
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens (a rows pass 64.2 / 76.1 / 89.1 ms, 1.51 / 1.61 / 1.69 decode steps);
+- prefill accuracy (`prefill_mode_check.py`): the default bf16 route with `attn_fa` against its host attention passes every
+  OPEN-PREFILL-BFP16 threshold at 512 (corr min 0.999835, 4 flips at margins <= 0.026, perplexity ratio 0.9996, KL 0.00023,
+  the six 80-token continuations identical) and 2048 (corr min 0.999835, 18 flips at <= 0.041, ratio 0.9989, KL 0.00019),
+  the numbers OPEN-PREFILL-ATTN-FA recorded. The bfp16 route with `attn_fa` against the default route's host attention is
+  where OPEN-PREFILL-BFP16-FFN left it: at 512 corr min 0.997501, perplexity ratio 0.9999, KL 0.00269, every random-id flip
+  under 0.2, but `code2` flips at 0.209 and `chat` differs at token 64 (margin 0.175); at 2048 corr min 0.986806 (fails
+  0.995), one flip at 0.209, ratio 0.9942, KL 0.00211. It stays opt-in.
+
+- every spec run below (`--spec` in modes `uno` and `adaptive`) printed SPEC IDENTICAL.
+
+Timing: every unit one `dibs run --measure --tag integ` that printed CLEAN before and after, inside
+`utilities/granite-combined-bench/controlled.py` (a 32-token context-0 decode on the union set before and after, calibrated
+at 24.08 tok/s, within 5 %, and no other process's NPU submissions); a unit that failed either was rerun and its numbers
+dropped, and so was every unit that overlapped another agent's NPU work at 06:55-07:05. llama.cpp b10944 Vulkan on the 890M
+(`llama-bench -dev Vulkan0 -ngl 99 -r 3`, mean of 3) ran in the same sitting before (06:46-06:53) and after (07:05-07:12)
+the NPU units. tok/s, NPU min / median of 3:
+
+| | pp512 | pp1024 | pp2048 | tg128 @0 | @512 | @1024 | @2048 |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| NPU, bf16 route + `attn_fa` (default) | 234 / 235 | 257 / 258 | 247 / 251 | 23.79 / 23.87 | 22.40 / 22.46 | 21.10 / 21.10 | 18.90 / 18.92 |
+| NPU, bfp16 route + `attn_fa` | 729 / 736 | 798 / 820 | 691 / 727 | (decode is the same kernels) | | | |
+| NPU, bfp16 route, host attention | 649 / 708 | 388 / 461 | 169 / 178 | | | | |
+| Vulkan Q4_1, before / after | 877 / 866 | 823 / 825 | 728 / 737 | 23.62 / 23.78 | 23.45 / 23.49 | 23.19 / 23.11 | 22.52 / 22.64 |
+| Vulkan Q4_0, before / after | 853 / 885 | 807 / 844 | 785 / 788 | 23.49 / 23.55 | 23.02 / 22.96 | 22.94 / 22.73 | 22.11 / 22.24 |
+| Vulkan Q4_K_M, before / after | 697 / 712 | 676 / 692 | 650 / 650 | 18.75 / 18.66 | 18.55 / 18.38 | 18.27 / 18.24 | 18.00 / 17.83 |
+
+- Against Vulkan Q4_1 (the same weights): the bfp16 route with `attn_fa` is 0.84x at pp512 and at parity at 1024 and 2048
+  (0.99x); plain decode is 1.01x at context 0, 0.96x at 512, 0.91x at 1024 and 0.84x at 2048 (it was 0.85 / - / 0.66 /
+  0.52x on the decode-depth set). Against Q4_K_M the NPU is ahead everywhere (decode 1.06-1.28x, bfp16 prefill 1.04-1.20x).
+- The default bf16 route is GEMM-bound at ~250 tok/s whatever the attention; `attn_fa` is what makes the bfp16 route flat
+  in length (host attention: 708 -> 178 tok/s from 512 to 2048, with the spread OPEN-PREFILL-ATTN-FA describes).
+- A same-unit A/B of the bfp16 route with host attention, P2's own CLI and set against the union: pp512 714 against 727
+  median, pp2048 286 against 274. OPEN-PREFILL-BFP16-FFN's 858 at pp512 did not reproduce on either build this morning, so
+  the gap is the machine's state, not the merge.
+- A tg128 token costs 41.9 ms after 0 tokens and 52.9 after 2048 (Vulkan Q4_1: 42.2 and 44.3); `--rows-check`'s single
+  steps read 42.4 / 47.4 / 52.7 ms at 70 / 1030 / 2060.
+
+Speculation on the same set (`utilities/spec-lookup/spec_lookup.py bench`, D3's prompt files, 128 tokens, the lookup
+prompts 256; median of 2 controlled runs for the short and 1024 prompts, 1 for 2048 and the lookup prompts, whose second
+runs met a busy box and were dropped; tokens a cycle in brackets; speed over the run's own plain decode):
+
+| prompt | plain tok/s | Uno tok/s | Uno | adaptive tok/s | adaptive |
+|---|--:|--:|--:|--:|--:|
+| chat | 23.7 | 17.27 (2.42) | 0.74x | 23.49 (1.06) | 0.99x |
+| chat2 | 23.8 | 18.74 (2.61) | 0.79x | 24.11 (1.05) | 1.01x |
+| code | 23.7 | 22.95 (3.20) | 0.97x | 27.94 (1.29) | 1.18x |
+| code2 | 23.6 | 22.96 (3.20) | 0.98x | 25.19 (1.15) | 1.07x |
+| math | 23.7 | 26.94 (3.76) | 1.14x | 26.34 (1.31) | 1.11x |
+| reason | 23.6 | 24.66 (3.46) | 1.05x | 26.54 (1.43) | 1.12x |
+| chat_1024 | 21.0 | 15.65 (2.56) | 0.75x | 20.97 (1.10) | 1.00x |
+| code_1024 | 21.1 | 19.53 (3.20) | 0.92x | 24.40 (1.32) | 1.16x |
+| chat_2048 | 18.8 | 14.04 (2.67) | 0.75x | 19.75 (1.15) | 1.05x |
+| code_2048 | 18.8 | 15.66 (2.98) | 0.83x | 20.67 (1.28) | 1.10x |
+| edit_py | 20.1 | 20.76 (3.61) | 1.03x | 31.43 (2.05) | 1.56x |
+| fix_py | 20.1 | 25.66 (4.49) | 1.28x | 48.03 (4.00) | 2.39x |
+| quote_doc | 20.7 | 21.42 (3.56) | 1.03x | 27.88 (1.72) | 1.35x |
+| qa_doc | 21.4 | 26.09 (4.13) | 1.22x | 32.05 (2.02) | 1.49x |
+
+- Plain decode got faster than the rows pass (a verify pass is now 1.51-1.69 decode steps, against 1.24-1.33 on the
+  decode-depth set), so Uno alone loses everywhere but math, reason and the lookup prompts. The per-cycle choice keeps up:
+  it falls back to plain steps on chat (0.99-1.05x) and gains 1.07-1.18x on code / math / reason and 1.35-2.39x where the
+  reply copies its context (`fix_py` 48.0 tok/s, ~2.1x Vulkan Q4_1's ~23 at that depth).
+
+**Result 2026-10-16, the rows pass at depth (`perf/granite-uno-depth`: OPEN-ATTN-BLOCK8 as landed on 2026-10-15, OPEN-ATTN-SPLIT8,
+OPEN-DXL-TABS; before = the kernels at 81edf67, after = the same set with `dxl` / `dxl_lora` rebuilt; one CLI):** `utilities/granite-combined-bench/unodepth.py`,
+chat and code prompts of exactly 64 / 512 / 1024 / 2048 tokens (bench.py's repo text, frozen once; "0" is the 64-token prompt), 96 tokens
+each, `--uno` against plain decode in the same process, before and after interleaved per prompt, one run of each. Both units
+`dibs run --measure` CLEAN, the context-0 control within 1.4 % before and after; the plain column is the mean of the two runs.
+Plain decode needs no column of its own: `dx`, `dxh`, `ln`, `lm_head_q4` and `lmhl` are byte-identical before and after
+(tg128 23.35 / 22.33 / 21.40 / 19.72 tok/s at 0 / 512 / 1024 / 2048, both sets, 3 reps within 0.3 %).
+
+| context | prompt | tokens a cycle | Uno tok/s before -> after | plain tok/s | Uno / plain before -> after |
+|---|---|---|---|---|---|
+| 64 | chat | 2.91 | 20.79 -> 21.95 | 23.0 | 0.90x -> 0.96x |
+| 512 | chat | 2.74 | 18.35 -> 19.50 | 22.2 | 0.83x -> 0.88x |
+| 1024 | chat | 2.59 | 16.16 -> 17.28 | 21.4 | 0.76x -> 0.81x |
+| 2048 | chat | 2.53 | 13.82 -> 14.99 | 19.7 | 0.70x -> 0.76x |
+| 64 | code | 3.43 | 24.50 -> 25.83 | 23.1 | 1.06x -> 1.12x |
+| 512 | code | 3.00 | 20.06 -> 21.33 | 22.3 | 0.90x -> 0.96x |
+| 1024 | code | 2.82 | 17.56 -> 18.82 | 21.3 | 0.82x -> 0.89x |
+| 2048 | code | 3.43 | 18.76 -> 20.34 | 19.7 | 0.95x -> 1.03x |
+
+- Every run IDENTICAL to plain decode (16 of 16 in the two units); `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens; the six
+  `uno-ref` prompts x 96 tokens, one run each: 3.02 tokens a cycle, all identical, Uno 17.74 / 18.71 / 22.27 / 23.05 / 26.55 / 24.62
+  -> 18.66 / 19.66 / 23.43 / 24.25 / 27.92 / 25.95 tok/s (+5.1 to +5.4 %), geometric-mean speedup 0.95x -> 1.00x.
+- Uno gains 5.4-7.2 % at 64-1024 tokens and 8.4-8.5 % at 2048, which is a cycle (draft + verify pass) 4.4 % cheaper at context 0 and
+  7.9 % at 2048: 3.3 -> 3.2 decode steps at 0 and 3.6 -> 3.3 at 2048. The depth-independent part is OPEN-DXL-TABS (prep), the
+  depth-dependent part OPEN-ATTN-SPLIT8. Uno alone still trails plain decode wherever acceptance is low (chat everywhere, code at
+  512-1024): chat's 2.5 tokens a cycle need a cycle under 2.5 steps and it costs 3.3. The per-cycle choice of OPEN-SPEC-LOOKUP,
+  not `--uno`, is what a served request takes.
+- Left on the table, in decode steps (measured, not built): the head's two context switches and its slow `lmhl`, ~0.1 of a step
+  a pass; the L-row GEMV arithmetic ~0.2 a pass; the attention window's stream ~0.16 a pass at 2048.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
@@ -1473,6 +2425,40 @@ alpha / beta's rows, `ssm_a` and `ssm_dt.bias`. When `num_v == num_k` nothing is
 tensor of a linear and a full layer with its source after the converter's expected transform;
 `ALL MATCH` (each quantized projection >= 0.99) is the bar. Run on the reconverted 27B on
 2026-10-01: ALL MATCH; on the published one, 8 mismatches, all value-indexed.
+
+### OPEN-CONVERT-EOS-GENCONFIG: a container stops where the source's generate() stops
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/model_assets.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_generation_eos.py`
+
+The runtime ends generation only on the ids in `tokenizer_config.json`'s `eos_token_id`;
+transformers' `generate()` also stops on `generation_config.json`'s. K2-Horizon lists only
+`<|ifm|endoftext|>` (1) in its tokenizer config and adds `<|ifm|im_end|>` (250019) in its
+generation config, so a container without the merge printed `<|ifm|im_end|>` as text and
+stopped a token late. After copying the tokenizer config, q4nx-build shall append every
+`generation_config.json` eos id (an int or a list) from the first source that has the file and
+is not already listed, keeping the tokenizer's own ids first.
+
+**Acceptance criteria:**
+- tokenizer `[1]`, generation `[1, 250019]` → `[1, 250019]`.
+- tokenizer `1`, generation `7` → `[1, 7]`.
+- every generation id already listed → the file is left as it was.
+- no `generation_config.json`, or one without `eos_token_id` → unchanged.
+
+### OPEN-CONVERT-FAMILY-TAG: a converted K2 config is tagged with its family
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/model_assets.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_oflm_family.py`
+
+`oflm add` finds a renamed or fine-tuned repository through the `oflm-family` tag in its README,
+which q4nx-build derives from the generated `config.json`'s `model_type`. K2-Horizon publishes
+`model_type: k2_horizon`; without a mapping to the `k2` family the tag was omitted and such a
+repository could not be linked to the K2 kernels. `oflm_family_of()` shall map `k2_horizon`
+(case-insensitively) to `k2` and return `None` for a `model_type` it does not know.
+
+**Acceptance criteria:**
+- `{"model_type": "k2_horizon"}` → `k2`; `"K2_Horizon"` → `k2`.
+- `{"model_type": "no_such_arch"}` → `None`.
 
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
@@ -3711,6 +4697,243 @@ quoted. Through `oflm serve` with `OFLM_OPEN_KERNELS_DIR` at the set and no othe
 `oflm-test --llm` on `qwen3.6-moe:35b-a3b` PASSes 5 of 5, its 169- and 618-token turns on the
 route. Details: `specs/open-engine/plans/archive/q8-gemm.md`.
 
+### OPEN-PREFILL-HOST-ATTN: the plain dense shape prefills with host attention, layer-major
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp` `host_attn_fits`, `layer_dense_staged`, `step_gemm_prompt_dense`)
+**Verification:** manual (needs the NPU and a dense kernel set with a `gemm_block`; Granite-4.2-3B-NPU2 is the one measured)
+
+A dense `gemm_block` set with no `attn_block`, no q/k norm, no sliding window, no sandwich norms and full rotary (Granite, Llama 3) takes its prefill attention on the host by default, and runs the whole prompt layer-major with each GEMM step over every block (OPEN-PREFILL-BATCH's stage-major order): block b + 1 is on the NPU while the host works block b. Before this the set ran 256 single-token `dxB` dispatches per layer per block, 60-70 % of a Granite prefill. `OFLM_OPEN_HOST_ATTN=0` restores the `dxB` dispatches; `OFLM_OPEN_LAYER_MAJOR=0` / `OFLM_OPEN_STAGE_MAJOR=0` keep the host attention but run block at a time.
+
+**Acceptance criteria:**
+- The load log names `gemm-block attention: HOST` and `prefill schedule: layer-major ... stage-major`.
+- Logits at every position of a 512-token prompt against the `dxB` route: corr >= 0.9998, and an argmax flip only where the reference's top-2 margin is under 0.05 logits.
+- A 340-token chat prompt greedy-decodes the same 24 tokens as the `dxB` route.
+- A prompt at `--at-position 300` agrees with `dxB` (corr 0.9998).
+
+**Result 2026-10-13 (Granite-4.2-3B-NPU2, q4_1, pp512, T 256, performance mode, quiet box):** `dxB` 8.45-8.82 s (58-60 tok/s); host attention block at a time 3.5-3.85 s (133-145); layer-major stage-major **2.28-2.33 s (220-225 tok/s)**. At 2048 tokens 14.4 s (142 tok/s): the host attention grows with position (5-6 s of it) and is not overlapped, so a long prompt wants the NPU attention products (`attn_block`, which needs `prep` for a no-norm family and hd 64 builds, not built). What is left at 512 is the projection GEMMs themselves: 2.3-2.5 TFLOPS per dispatch (`gemm_n8192_k2560` 5.3 ms min), about 1.15 s a block, so the route is NPU-bound.
+
+**2026-10-15:** a set whose dense type carries `attn_fa` (OPEN-PREFILL-ATTN-FA, Granite's) takes the same layer-major route with the attention on the NPU by default; the host attention here is then its `OFLM_OPEN_ATTN_FA=0` fallback, and the route for a prompt whose last window is wider than the set's widest `attn_fa` stream.
+
+### OPEN-PREFILL-ATTN-FA: a dense set's block attention as one NPU flash-attention dispatch a block
+**Applies to:** openflowlm-next (`open_kernels/designs/attn_fa/`, `open_kernels/recipes/dense.py`, `src/open_qwen36/{manifest,core}.cpp`, `utilities/dense-decode-probe/prefill_mode_check.py`, `utilities/granite-combined-bench/attn_bench.py`)
+**Verification:** test (the recipe emission, `tests/test_prefill_attn_fa.py`; the manifest schema, `manifest_test.cpp`) + manual (the kernel against fp64 and the model against the host attention, below)
+
+A dense layer type whose `gemm_block` carries `attn_fa` (the families in `recipes/dense.py BLOCK_ATTN_FA`, Granite only: head
+dim 64, full rotary, no q/k norm, no output gate, no window) runs each 256-token block's attention on the layer-major route
+(OPEN-PREFILL-HOST-ATTN) as ONE dispatch of `designs/attn_fa`: scores, the causal mask, the online softmax and both products
+stay on the array, and nothing between them comes back to the host. One xclbin (context `af`), an instruction stream per 256
+rows of window up to `attn_fa.l_max` (`af256` .. `af<l_max>`). It is the default on both GEMM routes (bf16 and
+`--prefill-mode bfp16`); `OFLM_OPEN_ATTN_FA=0` keeps the host attention for A/B and does not register the `af` context.
+
+What the host does per block unless the set carries the prep stream (OPEN-PREFILL-GLUE-PREP moves all of this onto the
+array on the bfp16 route): RoPE on q and k, the bf16 KV-cache write (the rows decode reads), and packing Q as the
+kernel reads it (per head a record with p0, then per 32 tokens Q^T as bf16 hi / lo in log2 units, log2(e)/sqrt(hd) folded
+in). That is O(T x width) a block; nothing on the host grows with the window. The kernel reads K and V in place from the
+layer's KV cache (`state`) and writes O as the fp32 token rows the out projection reads, so neither is copied. Block 0's
+dispatch (and the switch into the `af` context) starts while the host still packs the last block; every block's dispatch
+runs in that one visit, so a layer pays two context switches, not two a block.
+
+The kernel: 4 groups of 8 cores; a pass is one query head's 256 tokens, each core 32 of them against every 64-key chunk of
+its kv head's window, broadcast to the group. The 32 query rows are the vector lanes (scores come out as S^T), so the row
+max, the rescale and the row sum are lane-wise. bf16 element-wise MACs into fp32 (a broadcast key or P element times a
+vector of rows); Q as a hi / lo pair (no q/k norm); an integer running max, so rescales are exact powers of two, applied
+only when a row's chunk max passes it by 16 (log2 units); 2^x as a degree-3 polynomial to bf16 precision (aie2p's bf16
+exp2 is Mitchell's, 6 % off); fp32 O and l, l summed from the bf16 P the product used. A fully masked chunk skips its
+compute.
+
+**Acceptance criteria (unit):**
+- The Granite emission carries `attn_fa` on `gemm_block` and on the `bfp16` variant: `hd` 64, `l_max` 4096, `q_head` 36864 (the record and Q hi / lo for 256 tokens), `qsplit`, streams `af256` .. `af4096` on context `af`; the builds pass `AF_L`, `AF_HEADS` 40, `AF_KV_HEADS` 8, `AF_KV_LD` 1024 (a KV row is every kv head's K then V), `AF_MAX_ROWS`, `AF_QSPLIT`; Qwen3-4B, Llama 3.1, Phi-4-mini, K2-Horizon and Gemma 3 carry none (`test_prefill_attn_fa.py`).
+- The parser: four windows of 256 rows parse with their kernels; a missing window, a head dim other than 64 and a `q_head` that is not the design's layout are refused (`manifest_test.cpp`).
+
+**Verification (manual):**
+1. The kernel: `designs/attn_fa/make_test.py --build <dir> --out <t> --L 512` (40 / 8 heads, a block at p0 256 against 512 cached rows, an attention-sink row), `run_kernel.exe <t>/run.cfg`, `compare.py <t>`: rel_fro <= 4e-3 against fp64, no NaN.
+2. The model against the host attention, both GEMM routes: `prefill_mode_check.py --arms <route>:host,<route>:npu --cases random,ppl --tokens 512` and `--tokens 2048`, then `--cases chat,decode`. Thresholds are OPEN-PREFILL-BFP16's: corr >= 0.995 at every position, an argmax flip only where the reference's top-2 margin is under 0.2, perplexity within 1 %, and the six `utilities/uno-ref` prompts' 80-token greedy continuations identical.
+3. Timing: `utilities/granite-combined-bench/attn_bench.py --lengths 512,1024,2048 --reps 3 --dispatch-log` under `dibs run --measure`, with a control in the unit.
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; every model and timing run in a
+`dibs run --measure` unit that printed CLEAN before and after, each with a control: the unchanged CLI on the unchanged
+set, pp512 bfp16 with host attention, 868-1010 ms across the night's units).**
+
+- *The kernel* (step 1): rel_fro 1.15e-3 against fp64, min row cosine 0.999995, no NaN. In the engine (`--dispatch-log`,
+  the bf16 route at pp2048) a dispatch costs ~0.1 ms plus ~0.69 ms per 256 rows of window: `af512` 1.47 ms, `af1024` 2.69,
+  `af2048` 5.64 (all 40 heads of one 256-token block), ~17 us a 64-key chunk a pass. A layer's first dispatch also
+  carries the switch into the `af` context (`af256` 3.2 ms against ~1.5 expected).
+- *Accuracy, the bf16 (default) route, NPU against host attention:* 512 random ids corr min 0.999835 mean 0.999978,
+  argmax 508 / 512 (flips at margins of 0.026 or less), perplexity 20.7226 -> 20.7152 (0.9996), KL 0.00023 nats; 2048
+  random ids corr min 0.999835 mean 0.999977, argmax 2030 / 2048 (margins 0.041 or less), perplexity over 2047 predictions
+  11.4226 -> 11.4098 (0.9989), KL 0.00019 nats; the six chat prompts corr min 0.99982-0.99991, one flip (margin 0.083),
+  all six 80-token greedy continuations identical. Every threshold holds, and OPEN-PREFILL-HOST-ATTN's tighter ones too
+  (corr >= 0.9998, flips under 0.05 at 512 random ids).
+- *Accuracy, 2048 tokens, the bfp16 route, NPU against host attention:* random ids corr min 0.998425 mean 0.999817, argmax
+  1980 / 2048 with every flip at a margin of 0.137 or less; perplexity 11.3597 -> 11.3685 (1.0008), KL 0.00115 nats.
+- *Accuracy, 512 tokens, the bfp16 route, NPU against host attention:* random ids corr min 0.998955 mean 0.999812, argmax
+  494 / 512 (every flip at a margin of 0.06 or less); perplexity 20.6713 -> 20.7382 (1.0032), KL 0.0014 nats; the six
+  prompts corr min 0.99849-0.99899 with flips at margins 0.068, 0.226 and 0.602; five of six continuations identical,
+  `reason` differs at token 35. **Two of the thresholds fail on one prompt each.** Against the default route (bf16, host
+  attention) the bfp16 route with NPU attention is where the bfp16 route with host attention is: random ids corr min
+  0.998214 mean 0.999599 (host attention's 0.998151 / 0.999580), argmax 488 / 512, flips at 0.172 or less; prompts corr
+  min 0.99719-0.99826 (host attention's 0.99519-0.99833); KL 0.00278 nats (0.00276); perplexity ratio 1.0008 (0.9975);
+  but the `math` flip at 0.593 and the `reason` divergence at token 35 remain. The bfp16 encoding of the attention output
+  amplifies the bf16 P's error (the bf16 route, which rounds the same O to bf16, shows none of it).
+
+| prefill tok/s, median (min-max) of 3 | host attention | NPU attention (attn_fa) | |
+|---|---|---|---|
+| pp512, bf16 route | 240.4 (239.1-241.5) | 233.9 (233.7-235.5) | 0.97x |
+| pp512, bfp16 route | 541.8 (517.2-569.5) | 500.0 (492.8-505.4) | 0.92x |
+| pp1024, bf16 route | 227.1 (227.0-229.8) | 251.3 (250.6-252.6) | 1.11x |
+| pp1024, bfp16 route | 428.3 (427.7-437.0) | 539.8 (534.2-541.8) | 1.26x |
+| pp2048, bf16 route | 183.1 (168.2-183.4) | 246.9 (246.7-248.2) | 1.35x |
+| pp2048, bfp16 route | 268.7 (187.7-286.8) | 479.6 (474.8-496.5) | 1.78x |
+
+pp512 and pp2048 come from one unit, pp1024 from another (controls 909 / 1009 and 879 / 884 ms). llama.cpp Vulkan on the
+same box (2026-10-14, the overnight plan's table): 753 / 766 / 641 tok/s.
+
+- *The full window* (the set with all 16 streams): `make_test.py --L 4096` (p0 3840) PASSes at rel_fro 1.17e-3, 10.1 ms a
+  dispatch. A 4000-token prompt, one run each (an indication, not a median): the bfp16 route 27.3 s (146 tok/s, 21.5 s of
+  it host attention) -> 9.6 s (416 tok/s) with the NPU attention; the bf16 route with it 18.0 s (222 tok/s).
+
+- At pp2048 on the bfp16 route (a 4125 ms run) the attention is 1.20 s of NPU dispatches (320) plus 0.17 s of host packing,
+  where the host attention took 4.0-8.1 s (its spread is the host's); the rest is the untile / transposes (1.25 s, the next
+  stage to move) and the tails (0.67 s). The host attention's own run-to-run spread at 2048 (7.1-10.9 s) is gone.
+- At pp512 the route is slower: each layer pays two context switches (into `af` with block 0's dispatch, which starts while
+  the host finishes the last block, and back for the out projection), ~2.5-3 ms a layer, 100-120 ms a prompt, against the
+  host attention's ~200-270 ms of which part overlapped the GEMMs. A context shared with the GEMMs (one xclbin carrying
+  both, or the full-ELF register-write reconfiguration of the `full-elf-context` skill, 0.3-0.7 ms a switch) is what
+  removes it.
+
+### OPEN-PREFILL-GLUE-PREP: RoPE, Q packing and the cache write of the bfp16 prefill run on the NPU, in the attention context
+**Applies to:** openflowlm-next (`open_kernels/designs/attn_fa/{attn_fa.py,attn_fa.cc,make_prep_test.py}`, `open_kernels/recipes/{dense,manifest}.py`, `src/open_qwen36/{manifest,core}.cpp`)
+**Verification:** manual (needs the NPU and the Granite-4.2-3B-NPU2 container); the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_attn_fa.py`, `manifest_test.cpp`)
+
+On the bfp16 prefill route (OPEN-PREFILL-BFP16) with NPU attention (OPEN-PREFILL-ATTN-FA), the qkv GEMM's c-tiled fp32 output
+stays on the device in a per-block buffer (`af_y#b`) and a `prep` stream of the same `af` context (`afp`, `AF_MODE=prep`)
+turns it into what the attention reads, so the host no longer reads y back, copies it into q / k / v, rotates, converts, packs
+Q or syncs cache rows. Per 256-token block, per layer, one dispatch ahead of the block's attention dispatch, inside the visit
+to the `af` context the layer already pays for (no extra context switch):
+- Q: RoPE (the half-split rotation, the host's), x log2(e) / sqrt(64), bf16 hi / lo, transposed to Q^T [64 dims][32 tokens]
+  per core, written into the Q buffer's hi / lo regions (the records, which carry p0, are written once per prompt);
+- K: RoPE then bf16; V: bf16; both straight into the layer's KV cache rows `[pos0 + 256 b, +256)` through a sub-buffer of
+  `state` (the cache layout decode reads is unchanged: a row is every kv head's K, then every V, bf16).
+The cos / sin table (fp32, per token 32 cos then 32 sin, the host's `static_cast<float>(cos(p * inv_freq[i]))`) is built once
+per prompt and shared by all 40 layers. The core program is attention's, with prep loops of trip count 0 in an attention
+dispatch and attention loops of trip count 0 in a prep dispatch (`RTP_TBL`, `RTP_PQ`, `RTP_PKV`), so one xclbin serves all
+streams; each stream takes a fourth buffer, the table, hence `manifest_version` 6 and a rebuilt `af` family.
+
+**It follows the route.** On when the bfp16 route is selected and the set carries `afp` (placement rule: the NPU stage ties
+the host at pp512 and wins at pp1024 / pp2048, results at the end of this requirement); `OFLM_OPEN_PREFILL_PREP=0` forces
+the host rotation and packing (the streams still take the fourth buffer), `=1` forces it on. A prompt whose first position
+makes `pos0 * state_row` not a multiple of 4096 (an odd `pos0`; a chat turn that follows an odd-length history), whose last
+window is wider than `attn_fa.l_max`, or on a bf16-route set takes the host path, which is correct and no slower than the
+glue within noise. Any other `pos0` (a second turn, a continued conversation) runs the prep stream: the RoPE table is built
+from `pos0 + 256 b + t`, the Q records carry the block's first position, the cache rows go to `[pos0 + 256 b, +256)`
+through a sub-buffer of the layer's cache, and `attn_fa` takes the position from the record.
+The engine queues a block's prep and attention dispatches back to back and the next block's pair before this block's
+attention output is read back (`core.cpp`, the `launch` lambda of the NPU-attention loop).
+
+**Acceptance criteria (unit):**
+- The Granite emission carries `attn_fa.prep = {kernel: afp, n_pad: 4096}` on `gemm_block` and the `bfp16` variant, stream `afp` on context `af`, build env `AF_MODE=prep`, `AF_QKV_NPAD=4096`, manifest version 6 (`test_prefill_attn_fa.py`).
+- The parser reads the prep stream; a version 5 manifest, an unknown stream and an `n_pad` that is not a whole number of 1024 columns are refused (`manifest_test.cpp`).
+
+**Verification (manual):**
+1. The kernel: `designs/attn_fa/make_prep_test.py make --build <afp build> --out <t> --p0 256`, `run_kernel.exe <t>/run.cfg`
+   (repeat the `run k q kv y tb` line eight times for steady wall times),
+   `make_prep_test.py compare --out <t>`: Q (hi + lo) rel_fro < 1e-4 against the numpy fp32 pipeline, K / V rows rel_fro < 3e-3
+   (bf16 ulp differences only), records intact; a steady dispatch under 0.9 ms (the host work it replaces costs about that
+   per block).
+2. The model: `prefill_mode_check.py` bfp16 route with and without `OFLM_OPEN_PREFILL_PREP`: corr >= 0.995 at 512 (and report 2048),
+   perplexity within 1 %, KL against the host-rotation route, the six greedy continuations; decode logits byte-identical.
+3. Timing: pp512 / 1024 / 2048, `OFLM_OPEN_PREFILL_PREP=0/1` interleaved with a control, under `dibs run --measure`
+   (`utilities/dense-decode-probe/prefill_ab.py` with a `::ENV=VAL` variant suffix).
+
+**Result 2026-10-15, first version (Granite-4.2-3B-NPU2, bfp16 route, the union set of `perf/granite-overnight` 152f5e2 plus the rebuilt
+`af*` family and `afp`; the unit printed CLEAN before and after, control = the union tree's own CLI and set, pp512, 3 runs).**
+- *The kernel* (step 1, p0 256, seed 0): Q (hi + lo) rel_fro 8.2e-6 against the numpy fp32 pipeline, K rows 99.83 % of bytes
+  equal (the rest one bf16 ulp), V 100 %, records intact, PASS. Program memory of the shared core: 14128 of 16384 B (attention
+  alone 9968): the prep code is 4160 B. A dispatch is 1.25 ms steady (0.77 ms with the compute stubbed, so the dataflow
+  dominates: 12 passes, each waited for).
+- *The model:* against the default (bf16) route at 512 random ids, corr min 0.997523 mean 0.999590, argmax 484 / 512
+  (flips at margins up to 0.189); without prep 0.997877 / 0.999594, 489 / 512. Against the host rotation directly corr min
+  0.9942 (mean 0.99978, 10 flips of 513): the bfp16 route amplifies a 1e-5 change in Q (the host path is bit-reproducible
+  run to run: corr 1.0). A 40-token greedy continuation after a 512-token prompt, decoding from the device-written cache, is
+  token-identical with and without prep.
+- *Speed, tok/s min / median / max:* pp512 prep off 635 / 658 / 662, on 613 / 623 / 624 (control 671 / 712 / 723);
+  pp1024 off 632 / 691 / 761, on 661 / 679 / 700; pp2048 off 693 / 719 / 730, on 663 / 672 / 675. **Prep is 5-7 % slower.**
+  The host work it removes is rope + KV write 16 / 61 ms, Q pack 28 / 105, Q and cache syncs 5 / 20, the qkv copy 29 / 118
+  (pp512 / pp2048): 79 / 304 ms in the qkv post. The prep dispatches cost 211 / 521 ms (80 / 320 dispatches, 2.6 / 1.6 ms
+  each, the first of a layer carrying the context switch that attention used to carry). To win, a dispatch has to be under
+  ~0.9 ms steady.
+- *What hangs:* two passes in flight (`AF_PREP_INFLIGHT=2`) hang the array whenever a second input stream is consumed
+  (the table group, or two kv passes); Q passes alone run 10 deep at 2 in flight. Bisected with the `AF_PREP_NQ/NKV/NTBL`
+  knobs and `AF_ABL=8` (compute stubbed). One pass at a time (the shipped setting) is stable. Cause unknown; a timing race
+  in the core's dynamic-objFifo loops is the suspect, not the shim BD count.
+
+**Not built: residual + RMSNorm + bfp16 encode on the array (86 / 434 ms at pp512 / pp2048, plus the A packs 34 / 205).**
+Per-core budgets measured on the shipped builds (`llvm-size -A` on `final.prj/elfs_*`):
+- GEMM core (`gemm_bfp16`, glu epilogue): program memory 4848 of 16384 B (11536 free; without the glu epilogue 1872 B).
+  Data memory 64520 of 65536 B (A 2 x 4608, B 2 x 9216, C 32768, stack 4096): 1016 B free. So program memory does not block
+  a norm / encode / residual kernel in the GEMM program; data memory, input channels and output size do.
+- `attn_fa` core: program memory 9968 B before the prep stream, 14128 with it (2256 free); data memory ~59.5 of 64 KiB
+  (Q hi / lo 2 x 4096, scratch 8192, state 2112, O element 8192, A fifo 2 x 8192, B 8192, stack 8192): ~6 KB free.
+Variants and why each stops:
+1. Residual in the o / down GEMM epilogue: the residual tile (64 x 128 fp32 = 32768 B) has no input channel (both of a
+   core's DMA inputs carry A and B) and no room; it has to ride the A or B broadcast (A reaches the 8 cores of a core row,
+   B the 4 of a column), 4-8x over-delivered, staged through the held A / B buffers (13.8 KB) in pieces. The output is then a
+   fp32 sum (32768 B, the whole C element) AND an encoded 9216 B A operand AND per-token sum-of-squares partials: a second
+   C element per tile, and the cross-core row reduction (a row is 20 tiles over 8 columns) goes through DDR as a second
+   dispatch. Gamma folds into the next GEMM's weights at load and 1/rms into its epilogue, which removes the reduction from
+   the encode path. Estimated 2-3 days; needs all four bfp16 streams rebuilt.
+2. Norm + encode as a stream of the attention context: fits data memory (rows streamed twice through the 8 KB fifo
+   elements, one row-group of tokens a core) but the `af` context is only visited between qkv and o. Serving the two
+   residual points a layer would add 2-4 context switches a layer (1.3-2.4 ms each: 100-300 ms at pp512 against the 120 ms
+   it removes). Pays only with a shared context (the full-ELF register-write reconfiguration, 0.3-0.7 ms a switch).
+3. Sum-of-squares in the epilogue and encode in the next GEMM's A load: the A path is a DMA straight into the mmul's
+   buffers with no compute stage; encoding there means fp32 A tiles (64 x 64 x 4 = 16 KiB a buffer, 2 deep) beside B and C,
+   which does not fit.
+
+**Result 2026-10-15, glue parity (`perf/granite-glue-parity`, Granite-4.2-3B-NPU2, bfp16 route, `dibs run --measure` CLEAN
+before and after each unit except where noted).**
+- *Where the time was.* A prep dispatch was 1.25 ms steady in `run_kernel.exe`; an empty one is 0.15 ms, the table pass 0.14,
+  each Q pass 0.09. Ablating the compute (`AF_ABL=8`) gave 0.77 ms, but the split showed it was one routine: dropping the
+  transposes in `af_prep_q` (`AF_ABL=32`) took the dispatch to 0.55 ms, dropping the rope loop (`AF_ABL=16`) changed nothing.
+  `aie::transpose(blk, 8, 8)` ran ~60 us a pass; the dataflow (an 8x broadcast per raw element) was not the cost: splitting
+  a raw head over both input channels (tokens 0-127 on A, 128-255 on B) left the dispatch at 1.31 ms.
+- *What landed.* The Q^T transpose as five `interleave_zip` rounds per 32 x 32 block (`attn_fa.cc`, `af_prep_q`), the next
+  pass's fills queued before the current pass's drains are awaited (`attn_fa.py`, `prep_sequence`, `AF_PREP_PIPE`), and the
+  engine's back-to-back dispatch (above). Kernel output is byte-for-byte what the first version wrote (Q rel_fro 8.06e-6,
+  K 99.87 % bytes equal, V 100 %, records intact); a steady dispatch is **0.47-0.50 ms** (1.25 before, 1.17 with only the
+  pipelining).
+- *Speed, tok/s min / median / max* (3-4 runs a cell, one unit a length, variants interleaved, order reversing; `old` = the
+  d17c353 CLI and set, `new` = this branch's). Prep off (old) / prep on, old / prep on, new kernels with the old CLI /
+  prep on, new CLI and kernels:
+
+| | off | old prep | new kernels, old CLI | new prep |
+|---|---|---|---|---|
+| pp512 | 720 / 739 / 754 | 639 / 669 / 673 | 558 / 732 / 743 | 730 / **739** / 752 |
+| pp1024 | 716 / 784 / 787 | 661 / 692 / 721 | 772 / 789 / 797 | 802 / **808** / 815 |
+| pp2048 | 667 / 696 / 755 | 678 / 680 / 700 | 679 / 755 / 763 | 770 / **773** / 775 |
+
+  Prep is now level with the host path at pp512 and +3 % / +11 % at pp1024 / pp2048. The in-unit control (the old CLI and set,
+  prep off, pp512) read 745 / 677 / 692 / 668 in the four units against the ~658 the earlier session saw in this tree: the
+  box state moves the absolute numbers by up to 13 % between units (the 512 unit read +13 %), so only the in-unit comparisons
+  count; the "old prep" column reproduces the earlier -5..-8 % at pp512, which is the check that the units agree. Process CPU
+  seconds (load included) were within 10 % between off and on at every length (pp2048: 34.1 off, 32.1 new prep).
+  The pp2048 unit that printed NOISY after (a browser process) was discarded and rerun.
+- *Stage split* (one run each, ms; off -> new prep). pp512: host 220.5 -> 149.1 (qkv copy 28.5, rope+kv 14.3, Q pack 24.6,
+  Q/cache syncs 4.6 gone), NPU prep dispatches 135.6 (80 of them, the first of each layer carrying the switch into the
+  `af` context that attention used to carry: attention 205.5 -> 82.9). pp2048: host 995.1 -> 725.3, prep 249.7 (320
+  dispatches, 0.78 ms each), attention 1217 -> 925.
+- *Gates* (new kernels, this branch's CLI): decode logits byte-identical to the d17c353 set (20 of 20 at 70 and at 2100 prompt
+  tokens); the six uno-ref prompts greedy over 96 tokens identical (`OFLM_OPEN_ATTN_FA=0`); `--rows-check 17` ROWS PASS at
+  70 / 1030 / 2060; `--uno 64` UNO IDENTICAL; `--spec 128` SPEC IDENTICAL in adaptive and uno modes. Prefill, bfp16 route with
+  prep against the default (bf16) route: corr min 0.997523 / mean 0.999590 at 512 (argmax 484 of 512, flips at margins up to
+  0.189), min 0.985897 / mean 0.999549 at 2048 (argmax 1948 of 2048); perplexity ratio 1.0000 at 512 (20.7142 vs 20.7152) and
+  0.9981 at 2048, KL 0.00291 / 0.00222 nats; the six chat prompts 64-token greedy continuations identical (flip margins
+  0.173 and a few smaller at single positions of the teacher-forced runs); prep against the host glue on the same route:
+  corr min 0.996661 / mean 0.999792 (15 flips of 512, margins up to 0.133). `pytest specs`: 895 passed, 146 skipped;
+  `build.cmd` C++ tests pass.
+- *Not verified:* prompts starting at a non-zero position (multi-turn), `oflm serve`, `oflm-test`, a prompt of 4096 tokens.
+  Host CPU seconds were measured as whole-process CPU (model load included), not around the prefill alone. Recommendation:
+  make prep the default for the bfp16 route (it is level or faster at every measured length), after the multi-turn case.
+
 ### OPEN-PREFILL-MODE: the user picks the prefill route's memory against its speed
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,manifest}.py`, `src/open_qwen36/{manifest,core,engine,cli}.cpp`, `src/include/utils/vm_args.hpp`, `src/src/main.cpp`)
 **Test category:** test (the recipe emission, `tests/test_prefill_batch.py`; the manifest's route selection, `src/open_qwen36/manifest_test.cpp`) + manual (memory and speed on the NPU, below)
@@ -3733,7 +4956,7 @@ nothing` and runs that route. The route line reads `block prefill route: T = 256
 **Acceptance criteria (unit):**
 - `Manifest::select_prefill_route("lean")` gives every layer type the variant's programs, keeps the globals the variant names and drops those only `gemm_block` named; `select_prefill_route("")` keeps `gemm_block` and drops the variant and the globals only it named; on a set without the variant it returns false and changes nothing (`manifest_test.cpp`).
 - The all-q8 35B emission carries both routes, the bf16 `gemm_block` on `gemmb` and the split `lean` on `gemm`, with the same kind, t, `moe_batch` and `attn_block`; a q4_1 or mixed spec carries no variant (`test_prefill_batch.py`).
-- `oflm --prefill-mode` takes `fast` or `lean` and only with `run`, `serve` and `bench`; anything else is refused at parse.
+- `oflm --prefill-mode` takes `fast`, `lean` or `bfp16` and only with `run`, `serve` and `bench`; anything else is refused at parse. Without the flag the route is `kDefaultPrefillRoute` (`core.cpp`, `"fast"`): changing that one string to `"bfp16"` makes the bfp16 route the default for every set that carries it, and a set that does not keeps `fast`. `--prefill-mode fast` always means the `gemm_block` route.
 
 **Verification (manual):** on the all-q8 35B set, with nothing else on the NPU,
 1. `open_qwen36_cli --gemm-block --ids-file <1024 ids> --max-tokens 8 --repeat 2 --dump-logits <p>` with the default mode
@@ -3752,6 +4975,185 @@ interleaved runs of each mode: `fast` median 7078 ms (144.7 tok/s), `lean` 8799 
 of 5; the route line reads `(lean)` or `(fast)`, and the turns of 169-953 tokens took the
 route. The set is 13 MB on disk, against 11 MB with one route. Details:
 `specs/open-engine/plans/archive/prefill-mode.md`.
+
+### OPEN-PREFILL-BFP16: the dense block prefill on bfp16 operands, opt in
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_bfp16/`, `open_kernels/recipes/{dense,pack,manifest}.py`, `src/open_qwen36/{bfp16.hpp,pools,manifest,block_host,core}.cpp`)
+**Verification:** manual (needs the NPU and the Granite-4.2-3B-NPU2 container); the packers, the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_bfp16.py`, `pools_test.cpp`, `block_host_test.cpp`, `manifest_test.cpp`)
+
+The plain dense shape of OPEN-PREFILL-HOST-ATTN (Granite) may prefill its five projection GEMMs on `designs/gemm_bfp16`
+instead of `gemm_q4_prefill`: bfp16ebs8 x bfp16ebs8 -> fp32, eight K values sharing an exponent byte, 512 MACs an mmul
+instruction against the bf16 route's 256, one xclbin for every shape. The weights are the container's q4_1, dequantised and
+encoded to bfp16 at load by the `bfp16_gemm` pack op (rows padded to a multiple of 1024 with zero blocks); the activations are
+encoded per GEMM on the host and the c-tiled fp32 result is untiled to token rows. Nothing in the container or q4nx-build
+changes. The route is the `bfp16` entry of `gemm_block_variants` (manifest_version 4) and is chosen with
+`OFLM_OPEN_PREFILL_MODE=bfp16` / `open_qwen36_cli --prefill-mode bfp16`. **bf16 stays the default.** It runs layer-major only
+and refuses to load otherwise (its attention is OPEN-PREFILL-ATTN-FA's where the set carries `attn_fa`, the host's
+without); `oflm run|serve|bench --prefill-mode bfp16` selects it (the NPU glue of OPEN-PREFILL-GLUE-PREP comes with it).
+**The default route is the single constant `kDefaultPrefillRoute` in `core.cpp`** (`"fast"`; set it to `"bfp16"` to flip
+the default for Granite, nothing else needs to change).
+
+Why bfp16 and not int8 (the question this requirement answers): the q4_1 weight carries a scale and a min per (row, 32 k), so an
+int8 product needs an int32 rescale every 32 k or a second, per-row weight quantisation; bfp16 has the per-8-k exponent in
+the hardware for both operands.
+
+**Acceptance criteria** (the threshold, with the measurement that justifies it below). On Granite-4.2-3B-NPU2, the bfp16 route
+against the default route through `--gemm-block`, every position's logits:
+- corr >= 0.995 at every position, and an argmax flip only where the default route's top-2 margin is under 0.2 logits;
+- the 80-token greedy continuation of each `utilities/uno-ref/prompts.jsonl` prompt identical;
+- teacher-forced perplexity on a real text within 1 % of the default route's;
+- prefill at 512 tokens faster than the default route's.
+
+**Procedure:** `utilities/dense-decode-probe/prefill_mode_check.py --cli open_qwen36_cli.exe --model <Granite dir> --kernels <set>`
+(random ids, chat prompts, decode, perplexity, timing), after the one-shape check of each GEMM:
+`designs/gemm_bfp16/make_test.py make` / `run_kernel.exe` / `make_test.py compare` (kernel against the product of the decoded
+operands: rel_fro 0).
+
+**Result 2026-10-13/14 (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode).** Measured with no NPU gate: the shared lock was
+removed on purpose, and the Windows FrameServer camera context (svchost, idle) was present throughout; host CPU load was 15-30 %
+from the user's own work, so the timings are not quiet-box numbers.
+- *The mmul itself* (`utilities/aie-probes/mmul_rate_probe.py`, one core, operands in L1, a 2x2 expansion of four mmuls a loop turn,
+  3M-turn differences): native bf16 4x8x8 4.4 ns an mmul (58 GMAC/s); int8 8x8x8 0.56 ns (920 GMAC/s, 7.9x the bf16 mmul);
+  bfp16 8x8x8 3.5 ns in the probe (147 GMAC/s, 2.5x; the probe's block-vector pops are not pipelined, the GEMM below reaches
+  about 270 GMAC/s a core); bf16 8x8x8 through bfp16 emulation 3.3 ns. int8 is the fastest mmul by a wide margin, and not
+  built into a GEMM here.
+- *The GEMM*, 256 tokens, Granite's four distinct shapes (min of five, run_kernel): N 4096 K 2560 0.445 ms (12.1 TFLOPS counting the
+  padded N); N 3072 K 2560 0.352 ms (11.4); N 8192 K 2560 1.012 ms (10.6); N 3072 K 8192 1.201 ms (10.7). Every shape matches the product
+  of its decoded operands exactly (rel_fro 0) and the float product to 8.7e-3. `gemm_q4_prefill` runs the same shapes at 2.3-2.5 TFLOPS.
+- *Accuracy*, route against route: 512 random ids, corr min 0.99815 mean 0.99958, argmax 485/512 (all 27 flips at margins
+  under 0.1 logits), top-5 sets equal at 82.6 %; six chat/code/math/reasoning prompts of 23-44 tokens: corr min 0.99519
+  (math) and 0.99801-0.99833 on the rest, mean 0.99945-0.99962, argmax 21-43 of 23-44 with every flip at a margin of 0.173 or
+  less; all six 80-token greedy continuations identical; perplexity on 511 tokens of README.md 20.723 (default) against 20.671
+  (bfp16), ratio 0.9975, mean KL(default || bfp16) 0.0028 nats. The threshold above is set just under the worst measured
+  value of each; it is a threshold for "indistinguishable at the level the default route is from a bf16 reference", not a
+  claim about a larger text set, which was not run.
+- *Prefill*, three runs a mode alternating, min: 512 tokens 2233 ms (229 tok/s) default against 1181 ms (434 tok/s) bfp16, 1.9x;
+  2048 tokens 14265 ms (144 tok/s) against 9032 ms (227 tok/s), 1.6x. At 512 the GEMMs are 167 ms of the 1307 ms; the rest is the host
+  (attention 216 ms, activation encode 103, untile and row copies 370, norms, SwiGLU, residuals), so the route is now host-bound
+  and a further gain is in the host stages, not the array.
+
+**Result 2026-10-14, combined tree (`perf/granite-npu-combined`, one kernel set with the Uno kernels and both prefill routes; HX PRO 370, performance mode; each unit under `dibs run --measure` and CLEAN, a NOISY unit rerun; three runs a cell, the mode order alternating):**
+
+| prefill, tok/s (min / median) | bf16 route (default) | bfp16 route | bfp16 / bf16 (median) |
+|---|---|---|---|
+| pp512 | 162 / 179 | 329 / 331 | 1.85x |
+| pp1024 | 184 / 189 | 297 / 312 | 1.65x |
+| pp2048 | 145 / 148 | 222 / 240 | 1.62x |
+
+| plain decode after the prompt, tok/s (min / median, 128 tokens, 3 runs) | bf16 prefill | bfp16 prefill |
+|---|---|---|
+| 512 tokens of context | 15.56 / 15.80 | 15.91 / 16.09 |
+| 1024 | 13.69 / 13.69 | 13.64 / 13.67 |
+| 2048 | 10.69 / 10.70 | 10.63 / 10.69 |
+
+- The decode rate does not depend on the prefill route (the K/V cache is the host attention's either way); it falls with context, 15.8 -> 13.7 -> 10.7.
+- The bfp16 route keeps its lead at 2048 tokens (1.62x) and is faster at every length, so the acceptance criterion "faster at 512" holds with margin. The default route's pp512 here (179 median, min 162) is below the 220-229 tok/s OPEN-PREFILL-HOST-ATTN recorded on 2026-10-13, and its run-to-run spread is wide (162-183); the code of that route is unchanged by the merge, so this is the box's state that day (the bfp16 route's spread is 329-350), not a measured regression, and it is not explained. An earlier pass of the same matrix, NOISY (a browser tab), gave a default pp512 of 195-228 and bfp16 355-400; those are not quoted.
+- Accuracy on the combined set, `prefill_mode_check.py --cases random,chat,decode,ppl` (not a timing claim): 512 random ids corr min 0.998151 mean 0.999580, argmax 485/512 with all 27 flips at top-2 margins under 0.1; six prompts corr min 0.995189 (math) and 0.998008-0.998333 on the rest, every flip at a margin of 0.173 or less; all six 80-token greedy continuations identical; perplexity 20.7226 against 20.6713 (ratio 0.9975), mean KL 0.00276 nats. Every criterion above holds, identical to the pre-merge figures.
+- bfp16 prefill followed by Uno decode (`uno_bench.py --gemm-block --prefill-mode bfp16`, six prompts x 128): all six identical to plain decode, 3.05 tokens a cycle, 1.08x (CLEAN, OPEN-FAMILY-GRANITE-UNO has the table and the 1024 / 2048 results).
+- The merge of `perf/granite-prefill-int8` into `perf/granite-uno-core-compute` had no textual conflict (`dense.py`, `core.cpp`, `spec.md` all merged cleanly: the two routes' hunks are in different functions). One exporter run builds the union, the four bfp16 xclbins beside `dxl` / `dxl_lora` / `lmhl`, and the `manifest_test`, `pools_test`, `block_host_test` and `gguf_pack_test` binaries pass on it.
+
+### OPEN-PREFILL-BFP16-FFN: the bfp16 route's FFN stays on the NPU from gate|up to down
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_bfp16/{gemm_bfp16.py,mm_bfp_acc.cc,pack.py,make_test.py}`, `open_kernels/recipes/{dense,pack,manifest}.py`, `src/open_qwen36/{bfp16.hpp,block_host.hpp,pools,manifest,core,cli}.cpp`)
+**Verification:** manual (needs the NPU: the harness chain and the model's gates below); the packer twins, the row and slot laws, the recipe emission and the manifest schema are unit-tested (`tests/test_prefill_bfp16.py`, `pools_test.cpp`, `manifest_test.cpp`)
+
+On a SwiGLU family the bfp16 route (OPEN-PREFILL-BFP16) runs its FFN as two dispatches with nothing on the host between them.
+Gate and up are one weight (`ggu_w`, 2 ff rows, 8-row blocks alternating gate and up, n-tile ct holding ff chunk
+(ct % 8) * per_col + ct / 8) on `gemm_bfp16_n{2ff}_k{hidden}_glu`. Each core ends its 64 x 128 tile, while it still holds the
+last K chunk's A buffer, by computing h = silu(gate) * up from the fp32 sums (bf16 hi/lo arithmetic, about 2^-15), encoding h
+to bfp16 into that A buffer, which is exactly one 64 x 64 A tile of the down projection, and copying it into C where the
+memtile's 8x8 -> row-major transform makes it the first 1152 words of the core's stream. The encode follows the host packer's
+rule (`bfp16_encode_block`: the block's largest exponent, round to nearest even, a mantissa that rounds to 128 saturates at
+127): the converter alone raises the block's exponent instead, so the epilogue first holds a value whose significand is
+255/128 or more at 127/64 of its power of two, which encodes to 127 in its own binade and rounds as before in a lower one (a
+negative one encodes to -127 where the host has -128). The shim writes each core tile to an H slot of 8199 words (a whole
+number of bfp16 blocks) at (ff chunk x 4 + row block); down (`gemm_bfp16_n{n_pad}_k{ff}_h`) fills its A from those slots. Both are instruction streams of the one gemm_bfp16 core
+program (`rtp[0]` the K chunks between the first and the last, `rtp[1]` the epilogue mode), so the route keeps one hardware
+context. The host never holds gate, up or h: no untile, no SiLU, no encode of down's input, and xm is packed once. The qkv,
+o and down outputs are read c-tiled in place by the stage after them (`bfp16_c_row`), not untiled into a copy first; o's
+residual and post norm are one pass, and down's residual and the next layer's input norm one pass (`OFLM_OPEN_FUSED_NORM=0`
+splits them, bit-identical). `Core::glu_phase` runs gate|up(b) and down(b) back to back, packing b + 1 under gate|up(b) and
+running b - 1's residual under down(b). A family whose activation is not SiLU keeps the five-step route. Manifest version 5
+(`epi: glu`, `a: h`, the `glu` pack halves); an engine that reads 4 refuses the set.
+
+**Acceptance criteria:**
+- Harness (`make_test.py make-glu` / `compare-glu`, 256 x 2560 x 16384 then 256 x 8192 x 3072 in one context): H's bytes equal
+  the host encode of silu(g) * u of the decoded operands at 99.9 % or more and its shared exponents in 99.99 % of blocks or
+  more, H decoded within 5 % of the host encode's own error, and down(H) equal to the decoded-H x decoded-down product
+  (rel_fro < 1e-4); a plain shape on the same core program rel_fro 0.
+- The model: every OPEN-PREFILL-BFP16 criterion against the default route.
+- Prefill faster than the five-step bfp16 route at 512, 1024 and 2048 tokens (CLEAN, same sitting).
+
+**Procedure:** `designs/gemm_bfp16/make_test.py make-glu --build <glu build> --h-build <h build> --out <dir> --K 2560 --ff 8192
+--N 3072`, `run_kernel.exe <dir>\run.cfg`, `make_test.py compare-glu --out <dir>`; then OPEN-PREFILL-BFP16's procedure.
+
+**Result 2026-10-15, first build (P2 overnight; Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; no timing here, the
+measured split is in the CLEAN result below):**
+- Harness: H's bytes equal the host encode at 99.72 %, decoded H against the exact h rel_fro 8.186e-3 (the host encode's own
+  8.176e-3), down(H) against the decoded product rel_fro 2.5e-8, a plain shape on the new core program rel_fro 0.
+- The host changes are exact: every position's logits of a 512-token prompt are equal to the last bit between the base binary
+  and this one on the five-step set (c-tiled consumers, fused o norm, contiguous pack), between `OFLM_OPEN_FUSED_NORM` 0 and 1,
+  and between the two-phase and the pipelined FFN.
+- Where the new route differs: in 745 of 262,144 H blocks the on-core converter raises the shared exponent where the host packer
+  saturates the largest mantissa at 127; otherwise 470 of 2.09 M mantissas differ by one (SiLU's 2^-15), unbiased. Against the
+  five-step route that is corr min 0.997567, mean 0.999793 over 512 prose positions, 500 of 512 argmax.
+- Against the default route, the same sitting (five-step / glu): chat prompts corr min 0.995189 / 0.997616 (math), every other
+  prompt 0.998008-0.998333 / 0.997848-0.998429; greedy 80 tokens identical 6 / 5 of 6 (reason differs at token 35); flips at
+  margins up to 0.173 / one at 0.209 (code2); 512 random ids corr min 0.998151 (2026-10-14) / 0.996607; perplexity on 511
+  README tokens 20.6713 (2026-10-14) / 20.6964 against the default's 20.7226 (ratios 0.9975 / 0.9987), mean KL 0.00276 / 0.00287.
+  At 2048 random ids both routes miss the 0.995 floor, which was set at 512: corr min 0.987065 / 0.986759, argmax 1944 / 1941 of
+  2048, every flip under 0.2; perplexity on 2047 README tokens 11.3731 (glu) against 11.4226 (ratio 0.9957). So this build
+  passes the statistical criteria (perplexity, KL, corr mean) and misses two per-item extremes the five-step route set.
+
+**Result 2026-10-15, CLEAN with a control (Granite-4.2-3B-NPU2, q4_1, HX PRO 370, performance mode; each a `dibs run --measure`
+unit, CLEAN before and after, three runs a cell, the variants interleaved and their order alternating, one discarded run first;
+the route as landed, with the hold below):** the control is this route's pp512, median 841-858 in every unit kept; a unit whose
+control is more than 5 % off is rerun (one was: 766). Two earlier units (02:43-02:51) read this route at 768 at pp512: `dibs`
+lets one session's tracks hold the NPU together, and this track's own untimed probe overlapped the first, so they are not quoted.
+
+| prefill, tok/s (min / median) | five-step bfp16 route (before) | this route (after) | after / before (median) |
+|---|---|---|---|
+| pp512 | 501 / 537 | **819 / 858** | 1.60x |
+| pp1024 | 423 / 423 | **549 / 554** | 1.31x |
+| pp2048 | 231 / 268 | **317 / 332** | 1.24x |
+
+- 512 and 1024 are one unit, 2048 another; each before / after pair is within one unit. The five-step route's pp2048 is the
+  noisiest cell tonight (medians 235-274 across units: its 4-6 s of host attention is exposed to any CPU load).
+- The default bf16 route, one unit, the same set and binary: pp512 238 / 239 against this route's 814 / 845 (3.5x), pp2048
+  181 / 187 against 315 / 324 (1.73x).
+- The median run, ms at pp512 / pp2048. Host attention 199 / 4226 (OPEN-PREFILL-HOST-ATTN, not this requirement). The four
+  GEMMs' blocked waits 212 / 943: gate|up 137 / 669, down 44 / 199, qkv 17 / 31, o 13 / 43. The host outside attention
+  166 / 893: residual + norm passes 86 / 434, the qkv, o and gate|up packs 34 / 205, qkv's c-tiled -> q / k / v copy 29 / 168,
+  syncs 14 / 78. Before, the host outside attention was 583 / 2689 (untile and row copies 287 / 1397, residual / norm / SiLU
+  168 / 657, packs 76 / 382, input norms 17 / 92, syncs 34 / 155).
+- Memory, one run each (process peaks): this route 6.59 GiB private / 8.52 GiB working set, the default route 4.90 / 6.81.
+  The bfp16 weights (3.6 GiB at 9 / 8 bytes a weight, padding included) replace the default route's packed weights rather than
+  adding to them, so the difference is 1.7 GiB. Load time was not measured.
+- The o + FFN pipeline (`Core::o_glu_phase`: o a block ahead, so block b's residual, norm and gate|up pack ran under o(b + 1)
+  and b - 1's down residual under gate|up(b)) was bit-identical and is not kept: interleaved with the two-phase route in two
+  units it was no faster, medians 756 against 768 and 754 against 754 at pp512, 327 against 329 and 304 against 306 at pp2048.
+  Both units' controls read 10-12 % low (the first overlapped, the second ran in a slow state of the box), so those are
+  comparisons, not the route's speed. In the first, gate|up's wait fell as down's rose by as much: the host work it moved under
+  a dispatch did not come off the critical path. Why was not isolated.
+- The engine's gate|up dispatch blocks 1.72 ms at pp512 and 2.09 ms at pp2048 in the controlled units; untimed `run_kernel`
+  runs (not under a control) read it at 1.56-1.71 ms alone. Whether that gap is real, and its cause, were not established.
+
+**Result 2026-10-15, the host packer's rule on the core (`hold` in `mm_bfp_acc.cc`; the two-phase binary, untimed unless marked):**
+- Harness: H's bytes equal the host encode at 99.948 % (99.722 % without the hold) and its shared exponents in 262,139 of
+  262,144 blocks (746 differ without; the 5 left are SiLU's 2^-15 across a power of two); decoded H against the exact h
+  rel_fro 8.180e-3 (the host encode's own 8.176e-3); down(H) 2.5e-8. CLEAN, one binary on the two sets interleaved in one
+  unit (controls 843 / 848 at pp512, in range), min / median tok/s with against without: pp512 839 / 843 against 837 / 848,
+  pp1024 560 / 576 against 557 / 561, pp2048 322 / 340 against 323 / 324: no measurable cost.
+- Against the default route: 512 random ids corr min 0.996279 mean 0.999582, argmax 487 / 512 (483 without, five-step 485),
+  every flip under 0.2; chat prompts corr min 0.997736, every flip under 0.2 but code2's 0.209 (there without the hold too);
+  greedy 80 tokens identical on 5 of 6: reason is now identical, chat differs at token 64, where the default route's top-2
+  margin is 0.175; perplexity on 511 README tokens 20.6490 (ratio 0.9964; 0.9987 without, five-step 0.9975), mean KL 0.00267
+  nats (0.00287 without, five-step 0.00276). At 2048: random-id corr min 0.986466, argmax 1954 / 2048 (1941 without), one flip
+  at 0.209; perplexity on 2047 tokens 11.3450 (ratio 0.9932), KL 0.00208 (0.00224 without).
+- Status against the criteria above: the harness and the timing criteria hold. Of OPEN-PREFILL-BFP16's, the corr floor at
+  512, the perplexity and the statistical measures hold (KL at or below the five-step route's); two per-item thresholds miss:
+  one near-tie greedy continuation of six, and one flip at a 0.209 margin that the exponent rule did not cause. Those two were
+  set just under the five-step route's own worst values (OPEN-PREFILL-BFP16, 2026-10-13/14), so any change to the arithmetic
+  moves some near-tie across them; with and without the hold a different prompt missed. Restating them statistically is open,
+  and the route stays opt-in.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
@@ -3970,26 +5372,57 @@ context twice a layer rather than twice a head.
 
 The `dense` route runs the same products in place of its T single-token `dxB`
 dispatches, for a layer type whose `attn_block` carries `prep`: what the
-products' host half has to compute for that family. The one value is
+products' host half has to compute for that family. There are two values:
 `qknorm_rope` (the q / k RMSNorm, then the half-split rotation over the
 manifest's `rotary_dim`; no bias, no gate, no sliding window), declared by
-`recipes/dense.py` for the families in `BLOCK_ATTN_QKNORM_ROPE`, which a family
-joins by measurement against its `dxB` route. A dense `attn_block` without
-`prep` is not read, and the route keeps its `dxB` dispatches; a `prep` the
-engine does not know is refused. At head dim 128 the scores are built 8
-columns wide and the values 4, on contexts `ag_s` and `ag_pv`.
+`recipes/dense.py` for the families in `BLOCK_ATTN_QKNORM_ROPE`, and `rope`
+(the same rotation with no q / k norm), for the families in `BLOCK_ATTN_ROPE`.
+A family joins either list by measurement against its `dxB` route; one in
+neither gets no `attn_block` and builds no `ag_*` kernels. A dense
+`attn_block` without `prep` (an older kernel set's) is not read, and the route
+keeps its `dxB` dispatches; a `prep` the engine does not know is refused. At head dim 128 the
+scores are built 8 columns wide and the values 4, on contexts `ag_s` and `ag_pv`.
+
+At `rope` the scores take Q as a bf16 hi / lo pair: a second scores dispatch per
+kv head over the same K^T, summed on the host. Without the norm the scores are
+unbounded, and one bf16 rounding of Q puts the products further from the
+sequential route than the `dxB` route is. The decode kernel avoids the same
+error by splitting q (`attn.h`, `attn_q_impl`). P stays a single bf16.
 
 **Acceptance criteria (unit):**
 - The 35B emission: the full-attention type carries `attn_block` = `m` 2048, `hd` 256, `l_max` 4096, args `ag_a, ag_b, ag_c`, streams `ag_s<L>` / `ag_pv<L>` for L = 256 .. 4096 by 256 on context `ag`; the builds pass `AG_M`, `AG_K`, `AG_N` (K = hd, N = L for the scores; K = L, N = hd for the values); the globals are sized for the widest window; the linear type carries none (`test_prefill_attn.py`).
 - The parser (`manifest_test.cpp`): `m`, `hd` and `l_max` positive multiples of 256, three args that are declared globals, every window a positive multiple of 256 within `l_max`, `kernels_s` reaching `l_max`, and `kernels_s` / `kernels_pv` covering the same windows; the fixture parses to 16 windows of each on the full type only.
-- The dense emission (`test_prefill_attn.py`): Qwen3-4B's dense type carries `attn_block` with `m` 1024 (4 query heads per kv head x 256), `hd` 128, `l_max` 4096 and `prep` `qknorm_rope`; Llama 3.1 (no q / k norm), HunYuan (the norm after the rotation) and Phi-4-mini (not yet measured) carry no `prep`.
-- The dense parser (`manifest_test.cpp`): the Qwen3-4B fixture's dense `attn_block` parses with `prep` `qknorm_rope`, `hd` 128 and 16 windows on contexts `ag_s` / `ag_pv`; a `prep` other than `qknorm_rope` is refused; HunYuan's `attn_block` without `prep` is not read.
+- The dense emission (`test_prefill_attn.py`): Qwen3-4B's dense type carries `attn_block` with `m` 1024 (4 query heads per kv head x 256), `hd` 128, `l_max` 4096 and `prep` `qknorm_rope`; K2-Horizon 7B and 3.7B carry `m` 1024, `hd` 128 and `prep` `rope`; Llama 3.1 (no q / k norm, not yet measured), HunYuan (the norm after the rotation), Phi-4-mini and Granite (not yet measured) carry no `attn_block` and build no `ag_*` kernels.
+- The dense parser (`manifest_test.cpp`): the Qwen3-4B fixture's dense `attn_block` parses with `prep` `qknorm_rope`, `hd` 128 and 16 windows on contexts `ag_s` / `ag_pv`; the same fixture with `prep` `rope` parses; a `prep` other than `qknorm_rope` or `rope` is refused; HunYuan's `attn_block` without `prep` is not read.
 
 **Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`. For a dense family: `utilities/dense-decode-probe/attn_route_check.py` on its whole model (19, 600 and 981 tokens, `--seq` on the short one) -- the products against its `dxB` route at the argmax of every compared position, the same greedy continuation, and logits corr >= 0.9998, the distance its `dxB` route already keeps from the sequential one; then `oflm-test --llm` as above.
 
 **Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.
 
 **Result 2026-10-04 (dense, Qwen3-8B-NPU2, the qwen3 set exported from `perf/dense-prefill`, quiet box):** against its `dxB` route, every compared position's argmax agrees and the 16-token greedy continuation is identical at 19, 600 and 981 tokens; worst logits corr 0.99991 / 0.99987 / 0.99989. The `dxB` route itself is 0.99989 from the sequential route at 36 layers (0.99998 at an 8-layer prefix), and the products 0.99987: the products sit as close to the sequential route as the route they replace. The 981-token prefill: **33.3 s -> 17.5 s** with the products in per-head order, where each of the 576 dispatches a block paid a hardware-context switch (~2.5 ms), **-> 13.1 s** with all the scores before all the values (byte-identical logits and tokens at 600 and 981 tokens), against 3.1 s for stock FLM 1.0.2 on the same box the day before. The dense route's host stages then read the GEMM outputs as token rows from kept scratch (byte-identical on the products, the `dxB` route and the T = 1 host decode route): **11.6 s**, now 7.4 s of projection GEMMs, 2.4 s of attention and 1.8 s of host stages. **Through `oflm serve` (2026-10-04, `OFLM_OPEN_KERNELS_DIR` on the qwen3 set, the block route on by default):** `oflm-test --llm` passes, 5 of 5 (both answers, both modes, the follow-up from the prompt cache). Plan: `plans/archive/dense-prefill-attn.md`.
+
+**Result 2026-10-09 (dense, K2-Horizon-7B-NPU2, `prep` `rope`, Q split):** `attn_route_check.py --tokens 19,64,600,981 --seq` (prompts of 28, 64, 600 and 981 tokens).
+- **64, 600 and 981 tokens PASS.** Argmax agrees at every compared position, the 16-token continuation is the same, and worst corr against `dxB` is 0.99988 / 0.99995 / 0.99994.
+- **28 tokens:** argmax 28/28 and the same continuation, but corr 0.99958 against `dxB`, under the 0.9998 bar.
+  - At this length `dxB` is itself 0.99861 from the sequential route, and the products 0.99831. At 64 tokens both are 0.99979.
+  - The app sends no prompt under 64 tokens (`OFLM_OPEN_GEMM_BLOCK_MIN`) down the block route.
+- **Without the split** the products were 0.99555 / 0.99953 from the sequential route at 28 / 64 tokens, and both lengths failed the bar.
+- **Splitting P as well** measured no better (0.99893 / 0.99968, with one argmax flip at 64) and costs another values dispatch per head.
+- **Prefill** (`open_qwen36_cli --gemm-block`, the lock's `timing` gate):
+
+  | prompt | products (CLEAN) | `dxB`, two runs |
+  |---|---|---|
+  | 256 | 3.6 s | 4.4-5.0 s |
+  | 512 | 6.0 s | 13.1 s |
+  | 999 | 13.8 s | 30.9-39.2 s |
+  | 2000 | 27.3 s | 97.7-147 s |
+
+  - Both `dxB` runs were flagged NOISY by a build late in the run. Its per-token dispatches suffer most from a busy CPU.
+  - Each prompt length gives the same first token on both routes.
+- **Through `oflm serve`:** `oflm-test --llm` passes, 5 of 5. Greedy (Uno), sampled, streamed, multi-turn and tool-call requests are unchanged.
+  - Time to first token at 849 tokens: 18.2 s, against 36.2 s with `OFLM_OPEN_ATTN_BLOCK=0`.
+  - At 2781 tokens: 57.7 s against 171.2 s.
+  - Same output text; a build in another session overlapped part of this run.
 
 ### OPEN-REQUEST-ISOLATION: the same request on a reused engine gives the same tokens
 **Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `read_back`, `Core::reset`, `seek`, `route`, `arm_route_records`, `det_step`; `cli.cpp` `--repeat`, `--det-step`)
@@ -4102,6 +5535,13 @@ array** and exists only as the probe that established that. A layer whose progra
 is a single dispatch (the dense families) queues that dispatch itself behind the
 previous layer's; the deepstack path (Qwen3-VL reads `xres` back between layers)
 runs serially.
+
+`OFLM_OPEN_RUN_REUSE` (default `1`) has a one-dispatch layer, and a tail queued in
+the layers' context, restart the `xrt::run` it kept from the previous step instead
+of building a new one per dispatch; `0` builds anew. The commands are the same, so
+the logits are too. Measured on Granite 4.2 3B only (2026-10-15, with the CLI's
+argmax fix, OPEN-DECODE-ONE-CONTEXT-DENSE): ~0.1-0.2 ms a token; the multi-dispatch
+(MoE) layers build anew as before.
 
 **Verification (manual):**
 1. **Bit-exact, 19 ids, 4 layers, sequential.** `open_qwen36_cli --model <35B>
@@ -4220,6 +5660,84 @@ two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; pos
 a call on two contexts, goes to noise). Detail:
 `.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.
 
+### OPEN-DECODE-STREAM: dx's weights stream through a memtile ring, each phase's weights queued ahead of its wait
+**Applies to:** openflowlm-next (`open_kernels/designs/dense/dx.py`, `open_kernels/recipes/dense.py` `stream_knobs()`)
+**Verification:** manual (the NPU and the model; every timing is `dibs run --measure` CLEAN)
+
+For a dense family in `STREAM_MEASURED` (Granite 4.2 3B, q4_1 containers), each main core's weight fifo shall run
+shim -> a `WRING_DEPTH`-deep ring of 10 KB elements in its column's memtile -> core, the ring's memtile channels
+pinned to 0 (in) and 1 (out), and the layer's host sequence shall queue each phase's first weight fills ahead of the
+activation wait in front of that phase: o behind the xn fill, the first up | gate band behind the og fill, down
+behind the last up | gate band. Every core receives the same bytes in the same order, so every logit is unchanged.
+- Why: a core's weight fifo is 2 x 10 KB of L1, so DDR stopped 20 KB into every wait on an activation, and each
+  phase's first fill was only issued after it; `dx` streamed at 46.9 GB/s against the head's 51.7 on the same 8
+  streams.
+- Every other family, and Granite's f32-scale twin `dx_f32`, builds byte-identically (the MLIR is unchanged with
+  the knobs off). `DX_WRING=<n>` (0 off, at most 24) and `DX_WORDER=0|1` force either for an A/B build; both are
+  probe variables, so they are in the build key (OPEN-BUILD-CACHE).
+
+**Verification (manual):**
+1. Build `dx` (and `dxh`) with the knobs and without (`export_qwen36_kernels.py --only dx,dxh --out <dir>`), overlay
+   each on a copy of the union set with that export's manifest, and run the dump-logits gate over 70 prompt tokens +
+   20 decoded and over 2100 + 20, one token at a time (`utilities/decode-gates/decode_gates.py logits --prompt 70|2100`):
+   every logit file byte-identical.
+2. The six `utilities/uno-ref` prompts x 96 greedy tokens identical (`decode_gates.py greedy`); `--rows-check 17`
+   ROWS PASS; the Uno sweep (`utilities/uno-bench`) IDENTICAL.
+3. `decode_gates.py stepab --position 0` (`--bench-decode 5 --bench-step 12`, sets interleaved, 2 rounds) under
+   `dibs run --measure`, and tg128 at depth through `utilities/granite-combined-bench/bench.py decode`.
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, `--pmode performance`, every timing CLEAN).** Gates on the ring alone and on
+the final set (ring + one context): the 70 + 20 and 2100 + 20 logit files byte-identical to the base set, the six
+uno-ref prompts x 96 greedy tokens identical, `--rows-check 17` ROWS PASS. Real step at position 0, interleaved, min /
+median ms: base 46.3-46.6 / 46.4-46.9, ring 44.0-44.1 / 44.2-44.4 (re-checked with a control: ring 43.7-43.8 / 43.9-44.1
+against final 41.2-41.3 / 41.4-41.6, and base 46.0 / 46.2 in another unit). Same sitting, not kept: a 24-deep ring 41.0 / 41.6
+against 16-deep 41.2 / 41.4 (with one context); the layer's unused last xn and its drain dropped, 41.1 / 41.4.
+
+### OPEN-DECODE-ONE-CONTEXT-DENSE: a dense decode token runs in one hardware context
+**Applies to:** openflowlm-next (`open_kernels/designs/dense/dx.py` `DX_ONECTX` / `DX_HEAD`, `open_kernels/recipes/dense.py`
+`one_context()` / `programs()` / `builds()`, `src/open_qwen36/core.cpp` `Core::step_impl`)
+**Verification:** manual (the hardware claims) + test (the recipe emission, `tests/test_granite.py`)
+
+For a family in `ONE_CTX_MEASURED` (Granite 4.2 3B, q4_1), the token's tail -- final RMSNorm and LM head -- shall be
+`dxh`, a second instruction stream over `dx`'s image, named in context `dx`, so a decode step changes hardware
+context zero times (it was three: dx -> ln -> lm -> dx). The main cores and the ln core read a per-dispatch RTP word:
+a head pass runs the layer-entry norm with w = normw and then the q|k|v GEMV with `LMHEAD_BANDS / 8` bands instead of
+7 on the same table, and stops; a layer pass runs as before. The engine queues a tail that shares the layers'
+context behind the last layer, like a layer (OPEN-DECODE-PIPELINE, level 1).
+- Bit-identical by construction: `ln_nr` is `ln_xn`'s arithmetic at add = 0 (the old tail ran `ln_xn` with a zero
+  add), and the bands, chunks and GEMV entry are `lm_head_q4`'s.
+- The cores read the RTP word only after the dispatch's first data has landed (x on the main cores, the entry norm's
+  inputs on the ln core). Read right after the barrier it was the previous dispatch's: layer -> head hung (ERT
+  state 8) while layer -> layer and head -> head ran.
+- The GGUF-direct section keeps its `ln` + `lm_head_q4_f32` tail; every other family's manifest and kernels are
+  unchanged. Rollback: `DX_ONECTX=0` at export (a probe variable, in the build key) builds the old `ln` + `lm` tail.
+
+**Acceptance criteria (test):** for the Granite 4.2 3B spec, `programs()`'s tail is one `dxh` run in context `dx`
+with args `lmpool, xres, normw, logits, hn, zero`, `hn` is two 4 KB elements, `builds()` carries `dxh` with
+`DX_HEAD=1`, and the `gguf` section's tail is still `ln` + `lm`.
+
+**Verification (manual):** as OPEN-DECODE-STREAM's 1-3, plus `dx/final.xclbin` and `dxh/final.xclbin` equal apart
+from build stamps (`export_qwen36_kernels.xclbin_equivalent`).
+
+**Result 2026-10-15 (Granite-4.2-3B-NPU2, with OPEN-DECODE-STREAM, every timing CLEAN).** Gates as OPEN-DECODE-STREAM's
+(70 + 20 and 2100 + 20 byte-identical, six prompts x 96 identical, ROWS PASS), the Uno sweep IDENTICAL on all six
+prompts, and the head queued ahead bit-exact as well as serial. `dxh` runs in 3.04-3.09 ms (52.5 GB/s) against `ln` +
+`lm` at 0.19-0.26 + 3.63-3.83 ms in their own contexts, and the first layer of a token no longer pays +1.1 ms. Real
+step at position 0, min / median ms: 41.2 / 41.4 (24.15 tok/s; base 46.3 / 46.4 in the same sitting). Plain decode,
+tg128 after a 0 / 512 / 1024 / 2048-token prompt (`bench.py decode`, 3 runs a process, median tok/s): base 20.61 /
+17.42 / 15.04 / 12.19, now 22.96 / 19.08 / 16.22 / 13.05 -- the same ~5 ms a token at every depth. A tg128 token "at 0"
+cost 2.2 ms more than the position-0 step on both sets: it averages positions 1-128, where attention already grows,
+and 0.7 ms of it was the CLI's scalar argmax over 100352 logits (now AVX2, the same answer; see the skill).
+
+**Re-check 2026-10-15 05:00, a control in every unit.** dibs counts every track of one session as one holder, so a
+sibling's NPU run can land inside a CLEAN unit. Each unit re-ran with a control (the committed CLI's tg128 at ctx 0 on
+the final set, known 22.96 tok/s; void if more than 5% off; every control 22.19-23.13). tg128 medians at 0 / 512 /
+1024 / 2048: base set 20.65 / 17.51 / 15.34 / 12.02, final set 23.03 / 19.33 / 16.69 / 13.08, final set with the CLI's
+argmax and OPEN-DECODE-PIPELINE's run reuse 23.40 / 19.62 / 16.93 / 13.19. Position-0 step min / median: base 46.0 /
+46.2, final 41.1 / 41.2 ms. Uno sweep: base 1.06x, final 0.95x, all identical. Gates for the CLI change against the
+committed CLI on the final set: 70 + 20 and 2100 + 20 logit files byte-identical, six prompts x 96 identical, ROWS PASS.
+(`utilities/decode-gates/tg_control.py` runs such a unit.)
+
 ### OPEN-HOST-ATTN-GUARD: the host attention refuses every model it does not compute
 
 **Applies to:** `src/open_qwen36` (`manifest.cpp`, `core.cpp`)
@@ -4229,8 +5747,9 @@ a call on two contexts, goes to noise). Detail:
 The dense route's host attention (`OFLM_OPEN_HOST_ATTN` for prefill, `OFLM_OPEN_HOST_ATTN_DECODE`
 and `--decode-route host` for decode) computes K2's attention: no q/k norm, no bias, no gate,
 no window, a full half-split rotation, scale 1/sqrt(head_dim). `Manifest::host_attention_refusal()`
-returns why it cannot compute a model, or "" when it can. It accepts `family == "k2"` with that
-geometry (including an even head_dim and every layer's `qw` / `kvw` equal to heads * head_dim, the
+returns why it cannot compute a model, or "" when it can. It accepts `family == "k2"` and `family == "granite"` (its attention
+multiplier is folded into the q weights at export, and its block prefill and fused-attention routes run on this host path by default,
+OPEN-PREFILL-HOST-ATTN) with that geometry (including an even head_dim and every layer's `qw` / `kvw` equal to heads * head_dim, the
 checks `host_attn_layer` repeats at dispatch) and refuses every other family by name. It is an allow-list: the variants (q/k norm
 before or after the rotation, a q/k/v bias, Granite's multiplier, Gemma 3's window, partial
 rotation) are family properties in the recipe, not manifest fields, so a family joins by

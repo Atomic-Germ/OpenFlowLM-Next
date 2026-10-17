@@ -54,6 +54,10 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# spec_lookup_test (no XRT): the lookup drafter against tests/fixtures/spec_lookup_cases.json
+add_executable(spec_lookup_test spec_lookup_test.cpp)
+target_include_directories(spec_lookup_test PRIVATE ${_inc})
+
 # block_host_test (no XRT): the block prefill's host stages against replica_block.py's fixture
 add_executable(block_host_test block_host_test.cpp block_host.cpp)
 target_include_directories(block_host_test PRIVATE ${_inc})
@@ -69,7 +73,7 @@ foreach(t open_qwen36_cli block_host_test)
     endif()
 endforeach()
 
-foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test)
+foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test spec_lookup_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -81,6 +85,8 @@ add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
 add_test(NAME GGUF-PACK COMMAND gguf_pack_test)
+add_test(NAME OPEN-SPEC-LOOKUP COMMAND spec_lookup_test
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/spec_lookup_cases.json")
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"
