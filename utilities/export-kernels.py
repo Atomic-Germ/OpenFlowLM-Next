@@ -38,7 +38,7 @@ it drives is not: `open_kernels/export_qwen36_kernels.py` and
 win_amd64 wheels, and a native Windows toolchain (`iron_setup.py`, a
 downloaded XRT SDK zip -- see mlir-aie's `docs/buildHostWinNative.md`, no WSL
 and no source build required) has built and run open_kernels sets on
-hardware (`.opencode/skill/open-granite-kernels/SKILL.md`). `open_npue`'s
+hardware (`.agents/skills/open-granite-kernels/SKILL.md`). `open_npue`'s
 export additionally needs pyxrt and an installed NPU, which the Windows XRT
 SDK also supplies (for its own pyxrt-compatible Python version).
 """

@@ -47,7 +47,7 @@ values, and rejection of bad output shapes/NaNs/tail corruption.
 
 Same Strix/XRT/IRON/Peano environment as the
 [AB report](wide-deltanet-bringup.md). Use the
-[new build skill](../../../.opencode/skill/open-wide-deltanet-chain/SKILL.md).
+[new build skill](../../../.agents/skills/open-wide-deltanet-chain/SKILL.md).
 
 For each hidden width, two sequences of eight tokens:
 

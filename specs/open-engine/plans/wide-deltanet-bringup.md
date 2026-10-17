@@ -62,7 +62,7 @@ Strix aie2p 6x8, PCI0000:67:00.1, firmware1.1.2.64, XRT2.26.0
 (`e9db9ab15f10173f8d2fc93ff92ab4c7eb09d2e6`), amdxdna2.26.0_20260817.
 Python3.14.4; mlir-aie1.4.2; Peano21.0.0.2026080301+c9c5ecb7; NumPy2.5.3.
 Installed from `ironvenv-requirements.txt`. Exact procedure is in the
-[build skill](../../../.opencode/skill/open-wide-deltanet-ab/SKILL.md).
+[build skill](../../../.agents/skills/open-wide-deltanet-ab/SKILL.md).
 
 `utilities/test-wide-deltanet-ab.py` creates deterministic weights/inputs,
 uses the production packer, and compares every output head against float64

@@ -191,7 +191,7 @@ The step ends with a decision recorded here before step 3.
   - the 31 Images API integration tests (with `OFLM_MODEL_PATH=C:\Users\josha\.flm`).
 - OPEN-DIFFUSION-PERF on a quiet machine in turbo, 4 runs each at 512² and 1024², plus
   host CPU per image.
-- Merge the spec changes, update `.opencode/skill/open-diffusion`, and add a skill for
+- Merge the spec changes, update `.agents/skills/open-diffusion`, and add a skill for
   composing and building the full ELF (AGENTS.md: document each new kernel build).
   Archive this plan.
 
