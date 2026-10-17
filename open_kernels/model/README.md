@@ -189,12 +189,12 @@ entry. To reproduce the failing case without loading the whole model, use
 layers serially with experimental lx/ax builds. Both retain the independent
 FP64 comparison from captured FP32 `h`. Build and replay commands, including
 mandatory regeneration of kernel translation units, are documented in
-[the FP32 down replay skill](../../.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md).
+[the FP32 down replay skill](../../.agents/skills/open-qwen35-fp32-down-replay/SKILL.md).
 
 For full-model propagation after this correction, build a separate complete
 export, regenerate the CPU fixture with `--kernel-dir`, and score the new
 propagated captures at all layers. The
-[corrected production decode skill](../../.opencode/skill/open-qwen38-fp32-production/SKILL.md)
+[corrected production decode skill](../../.agents/skills/open-qwen38-fp32-production/SKILL.md)
 documents export provenance, memory requirements, runtime identity and all-layer
 partial checks. Isolated replay alone does not establish full-model propagation.
 
@@ -225,7 +225,7 @@ JSON includes scope, metrics and capture hashes; failures return nonzero.
 An isolated hardware experiment at `utilities/ffn-front-replay/` runs FP32
 RMSNorm and captures up, gate and h separately. Its BF16-preparation control
 reproduces the layer-11 error; direct FP32 preparation passes the local gates.
-See the [FP32 front replay skill](../../.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md)
+See the [FP32 front replay skill](../../.agents/skills/open-qwen35-fp32-front-replay/SKILL.md)
 for build, pinned-input replay and scoring commands. This experiment does not
 modify production layer layouts or establish corrected full-model propagation.
 
@@ -235,7 +235,7 @@ The front checker selects the capture dtype from this field; older compatible
 recipes without it use BF16. The new recipe deliberately refuses old BF16
 exports/act buffers. Build a complete new export and regenerate the fixture;
 model weights and their packing are unchanged. Reproduction and ABI details are
-in the [FP32 norm integration skill](../../.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md).
+in the [FP32 norm integration skill](../../.agents/skills/open-qwen38-fp32-norm-integration/SKILL.md).
 
 
 ### Per-head gated full-attention validation
@@ -272,7 +272,7 @@ positions and captures scaled Q, K/V, softmax accumulators and sums. The BF16
 control reproduces the retained production outputs bytewise. Its FP32-output
 variant isolates the final conversion; it is not a production precision fix.
 Build, replay, pinned-input scoring and the remaining KV error are documented
-in the [attention replay skill](../../.opencode/skill/open-qwen38-attention-replay/SKILL.md).
+in the [attention replay skill](../../.agents/skills/open-qwen38-attention-replay/SKILL.md).
 
 `utilities/attention-kv-replay/` adds an isolated `[K_hi,K_lo,V_hi,V_lo]`
 BF16-pair cache with FP32 output. Its widened BF16 control reproduces the earlier
@@ -282,7 +282,7 @@ three positions, not full-model propagation. The experimental cache row doubles
 to 8192 bytes. The standalone probes require their matching earlier BF16
 production ABI and reject the integrated paired ABI.
 Build, provenance checks and L1/DMA constraints are documented in the
-[paired-KV replay skill](../../.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md).
+[paired-KV replay skill](../../.agents/skills/open-qwen38-paired-kv-replay/SKILL.md).
 
 The Qwen3.8 production geometry now integrates this correction: paired KV rows,
 FP32 gated output, and direct FP32 preparation for `o_proj`. Its manifest declares
@@ -293,7 +293,7 @@ retain their existing ABI; model weights do not need repacking.
 Use `export_qwen36_kernels.py --build-root DIR` to keep compiler work separate
 from retained builds. `utilities/audit-kernel-export.py` checks current source
 identity, build/export binary hashes and linked program budgets. The
-[integration skill](../../.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md)
+[integration skill](../../.agents/skills/open-qwen38-paired-attention-integration/SKILL.md)
 contains build and full-depth validation commands. Block-prefill uses host
 attention for paired KV, with an explicit runtime diagnostic; its independent
 accuracy gate remains separate from sequential decode.
@@ -339,7 +339,7 @@ Q/gate/K/V preparation in a private full-ax design. Its appended scratch region
 is explicitly experimental; no production manifest is rewritten. It reuses one
 weight pool and retains K/V history across forced input positions. The BF16
 control must reproduce production activation/residual bytes and oracle results.
-Use the [FP32 entry replay skill](../../.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md)
+Use the [FP32 entry replay skill](../../.agents/skills/open-qwen38-fp32-attention-entry/SKILL.md)
 for build, resource audit, prepare/run/score and controlled comparison commands.
 The experiment shares the production checker's unrounded `score_layer` oracle.
 It refuses the current integrated ABI; reproduce it with its matching checkout.
@@ -351,7 +351,7 @@ validated paired/split geometry. Entry RMSNorm feeds Q/gate/K/V without BF16
 rounding; full-attention scratch grows by 8192 bytes. `attention_projections.py`
 reads that dtype only after manifest/fixture validation. Rebuild the complete
 export and regenerate fixtures; weights need no repacking. Reproduction and
-acceptance scope are in the [FP32 entry integration skill](../../.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md).
+acceptance scope are in the [FP32 entry integration skill](../../.agents/skills/open-qwen38-fp32-entry-integration/SKILL.md).
 
 ### Final norm and Q8 LM-head validation
 
@@ -463,7 +463,7 @@ The FP32 candidate appends 20 KiB of activation scratch; model weights, the
 production export and state layout are unchanged. Conv history remains BF16.
 Preparation, serial hardware execution, resource auditing and comparison
 commands are documented in
-[the linear-entry skill](../../.opencode/skill/open-qwen38-fp32-linear-entry/SKILL.md).
+[the linear-entry skill](../../.agents/skills/open-qwen38-fp32-linear-entry/SKILL.md).
 Only one layer's weight pool is needed at a time. Numerical failures retain
 complete JSON and return exit status 1; diagnostic rounding never replaces the
 unrounded primary reference. This experiment does not establish corrected
@@ -476,7 +476,7 @@ BF16 versus FP32 conv history. The candidate processes each conv tile in two
 512-channel halves, retaining the existing FIFO depths and weights. Its state
 buffer grows by 61440 bytes; its recurrent-state offset grows by the same amount.
 The production export is unchanged. See the
-[conv-history skill](../../.opencode/skill/open-qwen38-fp32-conv-history/SKILL.md)
+[conv-history skill](../../.agents/skills/open-qwen38-fp32-conv-history/SKILL.md)
 for build, resource audit, causal replay and comparison commands.
 
 Shared `read_boundaries`, `compare_sequence` and `score_sequence` APIs accept
@@ -505,7 +505,7 @@ offsets and sizes. Rebuild the full kernel export and regenerate decode fixtures
 for this ABI; model weights and pool packing do not change. The historical
 isolated replay builders reject the integrated recipe.
 
-See the [production integration skill](../../.opencode/skill/open-qwen38-fp32-linear-integration/SKILL.md)
+See the [production integration skill](../../.agents/skills/open-qwen38-fp32-linear-integration/SKILL.md)
 for build, resource audits and full-depth checks. Host scalar/vector arithmetic
 uses explicit multiply-then-add compiler semantics so legacy and FP32 tests
 remain comparable. Host unit tests do not establish full model block-prefill
@@ -547,7 +547,7 @@ and all nine products, with its own causal state from zero. Neither path loads
 model weights or substitutes a captured state into the primary FP64 reference.
 
 Build, resource audit, preparation and serial hardware commands are in the
-[recurrence replay skill](../../.opencode/skill/open-qwen38-recurrence-replay/SKILL.md).
+[recurrence replay skill](../../.agents/skills/open-qwen38-recurrence-replay/SKILL.md).
 Copied sources, binaries, records, complete outputs and run identity are hashed;
 configure removes stale dumps. Missing, incorrectly sized or non-finite captures
 fail. The control's identity gate is reported separately from numerical head
@@ -562,7 +562,7 @@ rounded updated state. All 6912 state/output/padding checks pass at unchanged
 bounds; worst output maxrel is 2.6966e-6. Stored states match the triple candidate
 bytewise. The independent primary oracle and causal carry are unchanged.
 
-The [factored readout skill](../../.opencode/skill/open-qwen38-factored-readout/SKILL.md)
+The [factored readout skill](../../.agents/skills/open-qwen38-factored-readout/SKILL.md)
 records commands and evidence. Its standalone core uses 8720 bytes of text,
 L1 buffer end 22016 and stack 6144.
 
@@ -579,7 +579,7 @@ and each variant's own causal state. The control must reproduce complete
 production buffers bytewise. The candidate must retain identical recurrence
 inputs and match the isolated factored state/output captures for every head;
 independent residual and recurrence oracles retain their existing thresholds.
-The [full-layer skill](../../.opencode/skill/open-qwen38-factored-full-layer/SKILL.md)
+The [full-layer skill](../../.agents/skills/open-qwen38-factored-full-layer/SKILL.md)
 records build and validation commands. The measured candidate passes all 144
 full-layer residual/recurrence cases and 6912 head-state/output checks, with
 worst residual error 0.0013026962 <0.005. All 13824 head captures match the
@@ -599,7 +599,7 @@ The manifest's `linear_recurrence: factored_compensated` distinguishes the new
 arithmetic from an older export with the same buffer ABI. Rebuild the export
 through the normal recipe and create fresh decode fixtures; existing model
 weights need no repacking. The
-[integration skill](../../.opencode/skill/open-qwen38-factored-integration/SKILL.md)
+[integration skill](../../.agents/skills/open-qwen38-factored-integration/SKILL.md)
 documents build, dependency/resource audits and full-depth validation commands.
 Private experiments retain their own recurrence-header injection; reproduce
 historical control results with their recorded checkout and export.
@@ -650,7 +650,7 @@ projections match production bytewise, and all 144 candidate projections/CPU
 records pass. Worst candidate K error is 0.0004477865; worst QKV error is
 0.00004684383. INT16 values/scales remain byte-identical across the variants.
 
-The [QKV precision skill](../../.opencode/skill/open-qwen38-qkv-precision/SKILL.md)
+The [QKV precision skill](../../.agents/skills/open-qwen38-qkv-precision/SKILL.md)
 documents private builds, resource audits, single-layer replay and the causal
 sweep. Full-layer fit, affected projection/FFN gates and fresh full-depth
 validation are required before production integration.

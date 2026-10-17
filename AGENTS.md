@@ -29,111 +29,111 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
   <skill>
     <name>npu_offload_pipeline</name>
     <description>End-to-end workflow for offloading dense GEMM operations to AMD NPU2 via mlir-aie/iron. Use when: compiling NPU xclbins, integrating NPU backends into embedding/LLM engines, validating NPU vs CPU reference, debugging XRT dispatch issues, or extending to new model architectures.</description>
-    <location>.opencode/skill/npu_offload_pipeline.md</location>
+    <location>.agents/skills/npu_offload_pipeline.md</location>
   </skill>
   <skill>
     <name>open-granite-kernels</name>
     <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
-    <location>.opencode/skill/open-granite-kernels/SKILL.md</location>
+    <location>.agents/skills/open-granite-kernels/SKILL.md</location>
   </skill>
   <skill>
     <name>open-wide-deltanet-ab</name>
     <description>Build and validate the separate open banked alpha/beta dispatch at H5120/H2560, including xn streaming and the fused glue DMA constraint.</description>
-    <location>.opencode/skill/open-wide-deltanet-ab/SKILL.md</location>
+    <location>.agents/skills/open-wide-deltanet-ab/SKILL.md</location>
   </skill>
   <skill>
     <name>open-wide-deltanet-chain</name>
     <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
-    <location>.opencode/skill/open-wide-deltanet-chain/SKILL.md</location>
+    <location>.agents/skills/open-wide-deltanet-chain/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-production-preflight</name>
     <description>Normalize existing Qwen3.5-family metadata, compare Qwen3.8-27B source tensors, and build all 41 production kernel sets on Linux.</description>
-    <location>.opencode/skill/open-qwen38-production-preflight/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-production-preflight/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen35-fp32-down-replay</name>
     <description>Build and validate direct FP32 input preparation for split dense FFN, replay isolated Qwen3.8 layers and run an all-layer precision sweep without full-model residency.</description>
-    <location>.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md</location>
+    <location>.agents/skills/open-qwen35-fp32-down-replay/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-production</name>
     <description>Build the complete corrected Qwen3.8 export and verify full-depth decode propagation, runtime identity and split-down partials.</description>
-    <location>.opencode/skill/open-qwen38-fp32-production/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-production/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen35-fp32-front-replay</name>
     <description>Build and validate isolated FP32 norm-to-up/gate/SiLU with separate NPU projection captures and a BF16 control.</description>
-    <location>.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md</location>
+    <location>.agents/skills/open-qwen35-fp32-front-replay/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-norm-integration</name>
     <description>Build and validate full lx/ax FP32 norm-to-up/gate integration, widened scratch ABI and full-depth decode regression.</description>
-    <location>.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-norm-integration/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-attention-replay</name>
     <description>Replay production gated attention with captured Q/KV/softmax boundaries and compare BF16/FP32 outputs without full-model residency.</description>
-    <location>.opencode/skill/open-qwen38-attention-replay/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-attention-replay/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-paired-kv-replay</name>
     <description>Build and validate isolated paired-BF16 K/V attention with FP32 output, an exact BF16 control and local memory checks.</description>
-    <location>.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-paired-kv-replay/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-paired-attention-integration</name>
     <description>Build full Qwen3.8 layers with paired KV and FP32 attention output-to-projection, then validate the new cache/scratch ABI and full-depth decode.</description>
-    <location>.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-paired-attention-integration/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-attention-entry</name>
     <description>Build isolated full-ax FP32 entry norm and compare against a byte-exact paired-attention control with forced inputs and causal KV history.</description>
-    <location>.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-attention-entry/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-entry-integration</name>
     <description>Build and validate production FP32 attention-entry norm, its scratch/stream ABI and full-depth Qwen3.8 decode with independent projection gates.</description>
-    <location>.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-entry-integration/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-linear-entry</name>
     <description>Build isolated full-lx FP32 norm-to-QKV/Z/alpha/beta and compare against a byte-exact production control with causal conv/recurrent state.</description>
-    <location>.opencode/skill/open-qwen38-fp32-linear-entry/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-linear-entry/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-conv-history</name>
     <description>Build isolated FP32 conv history with half-tile streams and validate causal state against a byte-exact BF16-history control.</description>
-    <location>.opencode/skill/open-qwen38-fp32-conv-history/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-conv-history/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-fp32-linear-integration</name>
     <description>Build and validate production FP32 DeltaNet entry/history, its state ABI and host carry, and full-depth decode with independent boundary gates.</description>
-    <location>.opencode/skill/open-qwen38-fp32-linear-integration/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-fp32-linear-integration/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-recurrence-replay</name>
     <description>Build private production-layout DeltaNet control and triple-BF16 recurrence kernels and validate causal head precision without model residency.</description>
-    <location>.opencode/skill/open-qwen38-recurrence-replay/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-recurrence-replay/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-factored-readout</name>
     <description>Build and validate isolated compensated factored DeltaNet readout with causal state and unchanged head precision gates.</description>
-    <location>.opencode/skill/open-qwen38-factored-readout/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-factored-readout/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-factored-full-layer</name>
     <description>Build private full-lx factored DeltaNet with shared helpers, audit compiler dependencies and resource budgets, and validate causal full-layer replay.</description>
-    <location>.opencode/skill/open-qwen38-factored-full-layer/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-factored-full-layer/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-factored-integration</name>
     <description>Build the production compensated factored DeltaNet export and validate all 64 layers with causal head gates and streamed weights.</description>
-    <location>.opencode/skill/open-qwen38-factored-integration/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-factored-integration/SKILL.md</location>
   </skill>
   <skill>
     <name>open-qwen38-qkv-precision</name>
     <description>Build isolated Q4 QKV control and consistent-sum probes, capture activation tables, and validate causal record precision without full-model residency.</description>
-    <location>.opencode/skill/open-qwen38-qkv-precision/SKILL.md</location>
+    <location>.agents/skills/open-qwen38-qkv-precision/SKILL.md</location>
   </skill>
 </available_skills>

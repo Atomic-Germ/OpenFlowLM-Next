@@ -129,7 +129,7 @@ The exporter requires a local multiprocessing socket, so it was run outside
 the sandbox after the restricted attempt failed at forkserver startup.
 
 Reproduction and source/weight hashes are recorded in
-[the production preflight skill](../../../.opencode/skill/open-qwen38-production-preflight/SKILL.md).
+[the production preflight skill](../../../.agents/skills/open-qwen38-production-preflight/SKILL.md).
 The export's `toolchain.json` records binary hashes and build provenance.
 Compilation was followed by the hardware validation below.
 
@@ -425,7 +425,7 @@ successful summary. This completes the isolated split-down correction, not
 end-to-end propagation through all corrected layers.
 
 Reproduction is documented in the new
-[FP32 down replay skill](../../../.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md).
+[FP32 down replay skill](../../../.agents/skills/open-qwen35-fp32-down-replay/SKILL.md).
 Artifacts and logs are retained under ignored `Models/qwen38-27b/ffn-replay/`.
 The production export remains intact; corrected full-model logits, independent
 up/gate/norm, state/head accuracy, prefill and serving acceptance remain open.
@@ -483,7 +483,7 @@ The new export is marked `VALIDATION_FAILED.txt` and is **not promoted** as
 numerically accepted. Evidence lives in
 `Models/qwen38-27b/production-fp32-multitoken/`: `results.json`,
 `build-audit.json`, `input-sha256.json`, `ffn-partials.json` and `logs/`.
-The new [corrected production decode skill](../../../.opencode/skill/open-qwen38-fp32-production/SKILL.md)
+The new [corrected production decode skill](../../../.agents/skills/open-qwen38-fp32-production/SKILL.md)
 documents reproduction. The power-mode request failed; no throughput claim.
 Next: localize the full-chain error with independent up/gate/norm and
 attention/state checks, then rerun the unchanged acceptance gates. Prefill,
@@ -577,7 +577,7 @@ invalidation. The hardware control fails and corrected probe passes. Full suite:
 **963 passed, 47 skipped**. No new full-model hardware result is claimed.
 
 Reproduction is in the new
-[FP32 front replay skill](../../../.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md).
+[FP32 front replay skill](../../../.agents/skills/open-qwen35-fp32-front-replay/SKILL.md).
 Evidence: ignored `Models/qwen38-27b/ffn-front-replay/` with `results.json`,
 build/hardware logs, hashes, core sizes and separate FAIL/PASS score files.
 Next is production integration: widen the norm-to-up/gate stream, handle the
@@ -632,7 +632,7 @@ primary combined activation error is now **0.0001456326**, below the same
 remain limited to the earlier isolated probe.
 
 Reproduction and ABI details are in the new
-[FP32 norm integration skill](../../../.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md).
+[FP32 norm integration skill](../../../.agents/skills/open-qwen38-fp32-norm-integration/SKILL.md).
 Artifacts are under ignored `Models/qwen38-27b/production-fp32-front-kernels/`
 and `production-fp32-front-multitoken/`, including build/input audits, source
 diff, reference hashes, numerical results and logs. This three-position result
@@ -721,7 +721,7 @@ hardware runs return exit 0 with 16 dispatches each.
 Core .text maxima: control **15968**, FP32 **15680**, below 16384. The initial
 three-output-FIFO design exceeded the core's two output DMA channels; core 0
 now emits KV and debug on one shared FIFO. The new
-[attention replay skill](../../../.opencode/skill/open-qwen38-attention-replay/SKILL.md)
+[attention replay skill](../../../.agents/skills/open-qwen38-attention-replay/SKILL.md)
 documents the build and this constraint. Artifacts are under ignored
 `Models/qwen38-27b/attention-replay/`, including mode-specific build/audit/score
 JSON, captures, logs, `results.json` and `build-audit.json`.
@@ -779,7 +779,7 @@ five additional provenance regressions failed before the identity handling
 was implemented. All 15 pass. Full open-engine suite: **1038 passed, 47 skipped**.
 Artifacts, hashes and failure/success logs are retained under ignored
 `Models/qwen38-27b/attention-kv-replay/`. The
-[paired-KV replay skill](../../../.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md)
+[paired-KV replay skill](../../../.agents/skills/open-qwen38-paired-kv-replay/SKILL.md)
 documents reproduction, DMA/L1 constraints and resource inspection.
 
 Production attention/cache/output-projection ABIs, model weights and packing
@@ -884,7 +884,7 @@ Build key: `sha256:fa34220099d565bfeb514765e3c72665f768a42ee17e9ba37dd7fa3402788
 Artifacts: `Models/qwen38-27b/production-paired-attention/`, including
 `build-audit.json`, `input-sha256.json`, build logs and the matching decode fixture.
 
-Reproduction: [integration skill](../../../.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md).
+Reproduction: [integration skill](../../../.agents/skills/open-qwen38-paired-attention-integration/SKILL.md).
 
 All **195 CPU reference hashes are unchanged**, and model/65 weight-pool hashes
 are verified. Available memory fell to approximately 28 GiB before resident
@@ -1022,7 +1022,7 @@ Full suite: **1090 passed, 47 skipped**. Artifacts and logs are in
 designs, binaries and core ELF evidence. Candidate source hash:
 `fcbd7273f296c66ed434ee19da637291286dc6a36408dadef7983d76901b35e5`.
 
-Reproduction: [FP32 entry replay skill](../../../.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md).
+Reproduction: [FP32 entry replay skill](../../../.agents/skills/open-qwen38-fp32-attention-entry/SKILL.md).
 Next integrate the entry dtype/scratch/stream ABI into production, build a fresh
 complete export and repeat full-depth gates. The retained production export's
 three residual failures and failure marker remain unchanged; resident runtime/
@@ -1087,7 +1087,7 @@ on the new propagated captures. No reference or threshold was relaxed.
 Artifacts: `Models/qwen38-27b/production-fp32-entry/`, including export/resource,
 input/reference audits, numerical JSON, captures and logs. Old exports and their
 failure markers remain untouched. Reproduction is documented in the
-[FP32 entry integration skill](../../../.opencode/skill/open-qwen38-fp32-entry-integration/SKILL.md).
+[FP32 entry integration skill](../../../.agents/skills/open-qwen38-fp32-entry-integration/SKILL.md).
 
 Resident runtime/harness byte identity, repeated requests and reset for this
 export remain untested: available memory was about 30 GiB versus the estimated

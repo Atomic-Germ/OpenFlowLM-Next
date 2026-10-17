@@ -7,7 +7,7 @@ description: Build and test the open 48-head WideDeltaNet AB, conv/record and re
 
 See `specs/open-engine/plans/wide-deltanet-a7.md` for the measured acceptance
 boundary and known head-local precision limitation. The preceding AB skill at
-`.opencode/skill/open-wide-deltanet-ab/SKILL.md` supplies toolchain and open
+`.agents/skills/open-wide-deltanet-ab/SKILL.md` supplies toolchain and open
 XRT harness setup. Use the same `ironvenv` and `run_kernel` binary.
 
 ## Reproduce the build and acceptance
