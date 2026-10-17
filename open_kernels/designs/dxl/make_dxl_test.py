@@ -57,7 +57,7 @@ def head(a, fx: Path, spec, R) -> int:
            f"buf lmpool {L0.LMHEAD_POOL_BYTES} {(fx / 'pools' / 'pool_lmhead.bin').as_posix()}",
            f"buf xresh {xres.nbytes} {(fx / 'xres_head.bin').as_posix()}",
            f"buf normw {hid * 2} {(fx / 'normw.bin').as_posix()}",
-           f"buf acth {a.l * hid * 2}", f"buf outh {out_floats * 4}"]
+           f"buf acth {DXR.head_act_bytes(spec, a.l)}", f"buf outh {out_floats * 4}"]
     cfg += ["run lmhl lmpool xresh normw acth outh"] * a.runs
     cfg += [f"dump outh {(fx / 'y_lmhl.bin').as_posix()} {out_floats * 4}", ""]
     (fx / "run_lmhl.cfg").write_text("\n".join(cfg), newline="\n")
