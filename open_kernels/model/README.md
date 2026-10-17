@@ -626,5 +626,31 @@ return exit 1 with complete JSON and source/weight/capture hashes. Q8 projection
 diagnostics are not implemented. At L34/T0 the norm-only K effect is 1.8758e-5
 and QKV-only effect 0.0058319225. A controlled hardware replay gives identical
 entry records with legacy and factored recurrence on the same forced inputs.
-The next precision investigation targets QKV projection; these observations
-do not prove a particular activation-table or accumulation fix.
+The isolated QKV experiment below tests the activation-table arithmetic.
+
+### Isolated QKV affine-sum precision
+
+`utilities/qkv-precision/` builds a private control and a consistent-sum Q4
+projection. The original affine epilogue combines INT16-quantized nibble products
+with sums of the original FP32 inputs. The candidate computes both terms from
+the same quantized inputs, preserving INT16 values, scales, table ABI and weight
+packing. A zero-effective-weight regression exposes the original cancellation
+error. Production kernels and recipe selection are unchanged by this experiment.
+
+The probe dumps full QKV and activation tables. Control projections must match
+production bytewise; candidate projections and causal CPU record preparation
+are scored against an independent unrounded FP64 reference at the unchanged
+0.005 bound. At L34/T0, normalized K error decreases from 0.0058319225 to
+0.0003864200 when both projections use the same CPU conv oracle. The retained
+production NPU record has error 0.0058359393. This isolated result does not yet
+close the production input gate or validate NPU conv/recurrence after the change.
+
+The complete 48-layer × 3-position isolated sweep passes: all 144 control
+projections match production bytewise, and all 144 candidate projections/CPU
+records pass. Worst candidate K error is 0.0004477865; worst QKV error is
+0.00004684383. INT16 values/scales remain byte-identical across the variants.
+
+The [QKV precision skill](../../.opencode/skill/open-qwen38-qkv-precision/SKILL.md)
+documents private builds, resource audits, single-layer replay and the causal
+sweep. Full-layer fit, affected projection/FFN gates and fresh full-depth
+validation are required before production integration.
