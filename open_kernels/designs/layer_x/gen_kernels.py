@@ -228,6 +228,10 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
         # gate; do not change unvalidated single-piece model arithmetic.
         out["dense_prep_f32.cc"] = out["dense_prep_f32.cc"].replace(
             "gemv_q4_prep_f32_blocks(", "gemv_q4_prep_f32_direct_blocks(")
+    if F.CONSISTENT_SUM:
+        # Scope the arithmetic to the validated direct FP32 prep TU, shared by
+        # lx/ax entry and FFN projections. BF16 and other model routes stay intact.
+        out["dense_prep_f32.cc"] = "#define GEMV_Q4_CONSISTENT_SUM 1\n" + out["dense_prep_f32.cc"]
     if mixed(R):
         # The mixed-format core cannot hold both q4_1 entries beside the q8 body, so the
         # pair becomes one folded entry with a runtime destination. Nothing else moves.
