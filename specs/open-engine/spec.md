@@ -628,8 +628,9 @@ instruction stream, `dxl_head`, over `dxl`'s image, not as `lmhl` in a context o
 weight, then each main core's 196 head bands as 28 tiles of 7. The core table's third mode (2) has two rows: tile 0, which prepares the
 normed rows, and one row that repeats 27 times (`REP`) on the cached tables (`NPREP` 0). The logits [L][vocab] go to the host, which takes
 each row's argmax by plain decode's rule (bf16-rounded, subnormals to zero, the lowest id on a tie; AVX2 in `core.cpp`), so Uno's verify rows
-pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent), and so does Granite unless the set is exported with `DXL_HEAD_FOLD=1`:
-the fold is opt-in until a clean unit shows it at parity or faster (see the result below).
+pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent), and so does Granite when the set is exported with `DXL_HEAD_FOLD=0`:
+the fold is on by default for Granite since a clean unit showed Uno 3.7-4.7% faster in all eight chat/code cells at 64-2048 tokens
+(see the result below).
 
 **The mode rides in the dispatch's first x element.** A mode written to the cores' rtp word in-context did not take effect: the cores ran the
 previous dispatch's table (a draft layer right after verify layers, and the head after them, hung), and the mode had only ever switched
@@ -650,7 +651,7 @@ written by the engine at start; `manifest rows.mode_off`), whose first word `dxl
 read sensibly the fold took the head from ~1.11 to ~0.93 of a plain step, but no unit of mine was clean: another session's CPU jobs (a
 conversion, builds, an `oflm` using the NPU) ran from 15:30 to past 21:30, and every `--measure` unit came back NOISY or with a control
 10-50 % off. The pairs that did run disagree on the layers (draft layers 67 -> 77 and verify 56 -> 59 in one, the other way in another).
-No tok/s figure for the fold is quoted, and the route stays opt-in until a quiet unit decides it.
+**Clean unit 2026-10-17 (`dibs run --measure`, control within 3.8%, Uno IDENTICAL in 16 of 16 runs, 96 tokens, one run per cell):** Uno tok/s unfolded -> folded, chat at 64 / 512 / 1024 / 2048 tokens 21.66 -> 22.66, 19.25 -> 20.12, 17.08 -> 17.78, 14.83 -> 15.39; code 25.53 -> 26.71, 21.03 -> 22.02, 18.58 -> 19.36, 20.12 -> 20.86 (+3.7 to +4.7%). Served through `oflm serve` with `OFLM_SPECULATIVE=1`: chat, streamed chat, a long prompt and a three-turn conversation identical to the unfolded set and to plain decode. The fold is the Granite default.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
