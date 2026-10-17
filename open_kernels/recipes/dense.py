@@ -833,8 +833,13 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 # Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
 ROWS_FAMILIES = ("k2", "granite")
 ROWS_L = 4
-# The L-row head as tile jobs on dxl's own cores (OPEN-DXL-HEAD): no lmhl context, the host takes the argmax.
+# The L-row head as tile jobs on dxl's own cores (OPEN-DXL-HEAD): no lmhl context, the host takes the argmax. Opt-in
+# (DXL_HEAD_FOLD=1 at export) until a clean unit shows it at parity or faster.
 HEAD_FOLD_FAMILIES = ("granite",)
+
+
+def head_fold_on() -> bool:
+    return os.environ.get("DXL_HEAD_FOLD") == "1"
 
 
 def rows_route(spec: ModelSpec) -> dict | None:
@@ -851,7 +856,7 @@ def rows_route(spec: ModelSpec) -> dict | None:
     G = geometry(spec)
     ks = {"kvslice": k} if (k := dxl_kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW)) else {}
     # dxl_lora is the draft pass's stream for the same core programs: it runs in dxl's context
-    hp = head_plan(spec, ROWS_L) if spec.family in HEAD_FOLD_FAMILIES else None
+    hp = head_plan(spec, ROWS_L) if head_fold_on() and spec.family in HEAD_FOLD_FAMILIES else None
     if hp:                                      # dxl_head too: the head's stream over the same image
         lora = {"lora_kernel": "dxl_lora", "lora_file": "uno.q4nx", "lora_pool_bytes": X.LORA_BYTES,
                 "lora_pack": lora_pack_plan(spec, ROWS_L)}
