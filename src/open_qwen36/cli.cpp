@@ -270,6 +270,10 @@ int rows_check(Core& core, const Args& a, int n) {
     if (passes)
         std::fprintf(stderr, "rows-check: %zu passes of %zu rows, %.1f ms a pass; decode %.1f ms a step (%.2fx)\n",
                      passes, L, rows_ms / passes, per_step, (rows_ms / passes) / per_step);
+    if (!passes) {
+        std::fprintf(stderr, "rows-check: no complete L-row pass was checked; request at least %zu tokens\n", L);
+        return 1;
+    }
     std::printf(bad ? "ROWS FAIL (%d rows)\n" : "ROWS PASS\n", bad);
     return bad;
 }
