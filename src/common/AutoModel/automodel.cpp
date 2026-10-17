@@ -457,6 +457,7 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
             }
             this->profiler_list[TKOEN_DECODE_TIME].stop(1);
             this->token_history.push_back(t);
+            if (!plain) this->sampler->ring_buffer_update_sparse(t);
             meta_info.generated_tokens++;
             const bool last = i + 1 == committed.size();
             if (this->is_eos(t)) {
