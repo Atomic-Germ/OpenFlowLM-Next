@@ -30,7 +30,7 @@ def main():
             cmd += ["-I", d]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:
-            sys.exit(f"{tu}:\n{r.stderr[-4000:]}")
+            sys.exit(f"{tu}:\n{r.stderr[:1500]}\n...\n{r.stderr[-1500:]}")
         if obj:
             nm = Path(config.peano_cxx_path()).parent / "llvm-nm"
             r = subprocess.run([str(nm), "--print-size", "--size-sort", str(asm)], capture_output=True, text=True)

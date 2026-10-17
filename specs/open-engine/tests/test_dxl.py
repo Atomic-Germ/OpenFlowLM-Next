@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from recipes import dense as DR
@@ -26,7 +27,7 @@ def test_act_regions_do_not_overlap():
     sizes = {"AD_XN": 4 * X.XN_ROW, "AD_Q": 4 * X.Q_ROW, "AD_K": 4 * X.KV_ROW_ACT, "AD_V": 4 * X.KV_ROW_ACT,
              "AD_OG": 4 * X.OG_ROW, "AD_OUT": 4 * X.HID_ROW, "AD_RES": 4 * X.HID_ROW, "AD_XM": 4 * X.XM_ROW,
              "AD_H": 4 * X.H_ROW, "AD_OUT2": 4 * X.HID_ROW, "AD_ZQKV": 4 * DXR.Z_ROW, "AD_ZO": 4 * DXR.Z_ROW,
-             "AD_ZGU": 4 * DXR.Z_ROW, "AD_ZD": 4 * DXR.Z_ROW, "AD_ZERO": DXR.XE, "AD_JUNK": K2_7B.hidden * 2}
+             "AD_ZGU": 4 * DXR.Z_ROW, "AD_ZD": 4 * DXR.Z_ROW, "AD_ZERO": DXR.XE, "AD_MODE": 3 * DXR.XE, "AD_JUNK": K2_7B.hidden * 2}
     for (a, fa), (b, _) in zip(regions, regions[1:]):
         assert a + sizes[fa] <= b, fa
     assert regions[-1][0] + sizes[regions[-1][1]] <= X.AD_BYTES
@@ -56,9 +57,38 @@ def test_verify_jobs_cover_every_band_once(spec):
 
 
 def test_k2_7b_tables_are_unchanged_by_the_wider_widths():
-    t = DXR.job_table(K2_7B, 4).tobytes()
-    assert hashlib.sha256(t).hexdigest() == "f69676338a3a437a507f3e73d2690a91497321762a794cc2b66ae577c674c77b"
+    t = DXR.job_table(K2_7B, 4)
+    nf = DXR.NF - 2                                  # the old twelve fields; NPREP and REP are the next two
+    rows = t[:, 1:].reshape(2, DXR.JMAX, DXR.NF)
+    assert DXR.FIELDS[-2:] == ("NPREP", "REP") and set(rows[:, :, nf].ravel()) <= {0, 4} and set(rows[:, :, nf + 1].ravel()) <= {0, 1}
+    old = np.concatenate([np.concatenate([[t[m, 0]], rows[m, :, :nf].ravel()]) for m in range(2)]).astype(np.int32)
+    assert hashlib.sha256(old.tobytes()).hexdigest() == "f69676338a3a437a507f3e73d2690a91497321762a794cc2b66ae577c674c77b"
+    assert DXR.layout(K2_7B, 4).TABS == 1 and all(j.core["NPREP"] == 4 and not j.reuse for j in DXR.jobs(K2_7B, 4, False))
     assert DR.rows_route(K2_7B)["rows"]["head_act_bytes"] == 4 * K2_7B.hidden * 2
+
+
+def test_granite_keeps_five_slice_tables_and_its_jobs_on_one_activation_prepare_it_once():
+    # Traces: OPEN-DXL-TABS
+    X = DXR.layout(GRANITE, 4)
+    assert X.TABS == 5 and DXR._main_l1(4, 5, 4, 1, X.TAB_K, X.TABS) <= DXR.L1_REUSE
+    for draft, reused, blocks in ((False, 9, 1984), (True, 12, 3424)):
+        js = DXR.jobs(GRANITE, 4, draft)
+        assert sum(j.reuse for j in js) == reused
+        assert sum(j.core["NPREP"] * j.core["S"] * j.core["KS"] // 32 for j in js) == blocks
+        assert all((j.core["NPREP"] == 0) == j.reuse for j in js)
+        assert not js[0].reuse and not any(j.reuse for j in js if j.x[0] == "z" or j.core["MODE"] == DXR.PREP_F32)
+
+
+def test_granite_head_is_28_tiles_of_7_bands_on_the_layers_cores():
+    # Traces: OPEN-DXL-HEAD
+    p = DXR.head_plan(GRANITE, 4)
+    assert (p.nb, p.bt, p.nt, p.bb) == (196, 7, 28, 102400) and p.out_floats == 4 * 100352
+    first, rest = p.rows
+    assert (first["NPREP"], first["REP"], rest["NPREP"], rest["REP"]) == (4, 1, 0, 27)   # prepared once, the other tiles reuse it
+    assert first["S"] * first["KS"] == GRANITE.hidden and first["BT"] <= DXR.layout(GRANITE, 4).YB + DXR.layout(GRANITE, 4).BP
+    t = DXR.head_table(GRANITE, 4)
+    assert t.shape == (1 + DXR.HEAD_JMAX * DXR.NF,) and t[0] == 2
+    assert DXR.head_plan(K2_7B, 4) is None and DXR.head_plan(K2_37B, 4) is None        # no table cache, no folded head
 
 
 def test_an_odd_multiple_of_512_takes_half_slices():
@@ -137,11 +167,21 @@ def test_l_must_be_a_multiple_of_four():
         DXR.layout(K2_7B, 6)
 
 
-def test_only_k2_and_granite_ship_the_rows_route():
+def test_only_k2_and_granite_ship_the_rows_route(monkeypatch):
+    monkeypatch.setenv("DXL_HEAD_FOLD", "1")
     assert DR.rows_route(K2_7B)["rows"]["lora_kernel"] == "dxl_lora"
     assert DR.rows_route(K2_37B)["rows"]["head_act_bytes"] == 4 * 2560 * 2 + 1024
     g = DR.rows_route(GRANITE)
-    assert g["rows"]["head_out_floats"] == 4 * 100352 + 8 * 4 * 64 and g["rows"]["lora_pool_bytes"] > 0
+    monkeypatch.delenv("DXL_HEAD_FOLD")
+    assert DR.rows_route(GRANITE)["rows"]["head"] == "lmhl" and "head_fold" not in DR.rows_route(GRANITE)["rows"]
+    monkeypatch.setenv("DXL_HEAD_FOLD", "1")
+    assert g["rows"]["head_out_floats"] == 4 * 100352 and g["rows"]["head_fold"] and g["rows"]["lora_pool_bytes"] > 0
+    assert g["rows"]["head"] == "dxl_head" and g["kernels"]["dxl_head"]["context"] == "dxl" and "lmhl" not in g["builds"]
+    assert "head_fold" not in DR.rows_route(K2_7B)["rows"]
+    for spec in (K2_7B, K2_37B, GRANITE):            # the mode element: three x elements in act, after the z seed row
+        X, r = DXR.layout(spec, 4), DR.rows_route(spec)["rows"]
+        assert (r["mode_off"], r["mode_elem"]) == (X.AD_MODE, DXR.XE) and X.AD_MODE == X.AD_ZERO + DXR.XE
+        assert X.AD_MODE + 3 * DXR.XE <= X.AD_JUNK
     assert DR.rows_route(load_spec(SPECS / "qwen3-4b.json")) is None
     heads = {DR.rows_route(s)["builds"]["lmhl"]["build_dir"] for s in (K2_7B, K2_37B)}
     assert len(heads) == 2                 # one vocab, two widths: two head builds

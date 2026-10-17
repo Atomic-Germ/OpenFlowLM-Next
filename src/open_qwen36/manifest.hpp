@@ -226,6 +226,10 @@ struct RowsDesc {
     uint64_t head_act_bytes = 0;     ///< the head's normed rows (bf16 [L][hidden])
     uint64_t head_cores = 0;         ///< cores whose [value L | row L] argmax elements end the head's output
     uint64_t head_out_floats = 0;    ///< logits [L][vocab] then head_cores elements of L * 64
+    /// OPEN-DXL-HEAD: `head` is a stream over `kernel`'s image (the head as tile jobs on its cores, no argmax elements): the
+    /// host takes each row's argmax from the logits.
+    bool head_fold = false;
+    uint64_t mode_off = 0, mode_elem = 0;   ///< act: three x elements holding 0, 1, 2 (the mode a dispatch opens with)
     // OPEN-UNO-LORA: `lora_kernel` is another stream for the same core programs; empty means no draft pass.
     std::string lora_kernel, lora_file;
     uint64_t lora_pool_bytes = 0;

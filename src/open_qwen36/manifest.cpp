@@ -223,9 +223,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
         // OPEN-ATTN-KVSLICE: per-core window fills of whole blocks; the stream and the kernel count the same blocks
         d.kvslice = v.value("kvslice", 0ull);
-        if (d.kvslice && ((d.patch != "attnpos" && d.patch != "attnrows") || d.rb != 1 || (d.kvslice != 2 && d.kvslice != 4)))
+        if (d.kvslice && ((d.patch != "attnpos" && d.patch != "attnrows") || d.rb != 1 || (d.kvslice != 2 && d.kvslice != 4 && d.kvslice != 8)))
             fail(where, "kernel " + k + ": kvslice " + std::to_string(d.kvslice) +
-                        " needs the attnpos or attnrows patch table, rb 1 and 2 or 4 rows an element");
+                        " needs the attnpos or attnrows patch table, rb 1 and 2, 4 or 8 rows an element");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
             d.patch != "attnrows")
@@ -244,6 +244,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         m.rows.head_act_bytes = get<uint64_t>(r, "head_act_bytes", rw);
         m.rows.head_cores = get<uint64_t>(r, "head_cores", rw);
         m.rows.head_out_floats = get<uint64_t>(r, "head_out_floats", rw);
+        m.rows.head_fold = r.value("head_fold", false);
+        m.rows.mode_off = r.value("mode_off", 0ull);
+        m.rows.mode_elem = r.value("mode_elem", 0ull);
         if (m.rows.l == 0 || m.rows.l % 4) fail(rw, "l " + std::to_string(m.rows.l) + " is not a multiple of 4");
         auto rk = m.kernels.find(m.rows.kernel);
         if (rk == m.kernels.end() || rk->second.patch != "attnrows")

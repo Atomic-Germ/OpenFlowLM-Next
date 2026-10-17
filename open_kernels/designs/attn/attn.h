@@ -120,6 +120,17 @@
 #ifndef ATTN_T8_UNROLL
 #define ATTN_T8_UNROLL 1     // rows of ATTN_TREE8's score loop unrolled (1, 2 or 4)
 #endif
+#ifndef ATTN_T8_SPLIT
+#define ATTN_T8_SPLIT 0      // 1: TREE8 scores in two passes (dot products, then trees), bit-identical; _U1 / _U2 unroll the passes
+#endif
+#define ATTN_PRAGMA_(x) _Pragma(#x)
+#define ATTN_PRAGMA(x) ATTN_PRAGMA_(x)
+#ifndef ATTN_T8_SPLIT_U1
+#define ATTN_T8_SPLIT_U1 1
+#endif
+#ifndef ATTN_T8_SPLIT_U2
+#define ATTN_T8_SPLIT_U2 1
+#endif
 #ifndef ATTN_TREE8
 #define ATTN_TREE8 0         // 1: the 8-head block kernel reduces its scores as a tree (attn_score2g); bit-identical to reduce_add
 #endif
@@ -191,11 +202,51 @@ static constexpr unsigned kMLU = ((kNHL + kVE - 1) / kVE) * kVE;
 #if ATTN_TREE8 && !ATTN_EXP32
 #error "attn.h: ATTN_TREE8 needs ATTN_EXP32"
 #endif
+#ifndef ATTN_EXPA
+#define ATTN_EXPA 0          // 1: exp with each Horner step's constant folded into the accumulator (not bit-identical to vexpN)
+#endif
+#if ATTN_EXPA
+template <unsigned N>
+__attribute__((noinline)) inline vfN<N> attn_expa(vfN<N> x) {
+  x = aie::max(x, aie::broadcast<float, N>(-87.0f));
+  const vfN<N> t = fmulN<N>(x, aie::broadcast<float, N>(1.44269504f));
+  const aie::vector<int32_t, N> n = aie::to_fixed<int32_t>(t, 0);
+  const vfN<N> f = fsubN<N>(t, aie::to_float<float>(n, 0));
+  vbN<N> fh, fl;
+  splitN<N>(f, fh, fl);
+#if ATTN_EXPA >= 2
+  vfN<N> p = aie::broadcast<float, N>(9.68571144e-3f);   // degree 4 minimax of 2^f on [-0.5, 0.5], 3.7e-6 relative
+  constexpr float c[4] = {5.59220257e-2f, 2.40218655e-1f, 6.93121036e-1f, 1.00000015f};
+  constexpr unsigned kDeg = 4;
+#else
+  vfN<N> p = aie::broadcast<float, N>(1.54035304e-4f);
+  constexpr float c[6] = {1.33335581e-3f, 9.61812911e-3f, 5.55041087e-2f, 2.40226507e-1f, 6.93147181e-1f, 1.0f};
+  constexpr unsigned kDeg = 6;
+#endif
+  AIE_LOOP_UNROLL_FULL
+  for (unsigned i = 0; i < kDeg; ++i) {
+    vbN<N> ph, pl;
+    splitN<N>(p, ph, pl);
+    accN<N> acc;
+    acc.from_vector(aie::broadcast<float, N>(c[i]));
+    acc = aie::mac(acc, ph, fh);
+    acc = aie::mac(acc, ph, fl);
+    acc = aie::mac(acc, pl, fh);
+    p = acc.template to_vector<float>();
+  }
+  // p in [0.7, 1.5] is normal: adding n to its exponent field is the exact 2^n scale
+  return aie::add(p.template cast_to<int32_t>(), aie::upshift(n, 23)).template cast_to<float>();
+}
+#define ATTN_EXPN attn_expa
+#else
+#define ATTN_EXPN vexpN
+#endif
 #if ATTN_EXP32
+static constexpr unsigned kEW = ATTN_RB >= 8 ? 64 : 32;     // the one exponential routine the narrow ones ride on
 template <unsigned N>
 static inline vfN<N> attn_vexp(vfN<N> x) {
-  if constexpr (N < 32) return vexpN<32>(x.template grow<32>()).template extract<N>(0);
-  else return vexpN<N>(x);
+  if constexpr (N < kEW) return ATTN_EXPN<kEW>(x.template grow<kEW>()).template extract<N>(0);
+  else return ATTN_EXPN<N>(x);
 }
 #endif
 static constexpr unsigned kRB = ATTN_RB;      // cached rows per call
@@ -1001,6 +1052,26 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
 #else
 #define ATTN_T8_KV(h) attn_kvh(h)
 #endif
+    unsigned t8ko[8];                               // each head's K slice offset in a window row, the same for every row
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned h = 0; h < 8; ++h) t8ko[h] = ATTN_T8_KV(hb + h) * kHD;
+#if ATTN_T8_SPLIT
+    // few live values per pass lets the compiler unroll rows: 4,000 B of program for the one-pass loop, 5,056 B here
+    alignas(128) static float t8z[kRB * 4 * 32];
+    ATTN_PRAGMA(clang loop unroll_count(ATTN_T8_SPLIT_U1))
+    for (unsigned r = 0; r < kRB; ++r) {
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned hp = 0; hp < 4; ++hp)
+        aie::store_v(t8z + (r * 4 + hp) * 32, attn_score2g(Kb[r] + t8ko[2 * hp], Kb[r] + t8ko[2 * hp + 1],
+                                                           q0 + 2 * hp * kHD, q0 + (2 * hp + 1) * kHD));
+    }
+    ATTN_PRAGMA(clang loop unroll_count(ATTN_T8_SPLIT_U2))
+    for (unsigned r = 0; r < kRB; ++r) {
+      const v32f w0 = attn_tree2(aie::load_v<32>(t8z + r * 128), aie::load_v<32>(t8z + r * 128 + 32), 8);
+      const v32f w1 = attn_tree2(aie::load_v<32>(t8z + r * 128 + 64), aie::load_v<32>(t8z + r * 128 + 96), 8);
+      aie::store_v(sv + r * kNL, attn_tree1<16>(attn_tree1<32>(attn_tree2(w0, w1, 4), 2), 1));
+    }
+#else
 #if ATTN_T8_UNROLL == 2
     _Pragma("clang loop unroll_count(2)")
 #elif ATTN_T8_UNROLL == 4
@@ -1010,12 +1081,13 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
       v32f z[4];                                    // level 1: heads (0,1) (2,3) (4,5) (6,7), 16 lanes each
       AIE_LOOP_UNROLL_FULL
       for (unsigned hp = 0; hp < 4; ++hp)
-        z[hp] = attn_score2g(Kb[r] + ATTN_T8_KV(hb + 2 * hp) * kHD, Kb[r] + ATTN_T8_KV(hb + 2 * hp + 1) * kHD,
+        z[hp] = attn_score2g(Kb[r] + t8ko[2 * hp], Kb[r] + t8ko[2 * hp + 1],
                              q0 + 2 * hp * kHD, q0 + (2 * hp + 1) * kHD);
       const v32f w0 = attn_tree2(z[0], z[1], 8);   // heads 0..3, 8 lanes each
       const v32f w1 = attn_tree2(z[2], z[3], 8);   // heads 4..7
       aie::store_v(sv + r * kNL, attn_tree1<16>(attn_tree1<32>(attn_tree2(w0, w1, 4), 2), 1));
     }
+#endif
 #undef ATTN_T8_KV
   }
 #elif ATTN_G5
@@ -1093,11 +1165,11 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   // exponential, ~240 bundles a block and 960 bytes of program, is gone.
   const vfN<kNL> earg = faddN<kNL>(fsubN<kNL>(m, mn), fsubN<kNL>(smax, mn));
   const vfN<kPV> eup = aie::shuffle_up(earg.template grow<kPV>(), kNHL);
-  const vfN<kPV> pv = vexpN<kPV>(aie::select(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)), eup,
+  const vfN<kPV> pv = ATTN_EXPN<kPV>(aie::select(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)), eup,
                                              aie::mask<kPV>::from_uint32(((1u << kNHL) - 1u) << kNHL)));
   const vfN<kNL> e = aie::shuffle_down(pv, kNHL).template extract<kNL>(0);
 #else
-  const vfN<kPV> pv = vexpN<kPV>(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)));
+  const vfN<kPV> pv = ATTN_EXPN<kPV>(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)));
 #endif
   aie::store_v(pvf, pv);
   vbN<kPV> t0, t1;

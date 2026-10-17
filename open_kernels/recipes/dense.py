@@ -833,13 +833,20 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 # Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
 ROWS_FAMILIES = ("k2", "granite")
 ROWS_L = 4
+# The L-row head as tile jobs on dxl's own cores (OPEN-DXL-HEAD): no lmhl context, the host takes the argmax. Opt-in
+# (DXL_HEAD_FOLD=1 at export) until a clean unit shows it at parity or faster.
+HEAD_FOLD_FAMILIES = ("granite",)
+
+
+def head_fold_on() -> bool:
+    return os.environ.get("DXL_HEAD_FOLD") == "1"
 
 
 def rows_route(spec: ModelSpec) -> dict | None:
     """The L-row pass's kernels (dxl, lmhl) and the manifest's `rows` section for a ROWS_FAMILIES spec, else None."""
     if spec.family not in ROWS_FAMILIES:
         return None
-    from .dxl import head_act_bytes, layout as dxl_layout, lora_pack_plan
+    from .dxl import XE, head_act_bytes, head_plan, layout as dxl_layout, lora_pack_plan
     try:
         X = dxl_layout(spec, ROWS_L)
     except OpRangeError:
@@ -849,6 +856,26 @@ def rows_route(spec: ModelSpec) -> dict | None:
     G = geometry(spec)
     ks = {"kvslice": k} if (k := dxl_kvslice(spec, G.ACORES, G.RB, G.QKVB, G.WINDOW)) else {}
     # dxl_lora is the draft pass's stream for the same core programs: it runs in dxl's context
+    hp = head_plan(spec, ROWS_L) if head_fold_on() and spec.family in HEAD_FOLD_FAMILIES else None
+    if hp:                                      # dxl_head too: the head's stream over the same image
+        lora = {"lora_kernel": "dxl_lora", "lora_file": "uno.q4nx", "lora_pool_bytes": X.LORA_BYTES,
+                "lora_pack": lora_pack_plan(spec, ROWS_L)}
+        return {
+            "contexts": {"dxl": "dxl/final.xclbin"},
+            "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl", **ks},
+                        "dxl_lora": {"context": "dxl", "insts": "dxl_lora/insts.bin", "patch": "attnrows",
+                                     "build": "dxl_lora", **ks},
+                        "dxl_head": {"context": "dxl", "insts": "dxl_head/insts.bin", "build": "dxl_head"}},
+            "rows": {"l": ROWS_L, "kernel": "dxl", "head": "dxl_head", "head_fold": True, "act_bytes": X.AD_BYTES,
+                     "mode_off": X.AD_MODE, "mode_elem": XE,
+                     "head_act_bytes": head_act_bytes(spec, ROWS_L), "head_cores": n_head, "head_out_floats": hp.out_floats,
+                     **lora},
+            "builds": {"dxl": {"design": "dxl/dxl.py", "build_dir": bd, "env": {"DXL_L": str(ROWS_L)}},
+                       "dxl_lora": {"design": "dxl/dxl.py", "build_dir": bd + "_draft",
+                                    "env": {"DXL_L": str(ROWS_L), "DXL_DRAFT": "1"}},
+                       "dxl_head": {"design": "dxl/dxl.py", "build_dir": bd + "_head",
+                                    "env": {"DXL_L": str(ROWS_L), "DXL_HEAD": "1"}}},
+        }
     return {
         "contexts": {"dxl": "dxl/final.xclbin", "lmhl": "lmhl/final.xclbin"},
         "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl", **ks},
@@ -856,6 +883,7 @@ def rows_route(spec: ModelSpec) -> dict | None:
                                  "build": "dxl_lora", **ks},
                     "lmhl": {"context": "lmhl", "insts": "lmhl/insts.bin", "build": "lmhl"}},
         "rows": {"l": ROWS_L, "kernel": "dxl", "head": "lmhl", "act_bytes": X.AD_BYTES,
+                 "mode_off": X.AD_MODE, "mode_elem": XE,
                  "head_act_bytes": head_act_bytes(spec, ROWS_L), "head_cores": n_head,
                  "head_out_floats": ROWS_L * lm_rows(spec) + n_head * ROWS_L * 64,
                  "lora_kernel": "dxl_lora", "lora_file": "uno.q4nx", "lora_pool_bytes": X.LORA_BYTES,

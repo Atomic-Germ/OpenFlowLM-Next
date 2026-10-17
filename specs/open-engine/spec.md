@@ -548,6 +548,110 @@ Plain decode, 128 tokens after N tokens of context (`--gemm-block` prefill; N = 
   GGUF-direct route (`dx_f32`, a model dir holding only `granite-4.2-3b-Q4_1.gguf` as `model.gguf`) at 70 + 20 and 300 + 20;
   the 10 greedy prompts identical; `--rows-check 17` ROWS PASS at 70 / 1030 / 2060.
 
+### OPEN-ATTN-BLOCK8: Granite's attention takes 8-row blocks and a cheaper exponential
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h` `ATTN_RB`, `ATTN_EXPA`, `recipes/attnknobs.py` `BLOCK8_MEASURED`, `src/open_qwen36/manifest.cpp`)
+**Verification:** test (the knobs and the manifest key: `tests/test_attn_geometry.py`, `manifest_test.cpp`); manual (the hardware procedure below)
+
+For Granite 4.2 3B the 3-head and 2-head cores of `dx` and the 8-head cores of `dxl` shall take blocks of 8 cached rows (`ATTN_RB=8`,
+manifest `kvslice` 8) with one 64-lane exponential a block and the fused-Horner degree-4 exponential (`ATTN_EXPA=2`). The result is
+not bit-identical to the 4-row kernel (the running max moves once a block of 8, and the polynomial is shorter), so the gates are
+correlation, not bytes: logits against the 4-row kernel over 20 steps with corr >= 0.9998 and the same top-1, every greedy prompt
+identical, Uno IDENTICAL, and `--rows-check 17` ROWS PASS, which holds `dxl` to `dx` because both compile the same block structure.
+`ATTN_RB=4` / `ATTN_EXPA=0` give the old kernel back for an A/B build.
+
+**Acceptance criteria:**
+- `decode_gates.py corr` of the set against the 4-row set: corr min >= 0.9998 and top-1 equal 20 of 20, with the prompt prefilled
+  a token at a time (520) and as blocks (504, 536, 1024, 2048).
+- The six `uno-ref` prompts and the chat / code prompts at 1024 and 2048 x 96 greedy tokens identical to the 4-row set.
+- `test_attn_geometry.py::test_block8_is_granite_only_and_forced_back_by_the_probe`.
+
+**Procedure (manual):** build `dx` and `dxl` / `dxl_lora` with the defaults and with `ATTN_RB=4,ATTN_EXPA=0`
+(`export_qwen36_kernels.py --only dx,dxl,dxl_lora --out <copy of the union set>`) and run the criteria. Measured by the track that landed
+it (2026-10-15): corr min 0.999909 (mean 0.999972) over 20 steps after a 2048-token block prefill, top-1 20 of 20.
+
+### OPEN-ATTN-SPLIT8: `dxl`'s score loop in two passes, bit-identical
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h` `ATTN_T8_SPLIT`, `recipes/attnknobs.py` `t8_split_flags`,
+`designs/dxl/dxl.py`)
+**Verification:** test (`tests/test_attn_geometry.py::test_dxl_score_split_is_on_by_default_and_the_probe_turns_it_off`); manual (the hardware procedure below)
+
+The TREE8 score block of the L-row pass (8 heads a core, 8-row blocks) shall run as two loops over the block's rows: first every
+row's four head-pair dot products into a 4 KB scratch (`attn_score2g`, unchanged), then every row's reduction tree from it. The
+arithmetic is the one-pass loop's operation for operation, so `dxl` stays bit-identical to `dx`: `--rows-check 17` prints ROWS PASS.
+The point is register pressure: one pass keeps a row's four 1,024-bit accumulators pairs and its tree live together and compiles to
+382 bundles a row; unrolling that pass by 2 spills past a frame offset of 8 KB and the object compile crashes ("immediate operand out
+of range"). The two passes unroll 2 (dot products) and 4 (trees) at 158 + 72 bundles a row, +1,056 B of program (the fullest core
+15,808 of 16,384 B). `ATTN_T8_SPLIT=0` gives the one-pass loop back.
+
+**Acceptance criteria:**
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens (0 of 100352 logits differ on every row).
+- Uno IDENTICAL to plain decode on the six uno-ref prompts and on chat / code at 64, 512, 1024 and 2048 (96 tokens).
+- Plain decode's kernels (`dx`, `dxh`, `ln`, `lm_head_q4`) byte-identical to the set built without the knob.
+
+**Result (2026-10-16, Granite 4.2 3B, `dxl` alone, before OPEN-DXL-TABS):** a verify pass at 2048 tokens 1.68 -> 1.61 decode steps and a
+draft pass 1.91 -> 1.83; Uno +1.0 / +1.2 / +2.5 / +3.8 % on chat and +0.2 / +0.7 / +2.7 / +4.1 % on code at 64 / 512 / 1024 / 2048.
+A variant that adds q hi and lo into one accumulator chain (not bit-identical) compiled smaller and unrolled by 2 as well, but moved
+Uno's argmax at a near-tie (ROWS FAIL, 1 argmax flip in 8 rows; Uno DIFFERS at 2048); it was dropped.
+
+### OPEN-DXL-TABS: a main core keeps five slice tables, so the jobs on one activation prepare it once
+**Applies to:** openflowlm-next (`open_kernels/recipes/dxl.py` `TABS`, `tab_alloc`, `jobs`, `designs/dxl/dxl.py`, `dxl_job.h`,
+`dxl_prep_slot.cc`, `dxl_gemv_job.cc`)
+**Verification:** test (`tests/test_dxl.py`); manual (the hardware procedure below)
+
+Where the cores' L1 holds them (`L1_REUSE`, 62 KB: Granite 4.2 3B's 5 slices of 512), a main core shall keep the activation table of
+each slice of the stage's activation, not just the slice it is on. A job whose activation is the one the cached tables were prepared
+from (`Job.reuse`: q after nothing, then k and v; the up and gate jobs of every tile; a draft's LoRA A job, which comes first) skips its
+prep (`NPREP` 0) and the stream skips its x fills, so the fifo and the core agree. The LoRA's z rows (MODE 2) have a region of their
+own, so a B job does not spoil the cache, and an fp32 job or one on more than 5 slices rebuilds slot 0 and drops it. A family whose
+tables do not fit (K2-7B, K2-3.7B) keeps `TABS` 1 and every `NPREP` at L: its job table is the old twelve fields byte for byte.
+The weight fifo falls to depth 2 to make room, which costs nothing (depth 2, 4 and 6 read alike: the pass is not waiting on weights).
+
+**Acceptance criteria:**
+- Granite's verify table has 9 reusing jobs of 13 and its draft table 12 of 30; a verify layer prepares 1,984 blocks a core, not 4,864,
+  a draft layer 3,424, not 7,264. The first job of a stage, every z job and every fp32 job prepares.
+- K2-7B's old twelve fields hash as before and no K2 job reuses.
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060; Uno IDENTICAL on the six prompts and on chat / code at 64-2048.
+- Plain decode's kernels byte-identical to the set built without it.
+
+**Result (2026-10-16):** a prep block costs 52 Peano bundles (`dxl_prep_group`: 211 bundles for 4 blocks, 417 for 8, so batching more
+does not help; about 15 of the 52 operations are the 32-lane max as shifts and compares). Nulling prep (`DXL_NULL_PREP`) takes a verify pass from
+1.48 to 1.33 decode steps at context 0; with the cache (and OPEN-ATTN-SPLIT8) a verify pass is 1.39 steps at 0 and 1.55 at 2048 (1.48 /
+1.70 before) and a draft pass 1.75 / 1.75 (1.86 / 1.91): a Uno cycle is 4.4 % cheaper at 0 and 7.9 % at 2048 (tables in
+OPEN-FAMILY-GRANITE-UNO).
+
+### OPEN-DXL-HEAD: the Uno head as tile jobs on `dxl`'s own cores, no context switch
+**Applies to:** openflowlm-next (`open_kernels/recipes/dxl.py` `head_plan`, `head_table`, `AD_MODE`, `recipes/dense.py` `HEAD_FOLD_FAMILIES`,
+`designs/dxl/dxl.py` `DXL_HEAD`, `dxl_mode.cc`, `src/open_qwen36/core.cpp` `step_rows`, `manifest.cpp` `head_fold`)
+**Verification:** test (`tests/test_dxl.py`); manual (the hardware procedure below)
+
+Where the table cache holds the whole hidden (OPEN-DXL-TABS; Granite 4.2 3B), the L-row pass's final norm and head shall run as a third
+instruction stream, `dxl_head`, over `dxl`'s image, not as `lmhl` in a context of its own: the ln core's entry norm with the final norm's
+weight, then each main core's 196 head bands as 28 tiles of 7. The core table's third mode (2) has two rows: tile 0, which prepares the
+normed rows, and one row that repeats 27 times (`REP`) on the cached tables (`NPREP` 0). The logits [L][vocab] go to the host, which takes
+each row's argmax by plain decode's rule (bf16-rounded, subnormals to zero, the lowest id on a tie; AVX2 in `core.cpp`), so Uno's verify rows
+pick what plain greedy picks. K2 keeps `lmhl` (`head_fold` absent), and so does Granite unless the set is exported with `DXL_HEAD_FOLD=1`:
+the fold is opt-in until a clean unit shows it at parity or faster (see the result below).
+
+**The mode rides in the dispatch's first x element.** A mode written to the cores' rtp word in-context did not take effect: the cores ran the
+previous dispatch's table (a draft layer right after verify layers, and the head after them, hung), and the mode had only ever switched
+across a context reload. Every dispatch of the L-row pass now opens with one x element of act (`AD_MODE`: three elements holding 0, 1, 2,
+written by the engine at start; `manifest rows.mode_off`), whose first word `dxl_mode` copies into the rtp before the table is read.
+
+**Acceptance criteria:**
+- Granite's head plan is 196 bands a core in 28 tiles of 7 (the accumulators hold 9); the table's mode 2 has 2 rows, 1 with `NPREP` 4 and
+  1 with `NPREP` 0, `REP` 27; K2-7B and K2-3.7B have no plan. Every route has `mode_off` and the three elements lie inside act.
+- `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set; K2-7B's `dxl` rebuilt with the mode element prints ROWS PASS at
+  70 and 1030.
+- Uno IDENTICAL to plain decode on chat / code at 64, 512, 1024 and 2048 (seen in every noisy run below) and on the six short prompts;
+  plain decode's kernels byte-identical to the set without the fold (dx, dxh, dx_f32, ln, lm_head_q4, lmhl: xclbin and insts.bin).
+- The non-folded route on the new `dxl` (mode element, `REP`) still runs: Uno IDENTICAL over 16 tokens.
+
+**Result (2026-10-16): correct, speed not established.** `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens on the folded set (0 of
+100352 logits differ on every row); K2-7B's rebuilt `dxl` (mode element, no fold) ROWS PASS at 70 and 1030. In the one paired unit that
+read sensibly the fold took the head from ~1.11 to ~0.93 of a plain step, but no unit of mine was clean: another session's CPU jobs (a
+conversion, builds, an `oflm` using the NPU) ran from 15:30 to past 21:30, and every `--measure` unit came back NOISY or with a control
+10-50 % off. The pairs that did run disagree on the layers (draft layers 67 -> 77 and verify 56 -> 59 in one, the other way in another).
+No tok/s figure for the fold is quoted, and the route stays opt-in until a quiet unit decides it.
+
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
 **Test category:** unit
@@ -1451,7 +1555,7 @@ sizes the shared window to pos0 + L rows.
 
 **Acceptance criteria (unit):**
 - The act regions do not overlap.
-- The main cores fit 60 KB at L = 4 and L = 8.
+- The main cores fit 60 KB at L = 4 and L = 8 (62 KB where OPEN-DXL-TABS keeps its slice tables).
 - The verify table covers every band of every projection exactly once.
 - Each draft base tile is followed by its LoRA k-tile at S0 = K / 256, and the band drains
   only after that tile.
@@ -1497,6 +1601,31 @@ sizes the shared window to pos0 + L rows.
   a 158-token one (157-172): 32 rows, 0 of 250624 logits differ on every one.
 - K2-7B on `dxl`, `dxl_lora` and `lmhl` rebuilt from the same sources: `ROWS PASS`, its job
   tables byte-identical.
+
+**Result 2026-10-16 (Granite 4.2 3B, hidden 2560; where a pass goes, `perf/granite-uno-depth`):** every figure a `dibs run --measure`
+unit inside `controlled.py` (context-0 control within 2 % before and after), a pass in plain decode steps (one step: 23.4 / 22.3 /
+21.4 / 19.7 tok/s at 0 / 512 / 1024 / 2048 tokens, tg128, fresh after the firmware update).
+- A verify pass was 1.48 steps at context 0 and 1.70 at 2048 (a draft pass 1.86 / 1.91). With OPEN-ATTN-SPLIT8 and OPEN-DXL-TABS they
+  are 1.39 / 1.55 and 1.75 / 1.75. Each pass also pays the head: `lmhl` takes 1.33x a plain head's time (the same 160 MB at ~39
+  against 52 GB/s) and two context switches (the first `dxl` dispatch after it takes 2.5x a steady layer's time, and the head's first
+  run 1.17x its second): ~7 % of a pass, which only folding the head into `dxl`'s context (as `dxh` is on `dx`) would remove.
+- Ablations of a verify pass at context 0 / 2048 (probe builds, percent of the pass): the L-row GEMV arithmetic -13 / -10 %, the
+  activation prep -10 / -4 %, prep + GEMV + norms -17 / -10 %, the norms alone -1 / +2 %, the silu epilogue -3 / +1 %, attention
+  arithmetic 0 / -20 %. A weight fifo of depth 2, 4 or 6 and a 16-deep memtile ring read alike: the pass is not waiting on
+  weights; the cores' prep and GEMV sit on its critical path in part.
+- Attention growth of a pass from context 0 to 2048 was 0.52 decode steps, 0.43 with OPEN-ATTN-SPLIT8; with the arithmetic compiled
+  out (`ATTN_NULL`) 0.16 remain, the window streams and block handshakes.
+- **`dxl` cannot reuse `dx`'s 16-core layout by kv head, and it would not pay if it could.** Four row groups of 16 cores are 64 cores
+  and the array has 32 compute tiles, of which 23 are free beside the 8 main cores and `ln`. The row-sequential variant (a core
+  takes one kv head's heads for all 4 rows over a shared window) is 12 head-rows a core (3 heads x 4 rows), against 8 now. A 3-head
+  `dx` core runs ~1,000 bundles an 8-row block for one row (~125 a cached row, so ~500 for 4 rows) and a 2-head one ~850; `dxl`'s
+  8-head TREE8 core ~3,550 a block (~440 a cached row) before OPEN-ATTN-SPLIT8 and ~2,350 (~290) after, so the row-sequential core
+  would be ~1.7x slower than what runs. The bound is the work: 160 head-rows (4 rows x 40 heads) over at most 23 cores is 7 a
+  core, against 8 on 20 cores now: 12 % of an attention walk (0.03 steps at 2048) even with perfect balance and no cost per
+  head-row to pay for it. (Bundle counts are Peano's, from `utilities/dxl-asm/attn_tu_check.py` and `bb_bundles.py`; the loop
+  trip counts are inferred.)
+- `ROWS PASS` and Uno IDENTICAL on every run below; K2-7B's `dxl` rebuilt from these sources (TABS 1, NPREP 4 in every row) builds
+  (14,912 of 16,384 B on the fullest core) and prints ROWS PASS at 70 and 1030 tokens on its own set.
 
 ### OPEN-UNO-LORA: A Uno diffusion LoRA as q4_1 bands
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/uno.py`, `--uno-adapter`, `open_kernels/recipes/dxl.py`, `designs/dxl`, `src/open_qwen36/core.cpp`)
@@ -1977,6 +2106,36 @@ runs met a busy box and were dropped; tokens a cycle in brackets; speed over the
   decode-depth set), so Uno alone loses everywhere but math, reason and the lookup prompts. The per-cycle choice keeps up:
   it falls back to plain steps on chat (0.99-1.05x) and gains 1.07-1.18x on code / math / reason and 1.35-2.39x where the
   reply copies its context (`fix_py` 48.0 tok/s, ~2.1x Vulkan Q4_1's ~23 at that depth).
+
+**Result 2026-10-16, the rows pass at depth (`perf/granite-uno-depth`: OPEN-ATTN-BLOCK8 as landed on 2026-10-15, OPEN-ATTN-SPLIT8,
+OPEN-DXL-TABS; before = the kernels at 81edf67, after = the same set with `dxl` / `dxl_lora` rebuilt; one CLI):** `utilities/granite-combined-bench/unodepth.py`,
+chat and code prompts of exactly 64 / 512 / 1024 / 2048 tokens (bench.py's repo text, frozen once; "0" is the 64-token prompt), 96 tokens
+each, `--uno` against plain decode in the same process, before and after interleaved per prompt, one run of each. Both units
+`dibs run --measure` CLEAN, the context-0 control within 1.4 % before and after; the plain column is the mean of the two runs.
+Plain decode needs no column of its own: `dx`, `dxh`, `ln`, `lm_head_q4` and `lmhl` are byte-identical before and after
+(tg128 23.35 / 22.33 / 21.40 / 19.72 tok/s at 0 / 512 / 1024 / 2048, both sets, 3 reps within 0.3 %).
+
+| context | prompt | tokens a cycle | Uno tok/s before -> after | plain tok/s | Uno / plain before -> after |
+|---|---|---|---|---|---|
+| 64 | chat | 2.91 | 20.79 -> 21.95 | 23.0 | 0.90x -> 0.96x |
+| 512 | chat | 2.74 | 18.35 -> 19.50 | 22.2 | 0.83x -> 0.88x |
+| 1024 | chat | 2.59 | 16.16 -> 17.28 | 21.4 | 0.76x -> 0.81x |
+| 2048 | chat | 2.53 | 13.82 -> 14.99 | 19.7 | 0.70x -> 0.76x |
+| 64 | code | 3.43 | 24.50 -> 25.83 | 23.1 | 1.06x -> 1.12x |
+| 512 | code | 3.00 | 20.06 -> 21.33 | 22.3 | 0.90x -> 0.96x |
+| 1024 | code | 2.82 | 17.56 -> 18.82 | 21.3 | 0.82x -> 0.89x |
+| 2048 | code | 3.43 | 18.76 -> 20.34 | 19.7 | 0.95x -> 1.03x |
+
+- Every run IDENTICAL to plain decode (16 of 16 in the two units); `--rows-check 17` ROWS PASS at 70, 1030 and 2060 tokens; the six
+  `uno-ref` prompts x 96 tokens, one run each: 3.02 tokens a cycle, all identical, Uno 17.74 / 18.71 / 22.27 / 23.05 / 26.55 / 24.62
+  -> 18.66 / 19.66 / 23.43 / 24.25 / 27.92 / 25.95 tok/s (+5.1 to +5.4 %), geometric-mean speedup 0.95x -> 1.00x.
+- Uno gains 5.4-7.2 % at 64-1024 tokens and 8.4-8.5 % at 2048, which is a cycle (draft + verify pass) 4.4 % cheaper at context 0 and
+  7.9 % at 2048: 3.3 -> 3.2 decode steps at 0 and 3.6 -> 3.3 at 2048. The depth-independent part is OPEN-DXL-TABS (prep), the
+  depth-dependent part OPEN-ATTN-SPLIT8. Uno alone still trails plain decode wherever acceptance is low (chat everywhere, code at
+  512-1024): chat's 2.5 tokens a cycle need a cycle under 2.5 steps and it costs 3.3. The per-cycle choice of OPEN-SPEC-LOOKUP,
+  not `--uno`, is what a served request takes.
+- Left on the table, in decode steps (measured, not built): the head's two context switches and its slow `lmhl`, ~0.1 of a step
+  a pass; the L-row GEMV arithmetic ~0.2 a pass; the attention window's stream ~0.16 a pass at 2048.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
