@@ -764,3 +764,14 @@ Outputs, state and cache match sequential host calls bytewise; history, cache
 prefix/tail and padding gates also pass. Worst normalized error is **6.1067e-6**
 against a **1e-3** limit. This conditions the stages on synthetic projections;
 NPU GEMMs, complete model prefill and serving require separate validation.
+
+### Real-weight prefill GEMM diagnostics
+
+[The prefill projection checker](../../utilities/prefill-projections/README.md)
+exercises all five production GEMM shapes with layer 0/3 weights and three
+captured decode inputs in two 256-column layouts. It checks linear Q/K/V/Z,
+attention Q/K/V/gate, output, FFN up/gate and down separately, against FP64
+products with both original and BF16-rounded inputs. Complete output sizes,
+finite data, zero inactive columns, slot identity and original input provenance
+are required. This is a conditioned projection diagnostic; complete causal
+prefill and hybrid/sequential route parity remain separate acceptance gates.
