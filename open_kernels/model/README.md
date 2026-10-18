@@ -775,3 +775,21 @@ products with both original and BF16-rounded inputs. Complete output sizes,
 finite data, zero inactive columns, slot identity and original input provenance
 are required. This is a conditioned projection diagnostic; complete causal
 prefill and hybrid/sequential route parity remain separate acceptance gates.
+
+### Causal prompt slice and prefill-to-decode handoff
+
+[The four-layer prefill checker](../../utilities/prefill-slice/README.md) tokenizes
+a real Qwen chat prompt, carries independent CPU conv/recurrent/KV state through
+all prompt positions, and predicts one continuation step. It compares all
+prompt logits and the continuation with sequential NPU and both hybrid
+schedules; hybrid layer-major/block-major logits must be byte-identical.
+The continuation's final-layer residual is checked from both split-down
+partials. A bounded-memory Q8 head reference shares weight unpacking across
+prompt positions. This slice does not establish full-depth or long-context
+prefill acceptance.
+
+The 20-token prompt plus continuation passes on all three routes: **63/63**
+logit comparisons, worst correlation **0.9999989974**, and exact hybrid schedule
+identity. Continuation final-layer residual maxrel is **0.0005230136** or better
+against **0.005**. These results cover four layers and one short prompt; the
+256-token boundary and full-depth prefill remain open.
