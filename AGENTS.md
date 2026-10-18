@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-host-boundaries</name>
+    <description>Build the CPU prefill bridge and validate FP32 history, paired KV and 255/256/257-token boundaries against an independent reference.</description>
+    <location>.agents/skills/open-qwen38-prefill-host-boundaries/SKILL.md</location>
+  </skill>
+  <skill>
     <name>npu_offload_pipeline</name>
     <description>End-to-end workflow for offloading dense GEMM operations to AMD NPU2 via mlir-aie/iron. Use when: compiling NPU xclbins, integrating NPU backends into embedding/LLM engines, validating NPU vs CPU reference, debugging XRT dispatch issues, or extending to new model architectures.</description>
     <location>.agents/skills/npu_offload_pipeline.md</location>
