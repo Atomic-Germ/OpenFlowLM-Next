@@ -100,10 +100,33 @@ def tail_batch(model,spec,xs):
     return head_batch(model,hn,spec.vocab)
 
 
+def prompt_cases(ids,boundaries):
+    lengths=(255,256,257) if boundaries else (len(ids),)
+    if not ids or len(ids)<max(lengths):raise ValueError('insufficient tokens for requested prefixes')
+    return {n:ids[:n] for n in lengths}
+
+
+def causal_prefixes(xs,state,lengths,decode):
+    """Preserve independent causal checkpoints even when decode mutates state."""
+    if (not lengths or len(set(lengths))!=len(lengths)
+            or any(type(n)!=int or not 1<=n<=len(xs) for n in lengths)):
+        raise ValueError('invalid causal checkpoints')
+    rows=[];states={}
+    for pos,x in enumerate(xs[:max(lengths)]):
+        y,state=decode(x,state,pos)
+        rows.append(np.array(y,dtype=np.float32,copy=True))
+        if pos+1 in lengths:states[pos+1]=tuple(np.array(v,copy=True) for v in state)
+    return rows,states
+
+
 def prepare(a):
     from tokenizers import Tokenizer
     out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
     for name in ('reference.json','report.json'):(out/name).unlink(missing_ok=True)
+    boundaries=getattr(a,'boundaries',False)
+    if boundaries:
+        for n in (255,256,257):
+            for name in ('reference.json','report.json'):(out/str(n)/name).unlink(missing_ok=True)
     spec=spec_from_model_dir(a.model)
     m0=json.loads((a.kernels/'manifest.json').read_text())
     m=load_bundle(a.kernels,manifest(spec,max_ctx=m0['max_ctx_default']))
@@ -119,9 +142,13 @@ def prepare(a):
         source[str(p.resolve())]=digest(p)
     tk=Tokenizer.from_file(str(a.model/'tokenizer.json'))
     ids=prompt_ids(tk,a.message,False)
+    cases=prompt_cases(ids,boundaries);ids=cases[max(cases)]
     if any(type(t)!=int or not 0<=t<spec.real_vocab for t in ids) or len(ids)+1>m['max_ctx_default']:
         raise ValueError('invalid prompt ids/context')
-    (out/'ids.txt').write_text(','.join(map(str,ids))+'\n')
+    dirs={n:out/str(n) if boundaries else out for n in cases}
+    for n,d in dirs.items():
+        d.mkdir(parents=True,exist_ok=True)
+        (d/'ids.txt').write_text(','.join(map(str,cases[n]))+'\n')
     print(f'prompt: {len(ids)} tokens; four layers; one continuation step',flush=True)
     model=Q4NX(path);model.hidden=spec.hidden;model.native_q8=lambda name:False
     plain=model.matmul_w;cache={}
@@ -130,44 +157,49 @@ def prepare(a):
         return cache[name]
     model.matmul_w=cached
     xs=[model.embed(t,spec.hidden).astype(np.float32) for t in ids]
-    states=[];refs={}
-    def save(name,value):
-        p=out/name;np.asarray(value,dtype='<f4').tofile(p);refs[name]=digest(p)
+    states=[];refs={n:{} for n in cases}
+    def save(n,name,value):
+        p=dirs[n]/name;np.asarray(value,dtype='<f4').tofile(p);refs[n][name]=digest(p)
     for layer in range(4):
         cache.clear()
         conv=np.zeros((spec.conv_kernel-1,spec.lin_qkv_dim))
         state=np.zeros((spec.lin_value_heads,spec.lin_value_dim,spec.lin_value_dim))
         k=np.zeros((0,spec.num_kv_heads,spec.head_dim));v=k.copy()
-        rows=[]
-        for pos,x in enumerate(xs):
-            y,conv,state,k,v=oracle.layer_decode(model,spec,layer,x,conv,state,k,v,pos)
-            rows.append(np.asarray(y,np.float32))
-        xs=rows;states.append((conv,state,k,v));save(f'ref_res{layer}.bin',np.stack(xs))
+        def decode(x,s,pos):
+            y,*s=oracle.layer_decode(model,spec,layer,x,*s,pos)
+            return y,s
+        xs,snapshots=causal_prefixes(xs,(conv,state,k,v),tuple(cases),decode)
+        states.append(snapshots)
+        for n in cases:save(n,f'ref_res{layer}.bin',np.stack(xs[:n]))
         print(f'CPU prompt layer {layer} complete',flush=True)
     cache.clear()
     logits=tail_batch(model,spec,xs)
-    for pos,y in enumerate(logits):
-        save(f'ref_p{pos}.bin',y)
+    for n in cases:
+        for pos,y in enumerate(logits[:n]):save(n,f'ref_p{pos}.bin',y)
     print(f'CPU logits: {len(ids)} positions complete',flush=True)
-    continuation=int(logits[-1][:spec.real_vocab].argmax())
-    x=model.embed(continuation,spec.hidden).astype(np.float32)
+    continuation={n:int(logits[n-1][:spec.real_vocab].argmax()) for n in cases}
+    continuation_x={n:model.embed(t,spec.hidden).astype(np.float32) for n,t in continuation.items()}
     for layer in range(4):
         cache.clear()
-        x,*state=oracle.layer_decode(model,spec,layer,x,*states[layer],len(ids))
-        x=np.asarray(x,np.float32);save(f'ref_cont_res{layer}.bin',x)
+        for n in cases:
+            x,*state=oracle.layer_decode(model,spec,layer,continuation_x[n],*states[layer][n],n)
+            continuation_x[n]=np.asarray(x,np.float32);save(n,f'ref_cont_res{layer}.bin',continuation_x[n])
         print(f'CPU continuation layer {layer} complete',flush=True)
-    cache.clear();last=tail_batch(model,spec,[x])[0];save('ref_cont_logits.bin',last)
-    expected=[continuation,int(np.asarray(last)[:spec.real_vocab].argmax())]
+    cache.clear();last=tail_batch(model,spec,list(continuation_x.values()))
     sources=[Path(__file__),ROOT/'open_kernels/model/replica_qwen35.py',ROOT/'open_kernels/model/replica_prompt.py',ROOT/'open_kernels/model/q4nx.py',ROOT/'open_kernels/model/decode_bundle.py',ROOT/'open_kernels/model/compare_decode.py']
     sources+=list((ROOT/'open_kernels/recipes').glob('*.py'))
     for p in sources:source[str(p.resolve())]=digest(p)
-    meta=dict(version=1,layers=4,ids=ids,message=a.message,expected_tokens=expected,
-              vocab=spec.vocab,real_vocab=spec.real_vocab,hidden=spec.hidden,
-              build_key=m['build_key'],spec_hash=m['spec_hash'],max_ctx=m['max_ctx_default'],
-              sources=source,references=refs,ids_sha256=digest(out/'ids.txt'),
-              model=str(a.model.resolve()),kernels=str(a.kernels.resolve()))
-    (out/'reference.json').write_text(json.dumps(meta,indent=2)+'\n')
-    print('CPU expected continuation:',expected,flush=True)
+    for (n,d),y in zip(dirs.items(),last):
+        save(n,'ref_cont_logits.bin',y)
+        expected=[continuation[n],int(y[:spec.real_vocab].argmax())]
+        meta=dict(version=1,layers=4,ids=cases[n],message=a.message,expected_tokens=expected,
+                  prompt_kind='chat_prefix' if boundaries else 'complete_chat',
+                  vocab=spec.vocab,real_vocab=spec.real_vocab,hidden=spec.hidden,
+                  build_key=m['build_key'],spec_hash=m['spec_hash'],max_ctx=m['max_ctx_default'],
+                  sources=source,references=refs[n],ids_sha256=digest(d/'ids.txt'),
+                  model=str(a.model.resolve()),kernels=str(a.kernels.resolve()))
+        (d/'reference.json').write_text(json.dumps(meta,indent=2)+'\n')
+        print(f'CPU expected continuation at {n}: {expected}',flush=True)
 
 
 def run(a):
@@ -232,6 +264,7 @@ def main():
     p=sub.add_parser('prepare')
     for key in ('out','model','kernels','original'):p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--message',default='What is 2 + 2?')
+    p.add_argument('--boundaries',action='store_true',help='prepare shared causal prefixes of 255/256/257 tokens; message must be long enough')
     p=sub.add_parser('run');p.add_argument('--out',type=Path,required=True);p.add_argument('--cli',type=Path,required=True)
     a=ap.parse_args();return prepare(a) if a.command=='prepare' else run(a)
 
