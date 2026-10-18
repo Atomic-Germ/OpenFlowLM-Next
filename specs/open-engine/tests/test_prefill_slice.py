@@ -74,3 +74,85 @@ def test_batched_q8_head_matches_existing_scalar_reference():
     got=m.head_batch(model,xs,vocab)
     np.testing.assert_allclose(got,want,rtol=2e-5,atol=2e-5)
     with pytest.raises(ValueError):m.head_batch(model,xs[:,:-1],vocab)
+
+
+def test_boundary_prefixes_require_all_three_real_lengths():
+    ids=list(range(300))
+    cases=m.prompt_cases(ids,True)
+    assert list(cases)==[255,256,257]
+    assert all(tokens==ids[:n] for n,tokens in cases.items())
+    assert m.prompt_cases(ids[:20],False)=={20:ids[:20]}
+    for bad in [[],ids[:256]]:
+        with pytest.raises(ValueError):m.prompt_cases(bad,True)
+
+
+def test_causal_snapshots_match_separate_runs_without_aliasing():
+    # The decoder deliberately mutates every state buffer, as DeltaNet mutates S.
+    def decode(x,state,pos):
+        for a in state:a[:]+=x+pos
+        return np.array([state[0][0]]),state
+    initial=tuple(np.zeros(2) for _ in range(4));xs=np.arange(257)
+    rows,states=m.causal_prefixes(xs,initial,(255,256,257),decode)
+    for n in (255,256,257):
+        state=tuple(np.zeros(2) for _ in range(4))
+        for pos,x in enumerate(xs[:n]):want,state=decode(x,state,pos)
+        np.testing.assert_array_equal(rows[n-1],want)
+        for actual,expected in zip(states[n],state):np.testing.assert_array_equal(actual,expected)
+    saved=states[256][1].copy()
+    states[255][1][:]=-1
+    np.testing.assert_array_equal(states[256][1],saved)
+    assert not np.shares_memory(states[257][1],initial[1])
+
+
+@pytest.mark.parametrize('lengths',[(255,256,258),(0,256,257),(255,255,257),()])
+def test_causal_prefixes_reject_invalid_checkpoints(lengths):
+    with pytest.raises(ValueError):
+        m.causal_prefixes(np.zeros(257),(),lengths,lambda x,s,p:(x,s))
+
+
+@pytest.mark.parametrize('boundaries',[False,True])
+def test_prepare_uses_each_prefix_state_and_own_prediction(tmp_path,monkeypatch,boundaries):
+    import json
+    import sys
+    from types import SimpleNamespace as NS
+    model=tmp_path/'model';kernels=tmp_path/'kernels';model.mkdir();kernels.mkdir()
+    for name in ('model.q4nx','config.json','tokenizer.json'):(model/name).write_text('{}')
+    for name in ('spec.json','toolchain.json'):(kernels/name).write_text('{}')
+    bundle=dict(max_ctx_default=2048,build_key='test',spec_hash='test')
+    (kernels/'manifest.json').write_text(json.dumps(bundle))
+    original=tmp_path/'original.json'
+    original.write_text(json.dumps({str(model/'model.q4nx'):m.digest(model/'model.q4nx')}))
+    spec=NS(family='qwen35',hidden=5120,num_layers=64,
+            layer_types=['linear_attention']*3+['full_attention'],real_vocab=32,vocab=32,
+            conv_kernel=4,lin_qkv_dim=1,lin_value_heads=1,lin_value_dim=1,
+            num_kv_heads=1,head_dim=1)
+    ids=[i%32 for i in range(270 if boundaries else 20)]
+    monkeypatch.setitem(sys.modules,'tokenizers',NS(Tokenizer=NS(from_file=lambda p:None)))
+    monkeypatch.setattr(m,'prompt_ids',lambda *args:ids)
+    monkeypatch.setattr(m,'spec_from_model_dir',lambda p:spec)
+    monkeypatch.setattr(m,'manifest',lambda *args,**kwargs:bundle)
+    monkeypatch.setattr(m,'load_bundle',lambda *args:bundle)
+    monkeypatch.setattr(m,'Q4NX',lambda p:NS(matmul_w=lambda *args:None,
+                                          embed=lambda t,h:np.full(h,t,np.float32)))
+    def decode(model,spec,layer,x,conv,state,k,v,pos):
+        assert np.all(state==pos)  # Detect late snapshots and continuation cross-contamination.
+        state+=1
+        return x+1,conv,state,k,v
+    def head(model,spec,xs):
+        out=np.zeros((len(xs),32),np.float32)
+        for i,x in enumerate(xs):out[i,int(x[0])%32]=1
+        return out
+    monkeypatch.setattr(m.oracle,'layer_decode',decode)
+    monkeypatch.setattr(m,'tail_batch',head)
+    out=tmp_path/'out'
+    m.prepare(NS(out=out,model=model,kernels=kernels,original=original,
+                 message='fixture',boundaries=boundaries))
+    for n in ((255,256,257) if boundaries else (20,)):
+        d=out/str(n) if boundaries else out
+        meta=json.loads((d/'reference.json').read_text())
+        expected=(ids[n-1]+4)%32
+        assert meta['ids']==ids[:n]
+        assert meta['expected_tokens']==[expected,(expected+4)%32]
+        assert len(meta['references'])==n+9
+        m.verify({str(d/name):sha for name,sha in meta['references'].items()})
+        np.testing.assert_array_equal(m.read(d/'ref_cont_res3.bin',5120),np.full(5120,expected+4))

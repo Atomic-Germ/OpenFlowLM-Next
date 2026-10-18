@@ -59,8 +59,68 @@ buffer. The report records hashes, per-position scores and token identity.
 Missing or stale input/reference data is refused; expected output dumps and
 prior success are invalidated before a rerun. A run failure leaves a failed
 report. Run the CPU preparation and resident NPU tests serially to avoid
-competing for memory. Source conversion, long prompts across 256-token blocks,
-all-layer residual coverage, full-depth prefill and serving are separate gates.
+competing for memory. Source conversion, all-layer residual coverage,
+full-depth prefill and serving are separate gates.
+
+## Crossing a 256-token block
+
+`prepare --boundaries` prepares directories `255`, `256` and `257` beneath
+`--out`. Supply a message that tokenizes to at least 257 tokens. These cases
+are prefixes of the same tokenized chat, potentially ending inside the user
+message; they are numerical state-carry checks, not complete chat requests.
+The message and exact prefix IDs are retained in each reference manifest.
+
+The CPU processes the longest prefix once per layer and deep-copies conv,
+recurrent and KV state at each boundary. It calculates all prompt logits in
+one batch, then selects each prefix's own greedy continuation and advances its
+independent saved state. Layer weights are shared across the three continuation
+cases before being released. Tests compare checkpointed state with separate
+sequential runs and exercise in-place mutation and distinct continuation IDs.
+
+For the retained boundary fixture, prepare with the same model, kernel and
+original-provenance arguments as above, adding `--boundaries` and using this
+message repeated **12 times** (including its trailing space):
+
+```text
+A language model reads a sequence of tokens and preserves information from earlier positions. Each layer updates recurrent state or an attention cache before passing its output to the next layer. Splitting the same sequence into blocks must preserve the causal order and the next token prediction.
+```
+
+Then run the cases serially:
+
+```bash
+for length in 255 256 257; do
+  OPENBLAS_NUM_THREADS=1 LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+    ironvenv/bin/python utilities/prefill-slice/check.py run \
+    --out "Models/qwen38-27b/prefill-slice/boundaries/$length" \
+    --cli /tmp/qwen38-main-merge-next/build/open_qwen36_cli || break
+done
+```
+
+Every case runs all three schedules and applies the same logit, token,
+continuation residual and hybrid identity gates. Passing the 257-token case
+requires a partial second prefill block followed by a decode step; four-layer
+results still do not establish full-depth prefill or long-context acceptance.
+
+On 2026-10-18 all **9 runs** passed: **2313/2313** prompt/continuation logit
+comparisons, matching real-vocabulary argmax throughout. Minimum correlation
+was **0.9999994801** for sequential NPU and **0.9999975248** for both hybrid
+schedules. Continuation final-layer residual errors were:
+
+| Prompt tokens | Sequential maxrel | Hybrid maxrel (both schedules) |
+|---|---:|---:|
+| 255 | 0.0002930006 | 0.0000525120 |
+| 256 | 0.0000940882 | 0.0000306139 |
+| 257 | 0.0002093509 | 0.0002889360 |
+
+All **774** hybrid logit files, including last-prompt aliases, were byte-exact
+between schedules. All cases predicted `[220, 220]` on this truncated slice;
+the full distributions, not text quality, are the numerical acceptance target.
+References, output hashes and logs are retained in
+`Models/qwen38-27b/prefill-slice/boundaries/`. Regression: **1405 passed,
+47 skipped**, native CTest **4/4**. Production kernels and native arithmetic
+were unchanged; no new kernel or native library build was required.
+
+## Short-prompt measurement
 
 On 2026-10-18 the 20-token prompt above passed all three routes: **63/63**
 position comparisons (20 prompt positions plus one continuation per route).

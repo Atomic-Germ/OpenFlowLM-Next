@@ -791,5 +791,13 @@ prefill acceptance.
 The 20-token prompt plus continuation passes on all three routes: **63/63**
 logit comparisons, worst correlation **0.9999989974**, and exact hybrid schedule
 identity. Continuation final-layer residual maxrel is **0.0005230136** or better
-against **0.005**. These results cover four layers and one short prompt; the
-256-token boundary and full-depth prefill remain open.
+against **0.005**.
+
+The same checker now prepares shared causal prefixes of **255/256/257 tokens**,
+with independent state snapshots and a separate CPU-selected continuation for
+each length. All **9 native runs** pass: **2313/2313** logit comparisons,
+minimum correlation **0.9999975248**, maximum continuation final-layer residual
+error **0.0002930006 <0.005**. All **774** hybrid logit files match bytewise
+between schedules. This covers the 256-token block boundary on four layers;
+full-depth prefill, all-layer residual coverage and long-context acceptance
+remain open.
