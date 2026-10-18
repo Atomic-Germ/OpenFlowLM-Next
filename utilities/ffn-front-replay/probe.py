@@ -22,11 +22,13 @@ from ironutil import Pipeline,include_dirs
 from recipes.load import current_spec
 from recipes.qwen35 import recipe
 from recipes.qwen36moe import band_bytes
+sys.path.insert(0,str(HERE))
+from front_build import prep_flags,validate_spec,sources as build_sources
 S=current_spec();R=recipe(S);H=S.hidden;F=S.intermediate;C=R.common;L=R.layout
 if S.family!='qwen35' or 'ffn' in S.q8_roles or H%1024:
     raise ValueError('probe requires qwen35 Q4 FFN with hidden divisible by 1024')
 MODE=int(os.environ.get('FRONT_FP32','1'))
-if MODE not in (0,1):raise ValueError('FRONT_FP32 must be 0 or 1')
+validate_spec(S,MODE)
 GEMV=ROOT/'designs/gemv_q4';LN=ROOT/'designs/ln'
 
 def ty(n,dtype):return np.ndarray[(n,),np.dtype[dtype]]
@@ -37,7 +39,7 @@ def probe(pool:In, resnorm:In, norm:InOut, captures:InOut, *, srchash:CompileTim
     inc=include_dirs()+[str(GEMV),str(LN)]
     u=ty(H,bfloat16);x=ty(1024,np.float32);w=ty(C.CALL_BYTES,np.uint8)
     y=ty(64,np.float32);tab=ty(H*9//4,np.uint8);ms=ty(128,np.float32)
-    flags=['-Os',f'-DGEMV_PER_CALL={C.PER_CALL}',f'-DFRONT_FP32={MODE}']
+    flags=['-Os',f'-DGEMV_PER_CALL={C.PER_CALL}']+prep_flags(MODE)
     def ext(name,args):return ExternalFunction(name,source_file=str(HERE/(name+'.cc')),arg_types=args,include_dirs=inc,compile_flags=flags)
     prep=ext('front_prep',[x,tab,np.int32,np.int32])
     gms=ext('front_gms',[w,tab,ms,np.int32,np.int32,np.int32])
@@ -72,6 +74,6 @@ def probe(pool:In, resnorm:In, norm:InOut, captures:InOut, *, srchash:CompileTim
         p.finish()
     return Program(iron.get_current_device(),Runtime(seq,[pool_t,rn_t,n_t,out_t,ni.prod(),no.cons(),wi.prod(),xi.prod(),yo.cons()]),workers=workers).resolve_program()
 
-sources=[HERE/'front_prep.cc',HERE/'front_gms.cc',HERE/'front_emit.cc',HERE/'probe.py',GEMV/'gemv_q4.h',GEMV/'gemv_tab.h',LN/'ln_nr32.cc',LN/'ln.h',ROOT/'include/vecmath.h']
+sources=build_sources(S)
 DESIGN=probe
 SPECIALIZE=dict(srchash=int(hashlib.sha256(b''.join(p.read_bytes() for p in sources)+S.to_json().encode()+str(MODE).encode()).hexdigest()[:8],16))

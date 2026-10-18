@@ -720,7 +720,34 @@ FFN front/partial0/partial1 errors are 0.0002516594 / 0.0000958907 / 0.000069356
 The complete model also passes resident runtime validation: all three logits
 are byte-identical to the harness after a repeated request, and full-buffer
 reset reports zero differing replays out of three. This validates the tested
-three-position decode and lifecycle. Separate all-layer FFN up/gate captures,
-remaining source/packing checks, block-prefill parity, serving isolation and
+three-position decode and lifecycle. The separate all-layer FFN projection
+checks below supplement it. Remaining source/packing checks, block-prefill
+parity, serving isolation and
 resource/performance acceptance remain open. Paired-KV block attention still
 uses host attention; these sequential NPU checks do not establish fully NPU prefill.
+
+
+### Separate FFN up/gate across all layers
+
+`utilities/ffn-front-replay/front_build.py` builds the isolated probe with
+production consistent Q4 preparation; `sweep.py` replays all captured pre-FFN
+residuals using one pool BO. It requires both byte-exact production norm/H and
+independent FP64 up/gate/activation gates, so a matching product cannot hide
+an incorrect individual projection. Original model/pool/capture provenance,
+compiled sources, header dependencies, configuration and all outputs are pinned.
+The input ABI is FP32 residual followed by BF16 norm weights; reference arrays
+must be serialized explicitly because the checker promotes them to FP64.
+
+All 64 layers × three positions pass: **192/192** independent cases, with
+**192/192** norm and **192/192** activation arrays byte-exact to production.
+Worst up/gate errors are **0.0000919118 / 0.0001016790**, norm/activation
+**0.0000189398 / 0.0002516594**, all below the unchanged **0.005** bound.
+The two probe cores use **6400 / 2944 bytes** of text, L1 ends **33024 / 53248**,
+and **2048-byte** stacks. Logical NPU buffers total **0.217 GiB**; full-model
+residency is unnecessary. The production export and its 82 binary hashes are
+unchanged. This diagnostic xclbin is not an application kernel export.
+
+The [FFN projection runbook](../../.agents/skills/open-qwen38-ffn-projection-sweep/SKILL.md)
+records complete commands and evidence. These isolated measurements supplement
+the full-depth decode checks; source conversion, prefill, serving and performance
+acceptance remain separate requirements.

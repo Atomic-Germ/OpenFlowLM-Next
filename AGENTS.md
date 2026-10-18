@@ -146,4 +146,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build production consistent Q4 sums and validate full-depth lx/ax decode, independent boundaries and resident identity/reset.</description>
     <location>.agents/skills/open-qwen38-consistent-integration/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-ffn-projection-sweep</name>
+    <description>Build a production-arithmetic FFN probe and validate separate up/gate projections across all layers with exact norm/activation identity.</description>
+    <location>.agents/skills/open-qwen38-ffn-projection-sweep/SKILL.md</location>
+  </skill>
 </available_skills>
