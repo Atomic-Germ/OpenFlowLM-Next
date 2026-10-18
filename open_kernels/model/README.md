@@ -751,3 +751,16 @@ The [FFN projection runbook](../../.agents/skills/open-qwen38-ffn-projection-swe
 records complete commands and evidence. These isolated measurements supplement
 the full-depth decode checks; source conversion, prefill, serving and performance
 acceptance remain separate requirements.
+
+### FP32-history and paired-KV host prefill boundaries
+
+`replica_block.py` supports FP32 convolution history (`conv_f32`) and four-plane
+paired-BF16 KV (`kv_pair`), preserving the legacy BF16 defaults.
+[The host boundary checker](../../utilities/prefill-boundaries/README.md) compiles
+the production CPU stages and compares independent FP64 results with both
+one-token and padded 256-token calls. Prompts of **1, 2, 255, 256 and 257 tokens**,
+each followed by one continuation token, pass at the actual 27B dimensions.
+Outputs, state and cache match sequential host calls bytewise; history, cache
+prefix/tail and padding gates also pass. Worst normalized error is **6.1067e-6**
+against a **1e-3** limit. This conditions the stages on synthetic projections;
+NPU GEMMs, complete model prefill and serving require separate validation.
