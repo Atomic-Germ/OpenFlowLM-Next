@@ -39,6 +39,21 @@ target_compile_definitions(settings_resolver_test PRIVATE
     OFLM_NO_XRT=1)
 add_test(NAME settings_resolver_test COMMAND settings_resolver_test)
 
+# Config store tests (host-only, no NPU needed)
+add_executable(config_store_test config_store_test.cpp
+    test_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/config_store.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)
+target_include_directories(config_store_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR})
+target_compile_definitions(config_store_test PRIVATE
+    CMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
+    OFLM_NO_XRT=1)
+add_test(NAME config_store_test COMMAND config_store_test)
+
 add_subdirectory(npu_platform)
 add_subdirectory(model_backend)
 add_subdirectory(downloader_pinning)

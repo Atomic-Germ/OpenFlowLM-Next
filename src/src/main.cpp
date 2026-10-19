@@ -15,6 +15,7 @@
 #include "utils/utils.hpp"
 #include "program_args.hpp"
 #include "minja/chat-template.hpp"
+#include "config/config_cmd.hpp"
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -555,6 +556,11 @@ int main(int argc, char* argv[]) {
     program_args_t parsed_args;
     if (!arg_utils::parse_options(argc, argv, parsed_args)) {
         return 1; // Help was already printed by Boost Program Options
+    }
+
+    // Early dispatch for config — doesn't need the model registry
+    if (parsed_args.command == "config") {
+        return oflm::config::config_command_main(parsed_args);
     }
 
     
