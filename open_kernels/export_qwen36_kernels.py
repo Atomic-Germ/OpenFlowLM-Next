@@ -69,6 +69,55 @@ FILES = ("final.xclbin", "insts.bin")
 
 
 # ————————————————————————————————————————————————————————————————
+# Content-addressed build cache
+# ————————————————————————————————————————————————————————————————
+# 50 build_dir paths are shared between specs: attn_block/build_s256 is wanted
+# by 7 specs, and the last full export ran 340 builds for 130 unique designs.
+# The shared designs (attn_block, gemm_q4_prefill, lm_head_q4, ln) have no
+# gen_kernels.py and do not read OPEN_KERNELS_SPEC, so their output is a
+# function of (design sources, compile-time knobs) alone -- the build_dir name
+# already encodes the spec-dependent parts. Hash those, write the hash next to
+# the output, and the next spec to want the design reuses it instead of
+# rebuilding an identical xclbin.
+#
+# The key covers the design's source files, so a design that DOES generate
+# per-spec sources (dense, layer_x) changes its key when the spec changes and
+# is rebuilt -- which is correct, and is also why Task 30 isolates those
+# sources per spec in the first place.
+
+KEY_FILE = ".build_key"
+
+
+def build_content_key(design: Path, out: Path, env: dict) -> str:
+    """Hash of everything that determines the build's output.
+
+    Covers the design's source files (excluding build outputs and caches) and
+    the compile-time knobs. Two builds with the same key produce the same
+    xclbin, so the second one can reuse the first one's output.
+    """
+    h = hashlib.sha256()
+    h.update(str(out.relative_to(DESIGNS)).encode())
+    h.update(b"\0")
+    for f in sorted(design.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(design)
+        top = rel.parts[0] if rel.parts else ""
+        if top.startswith("build") or top in ("__pycache__", ".staging", ".locks"):
+            continue
+        if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
+            continue
+        h.update(rel.as_posix().encode())
+        h.update(b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    for k in sorted(env):
+        h.update(f"{k}={env[k]}".encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+# ————————————————————————————————————————————————————————————————
 # Per-design build lock
 # ————————————————————————————————————————————————————————————————
 # 50 build_dir paths are shared between specs (e.g. lm_head_q4/build_151936 is
@@ -203,9 +252,33 @@ def fullest_core(bdir: Path) -> int | None:
         return None
 
 
-def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
-    """Build one kernel set. Worker for the parallel build; returns (name, bdir)."""
-    src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
+def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> tuple[str, Path]:
+    """Build one kernel set. Worker for the parallel build; returns (name, bdir).
+    
+    If stage_root is provided, the design sources are staged in that directory and
+    build_design.py compiles from the staged location to isolate per-spec sources.
+    """
+    design_path = sets[name]["design"]
+    if stage_root:
+        # Use the staged design path
+        src = stage_root / design_path.name
+        src.mkdir(parents=True, exist_ok=True)
+        # Copy non-build files from the original design to the staged location
+        orig_src = DESIGNS / design_path
+        for item in orig_src.iterdir():
+            # Skip build directories and __pycache__
+            if item.is_dir() and item.name.startswith("build") or item.name == "__pycache__":
+                continue
+            if item.is_file():
+                dest = src / item.name
+                if not dest.exists() or dest.stat().st_mtime < item.stat().st_mtime:
+                    shutil.copy2(item, dest)
+    else:
+        # Use the original design path
+        src = DESIGNS / design_path
+    
+    out = DESIGNS / sets[name]["build_dir"]
+    knobs = sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
     env["OPEN_KERNELS_SPEC"] = str(spec_file)
@@ -216,6 +289,16 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
     # The lock keeps two specs out of the same build dir at once: the designs
     # are shared, and build_design.py wipes its work dir before compiling.
     with design_lock(out):
+        # The cache lives next to the output, so it is covered by the same lock
+        # as the build: a spec that finds a current key reuses the xclbin
+        # instead of rebuilding an identical one.
+        key = build_content_key(src.parent, out, knobs)
+        marker = out / KEY_FILE
+        have = all((out / f).is_file() for f in FILES)
+        if have and marker.is_file() and marker.read_text(encoding="utf-8").strip() == key:
+            print(f"[{name}] up to date (build key {key[:19]}), reusing", flush=True)
+            return name, out
+
         # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
         # reports a core whose program does not fit only as an invalid ELF.
         p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
@@ -236,6 +319,7 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
             detail = tail.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
                                f"Last build output:\n{detail or '(no output)'}")
+        marker.write_text(key + "\n", encoding="utf-8")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
@@ -243,9 +327,9 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
     return name, out
 
 
-def build(name: str, sets: dict, spec_file: Path) -> Path:
+def build(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> Path:
     """Sequential build of a single set (kept for callers that want it)."""
-    _, out = _build_one(name, sets, spec_file)
+    _, out = _build_one(name, sets, spec_file, stage_root)
     return out
 
 
@@ -327,7 +411,18 @@ def main() -> int:
             print(f"up to date: {mj} already has build key {key[:19]} and every file; --force rebuilds")
             a.no_build = True
 
+    # ---- invalidate per-design cache when --force is used
+    if a.force:
+        for n in names:
+            bdir = DESIGNS / sets[n]["build_dir"]
+            marker = bdir / KEY_FILE
+            if marker.is_file():
+                marker.unlink()
+
     # ---- the whole-layer designs' kernel TUs for this spec, then the builds
+    # Create a per-spec staging directory to isolate generated sources
+    stage_root = DESIGNS / ".staging" / spec.spec_hash()[7:26]  # strip "sha256:" prefix, use first 19 chars
+    
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)
         gen_dir = HERE / F.GEN_KERNELS
@@ -335,7 +430,10 @@ def main() -> int:
         gspec = importlib.util.spec_from_file_location("gen_kernels", gen_dir)
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
-        gen.generate(F.recipe(spec))
+        # Generate into the staging directory instead of the shared design dir
+        stage_root.mkdir(parents=True, exist_ok=True)
+        gen.generate(F.recipe(spec), out=stage_root)
+    
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
     if a.no_build:
@@ -344,7 +442,7 @@ def main() -> int:
     else:
         workers = max(1, min(a.jobs, len(names)))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(_build_one, n, sets, spec_file) for n in names]
+            futures = [ex.submit(_build_one, n, sets, spec_file, stage_root) for n in names]
             for future in concurrent.futures.as_completed(futures):
                 n, bdir = future.result()
                 bdirs[n] = bdir

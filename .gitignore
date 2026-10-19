@@ -47,6 +47,7 @@ CLAUDE.md
 # artifacts too, so a directory named anything at all cannot carry them in.
 open_kernels/designs/*/build*/
 open_kernels/designs/.locks/
+open_kernels/designs/.staging/
 open_kernels/designs/**/final.xclbin
 open_kernels/designs/**/final.prj/
 open_kernels/designs/**/insts.bin
