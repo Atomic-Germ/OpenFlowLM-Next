@@ -511,10 +511,26 @@ int config_command_main(const program_args_t& args) {
         return config_gen_schema(args);
     } else if (action == "migrate") {
         return config_migrate(args);
+    } else if (action == "review") {
+        std::string mode = "interactive";
+        if (args.config_accept_shipped) mode = "accept-shipped";
+        else if (args.config_keep_all) mode = "keep-all";
+
+        if (mode == "interactive") {
+            // Interactive mode not yet available (Task 17)
+            std::cerr << "Interactive review not yet available." << std::endl;
+            std::cerr << "Use 'oflm config review --accept-shipped' to remove redundant overrides," << std::endl;
+            std::cerr << "or 'oflm config review --keep-all' to keep all and update version." << std::endl;
+            return 1;
+        }
+
+        std::string settings_path = utils::find_user_settings();
+        int removed = reconcile_settings(settings_path, mode);
+        return removed >= 0 ? 0 : 1;
     }
-    
+
     std::cerr << "Error: Unknown config action '" << action << "'" << std::endl;
-    std::cerr << "Valid actions: show, set, unset, edit, gen-schema, migrate" << std::endl;
+    std::cerr << "Valid actions: show, set, unset, edit, gen-schema, migrate, review" << std::endl;
     return 1;
 }
 
