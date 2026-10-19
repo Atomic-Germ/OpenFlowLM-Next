@@ -156,4 +156,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build a production-arithmetic FFN probe and validate separate up/gate projections across all layers with exact norm/activation identity.</description>
     <location>.agents/skills/open-qwen38-ffn-projection-sweep/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-paired-prefill-input</name>
+    <description>Build private paired-BF16-input GEMM CLIs and audit full-depth causal prefill against a byte-exact control.</description>
+    <location>.agents/skills/open-qwen38-paired-prefill-input/SKILL.md</location>
+  </skill>
 </available_skills>

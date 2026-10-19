@@ -236,3 +236,14 @@ single-vector references: worst maxrel **5.6245e-7**, same argmax, and unchanged
 layer residuals. The reference uses FP64 head accumulation; it is numerically
 close to, not byte-identical with, the older FP32 accumulation. The run used
 `tokenizers 0.23.3`. Regression: **1397 passed, 47 skipped**, native CTest **4/4**.
+
+## Paired-input follow-up
+
+The private [paired BF16 input experiment](../prefill-paired-input/README.md)
+reproduces all 66 original logits bytewise, then repeats each projection with
+the BF16-rounded residual of its FP32 input. On the same 64-layer short prompt,
+both hybrid schedules now pass all 21 position gates: minimum correlation
+**0.9999488108**, final continuation residual **0.0011956505**. All 22 sequential
+logit files remain exact and the hybrid schedules agree in 22/22 files.
+Production engine sources and kernels are unchanged; this is a controlled
+precision result, not a production default or full-context acceptance.
