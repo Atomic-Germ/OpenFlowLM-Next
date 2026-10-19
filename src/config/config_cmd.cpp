@@ -24,10 +24,15 @@
 namespace oflm::config {
 
 // Source tag strings (consistent with plan §Phase 4)
+// The source tag beside a value. The user cares about one thing first: is
+// this the value I chose, or the one the application ships? So the file the
+// user owns reads (custom) and the shipped registry reads (global). The
+// runtime overrides keep their own tags, because they answer a different
+// question: why is this not the value I set?
 const char* source_tag(SettingValue::Source s) {
     switch (s) {
-        case SettingValue::SHIPPED: return "(shipped)";
-        case SettingValue::USER: return "(user)";
+        case SettingValue::SHIPPED: return "(global)";
+        case SettingValue::USER: return "(custom)";
         case SettingValue::ENV: return "(env)";
         case SettingValue::CLI: return "(cli)";
         case SettingValue::API: return "(api)";
@@ -520,8 +525,18 @@ static int config_edit(const program_args_t& args) {
 
 // Generate schema
 static int config_gen_schema(const program_args_t& args) {
-    EffectiveConfig cfg = load_effective_config();
-    nlohmann::json schema = generate_full_schema_json(cfg.shipped_registry);
+    // The schema comes from the code, so it can be produced without a
+    // registry: the packaging step runs this before the registry is in
+    // place, and a missing file must not stop it. What the registry would
+    // have said (the app-wide defaults, the version hash) is filled in when
+    // there is one.
+    nlohmann::json shipped;
+    try {
+        shipped = load_effective_config().shipped_registry;
+    } catch (const std::exception&) {
+        shipped = nlohmann::json::object();
+    }
+    nlohmann::json schema = generate_full_schema_json(shipped);
     std::cout << schema.dump(2) << std::endl;
     return 0;
 }

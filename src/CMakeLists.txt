@@ -1408,9 +1408,12 @@ add_test(NAME oflm_config_set_unset
                $<TARGET_FILE:oflm> config unset --config-key ctx_len --config-model llama3.1:8b && \
                $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\"'")
 
-# TUI smoke test (Tier 1 fallback via piped input)
+# TUI smoke test. The full-screen browse needs a real terminal; under ctest
+# there is none, so it must refuse gracefully -- say what to use instead and
+# exit non-zero, not crash and not hang.
 add_test(NAME oflm_config_browse_smoke
-    COMMAND sh -c "echo q | $<TARGET_FILE:oflm> config browse")
+    COMMAND sh -c "echo q | $<TARGET_FILE:oflm> config browse; \
+                   test \$? -eq 1 && echo q | $<TARGET_FILE:oflm> config browse 2>&1 | grep -q 'guided flow'")
 set_tests_properties(oflm_config_browse_smoke PROPERTIES
     ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 

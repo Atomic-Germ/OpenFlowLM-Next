@@ -53,7 +53,7 @@ if echo "$out" | grep -q "prefill_mode"; then
 else
   ok "config show keeps the per-model settings out of the global view"
 fi
-if echo "$out" | grep -qE '\((shipped|user|env|cli)\)$'; then
+if echo "$out" | grep -qE '\((global|custom|env|cli|api)\)$'; then
   ok "config show tags each value with its source"
 else
   bad "config show did not tag the sources:"; echo "$out" | head -5
@@ -86,10 +86,10 @@ fi
 # ------------------------------------------------------- 3. show reflects it
 step "3. config show reflects the user override"
 out=$("$OFLM" config show --config-model "$MODEL" 2>&1)
-if echo "$out" | grep -qE "prefill_mode.*lean.*\(user\)"; then
-  ok "prefill_mode shows as lean (user)"
+if echo "$out" | grep -qE "prefill_mode.*lean.*\(custom\)"; then
+  ok "prefill_mode shows as lean (custom)"
 else
-  bad "prefill_mode did not show as lean (user):"; echo "$out"
+  bad "prefill_mode did not show as lean (custom):"; echo "$out"
 fi
 
 # --------------------------------------------------------- 4. global set
@@ -129,10 +129,10 @@ fi
 step "7. config unset removes the override"
 "$OFLM" config unset --config-model "$MODEL" --config-key prefill_mode >/dev/null 2>&1
 out=$("$OFLM" config show --config-model "$MODEL" 2>&1)
-if echo "$out" | grep -qE "prefill_mode.*\(shipped\)"; then
-  ok "prefill_mode is back to the shipped default"
+if echo "$out" | grep -qE "prefill_mode.*\(global\)"; then
+  ok "prefill_mode is back to the global default"
 else
-  bad "prefill_mode did not revert to shipped:"; echo "$out"
+  bad "prefill_mode did not revert to global:"; echo "$out"
 fi
 
 # --------------------------------------------------------- 8. gen-schema
@@ -157,8 +157,8 @@ fi
 step "10. CLI flag wins over the user file"
 "$OFLM" config set --config-model "$MODEL" --config-key prefill_mode --config-value lean >/dev/null 2>&1
 out=$("$OFLM" config show --config-model "$MODEL" 2>&1)
-if echo "$out" | grep -qE "prefill_mode.*lean.*\(user\)"; then
-  ok "the file says lean (user)"
+if echo "$out" | grep -qE "prefill_mode.*lean.*\(custom\)"; then
+  ok "the file says lean (custom)"
 else
   bad "the file override was not picked up:"; echo "$out"
 fi

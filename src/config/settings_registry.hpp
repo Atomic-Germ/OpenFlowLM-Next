@@ -65,9 +65,13 @@ std::vector<SettingDef> settings_for_scope(SettingScope scope);
 /// Output format: { "version": 1, "settings": [ ... ] }
 nlohmann::json generate_schema_json();
 
-/// Generate the full gen-schema output (settings_schema + defaults_version).
-/// Output format: { "settings_schema": { ... }, "defaults_version": "..." }
+/// Generate the full gen-schema output (settings_schema + defaults + defaults_version).
+/// Output format: { "settings_schema": { ... }, "defaults": { ... }, "defaults_version": "..." }
 nlohmann::json generate_full_schema_json(const nlohmann::json& shipped_registry);
+
+/// The app-wide defaults block: every setting's default value, so the shipped
+/// registry carries all the config keys.
+nlohmann::json generate_defaults_json(const nlohmann::json& shipped_registry);
 
 /// Compute the defaults_version hash from a shipped registry.
 /// Hashes: top-level "defaults" block + per-model default values from settings registry entries.

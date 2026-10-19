@@ -134,9 +134,27 @@ std::string compute_defaults_version(const nlohmann::json& shipped_registry) {
     return oss.str();
 }
 
+nlohmann::json generate_defaults_json(const nlohmann::json& shipped_registry) {
+    // The app-wide defaults block: every setting's default, so the shipped
+    // registry carries all the config keys and a user who has not set one
+    // still has a value to show. What the shipped file already says wins,
+    // so a release can pin a default without a code change.
+    nlohmann::json defaults = nlohmann::json::object();
+    if (shipped_registry.contains("defaults") && shipped_registry["defaults"].is_object()) {
+        defaults = shipped_registry["defaults"];
+    }
+    for (const auto& def : settings_registry()) {
+        if (def.default_value.empty()) continue;
+        if (defaults.contains(def.key)) continue;
+        defaults[def.key] = convert_type(def.default_value, def.type);
+    }
+    return defaults;
+}
+
 nlohmann::json generate_full_schema_json(const nlohmann::json& shipped_registry) {
     nlohmann::json result;
     result["settings_schema"] = generate_schema_json();
+    result["defaults"] = generate_defaults_json(shipped_registry);
     result["defaults_version"] = compute_defaults_version(shipped_registry);
     return result;
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Inject settings_schema and defaults_version into model_list.json.
+"""Inject the settings schema, the app-wide defaults and the defaults
+version into model_list.json.
 
 Usage:
     inject-schema.py --input model_list.json --schema schema.json --output model_list.json
@@ -7,8 +8,12 @@ Usage:
 The schema.json file is the output of `oflm config gen-schema`:
     {
       "settings_schema": { "version": 1, "settings": [...] },
+      "defaults": { "pmode": "performance", "prefill_mode": "fast" },
       "defaults_version": "a3f2b8c1"
     }
+
+The defaults block is what makes the shipped registry carry every config key:
+a user who has not set one still has a value to show, tagged (global).
 """
 import argparse
 import json
@@ -36,6 +41,15 @@ def main():
         print(f"Injected settings_schema (version {schema['settings_schema'].get('version', '?')}, "
               f"{len(schema['settings_schema'].get('settings', []))} settings)")
 
+    # Inject the app-wide defaults. What the file already says wins, so a
+    # release can pin a default without a code change.
+    if "defaults" in schema:
+        existing = registry.get("defaults", {})
+        merged = dict(schema["defaults"])
+        merged.update(existing)
+        registry["defaults"] = merged
+        print(f"Injected defaults: {', '.join(sorted(merged))}")
+
     # Inject defaults_version
     if "defaults_version" in schema:
         registry["defaults_version"] = schema["defaults_version"]
@@ -44,10 +58,6 @@ def main():
     # Ensure top-level version exists
     if "version" not in registry:
         registry["version"] = 1
-
-    # Ensure defaults block exists
-    if "defaults" not in registry:
-        registry["defaults"] = {}
 
     # Write output
     with open(args.output, "w") as f:
