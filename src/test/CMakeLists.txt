@@ -26,10 +26,9 @@ add_test(NAME settings_registry_test COMMAND settings_registry_test)
 
 # Settings resolver tests (host-only, no NPU needed)
 add_executable(settings_resolver_test settings_resolver_test.cpp
+    test_stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/config/settings_resolver.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/config_store.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp
-    ${CMAKE_SOURCE_DIR}/src/common/utils.cpp)
+    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)
 target_include_directories(settings_resolver_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src/include

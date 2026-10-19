@@ -1,20 +1,25 @@
 #include "config/settings_resolver.hpp"
-#include "utils/utils.hpp"
+// Forward-declare instead of including utils/utils.hpp (which pulls in XRT via buffer.hpp)
+namespace utils { std::string getenv_oflm(const char* oflm_name); }
 #include <cstdlib>
 #include <iostream>
 
 namespace oflm::config {
 
 // Helper: get CLI flag value from program_args_t
-// Maps cli_flag (e.g. "--prefill-mode") to the corresponding field
+// Maps cli_flag (e.g. "--prefill-mode") to the corresponding field.
+// Returns nullopt if the flag was not explicitly set (i.e. value is the default).
+// Pattern matches main.cpp: `bool got_power_mode = (parsed_args.power_mode != "performance");`
 static std::optional<std::string> get_cli_flag_value(const program_args_t& args, const std::string& flag) {
     if (flag == "--prefill-mode") {
-        if (args.prefill_mode != "fast") return args.prefill_mode; // "fast" is default, only return if changed
-        // Actually, check if the flag was explicitly set — for now, return if not default
-        return std::nullopt; // TODO: check if explicitly set via Boost
+        // Default is "fast" — only return if user changed it
+        if (!args.prefill_mode.empty() && args.prefill_mode != "fast") return args.prefill_mode;
+        return std::nullopt;
     }
     if (flag == "--pmode") {
-        return args.power_mode; // always has a value (default "performance")
+        // Default is "performance" — only return if user changed it
+        if (!args.power_mode.empty() && args.power_mode != "performance") return args.power_mode;
+        return std::nullopt;
     }
     if (flag == "--ctx-len") {
         if (args.ctx_length > 0) return std::to_string(args.ctx_length);
@@ -83,7 +88,7 @@ nlohmann::json resolve_settings(
         // Per-model shipped default from registry entry
         if (!def.registry_key.empty() && !model_tag.empty()) {
             auto entry = get_merged_model_entry(cfg, model_tag);
-            if (!entry.empty() && entry.contains(def.registry_key)) {
+            if (!entry.empty()) {
                 // Handle nested keys like "details.think"
                 if (def.registry_key.find('.') != std::string::npos) {
                     auto dot_pos = def.registry_key.find('.');
@@ -133,6 +138,14 @@ std::optional<SettingValue> get_setting_value(
     auto def = find_setting(setting_key);
     if (!def) return std::nullopt;
 
+    // Helper: extract string value from JSON (no quotes for strings)
+    auto json_to_string = [](const nlohmann::json& j) -> std::string {
+        if (j.is_string()) return j.get<std::string>();
+        if (j.is_boolean()) return j.get<bool>() ? "true" : "false";
+        if (j.is_number()) return j.dump();
+        return j.dump();
+    };
+
     // Check CLI first
     if (!def->cli_flag.empty()) {
         if (auto v = get_cli_flag_value(args, def->cli_flag)) {
@@ -149,7 +162,7 @@ std::optional<SettingValue> get_setting_value(
     // Check user settings
     if (model_tag.empty()) {
         if (cfg.user_settings.contains("defaults") && cfg.user_settings["defaults"].contains(setting_key)) {
-            return SettingValue{cfg.user_settings["defaults"][setting_key].dump(), SettingValue::USER};
+            return SettingValue{json_to_string(cfg.user_settings["defaults"][setting_key]), SettingValue::USER};
         }
     } else {
         auto [type, size] = split_tag(model_tag);
@@ -157,12 +170,12 @@ std::optional<SettingValue> get_setting_value(
             cfg.user_settings["settings"].contains(type) &&
             cfg.user_settings["settings"][type].contains(size) &&
             cfg.user_settings["settings"][type][size].contains(setting_key)) {
-            return SettingValue{cfg.user_settings["settings"][type][size][setting_key].dump(), SettingValue::USER};
+            return SettingValue{json_to_string(cfg.user_settings["settings"][type][size][setting_key]), SettingValue::USER};
         }
     }
     // Check shipped defaults
     if (cfg.shipped_registry.contains("defaults") && cfg.shipped_registry["defaults"].contains(setting_key)) {
-        return SettingValue{cfg.shipped_registry["defaults"][setting_key].dump(), SettingValue::SHIPPED};
+        return SettingValue{json_to_string(cfg.shipped_registry["defaults"][setting_key]), SettingValue::SHIPPED};
     }
     if (!def->registry_key.empty() && !model_tag.empty()) {
         auto entry = get_merged_model_entry(cfg, model_tag);
@@ -172,10 +185,10 @@ std::optional<SettingValue> get_setting_value(
                 std::string parent = def->registry_key.substr(0, dot_pos);
                 std::string child = def->registry_key.substr(dot_pos + 1);
                 if (entry.contains(parent) && entry[parent].contains(child)) {
-                    return SettingValue{entry[parent][child].dump(), SettingValue::SHIPPED};
+                    return SettingValue{json_to_string(entry[parent][child]), SettingValue::SHIPPED};
                 }
             } else if (entry.contains(def->registry_key)) {
-                return SettingValue{entry[def->registry_key].dump(), SettingValue::SHIPPED};
+                return SettingValue{json_to_string(entry[def->registry_key]), SettingValue::SHIPPED};
             }
         }
     }

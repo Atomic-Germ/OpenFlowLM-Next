@@ -23,7 +23,7 @@ static oflm::config::EffectiveConfig make_cfg(
     nlohmann::json user_settings = nlohmann::json::object())
 {
     oflm::config::EffectiveConfig cfg;
-    cfg.shipped_registry = {{{"defaults", shipped_defaults}, {"models", nlohmann::json::object()}}};
+    cfg.shipped_registry = {{"defaults", shipped_defaults}, {"models", nlohmann::json::object()}};
     cfg.user_settings = nlohmann::json::object();
     if (!user_defaults.empty()) cfg.user_settings["defaults"] = user_defaults;
     if (!user_settings.empty()) cfg.user_settings["settings"] = user_settings;
@@ -49,12 +49,11 @@ TEST(shipped_default_used_when_nothing_else) {
 }
 
 TEST(user_overrides_shipped) {
-    auto cfg = make_cfg({{"pmode", "performance"}}, {{{"pmode", "balanced"}}});
+    auto cfg = make_cfg({{"pmode", "performance"}}, {{"pmode", "balanced"}});
     auto args = make_args();
+    args.power_mode = ""; // Clear CLI so user setting wins
     auto resolved = oflm::config::resolve_settings(cfg, "", args);
-    // Note: CLI flag (--pmode default "performance") would win, but our get_cli_flag_value
-    // returns the args value. For this test, we check that user settings are in the chain.
-    // Since pmode CLI flag always has a value, CLI wins. Test with a setting that has no CLI flag.
+    ASSERT_EQ(resolved["pmode"], "balanced");
 }
 
 TEST(per_model_scope_filtered_for_global) {
