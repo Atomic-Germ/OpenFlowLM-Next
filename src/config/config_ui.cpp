@@ -1,8 +1,13 @@
 #include "config/config_ui.hpp"
+#include "config/config_store.hpp"
+#include "config/settings_registry.hpp"
+#include "config/settings_resolver.hpp"
+#include "config/config_cmd.hpp"
 #include <iostream>
 #include <cstdlib>
 #include <string>
 #include <cstdint>
+#include <iomanip>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -17,6 +22,7 @@
 #endif
 
 namespace oflm::config {
+
 
 UiTier detect_ui_tier() {
     if (!ISATTY(FILENO(stdin)) || !ISATTY(FILENO(stdout)))
@@ -178,7 +184,170 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
     return SIZE_MAX;
 #endif
 }
-int guided_flow() { return 1; } // Task 17
-int browse_tui() { return 1; }   // Task 17
+
+int guided_flow() {
+    auto tier = detect_ui_tier();
+    auto pick = [&](const std::string& title, const std::vector<PickerItem>& items) -> size_t {
+        if (tier >= UiTier::ARROW_PICKER) return arrow_picker(title, items);
+        return numbered_menu(title, items);
+    };
+
+    // Step 1: Choose action
+    std::vector<PickerItem> actions = {
+        {"Edit global settings", ""},
+        {"Edit a model's settings", ""},
+        {"Show effective configuration", ""},
+        {"Exit", ""},
+    };
+    size_t action = pick("What do you want to do?", actions);
+    if (action == SIZE_MAX || action == 3) return 0;
+
+    // Step 2: Choose model (or global)
+    EffectiveConfig cfg = load_effective_config();
+    std::vector<PickerItem> models;
+    models.push_back({"[Global settings]", ""});
+    // Add all models from merged registry
+    for (auto it_type = cfg.merged["models"].begin(); it_type != cfg.merged["models"].end(); ++it_type) {
+        const std::string& type = it_type.key();
+        for (auto it_size = it_type->begin(); it_size != it_type->end(); ++it_size) {
+            const std::string& size = it_size.key();
+            std::string tag = type + ":" + size;
+            bool is_user = cfg.user_settings.contains("models") &&
+                           cfg.user_settings["models"].contains(type) &&
+                           cfg.user_settings["models"][type].contains(size);
+            models.push_back({tag, is_user ? "(user-added)" : ""});
+        }
+    }
+
+    size_t model_idx = pick("Select model:", models);
+    if (model_idx == SIZE_MAX) return 0;
+    std::string model_tag = (model_idx == 0) ? "" : models[model_idx].label;
+
+    if (action == 2) {
+        // Show effective configuration
+        program_args_t show_args;
+        show_args.config_model = model_tag;
+        return config_show(show_args);
+    }
+
+    // Step 3: Choose setting
+    std::vector<PickerItem> settings;
+    for (const auto& def : settings_registry()) {
+        if (def.scope == SettingScope::PER_MODEL && model_tag.empty()) continue;
+        settings.push_back({def.key, def.description});
+    }
+    size_t setting_idx = pick("Select setting:", settings);
+    if (setting_idx == SIZE_MAX) return 0;
+    std::string key = settings[setting_idx].label;
+
+    // Step 4: Choose value (or unset)
+    auto def = find_setting(key);
+    if (def && def->type == SettingType::ENUM) {
+        std::vector<PickerItem> options;
+        for (const auto& opt : def->options) {
+            options.push_back(PickerItem{opt.value, opt.description});
+        }
+        size_t opt_idx = pick("Select value for " + key + ":", options);
+        if (opt_idx == SIZE_MAX) return 0;
+        
+        // Set the value
+        SettingsLock lock(cfg.user_settings_path);
+        if (!lock.locked()) {
+            std::cerr << "Error: Could not acquire lock on settings file" << std::endl;
+            return 1;
+        }
+        
+        nlohmann::json settings_json = cfg.user_settings;
+        if (settings_json.is_null()) {
+            settings_json = nlohmann::json::object();
+        }
+        
+        if (model_tag.empty()) {
+            // Global setting
+            if (!settings_json.contains("defaults")) {
+                settings_json["defaults"] = nlohmann::json::object();
+            }
+            settings_json["defaults"][key] = options[opt_idx].label;
+        } else {
+            // Per-model setting
+            auto model_parts = split_tag(model_tag);
+            std::string type = model_parts.first;
+            std::string size = model_parts.second;
+            if (!settings_json.contains("settings")) {
+                settings_json["settings"] = nlohmann::json::object();
+            }
+            if (!settings_json["settings"].contains(type)) {
+                settings_json["settings"][type] = nlohmann::json::object();
+            }
+            if (!settings_json["settings"][type].contains(size)) {
+                settings_json["settings"][type][size] = nlohmann::json::object();
+            }
+            settings_json["settings"][type][size][key] = options[opt_idx].label;
+        }
+        
+        // Update defaults_version
+        if (cfg.shipped_registry.contains("defaults") &&
+            cfg.shipped_registry["defaults"].contains("defaults_version")) {
+            settings_json["defaults_version"] = cfg.shipped_registry["defaults"]["defaults_version"];
+        }
+        
+        save_user_settings(settings_json, cfg.user_settings_path);
+        std::cout << "Set '" << key << "' = '" << options[opt_idx].label << "'" << std::endl;
+    } else {
+        std::cerr << "Error: Setting '" << key << "' is not an ENUM type or not found" << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
+
+int browse_tui() {
+    if (detect_ui_tier() < UiTier::FULL_TUI) {
+        std::cerr << "[OFLM] Full-screen mode requires a modern terminal." << std::endl;
+        std::cerr << "[OFLM] Use 'oflm config' for the interactive guided flow, or" << std::endl;
+        std::cerr << "[OFLM] 'oflm config set --config-key <key> --config-value <value>' for direct setting." << std::endl;
+        return 1;
+    }
+
+    // Basic TUI: show all settings, allow quit
+    EffectiveConfig cfg = load_effective_config();
+    std::cout << "\033[2J\033[H"; // Clear screen
+    std::cout << "┌─ oflm config ─────────────────────────────────────────────┐\n";
+    std::cout << "│  Press 'q' to quit                                        │\n";
+    std::cout << "└───────────────────────────────────────────────────────────┘\n";
+    
+    // Render global settings
+    std::cout << "\nGlobal settings:\n";
+    std::cout << "key                      value                      source\n";
+    std::cout << "------------------------ ------------------------ ------------------------\n";
+    
+    bool found_any = false;
+    for (const auto& def : settings_registry()) {
+        if (def.scope != SettingScope::GLOBAL && def.scope != SettingScope::BOTH) {
+            continue;
+        }
+        
+        auto value_opt = get_setting_value(cfg, "", def.key, program_args_t());
+        if (value_opt) {
+            std::cout << std::left << std::setw(24) << def.key << " "
+                      << std::setw(26) << value_opt->value << " "
+                      << source_tag(value_opt->source) << "\n";
+            found_any = true;
+        }
+    }
+    
+    if (!found_any) {
+        std::cout << "No global settings found\n";
+    }
+    
+    // Simple input loop
+    char c;
+    while (true) {
+        if (read(STDIN_FILENO, &c, 1) != 1) break;
+        if (c == 'q' || c == 'Q') break;
+    }
+    std::cout << "\033[2J\033[H"; // Clear on exit
+    return 0;
+}
 
 } // namespace oflm::config

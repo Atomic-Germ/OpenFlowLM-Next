@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstddef>
 #include <cstdint>
+#include "settings_resolver.hpp"
 
 namespace oflm::config {
 
@@ -31,5 +32,8 @@ int guided_flow();
 /// Run the full-screen TUI (oflm config browse).
 /// Implemented in Task 17.
 int browse_tui();
+
+/// Format a source tag for display
+const char* source_tag(SettingValue::Source s);
 
 } // namespace oflm::config

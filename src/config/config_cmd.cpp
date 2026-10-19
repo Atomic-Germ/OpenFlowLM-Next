@@ -4,6 +4,7 @@
 #include "config/config_store.hpp"
 #include "config/settings_registry.hpp"
 #include "config/settings_resolver.hpp"
+#include "config/config_ui.hpp"
 #include "utils/utils.hpp"
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -23,7 +24,7 @@
 namespace oflm::config {
 
 // Source tag strings (consistent with plan §Phase 4)
-static const char* source_tag(SettingValue::Source s) {
+const char* source_tag(SettingValue::Source s) {
     switch (s) {
         case SettingValue::SHIPPED: return "(shipped)";
         case SettingValue::USER: return "(user)";
@@ -102,7 +103,59 @@ static std::string get_settings_path_for_model(const std::string& model_tag, con
 // Set a configuration value
 static int config_set(const program_args_t& args) {
     if (args.config_value.empty()) {
-        std::cout << "Interactive picker not yet available, use --config-value" << std::endl;
+        auto def = find_setting(args.config_key);
+        if (def && def->type == SettingType::ENUM) {
+            std::vector<PickerItem> items;
+            for (const auto& opt : def->options) {
+                items.push_back(PickerItem{opt.value, opt.description});
+            }
+            size_t idx = arrow_picker("Select value for " + args.config_key + ":", items);
+            if (idx == SIZE_MAX) return 1; // cancelled
+            
+            // Use the selected value
+            EffectiveConfig cfg = load_effective_config();
+            SettingsLock lock(cfg.user_settings_path);
+            if (!lock.locked()) {
+                std::cerr << "Error: Could not acquire lock on settings file" << std::endl;
+                return 1;
+            }
+            
+            nlohmann::json settings_json = cfg.user_settings;
+            if (settings_json.is_null()) {
+                settings_json = nlohmann::json::object();
+            }
+            
+            if (args.config_model.empty()) {
+                if (!settings_json.contains("defaults")) {
+                    settings_json["defaults"] = nlohmann::json::object();
+                }
+                settings_json["defaults"][args.config_key] = items[idx].label;
+            } else {
+                auto model_parts = split_tag(args.config_model);
+                std::string type = model_parts.first;
+                std::string size = model_parts.second;
+                if (!settings_json.contains("settings")) {
+                    settings_json["settings"] = nlohmann::json::object();
+                }
+                if (!settings_json["settings"].contains(type)) {
+                    settings_json["settings"][type] = nlohmann::json::object();
+                }
+                if (!settings_json["settings"][type].contains(size)) {
+                    settings_json["settings"][type][size] = nlohmann::json::object();
+                }
+                settings_json["settings"][type][size][args.config_key] = items[idx].label;
+            }
+            
+            if (cfg.shipped_registry.contains("defaults") &&
+                cfg.shipped_registry["defaults"].contains("defaults_version")) {
+                settings_json["defaults_version"] = cfg.shipped_registry["defaults"]["defaults_version"];
+            }
+            
+            save_user_settings(settings_json, cfg.user_settings_path);
+            std::cout << "Set '" << args.config_key << "' = '" << items[idx].label << "'" << std::endl;
+            return 0;
+        }
+        std::cout << "Setting '" << args.config_key << "' is not an ENUM type or not found" << std::endl;
         return 1;
     }
     
@@ -262,7 +315,7 @@ static int config_unset(const program_args_t& args) {
 }
 
 // Show configuration
-static int config_show(const program_args_t& args) {
+int config_show(const program_args_t& args) {
     EffectiveConfig cfg = load_effective_config();
     
     if (args.json_output) {
@@ -490,11 +543,8 @@ static int config_migrate(const program_args_t& args) {
 /// Main entry point for `oflm config <action>`
 int config_command_main(const program_args_t& args) {
     if (args.config_key.empty() && args.config_value.empty() && args.config_model.empty()) {
-        // No specific action, just show help or default behavior
-        // For now, default to 'show'
-        program_args_t show_args = args;
-        show_args.model_tag = "show";
-        return config_show(show_args);
+        // No specific action, open guided flow
+        return guided_flow();
     }
     
     const std::string& action = args.model_tag;
@@ -507,6 +557,8 @@ int config_command_main(const program_args_t& args) {
         return config_unset(args);
     } else if (action == "edit") {
         return config_edit(args);
+    } else if (action == "browse") {
+        return browse_tui();
     } else if (action == "gen-schema") {
         return config_gen_schema(args);
     } else if (action == "migrate") {

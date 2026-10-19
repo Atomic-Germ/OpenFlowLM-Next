@@ -1,7 +1,12 @@
 #pragma once
 #include "program_args.hpp"
+#include "settings_resolver.hpp"
 
 namespace oflm::config {
+
+// Forward declarations for UI functions
+int config_show(const program_args_t& args);
+const char* source_tag(SettingValue::Source s);
 
 /// Main entry point for `oflm config <action>`.
 /// The action is parsed_args.model_tag (e.g. "show", "set", "unset").
