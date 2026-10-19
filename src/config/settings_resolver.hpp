@@ -32,4 +32,11 @@ std::optional<SettingValue> get_setting_value(
     const std::string& setting_key,
     const program_args_t& args);
 
+/// Global effective config — set by main.cpp, read by Runner/RestHandler.
+/// Valid only after load_effective_config() has been called.
+extern EffectiveConfig* g_effective_config;
+
+/// Global resolved settings — set by main.cpp after resolve_settings().
+extern nlohmann::json* g_resolved_settings;
+
 } // namespace oflm::config

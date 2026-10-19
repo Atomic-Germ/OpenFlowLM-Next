@@ -16,6 +16,8 @@
 #include "program_args.hpp"
 #include "minja/chat-template.hpp"
 #include "config/config_cmd.hpp"
+#include "config/config_store.hpp"
+#include "config/settings_resolver.hpp"
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -621,18 +623,39 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // LM_Config cannot carry it across the OFLM_DLL boundary, so the open engine reads it from the environment
-    if (!parsed_args.prefill_mode.empty()) {
-#ifdef _WIN32
-        _putenv_s("OFLM_OPEN_PREFILL_MODE", parsed_args.prefill_mode.c_str());
-#else
-        setenv("OFLM_OPEN_PREFILL_MODE", parsed_args.prefill_mode.c_str(), 1);
-#endif
-    }
-
     // Handle special case for serve command - use default tag if none provided
     if (parsed_args.command == "serve" && parsed_args.model_tag.empty()) {
         parsed_args.model_tag = "model-faker"; // Use default tag
+    }
+
+    // Load effective config and resolve settings for commands that need it
+    if (parsed_args.command == "run" || parsed_args.command == "serve" ||
+        parsed_args.command == "bench" || parsed_args.command == "bench-embed" ||
+        parsed_args.command == "image") {
+        // Load effective config (shipped + user settings, with migration)
+        static oflm::config::EffectiveConfig effective_cfg;
+        try {
+            effective_cfg = oflm::config::load_effective_config();
+        } catch (const std::exception& e) {
+            std::cerr << "[OFLM] Warning: " << e.what() << std::endl;
+            // Continue with empty config — will use defaults
+        }
+
+        // Resolve settings (applies precedence: shipped < user < env < CLI)
+        std::string tag = parsed_args.model_tag;
+        if (tag == "model-faker") tag = ""; // serve default sentinel
+        auto resolved = oflm::config::resolve_settings(effective_cfg, tag, parsed_args);
+
+        // Apply settings (setenv for ENV_VAR delivery — replaces hardcoded setenv)
+        oflm::config::apply_settings(resolved);
+
+        // Store for later use by Runner/RestHandler
+        static oflm::config::EffectiveConfig cfg_storage;
+        static nlohmann::json resolved_storage;
+        cfg_storage = effective_cfg;
+        resolved_storage = resolved;
+        oflm::config::g_effective_config = &cfg_storage;
+        oflm::config::g_resolved_settings = &resolved_storage;
     }
 
 #ifndef _WIN32

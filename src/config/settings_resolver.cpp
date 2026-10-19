@@ -198,4 +198,7 @@ std::optional<SettingValue> get_setting_value(
     return std::nullopt;
 }
 
+EffectiveConfig* g_effective_config = nullptr;
+nlohmann::json* g_resolved_settings = nullptr;
+
 } // namespace oflm::config

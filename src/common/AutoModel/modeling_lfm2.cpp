@@ -6,14 +6,18 @@
 /// \note This is a source file for the lfm2 class
 
 #include "AutoModel/modeling_lfm2.hpp"
+#include "config/settings_resolver.hpp"
 #include "utils/utils.hpp"
+#include "config/settings_resolver.hpp"
 #include "metrices.hpp"
+#include "config/settings_resolver.hpp"
 
 /************              LFM2 family            **************/
 LFM2::LFM2(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "LFM2") {}
 
 void LFM2::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // The engine: the open kernels when a set is installed for this model, the closed
     // DLL otherwise (AutoModel::_shared_select_open_engine).
@@ -275,7 +279,8 @@ StreamResult LFM2::parse_stream_content(const std::string content) {
 LFM2_5_TK::LFM2_5_TK(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "LFM2_5_TK") {}
 
 void LFM2_5_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
     this->q4nx = std::make_unique<Q4NX>(this->model_path);
     // model_type == llama
