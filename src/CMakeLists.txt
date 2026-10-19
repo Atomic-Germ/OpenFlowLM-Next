@@ -1663,4 +1663,18 @@ set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 # /etc/profile.d and /usr/bin belong to the base filesystem packages; do not
 # make openflowlm claim ownership of them.
 set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
+
+# Generate settings registry from source code scan + settings.json
+add_custom_target(generate-settings
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/scan-settings.py
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+            > ${CMAKE_BINARY_DIR}/scan-settings.json
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/generate-registry.py
+            --settings ${CMAKE_CURRENT_SOURCE_DIR}/config/settings.json
+            --scan-output ${CMAKE_BINARY_DIR}/scan-settings.json
+            --output ${CMAKE_CURRENT_SOURCE_DIR}/config/settings_registry_generated.hpp
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Generating settings registry from source code"
+)
+
 include(CPack)

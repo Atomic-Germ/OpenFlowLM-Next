@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "settings": [
+    {
+      "key": "prefill_mode",
+      "cli_flag": "--prefill-mode",
+      "env_var": "OFLM_OPEN_PREFILL_MODE",
+      "description": "Memory/speed trade-off for prefill",
+      "type": "enum",
+      "options": [
+        {"value": "fast", "description": "Default prefill, higher memory"},
+        {"value": "lean", "description": "Lower memory, ~15% slower"}
+      ],
+      "scope": "per_model",
+      "delivery": "env_var",
+      "category": "performance",
+      "reload_required": true,
+      "default_value": "fast"
+    },
+    {
+      "key": "pmode",
+      "cli_flag": "--pmode",
+      "description": "NPU power mode",
+      "type": "enum",
+      "options": [
+        {"value": "default", "description": "Let the driver decide"},
+        {"value": "powersaver", "description": "Lower power, reduced performance"},
+        {"value": "balanced", "description": "Balance of power and performance"},
+        {"value": "performance", "description": "Maximum performance (oflm default)"},
+        {"value": "turbo", "description": "Maximum clocks, highest power"}
+      ],
+      "scope": "global",
+      "delivery": "direct",
+      "category": "performance",
+      "reload_required": false,
+      "default_value": "performance"
+    },
+    {
+      "key": "ctx_len",
+      "cli_flag": "--ctx-len",
+      "description": "Context window length (overrides model default)",
+      "type": "int",
+      "min_value": 512,
+      "presets": [2048, 4096, 8192, 16384, 32768],
+      "scope": "per_model",
+      "delivery": "direct",
+      "category": "memory",
+      "reload_required": true,
+      "registry_key": "default_context_length"
+    },
+    {
+      "key": "prefill_chunk_len",
+      "cli_flag": "--prefill-chunk-len",
+      "description": "Maximum prefill chunk length (overrides model default)",
+      "type": "int",
+      "min_value": 512,
+      "presets": [1024, 2048, 4096, 8192],
+      "scope": "per_model",
+      "delivery": "direct",
+      "category": "memory",
+      "reload_required": true,
+      "registry_key": "max_prefill_len"
+    },
+    {
+      "key": "think",
+      "description": "Enable reasoning/thinking mode by default",
+      "type": "bool",
+      "scope": "per_model",
+      "delivery": "api_field",
+      "category": "generation",
+      "reload_required": false,
+      "registry_key": "details.think"
+    }
+  ]
+}

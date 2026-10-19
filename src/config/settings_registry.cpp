@@ -1,117 +1,12 @@
 /// \file settings_registry.cpp
 /// \brief Settings registry implementation — populates the registry and generates schema/help
 #include "config/settings_registry.hpp"
+#include "settings_registry_generated.hpp"
 #include <algorithm>
 #include <sstream>
 #include <functional>
 
 namespace oflm::config {
-
-namespace {
-
-// Schema version — bump when the schema format changes
-const int SCHEMA_VERSION = 1;
-
-// The registry — populated once, returned by reference
-const std::vector<SettingDef>& build_registry() {
-    static const std::vector<SettingDef> registry = {
-        {
-            .key = "prefill_mode",
-            .cli_flag = "--prefill-mode",
-            .env_var = "OFLM_OPEN_PREFILL_MODE",
-            .description = "Memory/speed trade-off for prefill",
-            .type = SettingType::ENUM,
-            .options = {
-                {"fast", "Default prefill, higher memory"},
-                {"lean", "Lower memory, ~15% slower"},
-            },
-            .min_value = std::nullopt,
-            .max_value = std::nullopt,
-            .presets = {},
-            .default_value = "fast",
-            .scope = SettingScope::PER_MODEL,
-            .reload_required = true,
-            .category = "performance",
-            .registry_key = "",
-            .delivery = DeliveryMechanism::ENV_VAR,
-        },
-        {
-            .key = "pmode",
-            .cli_flag = "--pmode",
-            .env_var = "",
-            .description = "NPU power mode",
-            .type = SettingType::ENUM,
-            .options = {
-                {"default", "Let the driver decide"},
-                {"powersaver", "Lower power, reduced performance"},
-                {"balanced", "Balance of power and performance"},
-                {"performance", "Maximum performance (oflm default)"},
-                {"turbo", "Maximum clocks, highest power"},
-            },
-            .min_value = std::nullopt,
-            .max_value = std::nullopt,
-            .presets = {},
-            .default_value = "performance",
-            .scope = SettingScope::GLOBAL,
-            .reload_required = false,
-            .category = "performance",
-            .registry_key = "",
-            .delivery = DeliveryMechanism::DIRECT,
-        },
-        {
-            .key = "ctx_len",
-            .cli_flag = "--ctx-len",
-            .env_var = "",
-            .description = "Context window length (overrides model default)",
-            .type = SettingType::INT,
-            .options = {},
-            .min_value = 512,
-            .max_value = std::nullopt,
-            .presets = {2048, 4096, 8192, 16384, 32768},
-            .default_value = "",
-            .scope = SettingScope::PER_MODEL,
-            .reload_required = true,
-            .category = "memory",
-            .registry_key = "default_context_length",
-            .delivery = DeliveryMechanism::DIRECT,
-        },
-        {
-            .key = "prefill_chunk_len",
-            .cli_flag = "--prefill-chunk-len",
-            .env_var = "",
-            .description = "Maximum prefill chunk length (overrides model default)",
-            .type = SettingType::INT,
-            .options = {},
-            .min_value = 512,
-            .max_value = std::nullopt,
-            .presets = {1024, 2048, 4096, 8192},
-            .default_value = "",
-            .scope = SettingScope::PER_MODEL,
-            .reload_required = true,
-            .category = "memory",
-            .registry_key = "max_prefill_len",
-            .delivery = DeliveryMechanism::DIRECT,
-        },
-        {
-            .key = "think",
-            .cli_flag = "",
-            .env_var = "",
-            .description = "Enable reasoning/thinking mode by default",
-            .type = SettingType::BOOL,
-            .options = {},
-            .min_value = std::nullopt,
-            .max_value = std::nullopt,
-            .presets = {},
-            .default_value = "",
-            .scope = SettingScope::PER_MODEL,
-            .reload_required = false,
-            .category = "generation",
-            .registry_key = "details.think",
-            .delivery = DeliveryMechanism::API_FIELD,
-        },
-    };
-    return registry;
-}
 
 std::string scope_to_string(SettingScope scope) {
     switch (scope) {
@@ -174,7 +69,8 @@ nlohmann::json setting_to_schema_json(const SettingDef& def) {
     return j;
 }
 
-} // anonymous namespace
+// Schema version — bump when the schema format changes
+const int SCHEMA_VERSION = 1;
 
 const std::vector<SettingDef>& settings_registry() {
     return build_registry();
@@ -199,7 +95,7 @@ std::vector<SettingDef> settings_for_scope(SettingScope scope) {
 
 nlohmann::json generate_schema_json() {
     nlohmann::json schema;
-    schema["version"] = SCHEMA_VERSION;
+    schema["version"] = 1;
     nlohmann::json settings = nlohmann::json::array();
     for (const auto& def : settings_registry()) {
         settings.push_back(setting_to_schema_json(def));

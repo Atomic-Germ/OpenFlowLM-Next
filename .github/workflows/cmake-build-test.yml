@@ -84,6 +84,11 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Verify settings registry is up to date
+        run: |
+          cmake --build build --target generate-settings
+          git diff --exit-code src/config/settings.json src/config/settings_registry_generated.hpp
+
       # gguf-inspect's tests need the GGUF reader. The in-tree vendored copy
       # (third_party/Guanaco/llama.cpp) is not a submodule of this repository,
       # so install the reader from upstream llama.cpp instead. It goes in a
