@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Inject settings_schema and defaults_version into model_list.json.
+
+Usage:
+    inject-schema.py --input model_list.json --schema schema.json --output model_list.json
+
+The schema.json file is the output of `oflm config gen-schema`:
+    {
+      "settings_schema": { "version": 1, "settings": [...] },
+      "defaults_version": "a3f2b8c1"
+    }
+"""
+import argparse
+import json
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Inject settings schema into model_list.json")
+    parser.add_argument("--input", required=True, help="Input model_list.json path")
+    parser.add_argument("--schema", required=True, help="Schema JSON from oflm config gen-schema")
+    parser.add_argument("--output", required=True, help="Output model_list.json path")
+    args = parser.parse_args()
+
+    # Load input registry
+    with open(args.input, "r") as f:
+        registry = json.load(f)
+
+    # Load schema
+    with open(args.schema, "r") as f:
+        schema = json.load(f)
+
+    # Inject settings_schema
+    if "settings_schema" in schema:
+        registry["settings_schema"] = schema["settings_schema"]
+        print(f"Injected settings_schema (version {schema['settings_schema'].get('version', '?')}, "
+              f"{len(schema['settings_schema'].get('settings', []))} settings)")
+
+    # Inject defaults_version
+    if "defaults_version" in schema:
+        registry["defaults_version"] = schema["defaults_version"]
+        print(f"Injected defaults_version: {schema['defaults_version']}")
+
+    # Ensure top-level version exists
+    if "version" not in registry:
+        registry["version"] = 1
+
+    # Ensure defaults block exists
+    if "defaults" not in registry:
+        registry["defaults"] = {}
+
+    # Write output
+    with open(args.output, "w") as f:
+        json.dump(registry, f, indent=2)
+        f.write("\n")
+
+    print(f"Written: {args.output}")
+
+
+if __name__ == "__main__":
+    main()

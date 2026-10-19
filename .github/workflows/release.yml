@@ -259,6 +259,16 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Inject settings schema
+        run: |
+          ./build/src/oflm config gen-schema > /tmp/schema.json
+          python3 utilities/release/inject-schema.py \
+            --input src/model_list.json \
+            --schema /tmp/schema.json \
+            --output src/model_list.json
+          echo "Schema injected. Verifying..."
+          python3 -c "import json; d=json.load(open('src/model_list.json')); assert 'settings_schema' in d; assert 'defaults_version' in d; print('OK:', len(d['settings_schema']['settings']), 'settings')"
+
       - name: Package
         run: |
           set -euo pipefail
