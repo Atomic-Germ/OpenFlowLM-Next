@@ -283,6 +283,27 @@ if(WIN32)
     endif()
 endif()
 
+# sentencepiece creates third_party/absl -> third_party/abseil-cpp/absl only
+# when the link is missing, so a link left over from another checkout survives
+# and points at a tree that is not here. The build then fails on
+# "third_party/absl/log/check.h: No such file or directory" in a place that
+# says nothing about the cause. Drop a link that points elsewhere so
+# sentencepiece makes a correct one.
+if(NOT WIN32)
+    set(OFLM_SPM_TP
+        "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
+    if(IS_SYMLINK "${OFLM_SPM_TP}/absl")
+        file(READ_SYMLINK "${OFLM_SPM_TP}/absl" OFLM_SPM_LINK_TARGET)
+        get_filename_component(OFLM_SPM_LINK_DIR "${OFLM_SPM_LINK_TARGET}" DIRECTORY)
+        get_filename_component(OFLM_SPM_LINK_NAME "${OFLM_SPM_LINK_TARGET}" NAME)
+        if(NOT OFLM_SPM_LINK_NAME STREQUAL "absl" OR
+           NOT OFLM_SPM_LINK_DIR STREQUAL "${OFLM_SPM_TP}/abseil-cpp")
+            message(STATUS "sentencepiece: replacing a stale third_party/absl link")
+            file(REMOVE "${OFLM_SPM_TP}/absl")
+        endif()
+    endif()
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
                  ${CMAKE_BINARY_DIR}/tokenizers-cpp
                  EXCLUDE_FROM_ALL)

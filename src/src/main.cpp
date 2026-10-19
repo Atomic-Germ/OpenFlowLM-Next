@@ -4,7 +4,6 @@
 /// \date 2025-08-05
 /// \version 0.9.24
 /// \note This is a source file for the main entry point
-#pragma once
 #include "runner.hpp"
 #include "server.hpp"
 #include "model_list.hpp"

@@ -164,7 +164,6 @@ void Runner::run() {
     bool verbose = false;
     this->system_prompt = "";
     this->auto_chat_engine->configure_parameter("system_prompt", this->system_prompt);
-    std::wstring_convert<std::codecvt_utf8<wchar_t>> utf8conv;
     wstream_buf obuf(std::cout);
     std::ostream base_ostream(&obuf);
     header_print("OFLM", "Type /? for help");
@@ -184,7 +183,7 @@ void Runner::run() {
         }
 
         // Convert line (UTF-8 bytes) → wide string (Unicode codepoints)
-        std::wstring winput = utf8conv.from_bytes(input);
+        std::wstring winput = utf8_to_wstring(input);
 
         // Split on *any* Unicode whitespace
         std::wistringstream wiss(winput);
@@ -194,7 +193,7 @@ void Runner::run() {
 
         while (wiss >> wtoken) {
             // Convert each token back → UTF-8 bytes
-            input_list.push_back(utf8conv.to_bytes(wtoken));
+            input_list.push_back(wstring_to_utf8(wtoken));
         }
 
         // now input_list contains your UTF-8 tokens
@@ -346,7 +345,7 @@ void Runner::run() {
                     }
                     file.imbue(std::locale(file.getloc(), new std::codecvt_utf8<wchar_t>));  // treat file content as UTF-8
                     std::wstring file_content_original((std::istreambuf_iterator<wchar_t>(file)), std::istreambuf_iterator<wchar_t>());
-                    std::string file_content = utf8conv.to_bytes(file_content_original);
+                    std::string file_content = wstring_to_utf8(file_content_original);
                     file.close();
 #else
                     std::ifstream file(filename);

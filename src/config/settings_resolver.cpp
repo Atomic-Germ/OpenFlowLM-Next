@@ -77,6 +77,15 @@ nlohmann::json resolve_settings(
                 resolved[def.key] = cfg.user_settings["settings"][type][size][def.key];
                 continue;
             }
+            // The user's app-wide default applies to every model that does
+            // not override the setting for itself. Without this a setting
+            // changed app-wide would show up in the global view and in no
+            // model at all.
+            if (cfg.user_settings.contains("defaults") &&
+                cfg.user_settings["defaults"].contains(def.key)) {
+                resolved[def.key] = cfg.user_settings["defaults"][def.key];
+                continue;
+            }
         }
 
         // 1. Shipped defaults
@@ -171,6 +180,11 @@ std::optional<SettingValue> get_setting_value(
             cfg.user_settings["settings"][type].contains(size) &&
             cfg.user_settings["settings"][type][size].contains(setting_key)) {
             return SettingValue{json_to_string(cfg.user_settings["settings"][type][size][setting_key]), SettingValue::USER};
+        }
+        // The user's app-wide default applies to every model that does not
+        // override the setting for itself.
+        if (cfg.user_settings.contains("defaults") && cfg.user_settings["defaults"].contains(setting_key)) {
+            return SettingValue{json_to_string(cfg.user_settings["defaults"][setting_key]), SettingValue::USER};
         }
     }
     // Check shipped defaults

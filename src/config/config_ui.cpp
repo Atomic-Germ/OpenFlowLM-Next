@@ -257,11 +257,14 @@ int guided_flow() {
 
     // The model list is rebuilt whenever the config changes, so the markers
     // stay true: "(user-added)" for a model the user installed, and the
-    // number of settings they have customised.
+    // number of settings whose value the user chose for this model — the
+    // same ones the view shows as (custom), whether they were set for the
+    // model alone or app-wide.
     std::vector<PickerItem> models;
     auto rebuild_models = [&]() {
         models.clear();
         models.push_back({"[Global settings]", ""});
+        program_args_t no_args;
         for (auto it_type = cfg.merged["models"].begin(); it_type != cfg.merged["models"].end(); ++it_type) {
             const std::string& type = it_type.key();
             for (auto it_size = it_type->begin(); it_size != it_type->end(); ++it_size) {
@@ -272,10 +275,12 @@ int guided_flow() {
                                cfg.user_settings["models"].contains(type) &&
                                cfg.user_settings["models"][type].contains(size);
                 if (is_user) note = "(user-added)";
-                if (cfg.user_settings.contains("settings") &&
-                    cfg.user_settings["settings"].contains(type) &&
-                    cfg.user_settings["settings"][type].contains(size)) {
-                    size_t n = cfg.user_settings["settings"][type][size].size();
+                size_t n = 0;
+                for (const auto& def : settings_registry()) {
+                    auto v = get_setting_value(cfg, tag, def.key, no_args);
+                    if (v && v->source == SettingValue::USER) n++;
+                }
+                if (n) {
                     if (!note.empty()) note += " ";
                     note += "(" + std::to_string(n) + " custom)";
                 }
@@ -407,12 +412,30 @@ int guided_flow() {
                 settings_json = nlohmann::json::object();
             }
 
-            if (model_tag.empty()) {
-                // Global setting
+            // Where the value goes: a global setting that this model does not
+            // override is an app-wide setting, so it is written to the
+            // defaults block and every model follows. A setting this model
+            // overrides for itself stays with the model.
+            bool model_overrides_it = false;
+            auto def = find_setting(key);
+            bool is_global = def && def->scope == SettingScope::GLOBAL;
+            if (!model_tag.empty() && is_global) {
+                auto mp = split_tag(model_tag);
+                model_overrides_it = cfg.user_settings.contains("settings") &&
+                                    cfg.user_settings["settings"].contains(mp.first) &&
+                                    cfg.user_settings["settings"][mp.first].contains(mp.second) &&
+                                    cfg.user_settings["settings"][mp.first][mp.second].contains(key);
+            }
+
+            if (model_tag.empty() || (is_global && !model_overrides_it)) {
+                // Global setting: it applies to every model
                 if (!settings_json.contains("defaults")) {
                     settings_json["defaults"] = nlohmann::json::object();
                 }
                 settings_json["defaults"][key] = options[o].label;
+                if (!model_tag.empty()) {
+                    std::cout << "  (app-wide: every model now uses this)" << std::endl;
+                }
             } else {
                 // Per-model setting
                 auto model_parts = split_tag(model_tag);

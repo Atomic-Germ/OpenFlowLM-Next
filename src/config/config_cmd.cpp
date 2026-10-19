@@ -203,8 +203,10 @@ static int config_set(const program_args_t& args) {
     }
     
     // Set the value based on scope
+    bool app_wide = false;
     if (args.config_model.empty()) {
         // Global setting: defaults.<key>
+        app_wide = true;
         if (!settings.contains("defaults")) {
             settings["defaults"] = nlohmann::json::object();
         }
@@ -218,19 +220,37 @@ static int config_set(const program_args_t& args) {
     } else {
         // Per-model setting: settings.<type>.<size>.<key>
         auto [type, size] = split_tag(args.config_model);
-        
-        if (!settings.contains("settings")) {
-            settings["settings"] = nlohmann::json::object();
+
+        // A global setting that this model does not override for itself is
+        // an app-wide setting: writing it to the model would leave every
+        // other model on the old value. Write it to the defaults block
+        // instead, so it reaches all of them.
+        bool is_global = def.scope == SettingScope::GLOBAL;
+        bool model_overrides_it = cfg.user_settings.contains("settings") &&
+                                  cfg.user_settings["settings"].contains(type) &&
+                                  cfg.user_settings["settings"][type].contains(size) &&
+                                  cfg.user_settings["settings"][type][size].contains(args.config_key);
+
+        if (is_global && !model_overrides_it) {
+            app_wide = true;
+            if (!settings.contains("defaults")) {
+                settings["defaults"] = nlohmann::json::object();
+            }
+            settings["defaults"][args.config_key] = value_json;
+        } else {
+            if (!settings.contains("settings")) {
+                settings["settings"] = nlohmann::json::object();
+            }
+            if (!settings["settings"].contains(type)) {
+                settings["settings"][type] = nlohmann::json::object();
+            }
+            if (!settings["settings"][type].contains(size)) {
+                settings["settings"][type][size] = nlohmann::json::object();
+            }
+
+            settings["settings"][type][size][args.config_key] = value_json;
         }
-        if (!settings["settings"].contains(type)) {
-            settings["settings"][type] = nlohmann::json::object();
-        }
-        if (!settings["settings"][type].contains(size)) {
-            settings["settings"][type][size] = nlohmann::json::object();
-        }
-        
-        settings["settings"][type][size][args.config_key] = value_json;
-        
+
         // Update defaults_version
         if (cfg.shipped_registry.contains("defaults") &&
             cfg.shipped_registry["defaults"].contains("defaults_version")) {
@@ -241,7 +261,11 @@ static int config_set(const program_args_t& args) {
     // Save the settings
     try {
         save_user_settings(settings, cfg.user_settings_path);
-        std::cout << "Set '" << args.config_key << "' = '" << args.config_value << "'" << std::endl;
+        std::cout << "Set '" << args.config_key << "' = '" << args.config_value << "'";
+        if (app_wide) {
+            std::cout << " (app-wide: every model now uses this)";
+        }
+        std::cout << std::endl;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error saving settings: " << e.what() << std::endl;
@@ -338,20 +362,10 @@ int config_show(const program_args_t& args) {
             // Convert to flat key-value with sources
             nlohmann::json model_settings;
             for (const auto& def : settings_registry()) {
-                bool per_model = (def.scope == SettingScope::PER_MODEL || def.scope == SettingScope::BOTH);
-                // A global setting the user overrode for THIS model is one of
-                // the model's effective values, so it belongs in this view.
-                bool user_override = false;
-                if (cfg.user_settings.contains("settings")) {
-                    auto [utype, usize] = split_tag(args.config_model);
-                    user_override = cfg.user_settings["settings"].contains(utype) &&
-                                    cfg.user_settings["settings"][utype].contains(usize) &&
-                                    cfg.user_settings["settings"][utype][usize].contains(def.key);
-                }
-                if (!per_model && !user_override) {
-                    continue;
-                }
-
+                // Everything that bears on this model: the per-model settings
+                // and the app-wide ones. The app-wide settings are listed
+                // because the guided flow offers them here too, and a view
+                // that shows fewer than the menu is confusing.
                 auto value_opt = get_setting_value(cfg, args.config_model, def.key, args);
                 if (value_opt) {
                     model_settings[def.key] = {
@@ -392,20 +406,7 @@ int config_show(const program_args_t& args) {
             
             bool found_any = false;
             for (const auto& def : settings_registry()) {
-                bool per_model = (def.scope == SettingScope::PER_MODEL || def.scope == SettingScope::BOTH);
-                // A global setting the user overrode for THIS model is one of
-                // the model's effective values, so it belongs in this view.
-                bool user_override = false;
-                if (cfg.user_settings.contains("settings")) {
-                    auto [utype, usize] = split_tag(args.config_model);
-                    user_override = cfg.user_settings["settings"].contains(utype) &&
-                                    cfg.user_settings["settings"][utype].contains(usize) &&
-                                    cfg.user_settings["settings"][utype][usize].contains(def.key);
-                }
-                if (!per_model && !user_override) {
-                    continue;
-                }
-
+                // Everything that bears on this model, as in the JSON view.
                 auto value_opt = get_setting_value(cfg, args.config_model, def.key, args);
                 if (value_opt) {
                     std::cout << std::left << std::setw(24) << def.key << " "

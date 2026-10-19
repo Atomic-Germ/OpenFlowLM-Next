@@ -111,6 +111,13 @@ inline __m128i f32o_bf16(__m256 fp32_vals) {
 /// \brief AVX-512 Convert bfloat16 to float32 (16 lanes)
 /// \param bf16_vals the bfloat16 values, 256-bits, 16xbf16
 /// \return the float32 values, 512-bits, 16xfloat32
+/// \note Only defined when the translation unit has AVX512F. A function that
+///       returns __m512 has a different ABI depending on whether AVX512F is
+///       enabled, and this header is included by translation units built both
+///       ways (some open_kernels sources get -mavx512f, the rest do not).
+///       Two inline copies with different ABIs would be an ODR violation,
+///       and the compiler warns about it (-Wpsabi).
+#if defined(__AVX512F__)
 inline __m512 bf16o_fp32_512(__m256i bf16_vals) {
     __m512i expanded = _mm512_cvtepu16_epi32(bf16_vals);
     return _mm512_castsi512_ps(_mm512_slli_epi32(expanded, 16));
@@ -134,6 +141,7 @@ inline __m256i f32o_bf16_512(__m512 fp32_vals) {
     result = _mm256_inserti128_si256(result, upper_bf16, 1);
     return result;
 }
+#endif  // __AVX512F__
 
 /// \brief Convert UTF-8 string to wide string
 /// \param str the UTF-8 string
@@ -147,8 +155,47 @@ inline std::wstring utf8_to_wstring(const std::string& str) {
     return wstr;
 }
 #else
+/// \brief Convert a UTF-8 string to a wide string
+/// \param str the UTF-8 string
+/// \return the wide string
+/// \note std::wstring_convert is deprecated in C++17 and removed in C++20, but
+///       it is still the only exact, locale-independent UTF-8 decoder in the
+///       standard library: std::filesystem::path's conversion goes through the
+///       locale, which is not UTF-8 in general, and driving
+///       std::codecvt_utf8_utf16 by hand does not work because its base class
+///       hides the five-argument out() behind a seven-argument one that
+///       converts the other way. So keep wstring_convert and silence the
+///       deprecation here, in the one place it is used. If the standard does
+///       remove it, this is the line to rewrite.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 inline std::wstring utf8_to_wstring(const std::string& str) {
     std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
     return conv.from_bytes(str);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
+/// \brief Convert a wide string to a UTF-8 string
+/// \param str the wide string
+/// \return the UTF-8 string
+/// \note The mirror of utf8_to_wstring, and deprecated for the same reason:
+///       see the note above. std::codecvt_utf8 (not codecvt_utf8_utf16) is
+///       what the callers used, and it is kept: on a platform where wchar_t
+///       is 32 bits it yields whole code points, where codecvt_utf8_utf16
+///       would yield UTF-16 code units.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+inline std::string wstring_to_utf8(const std::wstring& str) {
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+    return conv.to_bytes(str);
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 #endif
