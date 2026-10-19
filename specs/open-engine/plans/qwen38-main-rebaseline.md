@@ -1,5 +1,32 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — 2026-10-19
+
+A private paired-BF16-input hybrid GEMM experiment passes the full 64-layer,
+20-token causal prompt and one NPU continuation on all three schedules:
+**63/63 logit comparisons**. Hybrid minimum correlation improves from
+**0.9998908204** (control FAIL) to **0.9999488108** (candidate PASS), with the
+unchanged >0.9999 gate. L63 continuation residual maxrel improves from
+**0.0018923571** to **0.0011956505**, below 0.005.
+
+The original control reproduces all **66** historical logit files bytewise.
+Candidate sequential outputs remain identical in **22/22** files; its hybrid
+schedules match in **22/22** files. Independent CPU references, production
+engine sources and NPU kernels are unchanged. The private builder retains the
+single-dispatch implementation and calls it on the original input and its
+BF16 rounding remainder, then sums in host memory. This confirms a contribution
+from input rounding, not a complete explanation of every error.
+
+The reproducible experiment and auditor are in
+[`utilities/prefill-paired-input`](../../../utilities/prefill-paired-input/README.md).
+TDD and audit regressions: **11 new tests**, host suite **1436 passed, 47 skipped**;
+native CTest **4/4 per build**. Full-depth block boundaries, intermediate
+residuals, production promotion, serving and final resource/performance checks
+remain open. The candidate doubles projection dispatches and explicitly
+rejects stage-major; this is not full model acceptance.
+
+## Earlier decode-entry checkpoint — 2026-10-13
+
 Updated 2026-10-13. This branch adds strict decode/source validation, FP32
 split-FFN and full-attention entry preparation, and paired-BF16 KV with FP32
 gated attention/output-projection preparation. The complete FP32-entry export
