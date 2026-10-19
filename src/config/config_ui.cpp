@@ -67,10 +67,16 @@ size_t numbered_menu(const std::string& title, const std::vector<PickerItem>& it
         std::cout << "\n";
     }
     std::cout << "  0. Back\n";
+    std::cout << "\n  [number] choose   [0] back   [q] quit\n";
     std::cout << "> " << std::flush;
 
     std::string line;
     if (!std::getline(std::cin, line)) return SIZE_MAX;
+
+    // Trim, so " q " works as well as "q".
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front()))) line.erase(line.begin());
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+    if (line == "q" || line == "Q") return SIZE_MAX;   // quit the whole flow
 
     try {
         int choice = std::stoi(line);
@@ -112,7 +118,7 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
             if (!items[i].description.empty()) std::cout << "  " << items[i].description;
             std::cout << "\n";
         }
-        std::cout << "\n  ↑/↓ navigate  Enter select  Esc cancel\n" << std::flush;
+        std::cout << "\n  ↑/↓ navigate  Enter select  Esc back  q quit\n" << std::flush;
     };
 
     render();
@@ -135,6 +141,9 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
             SetConsoleMode(hIn, orig_mode);
             return SIZE_MAX;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == 'Q') {
+            SetConsoleMode(hIn, orig_mode);
+            return SIZE_MAX;
         }
     }
 #else
@@ -153,7 +162,7 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
             if (!items[i].description.empty()) std::cout << "  " << items[i].description;
             std::cout << "\n";
         }
-        std::cout << "\n  ↑/↓ navigate  Enter select  Esc cancel\n" << std::flush;
+        std::cout << "\n  ↑/↓ navigate  Enter select  Esc back  q quit\n" << std::flush;
     };
 
     render();
@@ -188,10 +197,37 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
 #endif
 }
 
+// What a setting currently holds, and where that value came from, for the
+// menu to show: "8192 (global)" or "balanced (custom)".
+static std::string current_value_note(const EffectiveConfig& cfg,
+                                       const std::string& model_tag,
+                                       const std::string& key) {
+    program_args_t no_args;
+    auto v = get_setting_value(cfg, model_tag, key, no_args);
+    if (!v) return "";
+    return v->value + " " + source_tag(v->source);
+}
+
+// The bare value a setting holds, without where it came from.
+static std::string current_value_only(const EffectiveConfig& cfg,
+                                      const std::string& model_tag,
+                                      const std::string& key) {
+    program_args_t no_args;
+    auto v = get_setting_value(cfg, model_tag, key, no_args);
+    if (!v) return "";
+    return v->value;
+}
+
 int guided_flow() {
     auto tier = detect_ui_tier();
     auto pick = [&](const std::string& title, const std::vector<PickerItem>& items) -> size_t {
         if (tier >= UiTier::ARROW_PICKER) return arrow_picker(title, items);
+        return numbered_menu(title, items);
+    };
+    // The same, but starting the cursor on the entry that is in effect.
+    auto pick_from = [&](const std::string& title, const std::vector<PickerItem>& items,
+                         size_t current) -> size_t {
+        if (tier >= UiTier::ARROW_PICKER) return arrow_picker(title, items, current);
         return numbered_menu(title, items);
     };
 
@@ -247,7 +283,10 @@ int guided_flow() {
                 settings.clear();
                 for (const auto& def : settings_registry()) {
                     if (def.scope == SettingScope::PER_MODEL) continue;
-                    settings.push_back({def.key, def.description});
+                    // Show what it holds now, and whether that is the user's
+                    // own value or the shipped one, so returning to this list
+                    // shows the state rather than a bare list of names.
+                    settings.push_back({def.key, current_value_note(cfg, model_tag, def.key)});
                 }
                 settings_back_to = Step::ACTION;
                 step = Step::SETTING;
@@ -274,7 +313,9 @@ int guided_flow() {
             settings.clear();
             for (const auto& def : settings_registry()) {
                 if (def.scope == SettingScope::PER_MODEL && model_tag.empty()) continue;
-                settings.push_back({def.key, def.description});
+                // The value it holds now, and whether that is the user's own
+                // value or the shipped one.
+                settings.push_back({def.key, current_value_note(cfg, model_tag, def.key)});
             }
             settings_back_to = Step::MODEL;
             step = Step::SETTING;
@@ -306,7 +347,20 @@ int guided_flow() {
                 step = Step::SETTING;
                 break;
             }
-            size_t o = pick("Select value for " + key + ":", options);
+
+            // Show which option is in effect, and whether that is the user's
+            // own value or the shipped one, and start the cursor on it.
+            std::string current = current_value_note(cfg, model_tag, key);
+            size_t current_idx = SIZE_MAX;
+            for (size_t i = 0; i < options.size(); i++) {
+                if (options[i].label == current_value_only(cfg, model_tag, key)) {
+                    current_idx = i;
+                    break;
+                }
+            }
+            std::string title = "Select value for " + key;
+            if (!current.empty()) title += " (current: " + current + ")";
+            size_t o = pick_from(title, options, current_idx);
             if (o == SIZE_MAX) { step = Step::SETTING; break; }  // back
 
             SettingsLock lock(cfg.user_settings_path);
@@ -351,8 +405,12 @@ int guided_flow() {
             save_user_settings(settings_json, cfg.user_settings_path);
             std::cout << "Set '" << key << "' = '" << options[o].label << "'" << std::endl;
 
-            // Back to the top: the user may want to change something else.
-            step = Step::ACTION;
+            // Back to the menu we came from -- the model list for a model's
+            // setting, the action list for a global one -- so the user lands
+            // where they were, with the value now showing as their own.
+            // The config in memory is refreshed so the list shows the new value.
+            cfg = load_effective_config();
+            step = settings_back_to;
             break;
         }
         }

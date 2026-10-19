@@ -242,6 +242,46 @@ else
   bad "config review --keep-all failed (exit $rc):"; echo "$out" | head -5
 fi
 
+# ------------------------------------------------ 16. guided flow navigation
+step "16. the guided flow goes back a level instead of quitting"
+# 1 = Edit a model's settings, 44 = qwen3.8:27b, 0 = Back, 0 = Back
+out=$(printf '2\n44\n0\n0\n' | "$OFLM" config 2>/dev/null)
+if echo "$out" | grep -q "Select model" && echo "$out" | grep -q "What do you want to do"; then
+  ok "Back at the model list returns to the action list"
+else
+  bad "Back did not return to the action list:"; echo "$out" | head -10
+fi
+
+# ------------------------------------------------ 17. the menus show the state
+step "17. the menus show the current value and where it came from"
+"$OFLM" config set --config-model "$MODEL" --config-key prefill_mode --config-value lean >/dev/null 2>&1
+out=$(printf '2\n44\n' | "$OFLM" config 2>/dev/null)
+if echo "$out" | grep -qE "prefill_mode.*lean.*\(custom\)"; then
+  ok "the setting list shows the user's own value as (custom)"
+else
+  bad "the setting list did not show the (custom) value:"; echo "$out" | head -12
+fi
+if echo "$out" | grep -qE "ctx_len.*\(global\)"; then
+  ok "the setting list shows the shipped value as (global)"
+else
+  bad "the setting list did not show a (global) value:"; echo "$out" | head -12
+fi
+out=$(printf '2\n44\n1\n' | "$OFLM" config 2>/dev/null)
+if echo "$out" | grep -qE "Select value for prefill_mode.*current: lean \(custom\)"; then
+  ok "the value picker names the option in effect"
+else
+  bad "the value picker did not name the option in effect:"; echo "$out" | head -12
+fi
+
+# ------------------------------------------------ 18. the menus list the keys
+step "18. the menus show the keyboard shortcuts"
+out=$(printf '0\n' | "$OFLM" config 2>/dev/null)
+if echo "$out" | grep -q "q. quit"; then
+  ok "the menu shows the quit key"
+else
+  bad "the menu did not show the quit key:"; echo "$out" | head -8
+fi
+
 # ------------------------------------------------------------- summary
 echo
 echo "================================"
