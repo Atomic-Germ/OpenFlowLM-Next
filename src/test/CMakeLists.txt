@@ -13,6 +13,17 @@ include(CMakeParseArguments)
 # The per-model NPU tests in this directory are deliberately NOT added: they
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
+
+# Settings registry tests (host-only, no NPU needed)
+add_executable(settings_registry_test settings_registry_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)
+target_include_directories(settings_registry_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR})
+add_test(NAME settings_registry_test COMMAND settings_registry_test)
+
 add_subdirectory(npu_platform)
 add_subdirectory(model_backend)
 add_subdirectory(downloader_pinning)
