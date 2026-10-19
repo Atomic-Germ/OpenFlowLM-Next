@@ -2,6 +2,24 @@
 
 ## Latest checkpoint — 2026-10-19
 
+A private per-layer native prefill tracer is now built and CPU-tested. It
+captures actual FP32 residuals after every layer, including continuation, on
+sequential NPU and both hybrid schedules. Sequential queue-ahead is disabled
+in this diagnostic copy to prevent the next layer overwriting `xres` during
+readback. Production sources, kernel artifacts and paired-input arithmetic
+are unchanged. The new auditor requires byte-exact baseline logits before
+interpreting residuals and applies the unchanged <0.005 gate per layer/position.
+
+Preparation adds **24 tests** (15 initially RED), including poisoned padding at
+255/256/257 boundaries, coverage failures, per-row numerical errors and control
+identity. Host suite: **1471 passed, 47 skipped**; native CTest **4/4**. Build
+provenance includes **585 compiler dependencies**. The compiled CLI also rejects
+unsupported host decode before loading the model. The
+[trace runbook](../../../utilities/prefill-residual-trace/README.md) records the
+build and deferred run commands. Full-model capture is **pending**: available
+RAM was about 13 GiB, and this stage was limited to preparation. Native logit
+identity and first-layer localization have not yet been measured.
+
 Full-depth 255/256/257-token prefill and one NPU continuation have now run on
 all three schedules. **Accuracy remains FAIL:** only **1668/2313** logit gates
 pass. Sequential first fails at position **80**, minimum correlation
@@ -15,9 +33,9 @@ The two hybrid schedules agree bytewise in **774/774** logit files, and all
 **1533/1533** common-prefix comparisons across lengths are exact on all routes.
 The capture audit completes with a numerical FAIL. Errors
 already occur before the block boundary, so this is not solely a 256-token
-transition issue. All **2331 native output files** are retained. The CLI only
-captures L63 after continuation; identifying the first divergent layer requires
-native intermediate residual captures. Full CPU residual references are ready.
+transition issue. All **2331 native output files** are retained. The CLI used for those measurements only
+captured L63 after continuation; identifying the first divergent layer still requires
+running the new intermediate residual tracer. Full CPU residual references are ready.
 
 Independent boundary references pass all **1155 files**, **128** common-prefix
 residual arrays, **511** logit prefixes and **12** first-four-layer arrays against

@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-residual-trace</name>
+    <description>Build a private synchronized native prefill residual tracer and audit per-layer drift after byte-exact baseline logit identity.</description>
+    <location>.agents/skills/open-qwen38-prefill-residual-trace/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-host-boundaries</name>
     <description>Build the CPU prefill bridge and validate FP32 history, paired KV and 255/256/257-token boundaries against an independent reference.</description>
     <location>.agents/skills/open-qwen38-prefill-host-boundaries/SKILL.md</location>
