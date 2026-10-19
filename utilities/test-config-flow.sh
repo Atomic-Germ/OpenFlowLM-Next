@@ -282,6 +282,27 @@ else
   bad "the menu did not show the quit key:"; echo "$out" | head -8
 fi
 
+# ------------------------------------------------ 19. a per-model global override
+step "19. a global setting overridden for one model shows in that model's view"
+# pmode is a global setting, but the user can override it for one model.
+"$OFLM" config set --config-model "$MODEL" --config-key pmode --config-value balanced >/dev/null 2>&1
+out=$("$OFLM" config show --config-model "$MODEL" 2>/dev/null)
+if echo "$out" | grep -qE "pmode.*balanced.*\(custom\)"; then
+  ok "the model's own pmode override is shown"
+else
+  bad "the model's own pmode override was hidden:"; echo "$out"
+fi
+# The count in the model list must agree with what is shown.
+n_custom=$("$OFLM" config show --json --config-model "$MODEL" 2>/dev/null \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for v in d.values() if v['source']=='(custom)'))")
+out=$(printf '2\n0\n' | "$OFLM" config 2>/dev/null | grep "$MODEL")
+if echo "$out" | grep -q "($n_custom custom)"; then
+  ok "the model list counts $n_custom custom settings, which is what is shown"
+else
+  bad "the model list count does not match what is shown ($n_custom):"; echo "$out"
+fi
+"$OFLM" config unset --config-model "$MODEL" --config-key pmode >/dev/null 2>&1
+
 # ------------------------------------------------------------- summary
 echo
 echo "================================"

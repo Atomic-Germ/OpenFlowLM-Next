@@ -338,10 +338,20 @@ int config_show(const program_args_t& args) {
             // Convert to flat key-value with sources
             nlohmann::json model_settings;
             for (const auto& def : settings_registry()) {
-                if (def.scope != SettingScope::PER_MODEL && def.scope != SettingScope::BOTH) {
+                bool per_model = (def.scope == SettingScope::PER_MODEL || def.scope == SettingScope::BOTH);
+                // A global setting the user overrode for THIS model is one of
+                // the model's effective values, so it belongs in this view.
+                bool user_override = false;
+                if (cfg.user_settings.contains("settings")) {
+                    auto [utype, usize] = split_tag(args.config_model);
+                    user_override = cfg.user_settings["settings"].contains(utype) &&
+                                    cfg.user_settings["settings"][utype].contains(usize) &&
+                                    cfg.user_settings["settings"][utype][usize].contains(def.key);
+                }
+                if (!per_model && !user_override) {
                     continue;
                 }
-                
+
                 auto value_opt = get_setting_value(cfg, args.config_model, def.key, args);
                 if (value_opt) {
                     model_settings[def.key] = {
@@ -382,10 +392,20 @@ int config_show(const program_args_t& args) {
             
             bool found_any = false;
             for (const auto& def : settings_registry()) {
-                if (def.scope != SettingScope::PER_MODEL && def.scope != SettingScope::BOTH) {
+                bool per_model = (def.scope == SettingScope::PER_MODEL || def.scope == SettingScope::BOTH);
+                // A global setting the user overrode for THIS model is one of
+                // the model's effective values, so it belongs in this view.
+                bool user_override = false;
+                if (cfg.user_settings.contains("settings")) {
+                    auto [utype, usize] = split_tag(args.config_model);
+                    user_override = cfg.user_settings["settings"].contains(utype) &&
+                                    cfg.user_settings["settings"][utype].contains(usize) &&
+                                    cfg.user_settings["settings"][utype][usize].contains(def.key);
+                }
+                if (!per_model && !user_override) {
                     continue;
                 }
-                
+
                 auto value_opt = get_setting_value(cfg, args.config_model, def.key, args);
                 if (value_opt) {
                     std::cout << std::left << std::setw(24) << def.key << " "
