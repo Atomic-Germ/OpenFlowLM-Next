@@ -154,6 +154,79 @@ TEST(built_in_default_used) {
     ASSERT_EQ(resolved["prefill_mode"], "fast");
 }
 
+TEST(each_model_resolves_its_own_settings) {
+    // A server can serve several models, and `/load` can swap the model at
+    // run time. The settings resolved for one model must not leak into
+    // another: each is resolved for the tag it is asked about.
+    auto cfg = make_cfg(
+        nlohmann::json::object(),
+        nlohmann::json::object(),
+        {{"qwen3.8", {{"27b", {{"prefill_mode", "lean"}}}}},
+         {"qwen3.6-moe", {{"35b-a3b", {{"prefill_mode", "fast"}}}}}}
+    );
+    cfg.shipped_registry["models"]["qwen3.8"]["27b"] = {{"default_context_length", 8192}};
+    cfg.shipped_registry["models"]["qwen3.6-moe"]["35b-a3b"] = {{"default_context_length", 32768}};
+
+    auto args = make_args();
+    auto one = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
+    auto two = oflm::config::resolve_settings(cfg, "qwen3.6-moe:35b-a3b", args);
+
+    ASSERT_EQ(one["prefill_mode"], "lean");
+    ASSERT_EQ(two["prefill_mode"], "fast");
+    ASSERT_EQ(one["ctx_len"], 8192);
+    ASSERT_EQ(two["ctx_len"], 32768);
+}
+
+TEST(the_app_wide_default_reaches_a_model_that_does_not_override_it) {
+    // A setting the user changed app-wide applies to every model, unless that
+    // model overrides it. Without this the app-wide value showed up in the
+    // global view and in no model at all.
+    auto cfg = make_cfg(
+        nlohmann::json::object(),
+        {{"pmode", "balanced"}},
+        {{"qwen3.8", {{"27b", {{"prefill_mode", "lean"}}}}}}
+    );
+    cfg.shipped_registry["models"]["qwen3.8"]["27b"] = {{"default_context_length", 8192}};
+    cfg.shipped_registry["models"]["qwen3.6-moe"]["35b-a3b"] = {{"default_context_length", 32768}};
+
+    auto args = make_args();
+    auto overridden = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
+    auto plain = oflm::config::resolve_settings(cfg, "qwen3.6-moe:35b-a3b", args);
+
+    ASSERT_EQ(overridden["pmode"], "balanced");
+    ASSERT_EQ(plain["pmode"], "balanced");
+}
+
+TEST(a_models_own_override_beats_the_app_wide_value) {
+    auto cfg = make_cfg(
+        nlohmann::json::object(),
+        {{"pmode", "balanced"}},
+        {{"qwen3.6-moe", {{"35b-a3b", {{"pmode", "turbo"}}}}}}
+    );
+    cfg.shipped_registry["models"]["qwen3.8"]["27b"] = {{"default_context_length", 8192}};
+    cfg.shipped_registry["models"]["qwen3.6-moe"]["35b-a3b"] = {{"default_context_length", 32768}};
+
+    auto args = make_args();
+    auto overridden = oflm::config::resolve_settings(cfg, "qwen3.6-moe:35b-a3b", args);
+    auto plain = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
+
+    ASSERT_EQ(overridden["pmode"], "turbo");   // the model's own
+    ASSERT_EQ(plain["pmode"], "balanced");    // the app-wide one
+}
+
+TEST(a_model_that_overrides_nothing_gets_the_shipped_value) {
+    auto cfg = make_cfg(
+        {{"pmode", "performance"}},
+        nlohmann::json::object(),
+        nlohmann::json::object()
+    );
+    cfg.shipped_registry["models"]["qwen3.8"]["27b"] = {{"default_context_length", 8192}};
+
+    auto args = make_args();
+    auto resolved = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
+    ASSERT_EQ(resolved["pmode"], "performance");
+}
+
 int main() {
     std::cout << "Running " << tests.size() << " tests..." << std::endl;
     int passed = 0;

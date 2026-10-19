@@ -371,9 +371,13 @@ static json convert_tool_responses_gemma4(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption), args(args){
     this->npu_device_inst = oflm_rt::device(0);
 
+    // The command line's values, and -1 for "not given". The value in effect
+    // for the model being served is resolved per model: a request may name a
+    // model other than the one on the command line, and that model has its
+    // own settings.
     if (args.ctx_length != -1) {
         this->ctx_length = args.ctx_length >= 512 ? args.ctx_length : 512;
     } else {
@@ -381,9 +385,6 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
     }
     if (args.prefill_chunk_len != -1) {
         this->prefill_chunk_len = args.prefill_chunk_len >= 512 ? args.prefill_chunk_len : 512;
-    }
-    else if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("prefill_chunk_len")) {
-        this->prefill_chunk_len = (*oflm::config::g_resolved_settings)["prefill_chunk_len"].get<int>();
     }
     else {
         this->prefill_chunk_len = -1;
@@ -557,8 +558,36 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
         }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
+
+        // The settings resolved at startup belong to the model named on the
+        // command line. A request may name another, so resolve them again for
+        // the model actually being loaded: its context length, its prefill
+        // chunk length and its prefill mode are its own, and the ones in
+        // effect for another model would be wrong.
+        nlohmann::json model_settings;
+        if (oflm::config::g_effective_config) {
+            model_settings = oflm::config::resolve_settings(*oflm::config::g_effective_config,
+                                                            new_ensure_tag, this->args);
+            // The engine reads the env-var-delivered settings, so they have to
+            // be in the environment before it is constructed.
+            oflm::config::apply_settings(model_settings);
+        }
+
+        // The command line wins; otherwise the model's own setting; otherwise
+        // the registry's.
+        int model_ctx_length = this->ctx_length;
+        if (model_ctx_length == -1 && model_settings.contains("ctx_len")) {
+            model_ctx_length = model_settings["ctx_len"].get<int>();
+        }
+        int model_prefill_chunk_len = this->prefill_chunk_len;
+        if (model_prefill_chunk_len == -1 && model_settings.contains("prefill_chunk_len")) {
+            model_prefill_chunk_len = model_settings["prefill_chunk_len"].get<int>();
+        } else if (model_prefill_chunk_len == -1) {
+            model_prefill_chunk_len = model_info.value("max_prefill_len", 4096);
+        }
+
         try {
-            auto_chat_engine->load_model(supported_models.get_model_path(new_ensure_tag), model_info, ctx_length, preemption);
+            auto_chat_engine->load_model(supported_models.get_model_path(new_ensure_tag), model_info, model_ctx_length, preemption);
             auto_chat_engine->snapshot_request_defaults();
         }
         catch (const std::exception& e) {
@@ -569,14 +598,8 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             set_current_model_tag("model-faker");
             return ModelLoad::LoadFailed;
         }
-        
-        if (this->prefill_chunk_len == -1) {
-            if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("prefill_chunk_len")) {
-                this->prefill_chunk_len = (*oflm::config::g_resolved_settings)["prefill_chunk_len"].get<int>();
-            } else {
-                this->prefill_chunk_len = model_info.value("max_prefill_len", 4096);
-            }
-        }
+
+        this->prefill_chunk_len = model_prefill_chunk_len;
         set_current_model_tag(ensure_tag);
     }
     return ModelLoad::Ok;
@@ -701,12 +724,18 @@ void RestHandler::configure_chat_engine_parameters(const json& options, const js
         auto_chat_engine->set_repetition_penalty(repetition_penalty);
     }
     
-    // Get default think from resolved settings
+    // The default for "think" comes from the settings of the model being
+    // served -- not from the ones resolved at startup, which belong to the
+    // model named on the command line.
     bool default_think = true;
-    if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("think")) {
-        default_think = (*oflm::config::g_resolved_settings)["think"].get<bool>();
+    if (oflm::config::g_effective_config) {
+        auto model_settings = oflm::config::resolve_settings(*oflm::config::g_effective_config,
+                                                             current_model_tag, this->args);
+        if (model_settings.contains("think")) {
+            default_think = model_settings["think"].get<bool>();
+        }
     }
-    
+
     if (request.contains("think")) {
         bool enable_thinking = request["think"];
         auto_chat_engine->configure_parameter("enable_think", enable_thinking);

@@ -40,7 +40,7 @@ std::map<std::string, runner_cmd_t> cmd_map = {
 /// \param downloader - the downloader for the models
 /// \param tag - the tag of the model to load
 Runner::Runner(model_list& supported_models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption) {
+    : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption), args(args) {
 
     this->npu_device_inst = oflm_rt::device(0);
 
@@ -78,6 +78,7 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
     this->asr_supported = model_info.contains("asr") && model_info["asr"];
     // header_print("ASR", asr_supported);
     this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
+    apply_model_settings(new_tag, model_info);
     try {
         this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
     }
@@ -160,6 +161,34 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
 
 
 /// \brief Run the runner
+/// \brief Resolve the settings of a model about to be loaded and put them in effect.
+/// \param model_tag the model being loaded
+/// \param model_info its registry entry
+/// \note The settings resolved at startup belong to the model named on the command
+///       line. `/load` can swap the model at run time, and the context length,
+///       the prefill chunk length and the prefill mode of the new model are its
+///       own -- the ones in effect for the previous model would be wrong.
+void Runner::apply_model_settings(const std::string& model_tag, const nlohmann::json& model_info) {
+    nlohmann::json model_settings;
+    if (oflm::config::g_effective_config) {
+        model_settings = oflm::config::resolve_settings(*oflm::config::g_effective_config, model_tag, this->args);
+        // The engine reads the env-var-delivered settings, so they have to be
+        // in the environment before it is constructed.
+        oflm::config::apply_settings(model_settings);
+    }
+
+    // The command line wins; otherwise the model's own setting; otherwise the
+    // registry's.
+    if (this->ctx_length == -1 && model_settings.contains("ctx_len")) {
+        this->ctx_length = model_settings["ctx_len"].get<int>();
+    }
+    if (this->prefill_chunk_len == -1 && model_settings.contains("prefill_chunk_len")) {
+        this->prefill_chunk_len = model_settings["prefill_chunk_len"].get<int>();
+    } else if (this->prefill_chunk_len == -1) {
+        this->prefill_chunk_len = model_info.value("max_prefill_len", 4096);
+    }
+}
+
 void Runner::run() {
     bool verbose = false;
     this->system_prompt = "";
@@ -468,6 +497,14 @@ void Runner::cmd_load(std::vector<std::string>& input_list) {
 
         auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
         this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
+        // The model changed, so its settings are not the ones in effect: the
+        // context length and the prefill chunk length were the previous
+        // model's, and the prefill mode is in the environment from them.
+        this->ctx_length = (this->args.ctx_length != -1)
+            ? (this->args.ctx_length >= 512 ? this->args.ctx_length : 512) : -1;
+        this->prefill_chunk_len = (this->args.prefill_chunk_len != -1)
+            ? (this->args.prefill_chunk_len >= 512 ? this->args.prefill_chunk_len : 512) : -1;
+        apply_model_settings(new_tag, model_info);
         try {
             this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
         }
