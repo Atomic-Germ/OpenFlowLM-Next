@@ -13,4 +13,8 @@ const char* source_tag(SettingValue::Source s);
 /// Returns 0 on success, non-zero on error.
 int config_command_main(const program_args_t& args);
 
+/// Same, but turns a missing or unreadable registry into a message and a
+/// non-zero exit instead of an uncaught exception.
+int config_command_main_guarded(const program_args_t& args);
+
 } // namespace oflm::config

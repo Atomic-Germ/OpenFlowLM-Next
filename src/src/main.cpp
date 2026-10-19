@@ -562,7 +562,7 @@ int main(int argc, char* argv[]) {
 
     // Early dispatch for config — doesn't need the model registry
     if (parsed_args.command == "config") {
-        return oflm::config::config_command_main(parsed_args);
+        return oflm::config::config_command_main_guarded(parsed_args);
     }
 
     

@@ -542,13 +542,15 @@ static int config_migrate(const program_args_t& args) {
 
 /// Main entry point for `oflm config <action>`
 int config_command_main(const program_args_t& args) {
-    if (args.config_key.empty() && args.config_value.empty() && args.config_model.empty()) {
-        // No specific action, open guided flow
+    // The action is the positional argument after `config`. The parser leaves
+    // model_tag at its default sentinel when there is none.
+    const std::string& action = args.model_tag;
+
+    if (action.empty() || action == "model-faker") {
+        // No action given, open the guided flow
         return guided_flow();
     }
-    
-    const std::string& action = args.model_tag;
-    
+
     if (action == "show") {
         return config_show(args);
     } else if (action == "set") {
@@ -584,6 +586,17 @@ int config_command_main(const program_args_t& args) {
     std::cerr << "Error: Unknown config action '" << action << "'" << std::endl;
     std::cerr << "Valid actions: show, set, unset, edit, gen-schema, migrate, review" << std::endl;
     return 1;
+}
+
+int config_command_main_guarded(const program_args_t& args) {
+    try {
+        return config_command_main(args);
+    } catch (const std::exception& e) {
+        // A missing or unreadable registry is a normal condition for a config
+        // command, not a crash: say what went wrong and stop.
+        std::cerr << "[OFLM] " << e.what() << std::endl;
+        return 1;
+    }
 }
 
 } // namespace oflm::config
