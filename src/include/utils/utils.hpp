@@ -370,6 +370,22 @@ inline std::string path_join(fileName&&... args){
 ///@return path to model_list.json
 std::string find_model_list();
 
+/// Find the SHIPPED model_list.json (no user registry step).
+/// Search order:
+///   1. OFLM_CONFIG_PATH (whole-registry override)
+///   2. <exe_dir>/model_list.json
+///   3. ./model_list.json
+///   4. <exe_dir>/../share/oflm/model_list.json
+///   5. CMAKE_INSTALL_PREFIX/share/oflm/model_list.json
+std::string find_shipped_registry();
+
+/// Find the user settings.json overlay file.
+/// Search order:
+///   1. OFLM_SETTINGS_PATH (for testing)
+///   2. <models_dir>/settings.json  (sibling of models directory)
+/// Returns empty string if not found (overlay is optional).
+std::string find_user_settings();
+
 std::string find_model_info();
 
 

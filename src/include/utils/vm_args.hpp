@@ -151,7 +151,12 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
              "Reference image to edit, .png or .jpg: the prompt says what to change (for "
              "image command; the size then defaults to the largest one not above the "
-             "reference's shorter side)");
+             "reference's shorter side")
+            ("config-key", po::value<std::string>(&parsed_args.config_key)->default_value(std::string()), "Setting key for config set/unset")
+            ("config-value", po::value<std::string>(&parsed_args.config_value)->default_value(std::string()), "Setting value for config set")
+            ("config-model", po::value<std::string>(&parsed_args.config_model)->default_value(std::string()), "Model tag for per-model config operations")
+            ("config-accept-shipped", po::bool_switch(&parsed_args.config_accept_shipped)->default_value(false), "config review: remove all redundant overrides")
+            ("config-keep-all", po::bool_switch(&parsed_args.config_keep_all)->default_value(false), "config review: keep all overrides, just update version");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
@@ -248,6 +253,17 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             }
             parsed_args.image_size_given = !vm["size"].defaulted();
 
+            // Config-specific options: only valid with config command
+            if (parsed_args.command != "config") {
+                for (const char* opt : {"config-key", "config-value", "config-model", "config-accept-shipped", "config-keep-all"}) {
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: --" << opt << " is only supported with"
+                                     " the config command!" << std::endl;
+                        return false;
+                    }
+                }
+            }
+
             // Serve-only options, refused by every other command. This used to
             // sit below the early exits that follow, so `version`, `port`,
             // `list`, `bench` and `validate` accepted these and ignored them
@@ -293,6 +309,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // check further down. Exact equality above also means a prefix like
             // "bench-embed" never matches "bench" by accident.
             if (parsed_args.command == "validate") {
+                return true;
+            }
+            if (parsed_args.command == "config") {
                 return true;
             }
         } else {
