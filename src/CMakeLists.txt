@@ -290,10 +290,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
 # ———————————————————————————————————————————————
 # Gather your sources
 # ———————————————————————————————————————————————
+file(GLOB OFLM_CONFIG_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/config/*.cpp")
 file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
 # Unit-test translation units carry their own main() and must never join the engine.
 list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
+
+list(APPEND SOURCES ${OFLM_CONFIG_SOURCES})
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT OFLM_USE_HRX)
