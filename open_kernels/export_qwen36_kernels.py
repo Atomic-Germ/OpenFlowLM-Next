@@ -252,31 +252,44 @@ def fullest_core(bdir: Path) -> int | None:
         return None
 
 
+def stage_design_tree(stage_root: Path) -> None:
+    """Copy the design sources into a per-spec stage.
+
+    The stage replaces the designs/ directory: a design's HERE.parent is the
+    designs dir (its siblings -- gemv_q4, attn, ln), HERE.parent.parent is
+    open_kernels (include/), and HERE.parent.parent.parent is the repo
+    (npu_offload/). The stage therefore has to sit one level under
+    open_kernels/ for those to resolve the same way, and it holds the whole
+    tree because the designs read each other.
+    """
+    def _ignore(dirpath, names):
+        skipped = set()
+        for n in names:
+            p = Path(dirpath) / n
+            if n == "__pycache__" or n.startswith(".staging"):
+                skipped.add(n)
+            elif p.is_dir() and n.startswith("build"):
+                skipped.add(n)
+        return skipped
+
+    if stage_root.exists():
+        shutil.rmtree(stage_root)
+    stage_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(DESIGNS, stage_root, ignore=_ignore, dirs_exist_ok=True)
+
+
 def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> tuple[str, Path]:
     """Build one kernel set. Worker for the parallel build; returns (name, bdir).
-    
-    If stage_root is provided, the design sources are staged in that directory and
-    build_design.py compiles from the staged location to isolate per-spec sources.
+
+    stage_root, when given, is a per-spec mirror of the design tree: the design
+    sources and the generated kernel TUs are copied into it, so this spec
+    compiles its own sources and no other spec can change them mid-build. The
+    mirror keeps design_path relative to the stage root, so the staged path has
+    the same shape as the real one.
     """
     design_path = sets[name]["design"]
-    if stage_root:
-        # Use the staged design path
-        src = stage_root / design_path.name
-        src.mkdir(parents=True, exist_ok=True)
-        # Copy non-build files from the original design to the staged location
-        orig_src = DESIGNS / design_path
-        for item in orig_src.iterdir():
-            # Skip build directories and __pycache__
-            if item.is_dir() and item.name.startswith("build") or item.name == "__pycache__":
-                continue
-            if item.is_file():
-                dest = src / item.name
-                if not dest.exists() or dest.stat().st_mtime < item.stat().st_mtime:
-                    shutil.copy2(item, dest)
-    else:
-        # Use the original design path
-        src = DESIGNS / design_path
-    
+    src = (stage_root / design_path) if stage_root else (DESIGNS / design_path)
+
     out = DESIGNS / sets[name]["build_dir"]
     knobs = sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
@@ -420,9 +433,14 @@ def main() -> int:
                 marker.unlink()
 
     # ---- the whole-layer designs' kernel TUs for this spec, then the builds
-    # Create a per-spec staging directory to isolate generated sources
-    stage_root = DESIGNS / ".staging" / spec.spec_hash()[7:26]  # strip "sha256:" prefix, use first 19 chars
-    
+    # The generated kernel TUs differ per spec (dense/gen_kernels.py and
+    # layer_x/gen_kernels.py read the spec), and they land in a design dir
+    # that 12 and 3 specs respectively share. Writing them there meant one
+    # spec's gen could overwrite the sources another spec was compiling, and
+    # the xclbin that came out was silently wrong. So each spec stages its
+    # own copy of the design tree and compiles from that.
+    stage_root = HERE / f".staging_{spec.spec_hash()[7:26]}"  # strip "sha256:", keep 19 chars
+
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)
         gen_dir = HERE / F.GEN_KERNELS
@@ -430,9 +448,14 @@ def main() -> int:
         gspec = importlib.util.spec_from_file_location("gen_kernels", gen_dir)
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
-        # Generate into the staging directory instead of the shared design dir
-        stage_root.mkdir(parents=True, exist_ok=True)
-        gen.generate(F.recipe(spec), out=stage_root)
+        # Stage the design tree once, before the parallel builds: the workers
+        # would otherwise copy the same file over each other and one could
+        # read a half-written source.
+        stage_design_tree(stage_root)
+        # Generate into the staged copy of the design dir the generator targets.
+        gen_design_dir = gen_dir.parent.relative_to(DESIGNS)
+        (stage_root / gen_design_dir).mkdir(parents=True, exist_ok=True)
+        gen.generate(F.recipe(spec), out=stage_root / gen_design_dir)
     
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
