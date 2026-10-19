@@ -1377,6 +1377,37 @@ add_test(NAME oflm_smoke COMMAND $<TARGET_FILE:oflm> list)
 set_tests_properties(oflm_smoke PROPERTIES
     ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# Config command smoke tests
+add_test(NAME oflm_config_show COMMAND $<TARGET_FILE:oflm> config show --config-model dummy)
+set_tests_properties(oflm_config_show PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+add_test(NAME oflm_config_gen_schema COMMAND $<TARGET_FILE:oflm> config gen-schema --config-model dummy)
+set_tests_properties(oflm_config_gen_schema PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Test config set/unset with isolated settings file
+add_test(NAME oflm_config_set_unset
+    COMMAND ${CMAKE_COMMAND} -E env
+        "OFLM_SETTINGS_PATH=${CMAKE_BINARY_DIR}/test_settings.json"
+        "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json"
+        sh -c "$<TARGET_FILE:oflm> config set --config-key ctx_len --config-value 8192 --config-model llama3.1:8b && \
+               $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\".*\"8192\"' && \
+               $<TARGET_FILE:oflm> config unset --config-key ctx_len --config-model llama3.1:8b && \
+               $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\"'")
+
+# TUI smoke test (Tier 1 fallback via piped input)
+add_test(NAME oflm_config_browse_smoke
+    COMMAND sh -c "echo q | $<TARGET_FILE:oflm> config browse")
+set_tests_properties(oflm_config_browse_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Guided flow smoke test (Tier 1 fallback)
+add_test(NAME oflm_config_guided_smoke
+    COMMAND sh -c "printf '0\\n' | $<TARGET_FILE:oflm> config")
+set_tests_properties(oflm_config_guided_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
 # openai_compat: the OpenAI wire vocabulary (finish_reason, error bodies, HTTP
 # status) and the chat-model predicate. NO device, NO weights, NO network -- it
 # links nothing but nlohmann and reads model_list.json off disk, so it runs on a

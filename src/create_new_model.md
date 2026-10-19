@@ -141,7 +141,8 @@ Always in this order — the shared helper parses `config.json`, resolves `MAX_L
 and sets `this->model_path` / `this->lm_config` before you can construct the engine:
 
 ```cpp
-this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 this->q4nx = std::make_unique<Q4NX>(this->model_path);
 this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 this->lm_engine->load_weights(*this->q4nx);
