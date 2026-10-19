@@ -640,6 +640,12 @@ int main(int argc, char* argv[]) {
             // Continue with empty config — will use defaults
         }
 
+        // Which environment variables are the user's, before we write any of
+        // our own into the environment. The env-var delivery mechanism writes
+        // the settings into the environment, and a server that serves several
+        // models would have the first model's values shadow the later ones.
+        oflm::config::capture_external_env_vars();
+
         // Resolve settings (applies precedence: shipped < user < env < CLI)
         std::string tag = parsed_args.model_tag;
         if (tag == "model-faker") tag = ""; // serve default sentinel

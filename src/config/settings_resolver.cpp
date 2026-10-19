@@ -4,7 +4,36 @@ namespace utils { std::string getenv_oflm(const char* oflm_name); }
 #include <cstdlib>
 #include <iostream>
 
+// POSIX: the environment block. Declared at global scope, so it is not
+// resolved inside the oflm::config namespace.
+extern char** environ;
+
 namespace oflm::config {
+
+std::set<std::string> g_external_env_vars;
+
+void capture_external_env_vars() {
+    // The environment as it was before we wrote anything into it. Anything
+    // named OFLM_* that is here now is the user's.
+    for (char** e = ::environ; e && *e; ++e) {
+        std::string entry(*e);
+        size_t eq = entry.find('=');
+        if (eq == std::string::npos) continue;
+        std::string name = entry.substr(0, eq);
+        if (name.rfind("OFLM_", 0) == 0) {
+            g_external_env_vars.insert(name);
+        }
+    }
+}
+
+/// The value of an env var, but only if the USER set it. Ours is not an
+/// override: it is the value we last delivered, and it belongs to the model
+/// we last delivered it for.
+static std::string external_env_value(const std::string& var) {
+    if (!g_external_env_vars.count(var)) return std::string();
+    return utils::getenv_oflm(var.c_str());
+}
+
 
 // Helper: get CLI flag value from program_args_t
 // Maps cli_flag (e.g. "--prefill-mode") to the corresponding field.
@@ -50,9 +79,11 @@ nlohmann::json resolve_settings(
             }
         }
 
-        // 3. Environment variables
+        // 3. Environment variables -- the ones the user set. The ones we
+        // wrote ourselves are not an override: they belong to the model we
+        // last delivered them for.
         if (!def.env_var.empty()) {
-            std::string env_val = utils::getenv_oflm(def.env_var.c_str());
+            std::string env_val = external_env_value(def.env_var);
             if (!env_val.empty()) {
                 resolved[def.key] = convert_type(env_val, def.type);
                 continue;
@@ -161,9 +192,9 @@ std::optional<SettingValue> get_setting_value(
             return SettingValue{*v, SettingValue::CLI};
         }
     }
-    // Check env var
+    // Check env var -- the ones the user set, not the ones we wrote.
     if (!def->env_var.empty()) {
-        std::string env_val = utils::getenv_oflm(def->env_var.c_str());
+        std::string env_val = external_env_value(def->env_var);
         if (!env_val.empty()) {
             return SettingValue{env_val, SettingValue::ENV};
         }

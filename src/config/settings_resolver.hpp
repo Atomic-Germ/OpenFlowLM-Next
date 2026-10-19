@@ -4,9 +4,26 @@
 #include "program_args.hpp"
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace oflm::config {
+
+/// The OFLM_* environment variables that were set when the process started.
+///
+/// The env-var delivery mechanism writes the settings into the environment,
+/// and the environment is process-wide: a server that serves several models
+/// would otherwise have the first model's values shadow every later one. So
+/// the resolver treats an env var as an override only when it was the user's
+/// to begin with -- one we wrote ourselves is not an override, it is our own
+/// last write.
+///
+/// Call capture_external_env_vars() before the first apply_settings().
+extern std::set<std::string> g_external_env_vars;
+
+/// Record which OFLM_* variables the user set. Must run before the first
+/// apply_settings(), or our own writes would be taken for the user's.
+void capture_external_env_vars();
 
 /// Resolve effective settings for a model tag.
 /// Precedence: shipped defaults < user settings < env vars < CLI flags

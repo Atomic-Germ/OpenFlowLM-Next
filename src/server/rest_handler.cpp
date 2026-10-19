@@ -528,6 +528,21 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
         if (auto_chat_engine != nullptr) {
             auto_chat_engine.reset();
         }
+        // The settings of the model being loaded have to be in the environment
+        // BEFORE the engine is built: the engine reads the env-var-delivered
+        // ones in its constructor. They are resolved here rather than at
+        // startup because a request may name a model other than the one on
+        // the command line, and the ones in effect for that one are its own.
+        nlohmann::json model_settings;
+        {
+            auto [tag_for_settings, info_for_settings] = supported_models.get_model_info(ensure_tag);
+            if (oflm::config::g_effective_config) {
+                model_settings = oflm::config::resolve_settings(*oflm::config::g_effective_config,
+                                                                tag_for_settings, this->args);
+                oflm::config::apply_settings(model_settings);
+            }
+        }
+
         std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(ensure_tag, this->supported_models, &this->npu_device_inst);
         auto_chat_engine = std::move(auto_model.second);
         ensure_tag = auto_model.first;
@@ -559,20 +574,6 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
 
-        // The settings resolved at startup belong to the model named on the
-        // command line. A request may name another, so resolve them again for
-        // the model actually being loaded: its context length, its prefill
-        // chunk length and its prefill mode are its own, and the ones in
-        // effect for another model would be wrong.
-        nlohmann::json model_settings;
-        if (oflm::config::g_effective_config) {
-            model_settings = oflm::config::resolve_settings(*oflm::config::g_effective_config,
-                                                            new_ensure_tag, this->args);
-            // The engine reads the env-var-delivered settings, so they have to
-            // be in the environment before it is constructed.
-            oflm::config::apply_settings(model_settings);
-        }
-
         // The command line wins; otherwise the model's own setting; otherwise
         // the registry's.
         int model_ctx_length = this->ctx_length;
@@ -584,6 +585,21 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             model_prefill_chunk_len = model_settings["prefill_chunk_len"].get<int>();
         } else if (model_prefill_chunk_len == -1) {
             model_prefill_chunk_len = model_info.value("max_prefill_len", 4096);
+        }
+
+        // Say which settings are in effect for this model: a server can serve
+        // several, and the ones in effect for one are not the ones for another.
+        {
+            std::string summary;
+            for (const auto& def : oflm::config::settings_registry()) {
+                auto v = get_setting_value(*oflm::config::g_effective_config, new_ensure_tag, def.key, this->args);
+                if (!v) continue;
+                if (!summary.empty()) summary += " ";
+                summary += def.key + "=" + v->value;
+            }
+            if (!summary.empty()) {
+                header_print("OFLM", "settings for '" + new_ensure_tag + "': " + summary);
+            }
         }
 
         try {

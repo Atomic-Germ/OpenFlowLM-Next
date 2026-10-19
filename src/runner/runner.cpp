@@ -467,15 +467,6 @@ void Runner::cmd_status(std::vector<std::string>& input_list) {
 void Runner::cmd_load(std::vector<std::string>& input_list) {
     std::string model_name = input_list[1];
 
-    std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(model_name, this->supported_models, &this->npu_device_inst);
-    if (auto_model.second == nullptr) {
-        header_print("ERROR", "cannot load '" + model_name + "': it is either unknown to this "
-                              "build or not a chat model -- keeping '" + this->tag +
-                              "'. `oflm list` shows what this build can run.");
-        return;
-    }
-    model_name = auto_model.first;
-
     if (model_name != this->tag) {
         this->tag = model_name;
 
@@ -493,18 +484,37 @@ void Runner::cmd_load(std::vector<std::string>& input_list) {
         auto_chat_engine.reset();
         if(model_name=="gpt-oss:20b")
             std::this_thread::sleep_for(std::chrono::milliseconds(2800));
-        this->auto_chat_engine = std::move(auto_model.second);
 
-        auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
-        this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
         // The model changed, so its settings are not the ones in effect: the
         // context length and the prefill chunk length were the previous
-        // model's, and the prefill mode is in the environment from them.
+        // model's, and the prefill mode is in the environment from them. The
+        // new model's settings have to be in the environment BEFORE the
+        // engine is built -- the engine reads the env-var-delivered ones in
+        // its constructor.
         this->ctx_length = (this->args.ctx_length != -1)
             ? (this->args.ctx_length >= 512 ? this->args.ctx_length : 512) : -1;
         this->prefill_chunk_len = (this->args.prefill_chunk_len != -1)
             ? (this->args.prefill_chunk_len >= 512 ? this->args.prefill_chunk_len : 512) : -1;
-        apply_model_settings(new_tag, model_info);
+        {
+            auto [tag_for_settings, info_for_settings] = this->supported_models.get_model_info(this->tag);
+            apply_model_settings(tag_for_settings, info_for_settings);
+        }
+
+        // The engine is built here, not above: it reads the env-var-delivered
+        // settings in its constructor, so they have to be in the environment
+        // first.
+        std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(this->tag, this->supported_models, &this->npu_device_inst);
+        if (auto_model.second == nullptr) {
+            header_print("ERROR", "cannot load '" + this->tag + "': it is either unknown to this "
+                                  "build or not a chat model -- keeping the previous one. "
+                                  "`oflm list` shows what this build can run.");
+            return;
+        }
+        this->tag = auto_model.first;
+        this->auto_chat_engine = std::move(auto_model.second);
+
+        auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
+        this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
         try {
             this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
         }
