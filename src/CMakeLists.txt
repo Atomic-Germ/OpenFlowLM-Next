@@ -1356,12 +1356,24 @@ else()
     option(OFLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" ON)
 endif()
 set(OFLM_KERNEL_SPECS "" CACHE STRING "Comma-separated spec names to export (empty = all specs in open_kernels/recipes/specs)")
+
+# Parallel jobs for the kernel export. 0 = auto-detect CPU count.
+# The export runs one subprocess per kernel spec, so this is what turns a
+# 20-100 minute serial build into a 2-10 minute parallel one.
+include(ProcessorCount)
+ProcessorCount(OFLM_NPROC)
+if(NOT OFLM_NPROC)
+    set(OFLM_NPROC 8)
+endif()
+set(OFLM_KERNEL_JOBS "${OFLM_NPROC}" CACHE STRING "Parallel jobs for kernel export (0 = auto)")
+
 if(OFLM_BUILD_KERNELS AND NOT WIN32)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_export_script "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/export-kernels.py")
     add_custom_target(export_kernels ALL
         COMMENT "Exporting open NPU kernel xclbins into src/xclbins"
         COMMAND "${Python3_EXECUTABLE}" "${_export_script}" "--specs=${OFLM_KERNEL_SPECS}"
+                "-j" "${OFLM_KERNEL_JOBS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
         VERBATIM)
 endif()
