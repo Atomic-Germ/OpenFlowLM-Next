@@ -527,12 +527,18 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         # serves every tier. ag_s / ag_pv, each kernel wired to its family.
         out["contexts"]["ag_s"] = f"ag_s{ag_tiers[0]}/final.xclbin"
         out["contexts"]["ag_pv"] = f"ag_pv{ag_tiers[0]}/final.xclbin"
+        # AG_M is a compile-time knob of the design, so it belongs in the build
+        # dir name: two dense specs whose head config gives a different ag_m
+        # need different kernels, and without this they shared one directory
+        # and one overwrote the other's xclbin. The qwen36moe recipe already
+        # spelled it this way.
+        msfx = "" if ag_m == 2048 else f"_m{ag_m}"
         for Lw in ag_tiers:
             for tag, K, N, cols in (("s", hd, Lw, 8), ("pv", Lw, hd, pv_cols)):
                 name = f"ag_{tag}{Lw}"
                 out["kernels"][name] = {"context": f"ag_{tag}", "insts": f"{name}/insts.bin", "build": name}
                 out["builds"][name] = {"design": "attn_block/attn_gemm.py",
-                                       "build_dir": f"attn_block/build_{tag}{Lw}{sfx}",
+                                       "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K),
                                                 "AG_N": str(N), "AG_COLS": str(cols)}}
         # a: the Q or P rows [M, K] bf16 (plain, the design streams A); b: the tiled
@@ -565,7 +571,7 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                     name = f"ag16_{tag}{Lw}"
                     out["kernels"][name] = {"context": "ag16", "insts": f"{name}/insts.bin", "build": name}
                     out["builds"][name] = {"design": "attn_block/attn_gemm.py",
-                                       "build_dir": f"attn_block/build16_{tag}{Lw}{sfx}",
+                                       "build_dir": f"attn_block/build16_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K),
                                                 "AG_N": str(N), "AG_COLS": "8", "AG_N_TILE": "16"}}
 

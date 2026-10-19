@@ -252,6 +252,31 @@ def fullest_core(bdir: Path) -> int | None:
         return None
 
 
+def disambiguate_build_dirs(sets: dict) -> dict:
+    """Give every kernel set a build directory of its own.
+
+    Two specs can name the same build_dir for sets whose knobs differ, because
+    a dir name does not always spell every knob out: dense.py's attn_block dir
+    left out the head dim and the column count, and lm_head_q4's left out
+    LMHEAD_K and LMHEAD_CORES. Those specs then built into one directory and
+    one overwrote the other's xclbin, and the copy that followed could pick up
+    the wrong one -- silently, because the build itself succeeded. The knobs
+    decide the kernel, so they decide the directory: append their hash.
+
+    Specs that agree on the knobs still share the directory, which is what
+    lets the content-addressed cache skip the rebuild.
+    """
+    out = {}
+    for name, s in sets.items():
+        s = dict(s)
+        env = s.get("env") or {}
+        if env:
+            blob = "|".join(f"{k}={env[k]}" for k in sorted(env)).encode()
+            s["build_dir"] = f"{s['build_dir']}_{hashlib.sha256(blob).hexdigest()[:8]}"
+        out[name] = s
+    return out
+
+
 def stage_design_tree(stage_root: Path) -> None:
     """Copy the design sources into a per-spec stage.
 
@@ -393,7 +418,7 @@ def main() -> int:
                 f"catalogue) once its fixture passes."
             )
         raise
-    sets = F.builds(spec)
+    sets = disambiguate_build_dirs(F.builds(spec))
     names = [n.strip() for n in a.only.split(",") if n.strip()] if a.only else list(sets)
     bad = [n for n in names if n not in sets]
     if bad:
