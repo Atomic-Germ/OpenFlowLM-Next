@@ -29,11 +29,21 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
   <skill>
     <name>npu_offload_pipeline</name>
     <description>End-to-end workflow for offloading dense GEMM operations to AMD NPU2 via mlir-aie/iron. Use when: compiling NPU xclbins, integrating NPU backends into embedding/LLM engines, validating NPU vs CPU reference, debugging XRT dispatch issues, or extending to new model architectures.</description>
-    <location>.opencode/skill/npu_offload_pipeline.md</location>
+    <location>.agents/skills/npu_offload_pipeline.md</location>
   </skill>
   <skill>
     <name>open-granite-kernels</name>
     <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
-    <location>.opencode/skill/open-granite-kernels/SKILL.md</location>
+    <location>.agents/skills/open-granite-kernels/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-deltanet-ab</name>
+    <description>Build and validate the separate open banked alpha/beta dispatch at H5120/H2560, including xn streaming and the fused glue DMA constraint.</description>
+    <location>.agents/skills/open-wide-deltanet-ab/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-deltanet-chain</name>
+    <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
+    <location>.agents/skills/open-wide-deltanet-chain/SKILL.md</location>
   </skill>
 </available_skills>

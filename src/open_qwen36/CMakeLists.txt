@@ -34,18 +34,23 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp
+               dflash2.cpp dflash2_host.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
 
-add_executable(manifest_test manifest_test.cpp manifest.cpp)
+add_executable(manifest_test manifest_test.cpp manifest.cpp gguf_file.cpp q4nx_file.cpp)
+add_executable(gguf_pack_test gguf_pack_test.cpp gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+foreach(t gguf_pack_test)
+    target_include_directories(${t} PRIVATE ${_inc})
+endforeach()
 target_include_directories(manifest_test PRIVATE ${_inc})
 
 # vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
 add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
 target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
-find_package(OpenMP QUIET)
+find_package(OpenMP REQUIRED)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
 endif()
@@ -62,7 +67,26 @@ target_include_directories(spec_test PRIVATE ${_inc})
 add_executable(verify_slots_test verify_slots_test.cpp)
 target_include_directories(verify_slots_test PRIVATE ${_inc})
 
-foreach(t open_qwen36_cli manifest_test vit_test block_host_test spec_test verify_slots_test)
+# taps_test (no XRT): the tap ring's window, drop and prefill behaviour
+add_executable(taps_test taps_test.cpp)
+target_include_directories(taps_test PRIVATE ${_inc})
+
+# dflash2_test (no XRT): the DFlash 2 drafter's selector walk and gemv_t2n's host tables (OPEN-DRAFT-DFLASH2)
+add_executable(dflash2_test dflash2_test.cpp dflash2_host.cpp)
+target_include_directories(dflash2_test PRIVATE ${_inc})
+
+# block_host.cpp and dflash2_host.cpp use AVX2/FMA intrinsics. The parent app and
+# Windows build.cmd already enable them; the standalone CMake build must too.
+foreach(t open_qwen36_cli block_host_test dflash2_test)
+    target_link_libraries(${t} PRIVATE OpenMP::OpenMP_CXX)
+    if(MSVC)
+        target_compile_options(${t} PRIVATE /arch:AVX2)
+    else()
+        target_compile_options(${t} PRIVATE -mavx2 -mfma)
+    endif()
+endforeach()
+
+foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test spec_test verify_slots_test taps_test dflash2_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -75,6 +99,9 @@ add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
 add_test(NAME OPEN-DECODE-SPECULATIVE-VERIFY COMMAND verify_slots_test)
+add_test(NAME GGUF-PACK COMMAND gguf_pack_test)
+add_test(NAME OPEN-DECODE-TAPS COMMAND taps_test)
+add_test(NAME OPEN-DRAFT-DFLASH2-WALK COMMAND dflash2_test)
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"

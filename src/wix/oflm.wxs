@@ -3,8 +3,15 @@
   WiX v5 source for the oflm installer.
   Ports src/inno/oflm.iss (Inno Setup) to an MSI package.
 
-  Build (from src/wix):
-    wix build Package.wxs -arch x64 -ext WixToolset.UI.wixext -out oflm-setup.msi
+  Build (from src/wix), via the script that also stages the payload:
+    powershell -ExecutionPolicy Bypass -File build.ps1 -Version 1.2.3
+  or by hand:
+    cmd /c get_files.bat
+    wix build oflm.wxs -arch x64 -ext WixToolset.UI.wixext -d ProductVersion=1.2.3 -out oflm-setup.msi
+
+  ProductVersion has no default worth having: an MSI whose version is 0.0.0
+  installs, upgrades nothing, and is indistinguishable from every other 0.0.0.
+  It is a required input, and the release workflow takes it from the tag.
 
   Not ported 1:1 from oflm.iss:
     - The interactive "model storage location" / "server port" wizard pages are
@@ -18,12 +25,25 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
+  <!-- get_files.bat (run by build.ps1 and by the release workflow) stages the
+       payload into this directory, and empties it first. It used to be
+       $(SourceDir), which is src/inno, a directory get_files.bat does not
+       write to, so the build read whichever oflm.exe an older inno/get_files.bat
+       run had left there. It is "package" and not "." on purpose: "." would glob
+       this .wxs, build.ps1, get_files.bat and the output\*.msi into Program
+       Files. -->
+  <?define PackageDir = "package"?>
+  <!-- Tracked installer assets (icon, licence), not staged. -->
   <?define SourceDir = "..\inno"?>
   <?define XclbinsDir = "..\xclbins"?>
+  <!-- Overridden by the release workflow: -d ProductVersion=1.2.3 -->
+  <?ifndef ProductVersion ?>
+    <?define ProductVersion = "0.0.0" ?>
+  <?endif?>
 
   <Package Name="oflm"
            Manufacturer="OpenFlowLM"
-           Version="1.0.4"
+           Version="$(ProductVersion)"
            UpgradeCode="5A5B2872-1E63-4934-9F57-088554CF4959"
            Language="1033"
            Scope="perMachine"
@@ -71,145 +91,24 @@
 
     <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
 
-      <Component Id="Comp_oflm.exe" Guid="*">
-        <File Id="File_oflm.exe" Source="$(SourceDir)\oflm.exe" KeyPath="yes" />
+      <!-- The staged payload, by glob rather than by list. It was 45 explicit
+           <Component>/<File> pairs, which is a claim about what the installer
+           ships that nothing checked: a new engine library, or the vcpkg
+           runtime DLLs a vcpkg-toolchain build links against, was missing from
+           the MSI until somebody remembered to add it, and the installed
+           oflm.exe then failed at load with a missing DLL. The xclbins group
+           below has always done it this way. get_files.bat empties the
+           directory first, so this glob is exactly the payload. -->
+      <Files Include="$(PackageDir)\**" />
+
+      <!-- The environment, on a registry key rather than on a file: a component
+           keyed on a File stops being "installed" when the file is there, and
+           with <Files> there is no single file to key on. -->
+      <Component Id="Comp_environment" Guid="*">
+        <RegistryValue Root="HKLM" Key="Software\OpenFlowLM\oflm" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
         <Environment Id="Env_Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" Permanent="no" />
         <Environment Id="Env_ModelPath" Name="OFLM_MODEL_PATH" Value="%USERPROFILE%\.oflm" Action="set" System="yes" Permanent="no" />
         <Environment Id="Env_ServePort" Name="OFLM_SERVE_PORT" Value="52625" Action="set" System="yes" Permanent="no" />
-      </Component>
-
-      <Component Id="Comp_libcurl.dll" Guid="*">
-        <File Id="File_libcurl.dll" Source="$(SourceDir)\libcurl.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_llama_npu.dll" Guid="*">
-        <File Id="File_llama_npu.dll" Source="$(SourceDir)\llama_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_gemma_npu.dll" Guid="*">
-        <File Id="File_gemma_npu.dll" Source="$(SourceDir)\gemma_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_gemma_text_npu.dll" Guid="*">
-        <File Id="File_gemma_text_npu.dll" Source="$(SourceDir)\gemma_text_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_gpt_oss_npu.dll" Guid="*">
-        <File Id="File_gpt_oss_npu.dll" Source="$(SourceDir)\gpt_oss_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_lfm2_npu.dll" Guid="*">
-        <File Id="File_lfm2_npu.dll" Source="$(SourceDir)\lfm2_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_phi4_npu.dll" Guid="*">
-        <File Id="File_phi4_npu.dll" Source="$(SourceDir)\phi4_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen2_npu.dll" Guid="*">
-        <File Id="File_qwen2_npu.dll" Source="$(SourceDir)\qwen2_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen2vl_npu.dll" Guid="*">
-        <File Id="File_qwen2vl_npu.dll" Source="$(SourceDir)\qwen2vl_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen3_npu.dll" Guid="*">
-        <File Id="File_qwen3_npu.dll" Source="$(SourceDir)\qwen3_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen3vl_npu.dll" Guid="*">
-        <File Id="File_qwen3vl_npu.dll" Source="$(SourceDir)\qwen3vl_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen3_5vl_npu.dll" Guid="*">
-        <File Id="File_qwen3_5vl_npu.dll" Source="$(SourceDir)\qwen3_5vl_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen3_5_omni_npu.dll" Guid="*">
-        <File Id="File_qwen3_5_omni_npu.dll" Source="$(SourceDir)\qwen3_5_omni_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_qwen3_6_moe_npu.dll" Guid="*">
-        <File Id="File_qwen3_6_moe_npu.dll" Source="$(SourceDir)\qwen3_6_moe_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_nanbeige_npu.dll" Guid="*">
-        <File Id="File_nanbeige_npu.dll" Source="$(SourceDir)\nanbeige_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_gemma4e_npu.dll" Guid="*">
-        <File Id="File_gemma4e_npu.dll" Source="$(SourceDir)\gemma4e_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_gemma4e_12b_npu.dll" Guid="*">
-        <File Id="File_gemma4e_12b_npu.dll" Source="$(SourceDir)\gemma4_12b_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_lm_head.dll" Guid="*">
-        <File Id="File_lm_head.dll" Source="$(SourceDir)\lm_head.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_dequant.dll" Guid="*">
-        <File Id="File_dequant.dll" Source="$(SourceDir)\dequant.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_whisper_npu.dll" Guid="*">
-        <File Id="File_whisper_npu.dll" Source="$(SourceDir)\whisper_npu.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_gemm.dll" Guid="*">
-        <File Id="File_gemm.dll" Source="$(SourceDir)\gemm.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_msvcp140.dll" Guid="*">
-        <File Id="File_msvcp140.dll" Source="$(SourceDir)\msvcp140.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_q4_npu_eXpress.dll" Guid="*">
-        <File Id="File_q4_npu_eXpress.dll" Source="$(SourceDir)\q4_npu_eXpress.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_mha.dll" Guid="*">
-        <File Id="File_mha.dll" Source="$(SourceDir)\mha.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_vcruntime140.dll" Guid="*">
-        <File Id="File_vcruntime140.dll" Source="$(SourceDir)\vcruntime140.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_vcruntime140_1.dll" Guid="*">
-        <File Id="File_vcruntime140_1.dll" Source="$(SourceDir)\vcruntime140_1.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_abseil_dll.dll" Guid="*">
-        <File Id="File_abseil_dll.dll" Source="$(SourceDir)\abseil_dll.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_avcodec_61.dll" Guid="*">
-        <File Id="File_avcodec_61.dll" Source="$(SourceDir)\avcodec-61.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_avdevice_61.dll" Guid="*">
-        <File Id="File_avdevice_61.dll" Source="$(SourceDir)\avdevice-61.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_avfilter_10.dll" Guid="*">
-        <File Id="File_avfilter_10.dll" Source="$(SourceDir)\avfilter-10.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_avformat_61.dll" Guid="*">
-        <File Id="File_avformat_61.dll" Source="$(SourceDir)\avformat-61.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_avutil_59.dll" Guid="*">
-        <File Id="File_avutil_59.dll" Source="$(SourceDir)\avutil-59.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_libprotobuf_lite.dll" Guid="*">
-        <File Id="File_libprotobuf_lite.dll" Source="$(SourceDir)\libprotobuf-lite.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_libprotobuf.dll" Guid="*">
-        <File Id="File_libprotobuf.dll" Source="$(SourceDir)\libprotobuf.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_libprotoc.dll" Guid="*">
-        <File Id="File_libprotoc.dll" Source="$(SourceDir)\libprotoc.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_swresample_5.dll" Guid="*">
-        <File Id="File_swresample_5.dll" Source="$(SourceDir)\swresample-5.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_swscale_8.dll" Guid="*">
-        <File Id="File_swscale_8.dll" Source="$(SourceDir)\swscale-8.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_zlib1.dll" Guid="*">
-        <File Id="File_zlib1.dll" Source="$(SourceDir)\zlib1.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_libfftw3_3.dll" Guid="*">
-        <File Id="File_libfftw3_3.dll" Source="$(SourceDir)\libfftw3-3.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_libfftw3f_3.dll" Guid="*">
-        <File Id="File_libfftw3f_3.dll" Source="$(SourceDir)\libfftw3f-3.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_libfftw3l_3.dll" Guid="*">
-        <File Id="File_libfftw3l_3.dll" Source="$(SourceDir)\libfftw3l-3.dll" KeyPath="yes" />
-      </Component>
-
-      <Component Id="Comp_logo.ico" Guid="*">
-        <File Id="File_logo.ico" Source="$(SourceDir)\logo.ico" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_model_list.json" Guid="*">
-        <File Id="File_model_list.json" Source="$(SourceDir)\model_list.json" KeyPath="yes" />
-      </Component>
-      <Component Id="Comp_model_info.json" Guid="*">
-        <File Id="File_model_info.json" Source="$(SourceDir)\model_info.json" KeyPath="yes" />
       </Component>
 
     </ComponentGroup>

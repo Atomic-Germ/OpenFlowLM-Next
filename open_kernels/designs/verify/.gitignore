@@ -1,5 +1,7 @@
 build_*/
 __pycache__/
-# generated at build time by vux.py (from gen_kernels.files): never checked in
+# generated at build time by vux.py (from gen_kernels.files, attn.h, wht_int.h): never checked in
 *.cc
 xh_signs.h
+vattn.h
+vwht_int.h

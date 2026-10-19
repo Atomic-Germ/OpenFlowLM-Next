@@ -15,6 +15,13 @@ This section reports the performance on NPU with OpenFlowLM (OFLM).
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
+
 ---
 
 ### **Test System 1:** 
@@ -32,7 +39,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Phi-4-mini-instruct**  | NPU (OFLM)    | 21.8	| 21.2	| 19.9	| 18.1	| 14.9	| 11.2|
+| **Phi-4-mini-instruct**  | NPU (OFLM)    | 21.8 | 21.2 | 19.9 | 18.1 | 14.9 | 11.2 | 
 
 ---
 
@@ -40,4 +47,4 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Phi-4-mini-instruct**  | NPU (OFLM)    | 643	| 787	| 857	| 809	| 644	| 447 | 
+| **Phi-4-mini-instruct**  | NPU (OFLM)    | 643 | 787 | 857 | 809 | 644 | 447 | 

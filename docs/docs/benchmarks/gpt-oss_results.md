@@ -15,6 +15,13 @@ This section reports the performance on NPU with OpenFlowLM (OFLM).
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
+
 ---
 
 ### **Test System 1:** 
@@ -32,7 +39,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |**64k** | **128k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|---------:|---------:|
-| **gpt-oss-20b**  | NPU (OFLM)    | 18.2|	18.0|	17.4|	16.3|	14.5|	12.0|	8.7|	5.7|
+| **gpt-oss-20b**  | NPU (OFLM)    | 18.2 | 18.0 | 17.4 | 16.3 | OOC | OOC | OOC | OOC | 
 
 ---
 
@@ -40,4 +47,4 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **gpt-oss-20b**  | NPU (OFLM)    | 221|	326|	415|	477|	473|	391|
+| **gpt-oss-20b**  | NPU (OFLM)    | 221 | 326 | 415 | 477 | OOC | OOC | 

@@ -64,6 +64,9 @@ public:
 
     virtual int restore() = 0;
 
+    /// Per-request detail the engine has about its speculative passes (empty when it has none); a call starts a new count.
+    virtual std::string speculative_report() { return {}; }
+
     /// Empty = declined; otherwise `last` and every returned token but the last have been fed, as plain decode would.
     virtual std::vector<int> forward_speculative(int last, int max_emit, const std::function<int(buffer<bf16>&)>& pick,
                                                  const std::function<bool(int)>& stop) {

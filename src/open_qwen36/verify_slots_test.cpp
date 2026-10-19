@@ -150,6 +150,36 @@ void attnv_patch() {
     }
 }
 
+// vux.py's attention: the records, the new rows' drains, ONE window fill, then each new row read back
+void attnv_shared_window() {
+    stream_patch::AttnGeometry g;
+    g.kv_row = 4096;
+    g.ptab_row = 2048;
+    g.rb_win = 4;
+    const unsigned nq = 3;
+    std::vector<std::pair<uint32_t, uint32_t>> ps;
+    for (unsigned j = 0; j < nq; ++j) ps.push_back({5, 2048 * (1 + j)});
+    for (unsigned j = 0; j < nq; ++j) ps.push_back({3, 4096 * (1 + j)});
+    ps.push_back({3, 0});
+    for (unsigned j = 0; j < nq; ++j) ps.push_back({3, 4096 * (1 + j)});
+    std::vector<uint32_t> w = stream(ps);
+    auto t = stream_patch::attnv_table(w, "fake", nq, g);
+    check(t.size() == 3 * nq + 2, "attnv_table: a record and two row patches per position, one window");
+    stream_patch::attnv_apply(w.data(), t, 1022, g);
+    for (const auto& p : t) {
+        const uint64_t ps_ = 1022 + p.q;
+        const uint32_t v = w[p.word] & 0x7fffffffu;
+        if (p.kind == 0) check(p.q == nq - 1 && v == (ps_ + 3) / 4 * 4 * 4096 / 4, "the window is the last query's");
+        if (p.kind == 1) check(v == ps_ * 4096, "row drain / read-back of position " + std::to_string(p.q));
+        if (p.kind == 2) check(v == ps_ * 2048, "record of position " + std::to_string(p.q));
+    }
+    bool threw = false;
+    ps.push_back({3, 4096});                       // a third patch of position 0's row
+    try { stream_patch::attnv_table(stream(ps), "fake", nq, g); }
+    catch (const std::exception&) { threw = true; }
+    check(threw, "a third patch of one position's row is refused");
+}
+
 }  // namespace
 
 int main() {
@@ -158,6 +188,7 @@ int main() {
     bookkeeping(4, 3);
     slot_patch();
     attnv_patch();
+    attnv_shared_window();
     std::printf(failures ? "verify_slots_test: %d FAILED\n" : "verify_slots_test: all passed\n", failures);
     return failures ? 1 : 0;
 }

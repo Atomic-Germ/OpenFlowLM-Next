@@ -15,6 +15,13 @@ This section reports the performance on NPU with OpenFlowLM (OFLM).
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
+
 ---
 
 ### **Test System 1:** 
@@ -32,7 +39,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Nanbeige4.1-3B**  | NPU (OFLM)    | 23.5	| 22.3	| 20.4	| 17.3	| 13.3	| 9.0|
+| **Nanbeige4.1-3B**  | NPU (OFLM)    | 23.5 | 22.3 | 20.4 | 17.3 | OOC | OOC | 
 
 ---
 
@@ -40,4 +47,4 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Nanbeige4.1-3B**  | NPU (OFLM)    | 612	| 731	| 742	| 686	| 523	| 343 | 
+| **Nanbeige4.1-3B**  | NPU (OFLM)    | 612 | 731 | 742 | 686 | OOC | OOC | 

@@ -28,6 +28,7 @@ sys.path.insert(0, str(HERE.parent.parent))                       # open_kernels
 sys.path.insert(0, str(HERE.parents[2] / "npu_offload" / "gemm_rtp"))  # -> npue.tile_b
 from q4_1_pack import pack_q4_1_pool, pool_reference, random_q4_1_blocks  # noqa: E402
 from npue import tile_b  # noqa: E402
+from recipes.pack import bf16_of_q8, pack_bf16_gemm  # noqa: E402
 
 SHAPES = {  # name: (N_WEIGHT, K)
     "qkv": (2560, 2560),
@@ -51,6 +52,7 @@ def main() -> int:
     ap.add_argument("--ternary", action="store_true",
                     help="Bonsai-style weights: q in {0,1,2}, m = -d, one d per 128 k (the q4_1 "
                          "re-expression of PQ2_0); files get a _tern suffix")
+    ap.add_argument("--fmt", default="q4_1", choices=["q4_1", "bf16"], help="must match GQP_FMT")
     a = ap.parse_args()
 
     if a.shape in SHAPES:
@@ -66,20 +68,31 @@ def main() -> int:
         print(f"REFUSE: shape {a.shape} ({n_weight},{k}) does not tile (256-row blocks / 256-K bands)")
         return 1
 
-    name = a.shape + ("_tern" if a.ternary else "")
+    if a.fmt == "bf16" and (a.ternary or a.k_tile != K_TILE):
+        print("REFUSE: --fmt bf16 has no ternary / k-tile variants")
+        return 1
+    pre = "" if a.fmt == "q4_1" else f"{a.fmt}_"
+    name = pre + a.shape + ("_tern" if a.ternary else "")
     tag = f"{name}_t{T}"
     rng = np.random.default_rng(a.seed)
 
-    print(f"packing q4_1 weight [{n_weight},{k}] ...")
-    blocks = random_q4_1_blocks(n_weight, k, rng)
-    if a.ternary:
-        nb = k // 32
-        d = np.repeat((rng.random((n_weight, nb // 4), np.float32) * 0.02 + 1e-3).astype(np.float16), 4, axis=1)
-        q = rng.integers(0, 3, (n_weight, nb, 32), dtype=np.uint8)
-        blocks[..., 0:2] = d.view(np.uint8).reshape(n_weight, nb, 2)
-        blocks[..., 2:4] = (-d).view(np.uint8).reshape(n_weight, nb, 2)
-        blocks[..., 4:20] = q[..., :16] | (q[..., 16:] << 4)
-    w = pack_q4_1_pool(blocks, rs=2)
+    print(f"packing {a.fmt} weight [{n_weight},{k}] ...")
+    if a.fmt == "q4_1":
+        blocks = random_q4_1_blocks(n_weight, k, rng)
+        if a.ternary:
+            nb = k // 32
+            d = np.repeat((rng.random((n_weight, nb // 4), np.float32) * 0.02 + 1e-3).astype(np.float16), 4, axis=1)
+            q = rng.integers(0, 3, (n_weight, nb, 32), dtype=np.uint8)
+            blocks[..., 0:2] = d.view(np.uint8).reshape(n_weight, nb, 2)
+            blocks[..., 2:4] = (-d).view(np.uint8).reshape(n_weight, nb, 2)
+            blocks[..., 4:20] = q[..., :16] | (q[..., 16:] << 4)
+        w = pack_q4_1_pool(blocks, rs=2)
+    else:
+        codes = rng.integers(-127, 128, size=(n_weight, k), dtype=np.int8)
+        scales = (rng.uniform(0.5, 2.0, size=(n_weight, k // 32)) * 2.0 ** -9).astype(bfloat16)
+        wbits = bf16_of_q8(codes, scales.view(np.uint16))
+        wq = wbits.view(bfloat16)
+        w = pack_bf16_gemm(wbits).view(np.uint8)
     nbytes = len(w)
 
     print(f"drawing {T} distinct token activations, K={k} ...")
@@ -89,14 +102,22 @@ def main() -> int:
     assert len({x.tobytes() for x in xs}) == T, "activations collided -- not actually distinct"
     x_tk = np.stack(xs)  # [T, K] token-major, bf16
 
-    if a.k_tile != K_TILE:                  # only the activation's tiling differs from the k-64 run
-        refs = np.zeros((T, n_weight), np.float32)
-    else:
+    if a.fmt == "bf16":
         print("computing fp64 reference per token from the SAME pool bytes ...")
-        refs = np.stack([pool_reference(w, xs[t].astype(np.float32), n_weight, k, rs=2) for t in range(T)])  # [T, N_WEIGHT] f32
-    # Device Y is [N_WEIGHT, T] row-major (weight-row-major, matching the
-    # kernel's own C tap order) -- transpose the per-token stack to match.
-    ref_dev = refs.T.astype(np.float32).copy()  # [N_WEIGHT, T]
+        x64 = x_tk.astype(np.float64).T                                       # [K, T]
+        w64 = codes.astype(np.float64) * np.repeat(scales.astype(np.float64), 32, axis=1)
+        ref_dev = (w64 @ x64).astype(np.float32)
+        # the same product over the bf16-rounded weights the cores multiply: isolates layout from rounding
+        (HERE / f"ref2_{tag}.bin").write_bytes((wq.astype(np.float64) @ x64).astype(np.float32).tobytes())
+    else:
+        if a.k_tile != K_TILE:              # only the activation's tiling differs from the k-64 run
+            refs = np.zeros((T, n_weight), np.float32)
+        else:
+            print("computing fp64 reference per token from the SAME pool bytes ...")
+            refs = np.stack([pool_reference(w, xs[t].astype(np.float32), n_weight, k, rs=2) for t in range(T)])  # [T, N_WEIGHT] f32
+        # Device Y is [N_WEIGHT, T] row-major (weight-row-major, matching the
+        # kernel's own C tap order) -- transpose the per-token stack to match.
+        ref_dev = refs.T.astype(np.float32).copy()  # [N_WEIGHT, T]
 
     print("pre-tiling activation X^T[K,T] via tile_b ('k,n' order, s=8,t=8) ...")
     x_kt = np.ascontiguousarray(x_tk.T)  # [K, T] -- what the design's B role logically is
@@ -126,7 +147,7 @@ def main() -> int:
 
     print(f"{tag}: N_WEIGHT={n_weight} K={k} T={T} w={nbytes} B x={x_tiled_bf16.nbytes} B "
           f"ref={ref_dev.nbytes} B absmax={np.abs(ref_dev).max():.4g}")
-    print(f"build: GQP_N={n_weight} GQP_K={k} GQP_T={T} "
+    print(f"build: GQP_FMT={a.fmt} GQP_N={n_weight} GQP_K={k} GQP_T={T} "
           f"python ../../build_design.py gemm_q4_prefill.py build_{build}")
     print(f"run:   ..\\..\\harness\\out\\run_kernel.exe run_{tag}.cfg && python compare.py {tag}")
     return 0

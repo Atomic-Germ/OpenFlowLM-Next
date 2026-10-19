@@ -9,6 +9,7 @@
 #include <boost/program_options.hpp>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <algorithm>
 #include <vector>
 #include "program_args.hpp"
@@ -29,6 +30,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
     std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
     std::cout << "  bench-embed <tag>   - Benchmark an embedding model over batch sizes" << std::endl;
+    std::cout << "  image <tag> \"text\"  - Generate an image from a prompt" << std::endl;
     std::cout << "  list                - List all available models" << std::endl;
     std::cout << "  version             - Show version information" << std::endl;
     std::cout << "  help                - Show this help message" << std::endl;
@@ -53,11 +55,14 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --cors 0" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --asr 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --imagegen 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
     std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
     std::cout << "\toflm bench-embed bge-base:en-v1.5" << std::endl;
     std::cout << "\toflm bench-embed nomic-embed-text:v1.5 --max-batch 32 --prompt-name document" << std::endl;
+    std::cout << "\toflm image flux2-klein:4b \"a red fox in fresh snow\" -o fox.png" << std::endl;
+    std::cout << "\toflm image flux2-klein:4b \"a lighthouse at dusk\" --size 512 --seed 7" << std::endl;
     std::cout << "\toflm list" << std::endl;
     std::cout << "\toflm list --quiet" << std::endl;
     std::cout << "\toflm list --filter installed" << std::endl;
@@ -89,6 +94,12 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("embeddingmodel", po::value<std::string>(&parsed_args.embedding_model)->default_value(""),
              "Which embedding model to serve with --embed 1 "
              "(default: embed-gemma:300m)")
+            ("imagegen", po::value<bool>(&parsed_args.image_resident)->default_value(0),
+             "Load the image engine at startup and keep it beside the chat model "
+             "(for serve command; default: an image request swaps them)")
+            ("imagemodel", po::value<std::string>(&parsed_args.image_model)->default_value(""),
+             "The image model a request naming none gets, and --imagegen 1 loads "
+             "(for serve command; default: flux2-klein:4b)")
             ("host", po::value<std::string>(&parsed_args.host)->default_value("127.0.0.1"), 
              "Set the server address (for serve command)")
             ("port,p", po::value<int>(&parsed_args.port)->default_value(-1), 
@@ -111,6 +122,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Speculative decode for greedy requests (temperature 0 or top_k 1) on the open engine; "
              "same output, fewer passes. Refuses to start unless the model's registry entry declares a "
              "speculative method its kernels serve. Sets OFLM_OPEN_SPEC=1")
+            ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
+             "fast (default) or lean: lean uses less memory and processes prompts more slowly, "
+             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill)")
             ("img-pre-resize,r", po::value<int>(&parsed_args.img_pre_resize)->default_value(2),
              "Pre-resize the image, 0: original size, 1: height = 480, 2: height = 720, 3: height = 1080, 4: height = 1440, 5: height = 2160, 6: height = 2880, 7: height = 3240, 8: height = 4320")
             ("socket,s", po::value<size_t>(&parsed_args.max_socket_connections)->default_value(10),
@@ -131,18 +145,30 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prompt-name", po::value<std::string>(&parsed_args.prompt_name)->default_value(""),
              "Task prompt for bench-embed, by its REST name (query, document, "
              "clustering, ...). Empty means query, which is what /v1/embeddings "
-             "resolves an unspecified request to");
+             "resolves an unspecified request to")
+            ("out,o", po::value<std::string>(&parsed_args.image_out)->default_value(""),
+             "Image file to write, .png or .jpg (for image command; default oflm-<seed>.png)")
+            ("size", po::value<int>(&parsed_args.image_size)->default_value(1024),
+             "Image width and height in pixels (for image command)")
+            ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
+             "Noise seed, for a reproducible image (for image command; default random)")
+            ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
+             "Reference image to edit, .png or .jpg: the prompt says what to change (for "
+             "image command; the size then defaults to the largest one not above the "
+             "reference's shorter side)");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
         pos_desc.add("command", 1);
         pos_desc.add("model_tag", 1);
+        pos_desc.add("image_prompt", 1);
 
         // Define hidden options for positional arguments
         po::options_description hidden("Hidden options");
         hidden.add_options()
             ("command", po::value<std::string>(&parsed_args.command), "Command to execute")
-            ("model_tag", po::value<std::string>(&parsed_args.model_tag), "Model tag");
+            ("model_tag", po::value<std::string>(&parsed_args.model_tag), "Model tag")
+            ("image_prompt", po::value<std::string>(&parsed_args.image_prompt), "Image prompt");
 
         // Combine all options
         po::options_description all_options;
@@ -184,14 +210,72 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // ignored reads as a flag that took effect. `oflm bench granite:3b
             // --max-batch 4` used to be accepted in silence.
             //
-            // This has to sit ABOVE the early exits below. `bench`, `list`,
-            // `version`, `port` and `validate` all return before the serve-only
-            // guards, so a check placed down there would never see them.
+            // This has to sit ABOVE the early exits below: `bench`, `list`,
+            // `version`, `port` and `validate` all return there, so a check
+            // placed after them would never see those commands.
+            // The open engine picks its prefill route when an LLM loads, and only these commands load one.
+            if (!vm["prefill-mode"].defaulted()) {
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --prefill-mode is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean") {
+                    std::cerr << "Error: --prefill-mode is fast or lean, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                    return false;
+                }
+            }
+
             if (parsed_args.command != "bench-embed") {
                 for (const char* opt : {"max-batch", "prompt-name"}) {
                     if (!vm[opt].defaulted()) {
                         std::cerr << "Error: --" << opt << " is only supported with"
                                      " the bench-embed command!" << std::endl;
+                        return false;
+                    }
+                }
+            }
+            // The same for image: its options, and the prompt positional, which any
+            // other command would otherwise take and drop.
+            if (parsed_args.command != "image") {
+                for (const char* opt : {"out", "size", "seed", "image"}) {
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: --" << opt << " is only supported with"
+                                     " the image command!" << std::endl;
+                        return false;
+                    }
+                }
+                if (vm.count("image_prompt")) {
+                    std::cerr << "Error: unexpected argument '" << parsed_args.image_prompt
+                              << "'; only the image command takes a prompt" << std::endl;
+                    return false;
+                }
+            }
+            parsed_args.image_size_given = !vm["size"].defaulted();
+
+            // Serve-only options, refused by every other command. This used to
+            // sit below the early exits that follow, so `version`, `port`,
+            // `list`, `bench` and `validate` accepted these and ignored them
+            // (#68). `host` is one of them: it is read in exactly one place,
+            // create_lm_server().
+            //
+            // `port --port N` is the one exemption: that command exists to
+            // print the port a given --port would resolve to.
+            if (parsed_args.command != "serve") {
+                const std::pair<const char*, const char*> serve_only[] = {
+                    {"socket", "Max socket connections is only required for serve command!"},
+                    {"q-len", "Max npu queue length is only required for serve command!"},
+                    {"port", "The port number option is only supported with the serve command!"},
+                    {"cors", "The cors option is only supported with the serve command!"},
+                    {"host", "The host option is only supported with the serve command!"},
+                    {"imagegen", "--imagegen is only supported with the serve command!"},
+                    {"imagemodel", "--imagemodel is only supported with the serve command!"},
+                };
+                for (const auto& [opt, message] : serve_only) {
+                    if (parsed_args.command == "port" && std::string(opt) == "port") {
+                        continue;
+                    }
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: " << message << " " << std::endl;
                         return false;
                     }
                 }
@@ -209,49 +293,15 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             if (parsed_args.command == "bench") {
                 return true;
             }
-            // "bench-embed" is DELIBERATELY not here. This early exit skips the
-            // serve-only option guards below, so a command that takes it accepts
-            // --port and --cors silently. Exact equality above also means a
-            // prefix like "bench-embed" never matches "bench" by accident.
+            // "bench-embed" is DELIBERATELY not here: it needs the model-tag
+            // check further down. Exact equality above also means a prefix like
+            // "bench-embed" never matches "bench" by accident.
             if (parsed_args.command == "validate") {
                 return true;
             }
         } else {
             std::cerr << "Error: Command is required" << std::endl;
             return false;
-        }
-
-        if (parsed_args.command != "serve")
-        {
-            if (!vm["socket"].defaulted())
-            {
-                std::cerr << "Error: Max socket connections is only required for serve command! " << std::endl;
-                return false;
-            }
-            if (!vm["q-len"].defaulted())
-            {
-                std::cerr << "Error: Max npu queue length is only required for serve command! " << std::endl;
-                return false;
-            }
-            if (!vm["port"].defaulted())
-            {
-                std::cerr << "Error: The port number option is only supported with the serve command! " << std::endl;
-                return false;
-            }
-            if (!vm["cors"].defaulted())
-            {
-                std::cerr << "Error: The cors option is only supported with the serve command! " << std::endl;
-                return false;
-            }
-            // `host` belongs with them: it is documented "(for serve command)"
-            // and read in exactly one place, create_lm_server(). It was accepted
-            // and ignored everywhere else, which is the same defect as the four
-            // above and reads the same way to a user -- a flag that took effect.
-            if (!vm["host"].defaulted())
-            {
-                std::cerr << "Error: The host option is only supported with the serve command! " << std::endl;
-                return false;
-            }
         }
 
         // Handle all options
@@ -286,9 +336,19 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             return false;
         }
 
+        if (parsed_args.command == "image" &&
+            (parsed_args.model_tag.empty() || parsed_args.model_tag == "model-faker" ||
+             parsed_args.image_prompt.empty())) {
+            std::cerr << "Error: image needs a model tag and a prompt, e.g. "
+                         "`oflm image flux2-klein:4b \"a red fox in fresh snow\"`" << std::endl;
+            return false;
+        }
+
         // Validate command-specific requirements
         if (parsed_args.command == "run" || parsed_args.command == "pull" || parsed_args.command == "remove" || parsed_args.command == "check") {
-            if (parsed_args.model_tag.empty()) {
+            // An omitted positional is never empty: model_tag is initialised to
+            // the "model-faker" sentinel, which `serve` uses on purpose (#67).
+            if (parsed_args.model_tag.empty() || parsed_args.model_tag == "model-faker") {
                 std::cerr << "Error: Model tag is required for command '" << parsed_args.command << "'" << std::endl;
                 return false;
             }

@@ -57,8 +57,10 @@ To change it at launch, in PowerShell, run:
 oflm serve llama3.2:1b --ctx-len 8192
 ```
 
-> - Internally, OFLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.  
-> - If you enter a context length that is not a power of 2, OFLM automatically rounds it up to the nearest power of 2. For example: input `8000` → adjusted to `8192`.  
+> - Internally, OFLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.
+> - The value is otherwise used **as given**; it is *not* rounded to a power of
+>   2, so `--ctx-len 8000` gives you 8000.
+> - The same 512 minimum applies to `--prefill-chunk-len`.
 
 ## Show Server Port 
 
@@ -127,12 +129,15 @@ oflm serve --cors 0
 > 🔒 **Security tip:** Disable CORS (or restrict at your proxy) if your server is exposed beyond localhost (127.0.0.1).
 
 
-## Suppress Logs for Higher-Level Applications
+## Quiet Mode
 
-When OFLM is run as a subprocess inside another application, use quiet mode to reduce OFLM log output:
+`--quiet` reduces OFLM's own download and verification logging (and the emoji
+column in `oflm list`):
 
 ```shell
 oflm serve --quiet
 ```
 
-This keeps the parent application's logs cleaner and easier to read.
+> ⚠️ `--quiet` does **not** reduce server or request logging. No server log
+> output is gated on it. If you need a quiet server, redirect the process's
+> output at the source.

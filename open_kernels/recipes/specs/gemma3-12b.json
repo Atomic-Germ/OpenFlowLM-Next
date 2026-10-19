@@ -84,6 +84,6 @@
  "extra": {
   "model_type": "gemma3_text",
   "source": "hf_config",
-  "model": "Gemma3-4B-NPU2"
+  "model": "Gemma3-12B-NPU2"
  }
 }

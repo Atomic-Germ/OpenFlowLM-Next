@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,7 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
+    std::string op;                          ///< std_perm | std_perm_gguf | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose | transpose_banked
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity
@@ -42,6 +43,7 @@ struct PackOp {
     std::string split;                                                  ///< std_perm of a q8 source: "hi" |
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)
+    std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -54,6 +56,8 @@ struct Step {
     std::string kernel;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
+    bool split = false;                      ///< run, block route: the weight is a q8 projection's exact q4_1
+                                             ///< split, [hi | lo]; the GEMM runs twice the rows and the halves add
 };
 
 /// The block prefill route (OPEN-PREFILL-BATCH): T tokens through a layer's
@@ -104,6 +108,9 @@ struct AttnBlock {
     std::map<size_t, std::string> kernels_s, kernels_pv;   ///< window rows -> the stream for that width
     std::vector<std::string> args;                         ///< the a / b / c globals
     size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
+    /// A dense layer's host half before the products: "qknorm_rope" (q/k RMSNorm, then the
+    /// half-split rotation; no bias, no gate). Empty on a full-attention layer, whose is fixed.
+    std::string prep;
     bool present() const { return !kernels_s.empty(); }
 };
 
@@ -126,6 +133,12 @@ struct GemmBlockProgram {
     std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
     bool sandwich = false;
     std::string act = "silu";
+    // >1: the route's HOST norms split each row into `norm_groups` equal groups and
+    // RMS each group separately (K2's GroupRMSNorm(2)), the same split the `ln`
+    // design's LN_GROUPS bakes into the NPU kernel -- 1 is the plain whole-row
+    // RMSNorm every pre-2.2 manifest computed (also the default when the field
+    // is absent, so old kernel sets keep their behaviour byte for byte).
+    uint64_t norm_groups = 1;
     // linear: the fused qkv width, the value width, the DeltaNet geometry, the state layout
     uint64_t qkv_dim = 0, vw = 0, key_heads = 0, value_heads = 0, head_dim = 0, conv_kernel = 0;
     // linear: the out projection's GEMM returns 2 x hidden rows, the hi and lo halves of a q8
@@ -164,6 +177,7 @@ struct LayerType {
     uint64_t state_bytes = 0, state_row = 0;
     std::vector<Step> program;
     GemmBlockProgram gemm_block;
+    std::map<std::string, GemmBlockProgram> gemm_block_variants;   ///< OPEN-PREFILL-MODE: routes loadable in its place
     std::vector<PackOp> pool, consts;
 };
 
@@ -176,6 +190,11 @@ struct KernelDesc {
     /// a block of its own (attn.h ATTN_BLOCK_WIN); the driver pads the streamed count to match, or
     /// the fifo deadlocks. 1 = unblocked.
     uint64_t rb_win = 1;
+    /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
+    /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
+    /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
+    uint64_t rb = 1;
+    uint64_t nq = 0;                         ///< attnposv: positions the stream was built for (0 = the verify width)
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -193,13 +212,25 @@ struct RowGlobal {
     uint64_t switch_row = kSwitchNever;
 };
 
+/// The streams of a pass of n positions on the verify image (its cores read n from run-time words).
+struct VerifyStreams {
+    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es)
+    std::vector<Step> tail;                            ///< the final norm + head for every position
+};
+
 /// Shares the decode image's state buffers, so a linear state needs width + 1 slots (OPEN-DECODE-SPECULATIVE-VERIFY).
 struct VerifyProgram {
     size_t width = 0;                                  ///< 0 = the kernel set has no verify program
     uint64_t slot_bytes = 0, act_bytes = 0;
-    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es)
+    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es), width positions
     std::vector<Step> tail;                            ///< the final norm + head for every position
+    std::map<size_t, VerifyStreams> narrow;            ///< passes of 2 .. width - 1 positions, where the set has them
     std::string xres, logits;                          ///< the globals holding width rows of xres / logits
+    /// The streams for an n-position pass, or null when the set has none for n.
+    const VerifyStreams* streams(size_t n) const {
+        auto it = narrow.find(n);
+        return it == narrow.end() ? nullptr : &it->second;
+    }
 };
 
 struct Manifest {
@@ -231,6 +262,7 @@ struct Manifest {
     /// themselves; the host does it for the block route's GEMMs (Core::gemm_run).
     size_t hadamard_block = 0;
     std::vector<float> hadamard_og_signs;
+    double embed_scale = 1.0;                 ///< applied to token lookup only; never the tied lm_head
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
     nlohmann::json hf_config_check;
@@ -238,6 +270,10 @@ struct Manifest {
     /// may omit (Phi-3's head_dim, partial_rotary_factor, rope_scaling, ...): check_model
     /// compares the expected value against this instead of refusing for the missing key.
     nlohmann::json hf_config_defaults = nlohmann::json::object();
+    /// The same kernel set for GGUF-direct weight files (f32-scale pool chunks,
+    /// open_kernels/gguf_pool.py): a complete manifest of its own, parsed with
+    /// this same code; the engine swaps it in when the model ships a .gguf.
+    std::unique_ptr<Manifest> gguf;
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);
@@ -247,6 +283,12 @@ struct Manifest {
     /// refused as lacking otherwise.
     void check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
+    /// Why the host attention (OPEN-HOST-ATTN-GUARD) cannot compute this model, or "" when it can.
+    /// It implements K2's attention only; any other family is refused by name.
+    std::string host_attention_refusal() const;
+    /// OPEN-PREFILL-MODE: gemm_block becomes variant `name` ("" keeps it), and the other routes and the
+    /// globals only they name are dropped. False when no layer type has a variant `name`.
+    bool select_prefill_route(const std::string& name);
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
 };

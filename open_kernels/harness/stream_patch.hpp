@@ -56,6 +56,10 @@ struct AttnGeometry {
     /// position's row in a block of its own (attn.h ATTN_BLOCK_WIN, the merged dense layer image).
     /// 1 = every other kernel: the row count is the window's own.
     uint64_t rb_win = 1;
+    /// Cached rows the kernel takes per call (attn.h ATTN_RB) when it walks them in whole
+    /// blocks AND takes the new position's row as the last block's final slot (attn.h
+    /// ATTN_BLOCK_ONLY). 1 = every other kernel: the row count is the window's own.
+    uint64_t rb = 1;
 };
 
 /// The cached rows position `pos` attends to: [start, pos), streamed as nf rows (>= 1: position 0
@@ -277,6 +281,20 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
         const uint64_t nb = (valid + g.rb_win - 1) / g.rb_win;
         nf = g.rb_win * (nb ? nb : 1);
     }
+    if (g.rb > 1) {
+        // The blocked walk (attn.h ATTN_BLOCK_ONLY) covers the `valid` cached rows AND the
+        // new position's row in ceil((valid + 1) / rb) blocks, the last of which takes the
+        // new row from core scratch as its final slot. So the stream carries one row less
+        // than those blocks hold: rb * (valid / rb + 1) - 1. The extra rows over `valid`
+        // sit at or past `pos` and the kernel masks them.
+        //
+        // The highest row this reads is pos + rb - 2 - (valid % rb), so at rb 2 it is
+        // exactly `pos` -- inside the cache, and the row this very dispatch writes. At
+        // rb > 2 it can be pos + rb - 2, which needs rb - 2 rows of slack above the
+        // context capacity in the KV buffer.
+        const uint64_t valid = pos - start;
+        nf = g.rb * (valid / g.rb + 1) - 1;
+    }
     for (const auto& p : table) {
         uint64_t v = p.kind == 0   ? nf * g.kv_row / 4  // a BD length is in words
                      : p.kind == 1 ? pos * g.kv_row
@@ -352,13 +370,20 @@ inline std::vector<AttnPatchV> attnv_table(const std::vector<uint32_t>& w, const
             t.push_back({i + 10, 2, static_cast<uint8_t>(off / g.ptab_row - 1), flags});
         }
     }
+    // one window fill for the whole pass: every query walks the last one's window (blocks past its own are padding)
+    const bool shared = nwin == 1 && nq > 1;
+    if (shared)
+        for (auto& p : t)
+            if (p.kind == 0 || p.kind == 3) p.q = static_cast<uint8_t>(nq - 1);
     for (uint8_t kind = 0; kind < 4; ++kind)
         for (unsigned q = 0; q < nq; ++q) {
             size_t n = 0;
             for (const auto& p : t) n += (p.kind == kind && p.q == q);
-            if (n != 1)
+            // kind 1 twice: the new row's drain and its read-back for the query's own step
+            const bool ok = (kind == 0 || kind == 3) ? n == (shared && q + 1 < nq ? 0u : 1u) : kind == 1 ? (n == 1 || n == 2) : n == 1;
+            if (!ok)
                 throw std::runtime_error("attnposv: " + kn + ": " + std::to_string(n) + " patches of kind " +
-                                         std::to_string(kind) + " for position " + std::to_string(q) + ", expected 1");
+                                         std::to_string(kind) + " for position " + std::to_string(q));
         }
     return t;
 }

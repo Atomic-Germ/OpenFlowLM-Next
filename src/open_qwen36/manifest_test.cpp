@@ -3,6 +3,7 @@
 ///        model whose config.json disagrees with it is refused with the key named.
 ///        No XRT, no hardware: `manifest_test <fixtures/manifest_qwen36.json>`.
 // Traces: OPEN-MANIFEST (canonical spec: specs/open-engine/spec.md)
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
@@ -71,6 +72,32 @@ int main(int argc, char** argv) {
         return 1;
     }
     // ---- what the recipe wrote for the 27B
+    // Only exercise the new pack-op schema; this synthetic manifest is not a
+    // claim that a 48-head kernel has been built or validated.
+    {
+        json j;
+        std::ifstream(argv[1]) >> j;
+        auto& ops = j["layer_types"]["linear_attention"]["pack"]["consts"];
+        ops.push_back({{"op", "transpose_banked"}, {"tensor", "ab"}, {"dst", 0},
+                       {"rows", 48}, {"cols", 5120}, {"elem", 2}});
+        try {
+            auto banked = Manifest::parse(j, "banked AB test");
+            check(banked.layer_types.at("linear_attention").consts.back().op == "transpose_banked",
+                  "transpose_banked: manifest accepts dedicated AB operation");
+        } catch (const std::exception& e) {
+            check(false, std::string("transpose_banked manifest: ") + e.what());
+        }
+        for (const char* field : {"tensor", "rows", "cols", "elem"}) {
+            auto bad = j;
+            bad["layer_types"]["linear_attention"]["pack"]["consts"].back().erase(field);
+            bool refused = false;
+            try { Manifest::parse(bad, "banked AB test"); }
+            catch (const std::exception& e) {
+                refused = std::string(e.what()).find(field) != std::string::npos;
+            }
+            check(refused, std::string("transpose_banked: missing field named: ") + field);
+        }
+    }
     check(m.version == 1 && m.family == "qwen36moe", "version 1, family qwen36moe");
     check(m.layers.size() == 40 && m.layers[3] == "full_attention" && m.layers[0] == "linear_attention", "40 layers, attention every 4th");
     check(m.hidden == 2048 && m.vocab == 248320 && m.real_vocab == 248070, "hidden / vocab / real vocab");
@@ -107,6 +134,39 @@ int main(int argc, char** argv) {
             }
         check(fits, "attn_apply: the stream is exactly what the kernel's window blocks consume");
         check(slack, "attn_apply: the padded window stays inside rb rows of KV slack");
+    }
+    // attnpos pads the streamed row count to whole blocks of `rb` (attn.h ATTN_BLOCK_ONLY);
+    // every other kernel is unblocked and the field is absent from its manifest entry.
+    check(m.kernels.at("ax0").rb == 4 && m.kernels.at("lx1").rb == 1, "attn rows per call");
+    {
+        // The blocked walk covers the cached rows AND the new position's row in whole
+        // blocks of `rb`, taking the new row as the last block's final slot -- so the
+        // stream carries one row less than those blocks hold, and the extra rows over
+        // the real count sit at or past `pos`, where the kernel masks them. At rb 2 the
+        // highest row read is exactly `pos`: inside the cache, and written by this very
+        // dispatch. A count that does not match what attn_meta_impl derives from the
+        // same position deadlocks the fifo, so this is the arithmetic both sides run.
+        std::vector<uint32_t> iw(1, 0);
+        const std::vector<stream_patch::AttnPatch> tab{{0, 0, 0}};
+        stream_patch::AttnGeometry g;                     // kv_row 2048, no window
+        auto rows = [&](uint64_t pos, uint64_t rb) {
+            g.rb = rb;
+            stream_patch::attn_apply(iw.data(), tab, pos, g);
+            return static_cast<uint64_t>(iw[0]) * 4 / g.kv_row;
+        };
+        check(rows(0, 2) == 1 && rows(1, 2) == 1 && rows(2, 2) == 3 && rows(3, 2) == 3 &&
+              rows(4, 2) == 5 && rows(1000, 2) == 1001, "attn_apply: rows padded to whole blocks of 2");
+        check(rows(0, 1) == 1 && rows(2, 1) == 2 && rows(1000, 1) == 1000, "attn_apply: rb 1 is the window's own count");
+        bool top = true, fits = true;
+        for (uint64_t pos = 0; pos < 64; ++pos) {
+            top = top && rows(pos, 2) - 1 <= pos;
+            // What attn_meta_impl will do with the same position: pb[4] = pb[0] / kRB full
+            // blocks off the fifo, then one peeled block of kRB - 1 more. If that is not
+            // exactly what the fill delivers, the core blocks forever on an acquire.
+            for (uint64_t rb = 2; rb <= 4; rb *= 2) fits = fits && rb * (pos / rb) + rb - 1 == rows(pos, rb);
+        }
+        check(top, "attn_apply: the padded window never reads past the position's own row");
+        check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
     }
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
@@ -215,13 +275,83 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 2}"));
+    json j = json::parse(std::string("{\"manifest_version\": 4}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 2 is refused");
+        check(false, "manifest_version 4 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 2") != std::string::npos, std::string("manifest_version 2 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 4") != std::string::npos, std::string("manifest_version 4 is refused: ") + e.what());
     }
+    // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
+    auto bf16_weight = [](json& j, int version, bool mixed) {
+        j["manifest_version"] = version;
+        json op = {{"op", "bf16_gemm"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
+                   {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}};
+        json pack = json::array({op});
+        if (mixed) pack.push_back({{"op", "std_perm"}, {"tensor", op["tensor"]}, {"nch", 1024}, {"in_dim", 4096}, {"dst", 16777216}});
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"] = {{"from", "pack"}, {"pack", pack}};
+    };
+    refused_manifest(argv[1], "needs version 3", "a bf16_gemm weight in a version 2 manifest is refused at load",
+                     [&](json& j) { bf16_weight(j, 2, false); });
+    refused_manifest(argv[1], "mixes bf16_gemm and std_perm", "a weight mixing GEMM formats is refused at load",
+                     [&](json& j) { bf16_weight(j, 3, true); });
+    {
+        std::ifstream f(argv[1]);
+        json g = json::parse(f);
+        bf16_weight(g, 3, false);
+        bool ok = true;
+        try { Manifest::parse(g, "q8 gemm"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
+        check(ok, "a version 3 manifest with a bf16_gemm weight loads");
+    }
+    // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
+    auto with_lean = [](json& j) {
+        j["kernels"]["gemm_lean"] = {{"context", "gemm"}, {"insts", "gemm_lean/insts.bin"}};
+        j["globals"]["gemm_y_lean"] = 4096;
+        for (const char* lt : {"linear_attention", "full_attention"}) {
+            json v = j["layer_types"][lt]["gemm_block"];
+            v["program"][0]["kernel"] = "gemm_lean";
+            v["program"][0]["args"][2] = "gemm_y_lean";
+            j["layer_types"][lt]["gemm_block_variants"]["lean"] = v;
+        }
+    };
+    {
+        std::ifstream f(argv[1]);
+        json g = json::parse(f);
+        with_lean(g);
+        Manifest both = Manifest::parse(g, "lean");
+        const auto& files = both.files();
+        check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
+                  std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
+              "a lean variant parses, and the set's files include its streams");
+        Manifest fast = Manifest::parse(g, "lean");
+        const bool fast_found = fast.select_prefill_route("");
+        check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
+                  fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
+                  fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
+                  !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
+              "fast keeps gemm_block and drops the variant and the globals only it names");
+        Manifest lean = Manifest::parse(g, "lean");
+        const bool lean_found = lean.select_prefill_route("lean");
+        check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
+                  lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
+                  lean.globals.count("gemm_y_lean") && !lean.globals.count("gemm_y_n12288") &&
+                  !lean.globals.count("gemm_y_n9216") && lean.globals.count("gemm_x_k2048"),
+              "lean takes the variant on every layer type and drops the globals only gemm_block named");
+        Manifest one = Manifest::load(argv[1]);
+        const auto before = one.layer_types.at("linear_attention").gemm_block.program[0].kernel;
+        check(!one.select_prefill_route("lean") && one.layer_types.at("linear_attention").gemm_block.program[0].kernel == before,
+              "lean on a set with one route changes nothing");
+    }
+    refused_manifest(argv[1], "carry different gemm_block_variants", "a variant on only some layer types is refused",
+                     [&](json& j) { with_lean(j); j["layer_types"]["full_attention"].erase("gemm_block_variants"); });
+    refused_manifest(argv[1], "route at t 128", "a variant at another t is refused", [&](json& j) {
+        with_lean(j);
+        j["layer_types"]["linear_attention"]["gemm_block_variants"]["lean"]["t"] = 128;
+    });
+    refused_manifest(argv[1], "unknown kernel gemm_nope", "a variant naming an unknown kernel is refused", [&](json& j) {
+        with_lean(j);
+        j["layer_types"]["linear_attention"]["gemm_block_variants"]["lean"]["program"][1]["kernel"] = "gemm_nope";
+    });
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
     refused_manifest(argv[1], "op 99", "a route weight past the pack plan is refused at load", [](json& j) {
@@ -255,6 +385,12 @@ int main(int argc, char** argv) {
     });
     refused_manifest(argv[1], "needs the attnpos", "a window block on a stream the host does not pad is refused", [](json& j) {
         j["kernels"]["lx1"]["rb_win"] = 2;
+    });
+    refused_manifest(argv[1], "is not 1, 2 or 4", "a row block the attention kernel is not built for is refused", [](json& j) {
+        j["kernels"]["ax0"]["rb"] = 8;
+    });
+    refused_manifest(argv[1], "needs the attnpos", "a row block on a stream the host does not pad is refused", [](json& j) {
+        j["kernels"]["lx1"]["rb"] = 2;
     });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];
@@ -310,9 +446,10 @@ int main(int argc, char** argv) {
             const auto& lt = d.layer_types.at("dense");
             check(lt.program.size() == 1 && lt.program[0].op == "run" && lt.program[0].kernel == "dx" && lt.program[0].args.size() == 6 &&
                   lt.state_kind == "kv" && lt.state_row == 4096, "qwen3: one run per layer");
-            // dx / ln / lm plus the block prefill route's two: the attention dispatch's own
-            // xclbin ("dxa") and the ONE context every projection shape streams over ("gemm").
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 5, "qwen3: kernels");
+            // dx / ln / lm plus the block prefill route's four: the attention dispatch's own
+            // xclbin ("dxa"), the ONE context every projection shape streams over ("gemm"), and
+            // the attention products' two ("ag_s", "ag_pv": 8 and 4 columns wide at head dim 128)
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
@@ -336,6 +473,15 @@ int main(int argc, char** argv) {
             // every projection shape is an instruction stream over ONE hardware context
             check(d.kernels.at("gemm_n6144_k2560").context == "gemm" && d.kernels.at("gemm_n2560_k9728").context == "gemm",
                   "qwen3: one GEMM context for every shape");
+            // the attention products (OPEN-PREFILL-ATTN): qwen3 declares its host half, so the
+            // route runs them -- 4 query heads per kv head x 256 tokens, head dim 128
+            const auto& ab = dg.attn_block;
+            check(ab.present() && ab.prep == "qknorm_rope" && ab.m == 1024 && ab.hd == 128 && ab.l_max == 4096 &&
+                  ab.kernels_s.size() == 16 && ab.kernels_pv.size() == 16 &&
+                  d.kernels.at(ab.kernels_s.at(256)).context == "ag_s" && d.kernels.at(ab.kernels_pv.at(4096)).context == "ag_pv",
+                  "qwen3: the dense route's attention products, declared qknorm_rope");
+            refused_manifest(argv[2], "is not one this engine computes", "qwen3: an attn_block prep the engine does not compute is refused",
+                             [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "qknorm_post_rope"; });
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
@@ -349,6 +495,12 @@ int main(int argc, char** argv) {
             // dx is attnpos-patched too, and would run the whole layer per token of the block
             refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
+            // the dense route runs its GEMMs through its own dispatch, which adds no split halves
+            refused_manifest(argv[2], "do not add split halves", "qwen3: a split step on the dense route is refused",
+                             [](json& j) {
+                                 j["manifest_version"] = 2;
+                                 j["layer_types"]["dense"]["gemm_block"]["program"][0]["split"] = true;
+                             });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
         }
@@ -401,6 +553,10 @@ int main(int argc, char** argv) {
             check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
             // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
             check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
+            // its norm follows the rotation, which the products' host half does not do: the
+            // recipe emits the streams but declares no prep, so the route keeps its dxB dispatches
+            check(!h.layer_types.at("dense").gemm_block.attn_block.present(),
+                  "hunyuan: an attn_block without a prep is left to the dxB route");
             check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
             json ok = matching_config(h);
             check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");
@@ -567,7 +723,7 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a t2 route parses: ") + e.what());
             }
         }
-        refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight mixing std_perm and t2_perm is refused",
+        refused_manifest(argv[5], "mixes std_perm and t2_perm", "qwen35: a packed weight mixing std_perm and t2_perm is refused",
                          [&](json& j) {
                              split_out(j);
                              json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];
@@ -576,7 +732,7 @@ int main(int argc, char** argv) {
                          });
         refused_manifest(argv[5], "x_tile_k must be 64 or 128", "qwen35: an activation tile the host does not write is refused",
                          [&](json& j) { j["layer_types"]["linear_attention"]["gemm_block"]["x_tile_k"] = 96; });
-        refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight that is not std_perm is refused",
+        refused_manifest(argv[5], "std_perm, t2_perm or bf16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);
                              json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];
@@ -587,6 +743,73 @@ int main(int argc, char** argv) {
                          [&](json& j) {
                              split_out(j);
                              j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][0]["split"] = "mid";
+                         });
+        // Any route step can read a q8 weight as its exact split (OPEN-PREFILL-BATCH): `split` on the
+        // step, a hi-then-lo pack on its weight. qkv | z here, from the fixture's own pool ops.
+        auto split_qkvz = [](json& j) {
+            json& lt = j["layer_types"]["linear_attention"];
+            json& gb = lt["gemm_block"];
+            json hi = json::array(), lo = json::array();
+            uint64_t dst = 0;
+            for (const char* part : {"hi", "lo"})
+                for (const auto& idx : gb["weights"]["gqkvz_w"]["ops"]) {
+                    json o = lt["pack"]["pool"][idx.get<size_t>()];
+                    o["op"] = "std_perm";
+                    o["dst"] = dst;
+                    o["split"] = part;
+                    dst += o["nch"].get<uint64_t>() * 5120;
+                    (std::string(part) == "hi" ? hi : lo).push_back(o);
+                }
+            json pack = hi;
+            for (auto& o : lo) pack.push_back(o);
+            gb["weights"]["gqkvz_w"] = {{"from", "pack"}, {"pack", pack}};
+            gb["program"][0]["split"] = true;
+            j["manifest_version"] = 2;
+        };
+        {
+            std::ifstream f(argv[5]);
+            json j = json::parse(f);
+            split_out(j);
+            split_qkvz(j);
+            try {
+                Manifest q = Manifest::parse(j, "edited");
+                const auto& g = q.layer_types.at("linear_attention").gemm_block;
+                check(g.program[0].split && g.weights.at("gqkvz_w").pack.size() == 4,
+                      "a split qkv | z step (split on the step, hi then lo on the weight) parses");
+                check(g.program[1].split, "out_split marks the out step split, so one host path adds every split's halves");
+                check(!q.layer_types.at("full_attention").gemm_block.program[0].split,
+                      "a step without `split` is not split");
+            } catch (const std::exception& e) {
+                check(false, std::string("a split qkv | z step parses: ") + e.what());
+            }
+        }
+        refused_manifest(argv[5], "is not a hi / lo split", "a split step whose weight is not a split is refused",
+                         [&](json& j) {
+                             j["manifest_version"] = 2;
+                             j["layer_types"]["linear_attention"]["gemm_block"]["program"][0]["split"] = true;
+                         });
+        // an engine that reads only version 1 ignores `split` and would use the hi half alone, so
+        // the version is what makes such an engine refuse the set; out_split alone stays version 1
+        refused_manifest(argv[5], "needs version 2", "a split step in a version 1 manifest is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["manifest_version"] = 1;
+                         });
+        refused_manifest(argv[5], "end to end from 0", "a split whose lo halves overlap its hi halves is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gqkvz_w"]["pack"][2]["dst"] = 0;
+                         });
+        refused_manifest(argv[5], "without `split`", "a split weight read by a step that is not split is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["program"][0].erase("split");
+                         });
+        refused_manifest(argv[5], "is not a hi / lo split", "a split whose lo half does not mirror its hi half is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             auto& pack = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gqkvz_w"]["pack"];
+                             pack[3]["nch"] = pack[3]["nch"].get<uint64_t>() / 2;
                          });
     }
     // ---- Phi-3: a 96-dim rotation, longrope's two tables, and hf_config_defaults -- the
@@ -625,6 +848,43 @@ int main(int argc, char** argv) {
             refused(p, noorig, "original_max_position_embeddings", "phi3: dropping the original context (nowhere else to read it from) is refused");
         } catch (const std::exception& e) {
             check(false, std::string("phi3 fixture: ") + e.what());
+        }
+    }
+
+    // ---- OPEN-HOST-ATTN-GUARD: the host attention computes K2's attention and refuses every other family
+    for (int i = 1; i < argc; ++i) {
+        try {
+            Manifest f = Manifest::load(argv[i]);
+            const std::string why = f.host_attention_refusal();
+            check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
+                  "host attention: " + f.family + " is refused by name");
+            if (f.family == "qwen3") {
+                // Manifest is move-only (the GGUF-direct view), so each variant is its own load
+                auto as_k2 = [&] { Manifest m = Manifest::load(argv[i]); m.family = "k2"; return m; };
+                Manifest k = as_k2();
+                check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
+                Manifest half = as_k2();
+                half.rotary_dim = half.rotary_dim / 2;
+                check(half.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest with a partial rotation is refused on geometry");
+                Manifest odd = as_k2();
+                const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
+                odd.hf_config_check["head_dim"] = hd;
+                odd.rotary_dim = hd;
+                odd.rope_inv_freq.resize(hd / 2);
+                for (auto& [n, t] : odd.layer_types) {
+                    t.gemm_block.qw = odd.hf_config_check["num_attention_heads"].get<size_t>() * hd;
+                    t.gemm_block.kvw = odd.hf_config_check["num_key_value_heads"].get<size_t>() * hd;
+                }
+                check(odd.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest with an odd head_dim is refused on geometry");
+                Manifest wide = as_k2();
+                wide.layer_types.begin()->second.gemm_block.qw += 1;
+                check(wide.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");
+            }
+        } catch (const std::exception& e) {
+            check(false, std::string("host attention guard: ") + e.what());
         }
     }
 

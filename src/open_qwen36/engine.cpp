@@ -22,11 +22,21 @@
 #include <string>
 #include <vector>
 
+#include "open_qwen36/dflash2.hpp"
 #include "utils/utils.hpp"
 
 namespace open_qwen36 {
 
 namespace fs = std::filesystem;
+
+// a registry `draft` is a directory or the name of one beside the model; OFLM_OPEN_DRAFT_KERNELS_DIR picks its kernel set
+static spec::DraftResolver draft_resolver(const std::string& model_path) {
+    const std::string root = fs::path(model_path).parent_path().string();
+    return [root](const std::string& d) {
+        const char* k = std::getenv("OFLM_OPEN_DRAFT_KERNELS_DIR");
+        return spec::resolve_draft(d, root, k ? k : "");
+    };
+}
 
 std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     auto chose = [how](const char* where) { if (how) *how = where; };
@@ -80,7 +90,7 @@ spec::Availability Engine::spec_preflight(const std::string& model_path, const n
     const std::string dir = find_kernels(cfg);
     if (dir.empty()) return spec::spec_availability(entry, nullptr);
     const Manifest m = Manifest::load((fs::path(dir) / "manifest.json").string());
-    return spec::spec_availability(entry, &m);
+    return spec::spec_availability(entry, &m, draft_resolver(model_path));
 }
 
 Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L, const nlohmann::json& entry) : dev_(dev) {
@@ -93,6 +103,7 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L, const n
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
+    if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) cfg_.prefill_mode = pm;   // oflm --prefill-mode
     // Say which set won. Three rules can pick one, and every one of them yields
     // valid output -- so a set chosen against the user's intent looks exactly
     // like the right one. An A/B that silently ran identical kernels twice, and
@@ -104,12 +115,12 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L, const n
     // OPEN-DECODE-SPECULATIVE is opt-in, and the app asks only for greedy requests
     std::string method;
     if (utils::getenv_oflm("OFLM_OPEN_SPEC") == "1") {
-        const spec::Availability av = spec::spec_availability(entry, &core_->manifest());
+        const spec::Availability av = spec::spec_availability(entry, &core_->manifest(), draft_resolver(config.model_path));
         if (av.status == spec::Availability::kError)
             throw std::runtime_error("open_qwen36: speculative decode for " + config.model_name + ": " + av.reason);
         if (av.ok()) {
             method = av.method;
-            drafter_ = spec::make_drafter(method);
+            avail_ = av;   // the drafters are built once the weights are resident (open_drafter)
             spec_on_ = true;
         } else {
             std::fprintf(stderr, "open_qwen36: speculative decode is not available for %s: %s; decoding normally\n",
@@ -133,6 +144,26 @@ void Engine::load_weights(Q4NX&) { load_open_weights(); }
 void Engine::load_open_weights() {
     core_->load_weights();
     core_->reset();
+    open_drafter();
+}
+
+void Engine::open_drafter() {
+    if (!spec_on_) return;
+    drafter_.reset();
+    dflash2::StackOptions opt;
+    const std::string lm = utils::getenv_oflm("OFLM_OPEN_LOOKUP_MIN");
+    if (!lm.empty()) opt.lookup_min = std::atoi(lm.c_str());
+    opt.eager = utils::getenv_oflm("OFLM_OPEN_STACK_EAGER") == "1";
+    const std::string fill = utils::getenv_oflm("OFLM_OPEN_DRAFT_FILL");
+    if (!fill.empty()) opt.fill_rows = std::strtoul(fill.c_str(), nullptr, 10);
+    const std::string deepen = utils::getenv_oflm("OFLM_OPEN_DRAFT_DEEPEN");
+    if (!deepen.empty()) opt.deepen_after = std::strtoul(deepen.c_str(), nullptr, 10);
+    drafter_ = dflash2::make_stack(*core_, avail_, opt, cfg_.verbose);
+}
+
+std::string Engine::speculative_report() {
+    auto* s = dynamic_cast<spec::Stacked*>(drafter_.get());
+    return s ? s->report() : std::string();
 }
 
 buffer<bf16> Engine::logits_view() { return logits_view_of(core_->logits()); }
@@ -153,10 +184,12 @@ void Engine::note_failure(const char* what) {
 void Engine::ensure_alive() {
     if (!poisoned_) return;
     std::fprintf(stderr, "open_qwen36: a kernel failed on the last request; rebuilding the engine\n");
+    drafter_.reset();   // it holds the old core
     core_.reset();
     core_ = std::make_unique<Core>(cfg_, dev_);
     core_->load_weights();
     core_->reset();
+    open_drafter();
     has_snapshot_ = false;
     poisoned_ = false;
     fed_.clear();
@@ -428,7 +461,11 @@ int Engine::restore() {
         fed_.clear();
         return 0;
     }
+    // the core keeps the taps of the positions before the snapshot; they are the snapshot's only if the history agrees
+    const size_t keep = static_cast<size_t>(snapshot_.pos);
+    const bool same_history = fed_.size() >= keep && fed_snap_.size() >= keep && std::equal(fed_snap_.begin(), fed_snap_.begin() + static_cast<long>(keep), fed_.begin());
     core_->restore(snapshot_);
+    if (!same_history) core_->clear_taps();
     fed_ = fed_snap_;
     return snapshot_.pos;
 }

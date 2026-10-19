@@ -108,7 +108,7 @@ oflm list
 
 ### 4. Write Tests (if adding new functionality)
 
-- Add tests to `src/tests/`
+- Add tests to `src/test/`
 - Follow existing test patterns
 - Make tests fail clearly when broken
 - Consider integration tests for complex flows
@@ -153,11 +153,11 @@ oflm serve <model>
 ### Debugging
 
 ```bash
-# Enable verbose logging
-oflm run <model> --log-level debug
+# There is no --log-level flag. Inside an interactive `oflm run` session,
+# /verbose turns on per-dispatch tracing.
 
 # Check kernel resolution
-oflm list --verbose
+oflm list
 ```
 
 ---
@@ -322,6 +322,6 @@ git push origin feat/your-feature-name
 
 - [Branch naming convention](#branch-naming-convention)
 - [Testing](#testing-your-changes)
-- [Kernel contributions](../kernel-contributions.md)
-- [Documentation](../docs/contributing/doc-contributions.md)
-- [Tools](../docs/contributing/tool-contributions.md)
+- [Kernel contributions](kernel-contributions.md)
+- [Documentation](doc-contributions.md)
+- [Tools](tool-contributions.md)

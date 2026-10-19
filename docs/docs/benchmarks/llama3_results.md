@@ -10,10 +10,17 @@ nav_order: 1
 This section reports the performance of LLaMA 3.x on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on OpenFlowLM v0.9.30.  
+> - Results are based on OpenFlowLM v0.9.30.
 > - Under OFLM's default NPU power mode (Performance)   
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models.   
+
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
 
 ---
 
@@ -32,27 +39,27 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW** | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** | **64k** | **128k** |
 |------------------|--------------|-------:|-------:|-------:|-------:|--------:|--------:|--------:|---------:|
-| **LLaMA 3.2 1B** | NPU (OFLM)    |64.5	|	62.2	|	58.9	|	53.9	|	45.5	|	35.0	|	24.1	|	13.6	|
-| **LLaMA 3.2 3B** | NPU (OFLM)    | 26.3	| 25.5	| 24.1	| 21.7	| 18.0	| 13.6	| 9.0   | OOM      |
-| **LLaMA 3.1 8B** | NPU (OFLM)    | 12.8   |	12.6   |	12.2   |	11.5   |	10.2   |	8.5   | OOM     | OOM      |
+| **LLaMA 3.2 1B**  | NPU (OFLM)    | 64.5 | 62.2 | 58.9 | 53.9 | 45.5 | 35.0 | 24.1 | 13.6 | 
+| **LLaMA 3.2 3B**  | NPU (OFLM)    | 26.3 | 25.5 | 24.1 | 21.7 | 18.0 | 13.6 | 9.0 | OOM | 
+| **LLaMA 3.1 8B**  | NPU (OFLM)    | 12.8 | 12.6 | 12.2 | 11.5 | 10.2 | OOC | OOM | OOM | 
 
 <!-- | **Model**        | **Hardware** | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** | **64k** | **128k** | **Hardware** | **Model**        |
 |------------------|--------------|-------:|-------:|-------:|-------:|--------:|--------:|--------:|---------:|--------------|------------------|
-| **LLaMA 3.2 1B** | NPU (OFLM)    | 41.5   | 40.6   | 38.1   | 33.2   | 25.6    | 18.6    | 12.2    | 8.9      | NPU (OFLM)    | **LLaMA 3.2 1B** |
+| **LLaMA 3.2 1B**  | NPU (OFLM)    | 41.5 | 40.6 | 38.1 | 33.2 | 25.6 | 18.6 | 12.2 | 8.9 | NPU (OFLM) | **LLaMA 3.2 1B** | 
 |                  | NPU (RAI)    | 18.6   | 14.9   | *NA*   | *NA*   | *NA*    | *NA*    | *NA*    | *NA*     | NPU (RAI)    |                  |
 |                  | iGPU         | 28.7   | 19.0   | 10.9   | 6.0    | 3.2     | 1.6     | 0.8     | OOM      | iGPU         |                  |
 |                  | CPU          | 54.6   | 52.6   | 42.3   | 34.1   | 24.4    | 14.8    | 8.4     | OOM      | CPU          |                  |
 
 | **Model**        | **Hardware** | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** | **64k** | **128k** | **Hardware** | **Model**        |
 |------------------|--------------|-------:|-------:|-------:|-------:|--------:|--------:|--------:|---------:|--------------|------------------|
-| **LLaMA 3.2 3B** | NPU (OFLM)    | 18.3   | 17.8   | 15.9   | 13.6   | 10.5    | 7.3     | 6.3     | OOM      | NPU (OFLM)    | **LLaMA 3.2 3B** |
+| **LLaMA 3.2 3B**  | NPU (OFLM)    | 18.3 | 17.8 | 15.9 | 13.6 | 10.5 | 7.3 | 6.3 | OOM | NPU (OFLM) | **LLaMA 3.2 3B** | 
 |                  | NPU (RAI)    | 9.0    | 6.1    | *NA*   | *NA*   | *NA*    | *NA*    | *NA*    | *NA*     | NPU (RAI)    |                  |
 |                  | iGPU         | 23.2   | 18.8   | 14.0   | 9.2    | 5.5     | 3.0     | OOM     | OOM      | iGPU         |                  |
 |                  | CPU          | 22.6   | 21.3   | 17.5   | 14.1   | 9.4     | 6.1     | OOM     | OOM      | CPU          |                  |
 
 | **Model**        | **Hardware** | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** | **64k** | **128k** | **Hardware** | **Model**        |
 |------------------|--------------|-------:|-------:|-------:|-------:|--------:|--------:|--------:|---------:|--------------|------------------|
-| **LLaMA 3.1 8B** | NPU (OFLM)    | 9.1    | 9.0    | 8.3    | 7.5    | 6.2     | 4.6     | OOM     | OOM      | NPU (OFLM)    | **LLaMA 3.1 8B** |
+| **LLaMA 3.1 8B**  | NPU (OFLM)    | 9.1 | 9.0 | 8.3 | 7.5 | 6.2 | OOC | OOM | OOM | NPU (OFLM) | **LLaMA 3.1 8B** | 
 |                  | NPU (RAI)    | 6.3    | 4.6    | *NA*   | *NA*   | *NA*    | *NA*    | *NA*    | *NA*     | NPU (RAI)    |                  |
 |                  | iGPU         | 11.3   | 9.9    | 7.7    | 5.4    | 3.4     | OOM     | OOM     | OOM      | iGPU         |                  |
 |                  | CPU          | 10.3   | 7.7    | 7.6    | 6.7    | 5.8     | OOM     | OOM     | OOM      | CPU          |                  | -->
@@ -80,6 +87,6 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **LLaMA 3.2 1B** | NPU (OFLM)    |1686	|2136	|2339	|2212	|1706	|1157|
-| **LLaMA 3.2 3B**  | NPU (OFLM)    | 766	|910	|991	|933	|721	|500|
-| **LLaMA 3.1 8B**   | NPU (OFLM)    | 403|	472|	495|	467|	381|	281|
+| **LLaMA 3.2 1B**  | NPU (OFLM)    | 1686 | 2136 | 2339 | 2212 | 1706 | 1157 | 
+| **LLaMA 3.2 3B**  | NPU (OFLM)    | 766 | 910 | 991 | 933 | 721 | 500 | 
+| **LLaMA 3.1 8B**  | NPU (OFLM)    | 403 | 472 | 495 | 467 | 381 | OOC | 

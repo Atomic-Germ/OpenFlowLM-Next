@@ -233,6 +233,8 @@ This process is fully automatic and requires no additional flags beyond **`-f`**
 
 > **Note:** Dequantizing from a lossy format and re-quantizing introduces additional quantization error compared to converting directly from full-precision weights. For best quality, prefer starting from BF16, FP16, or Q8_0 sources when available.
 
+Q4_K sources are special: their block layout (uint4 codes per 32-weight group inside a 256-weight super-block, `w = t·q − u`) matches ours, so a Q4_K_M GGUF now repacks **without** dequantize/re-quantize — the codes are preserved, and only the per-group scale/min are rounded to fp16 at the pack boundary. The same holds for Q4_0↔Q4_1↔Q4_K sources feeding those targets. Q5_K/Q6_K/IQ*/TQ* sources still take the full dequantize → re-quantize path, and `--quant` pins the target while the source pick follows the config's target type (least re-quant work first).
+
 When converting community-quantized models, the GGUF metadata may not always match the architecture names expected by the converter. Use the **`-f`** flag to explicitly specify the model architecture in those cases.
 
 ### Example

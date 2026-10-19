@@ -1,9 +1,19 @@
-r"""GGUF Q4_1 blocks -> the pool-order chunk layout the open q4 GEMV reads.
+r"""GGUF Q4_0 / Q4_1 blocks -> the pool-order chunk layout the open q4 GEMV reads.
 
 This is the seed of the GGUF -> device-pool packer. A GGUF ``Q4_1`` block is
 20 bytes for 32 values along K: ``fp16 d | fp16 m | 16 nibble bytes`` (byte j
-holds value j in its low nibble and value j+16 in its high nibble). The kernel
-reads 5120-byte chunks, each a 32-row x 256-col tile:
+holds value j in its low nibble and value j+16 in its high nibble). A ``Q4_0``
+block is the same 18 bytes wide without the min, and its value rule
+``(q - 8) * d`` is this one with ``m = -8 * d`` -- exact, since multiplying by
+8 only moves an exponent. Every function here takes either and tells them apart
+by the block width, so a caller never says which it has.
+
+Note that GGUF's ``Q4_0`` nibbles are offset binary (0 means -8) while the
+``.q4nx`` containers ``q4nx-build`` writes hold the same values as two's
+complement (0 means 0, 8 means -8). Same numbers, different labels; reading one
+as the other shifts every weight by ``8*d``. This file is the GGUF one.
+
+The kernel reads 5120-byte chunks, each a 32-row x 256-col tile:
 
     d  [256] bf16   [0    : 512]     index j = kb*32 + r
     m  [256] bf16   [512  : 1024]    same index
@@ -24,7 +34,12 @@ standard layout, 4 for expert stripes; see gemv_q4.h):
     rows0 = 32*RS*band + 32*(ci % RS),  cols0 = 256*(ci // RS)
 
 ``python q4_1_pack.py`` self-tests: random blocks -> pack -> dequant of the pool
-bytes must equal dequant of the GGUF blocks (with d/m narrowed to bf16) exactly.
+bytes must equal dequant of the GGUF blocks (with d/m narrowed to bf16) exactly,
+for both block types.
+
+``ggml-xdna``'s ``hybrid/q4_pack.{h,cpp}`` is this file in C++ (both types), and
+its ``test-q4-pack.cpp`` holds the two byte-identical on real GGUF tensors. Keep
+them in step.
 """
 
 from __future__ import annotations
@@ -35,8 +50,21 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 CH = 5120           # pool chunk bytes (32 rows x 256 k)
-BLK = 32            # values per Q4_1 block
+BLK = 32            # values per block
 Q4_1_BYTES = 20     # fp16 d, fp16 m, 16 nibble bytes
+Q4_0_BYTES = 18     # fp16 d, 16 nibble bytes (the min is -8*d)
+
+
+def random_q4_0_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 0.02) -> np.ndarray:
+    """GGUF-style Q4_0 blocks for an [n, k] matrix: uint8[n, k//32, 18]."""
+    assert k % BLK == 0
+    nb = k // BLK
+    d = (rng.random((n, nb), np.float32) * scale + 1e-3).astype(np.float16)
+    q = rng.integers(0, 16, (n, nb, BLK), dtype=np.uint8)
+    blocks = np.empty((n, nb, Q4_0_BYTES), np.uint8)
+    blocks[..., 0:2] = d.view(np.uint8).reshape(n, nb, 2)
+    blocks[..., 2:18] = q[..., :16] | (q[..., 16:] << 4)
+    return blocks
 
 
 def random_q4_1_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 0.02) -> np.ndarray:
@@ -54,17 +82,27 @@ def random_q4_1_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 
 
 
 def unpack_q4_1_blocks(blocks: np.ndarray):
-    """uint8[n, nb, 20] -> (d f32[n, nb], m f32[n, nb], q uint8[n, nb*32])."""
-    n, nb, _ = blocks.shape
+    """uint8[n, nb, 20 or 18] -> (d f32[n, nb], m f32[n, nb], q uint8[n, nb*32]).
+
+    Q4_0 (18 B) has no stored min; `m = -8 * d` is its value rule written the
+    Q4_1 way, and the product is exact in f32 and in bf16 alike.
+    """
+    n, nb, width = blocks.shape
+    if width not in (Q4_1_BYTES, Q4_0_BYTES):
+        raise ValueError(f"block width {width} is neither Q4_1 ({Q4_1_BYTES}) nor Q4_0 ({Q4_0_BYTES})")
     d = np.ascontiguousarray(blocks[..., 0:2]).view(np.float16).reshape(n, nb).astype(np.float32)
-    m = np.ascontiguousarray(blocks[..., 2:4]).view(np.float16).reshape(n, nb).astype(np.float32)
-    qs = blocks[..., 4:20]
+    if width == Q4_1_BYTES:
+        m = np.ascontiguousarray(blocks[..., 2:4]).view(np.float16).reshape(n, nb).astype(np.float32)
+        qs = blocks[..., 4:20]
+    else:
+        m = -8.0 * d
+        qs = blocks[..., 2:18]
     q = np.concatenate([qs & 0xF, qs >> 4], axis=-1).reshape(n, nb * BLK)
     return d, m, q
 
 
 def dequant_q4_1(blocks: np.ndarray, scale_dtype=np.float32) -> np.ndarray:
-    """GGUF blocks -> f32[n, k]. scale_dtype=bfloat16 reproduces what the kernel sees."""
+    """GGUF Q4_0 / Q4_1 blocks -> f32[n, k]. scale_dtype=bfloat16 is what the kernel sees."""
     d, m, q = unpack_q4_1_blocks(blocks)
     d = d.astype(scale_dtype).astype(np.float32)
     m = m.astype(scale_dtype).astype(np.float32)
@@ -84,7 +122,7 @@ def chunk_geometry(n: int, k: int, rs: int):
 
 
 def pack_q4_1_pool(blocks: np.ndarray, rs: int) -> np.ndarray:
-    """GGUF Q4_1 blocks uint8[n, k//32, 20] -> pool-order chunk bytes uint8[nch*5120]."""
+    """GGUF Q4_1 (20 B) or Q4_0 (18 B) blocks -> pool-order chunk bytes uint8[nch*5120]."""
     n, nb, _ = blocks.shape
     k = nb * BLK
     d, m, q = unpack_q4_1_blocks(blocks)
@@ -146,17 +184,18 @@ def pool_reference(pool: np.ndarray, x: np.ndarray, n: int, k: int, rs: int) -> 
 def _selftest() -> int:
     rng = np.random.default_rng(0)
     ok = True
-    for n, k, rs in [(512, 2048, 2), (2048, 512, 2), (512, 2048, 4)]:
-        blocks = random_q4_1_blocks(n, k, rng)
-        pool = pack_q4_1_pool(blocks, rs)
-        want = dequant_q4_1(blocks, bfloat16)
-        got = dequant_pool(pool, n, k, rs)
-        exact = np.array_equal(got, want)
-        # and the fp16 -> bf16 narrowing is the ONLY loss vs the GGUF bytes
-        rel = np.abs(want - dequant_q4_1(blocks)).max() / np.abs(want).max()
-        print(f"{'PASS' if exact else 'FAIL'} n={n} k={k} rs={rs} pool={len(pool)} B "
-              f"pool==gguf(bf16 scales): {exact}  bf16-narrowing maxrel={rel:.2e}")
-        ok &= exact
+    for kind, make in (("Q4_1", random_q4_1_blocks), ("Q4_0", random_q4_0_blocks)):
+        for n, k, rs in [(512, 2048, 2), (2048, 512, 2), (512, 2048, 4)]:
+            blocks = make(n, k, rng)
+            pool = pack_q4_1_pool(blocks, rs)
+            want = dequant_q4_1(blocks, bfloat16)
+            got = dequant_pool(pool, n, k, rs)
+            exact = np.array_equal(got, want)
+            # and the fp16 -> bf16 narrowing is the ONLY loss vs the GGUF bytes
+            rel = np.abs(want - dequant_q4_1(blocks)).max() / np.abs(want).max()
+            print(f"{'PASS' if exact else 'FAIL'} {kind} n={n} k={k} rs={rs} pool={len(pool)} B "
+                  f"pool==gguf(bf16 scales): {exact}  bf16-narrowing maxrel={rel:.2e}")
+            ok &= exact
     return 0 if ok else 1
 
 

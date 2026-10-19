@@ -38,6 +38,8 @@ path, so a request carrying one routes to the closed engine.
 """
 from __future__ import annotations
 
+import os
+
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 import os
@@ -116,6 +118,9 @@ def _check(spec: ModelSpec) -> None:
         require_gemv(spec, "linear", spec.hidden, spec.lin_value_width // n, pc)
         require_gemv(spec, "linear_out", spec.lin_value_width, spec.hidden // n, pc)
         fills = glue_side_fills(spec)
+        # PR #148 implements the >32-head case (glue_ab_w.cc's 64-lane tile and the
+        # half-outer walk in glue_side_fills), so the old "fused wide glue needs 3 input
+        # DMA channels" refusal is gone: head count no longer gates this recipe.
         if fills > LIMITS["shim_fills"]:
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
@@ -199,6 +204,12 @@ def pack_plan(spec: ModelSpec) -> dict:
         # projection is written [hid, 32] with columns 16..31 zero. `dst_rows` appears ONLY
         # when it differs from `rows`: an extra key would move every existing family's plan,
         # its manifest and its build key for a value they already have.
+        #
+        # PR #148: the layer path no longer packs bank-major. Above 32 heads the whole-layer
+        # glue is glue_ab_w.cc's single 64-lane tile, so the dense/layer_x reader wants one
+        # [hid, lanes] row layout and `dst_rows` pads it (columns lanes.. zero). The
+        # `transpose_banked` opcode stays in the engine for the standalone wide_deltanet
+        # probes (recipes/wide_deltanet.py), which read 32-lane banks.
         lanes = ab_lanes(spec)
         pad = {"dst_rows": lanes} if lanes != heads else {}
         plan["layer_types"][LINEAR] = {
@@ -209,7 +220,7 @@ def pack_plan(spec: ModelSpec) -> dict:
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.C_LNW, "cap": L.ELN},
                 # the container's q8 alpha / beta come with a bf16 [heads, hidden] copy; the glue
-                # reads [hidden, heads], which is what the 35B's container already stores (R4)
+                # reads `lanes`-wide rows (32 normally, 64 for glue_ab_w.cc above 32 heads).
                 {"op": "transpose", "tensor": pre + "linear_attn.ssm_alpha_proj.bf16.weight",
                  "dst": side + L.SIDE_ALPHA, "rows": heads, "cols": hid, "elem": 2, **pad},
                 {"op": "transpose", "tensor": pre + "linear_attn.ssm_beta_proj.bf16.weight",
@@ -344,11 +355,11 @@ def tail_in_layer(spec: ModelSpec) -> bool:
 
 
 # ---- OPEN-DECODE-SPECULATIVE-VERIFY: the verify image (designs/verify/vux.py)
-VERIFY_W = 2                       # positions per verify pass: two tables per main core is what fits
+VERIFY_W = 4                       # positions per verify pass: the mmul's four A rows (designs/verify/gemv_t4.h)
 
 
 def verify_image(spec: ModelSpec) -> bool:
-    """vux.py is the two-position twin of the in-layer-head image with two down pieces; OPEN_LAYER_VERIFY=0 opts out."""
+    """vux.py is the 2 .. VERIFY_W-position twin of the in-layer-head image with two down pieces; OPEN_LAYER_VERIFY=0 opts out."""
     if os.environ.get("OPEN_LAYER_VERIFY") == "0" or not tail_in_layer(spec):
         return False
     R = recipe(spec)
@@ -439,6 +450,13 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                                  "rb_win": recipe(spec).attn.RB}
         out["kernels"]["vlm"] = {"context": "verify", "insts": "vlm/insts.bin", "build": "vlm"}
         w = vg["width"]
+        # narrower passes: their own streams on the same image (its cores read n from run-time words)
+        for n in range(2, w):
+            out["kernels"][f"vlx{n}"] = {"context": "verify", "insts": f"vlx{n}/insts.bin", "build": f"vlx{n}",
+                                         "patch": "stateslot"}
+            out["kernels"][f"vax{n}"] = {"context": "verify", "insts": f"vax{n}/insts.bin", "build": f"vax{n}",
+                                         "patch": "attnposv", "rb_win": recipe(spec).attn.RB, "nq": n}
+            out["kernels"][f"vlm{n}"] = {"context": "verify", "insts": f"vlm{n}/insts.bin", "build": f"vlm{n}"}
         out["globals"]["vxres"] = w * spec.hidden * 4
         out["globals"]["vlogits"] = w * spec.vocab * 4
         out["globals"]["vlmact"] = w * 64 * 1024
@@ -447,7 +465,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                          "programs": {LINEAR: [{"op": "run", "kernel": "vlx", "args": va}],
                                       FULL: [{"op": "run", "kernel": "vax", "args": va}]},
                          "tail": [{"op": "run", "kernel": "vlm",
-                                   "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}]}
+                                   "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}],
+                         "narrow": {str(n): {"programs": {LINEAR: [{"op": "run", "kernel": f"vlx{n}", "args": va}],
+                                                          FULL: [{"op": "run", "kernel": f"vax{n}", "args": va}]},
+                                             "tail": [{"op": "run", "kernel": f"vlm{n}",
+                                                       "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}]}
+                                    for n in range(2, w)}}
     r = gemm_route(spec)
     if r:
         for k in ("contexts", "kernels", "globals"):
@@ -497,6 +520,10 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                 b[name] = {"design": "verify/vux.py",
                            "build_dir": f"verify/build_{spec.family}_vux{part}_h{spec.hidden}{sfx}",
                            "env": {"VUX_PART": str(part)}}
+                for n in range(2, VERIFY_W):
+                    b[f"{name}{n}"] = {"design": "verify/vux.py",
+                                       "build_dir": f"verify/build_{spec.family}_vux{part}n{n}_h{spec.hidden}{sfx}",
+                                       "env": {"VUX_PART": str(part), "VUX_N": str(n)}}
         if tail_in_layer(spec):
             return {**b, **(gemm_route(spec) or {}).get("builds", {})}
     else:

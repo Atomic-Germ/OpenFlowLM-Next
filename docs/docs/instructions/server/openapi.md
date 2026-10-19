@@ -46,12 +46,83 @@ These libraries make it easy to send prompts, receive completions, and integrate
 
 OFLM follows the OpenAI API format in **Server Mode**.  
 
-The following endpoints are actively supported and maintained:
+The OpenAI-compatible endpoints:
 
-- `v1/models`
-- `v1/chat/completions`
-- `v1/audio/transcriptions`
-- `v1/embeddings`
+| method | path |
+|---|---|
+| `GET` | `/v1/models` |
+| `POST` | `/v1/chat/completions` |
+| `POST` | `/v1/completions` |
+| `POST` | `/v1/audio/transcriptions` |
+| `POST` | `/v1/embeddings` |
+| `POST` | `/v1/images/generations` (FLUX.2 [klein] 4B on the NPU) |
+| `POST` | `/v1/images/edits` (one reference image, PNG or JPEG, centre-cropped to a square; `mask` is not implemented) |
+| `GET` | `/v1/version` |
+
+OFLM also serves an **Ollama-compatible** surface, so existing Ollama clients
+and LangChain's `OllamaLLM` work against it unchanged:
+
+| method | path | Ollama equivalent |
+|---|---|---|
+| `POST` | `/api/chat` | chat |
+| `POST` | `/api/generate` | generate |
+| `POST` | `/api/show` | show |
+| `GET` | `/api/tags` | tags (model discovery) |
+| `GET` | `/api/ps` | ps |
+| `POST` | `/api/embeddings` | embeddings |
+| `POST` | `/api/pull` | pull |
+| `POST` | `/api/cancel` | cancel a running generation |
+| `GET` | `/api/version` | version |
+| `GET` | `/api/npu/status` | *(OFLM-specific)* NPU health |
+
+> ℹ️ `/api/tags` and `/v1/models` deliberately **hide** `whisper-v3` and
+> `embed-gemma`. Those are auxiliary models an Ollama client is not expected to
+> select as a chat model, and they are reached through `--asr 1` /
+> `--embed 1` on the server command line instead.
+
+### Accepted request parameters
+
+`/v1/chat/completions` and `/v1/completions` accept these top-level body
+fields, in addition to the standard `model` and `messages`/`prompt`:
+
+| field | notes |
+|---|---|
+| `temperature` | |
+| `top_p` | |
+| `top_k` | |
+| `min_p` | |
+| `presence_penalty` | |
+| `frequency_penalty` | |
+| `repetition_penalty` | |
+| `think` | toggle reasoning output |
+| `reasoning_effort` | e.g. `low` / `medium` / `high` |
+| `image-max-tokens` | cap the tokens spent on image input |
+
+### `POST /v1/embeddings`
+
+`input` is **required**; omitting it returns HTTP 400 with a body naming the
+missing parameter. `model` is optional. `prompt_name` and `task_type` select a
+task prompt on models that declare them.
+
+Request:
+
+```json
+{
+  "model": "bge-base:en-v1.5",
+  "input": ["first document", "second document"]
+}
+```
+
+Response:
+
+```json
+{
+  "data": [
+    { "object": "embedding", "embedding": [0.0123, -0.0456] }
+  ],
+  "usage": { "prompt_tokens": 6, "total_tokens": 6 }
+}
+```
 
 ---
 
@@ -210,7 +281,7 @@ gc.collect()
 
 You can load a full `.txt` file as a prompt -- useful for long documents or testing large context windows.
 
-👉 [Download the sample prompt](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/assets/alice_in_wonderland.txt)  
+👉 [Download the sample prompt](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/utilities/bench-configs/README.md)  
 
 Download to Downloads folder. This contains over 38k tokens, so it may take longer to prompt. OpenFlowLM supports full context length (32k–128k), making it ideal for processing long documents like this
 
@@ -218,7 +289,7 @@ Download to Downloads folder. This contains over 38k tokens, so it may take long
 # Use a text file to prompt
 from openai import OpenAI
 
-with open("C:\\Users\\<username>\\Downloads\\alice_in_wonderland.txt", "r", encoding="utf-8") as f:
+with open("C:\\Users\\<username>\\Downloads\\long_prompt.txt", "r", encoding="utf-8") as f:
     user_prompt = f.read()
 
 client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
@@ -294,6 +365,8 @@ response = client.chat.completions.create(
     temperature=0.9,      # More randomness
     top_p=0.95,           # Nucleus sampling
     presence_penalty=0.5, # Encourage novelty
+    # also accepted: top_k, min_p, frequency_penalty, repetition_penalty,
+    #                 think, reasoning_effort, image-max-tokens
 )
 
 print(response.choices[0].message.content)
@@ -415,3 +488,38 @@ gc.collect()
 ```
 
 ---
+
+---
+
+## 🎨 Example: Generate an Image
+
+`flux2-klein:4b` makes images with every op on the NPU: about 5.5 s at 512x512 and 14 s at
+1024x1024. It is pulled on the first request. By default an image request swaps the chat model
+off the NPU and a chat request swaps it back (about 5 s each way); start the server with
+`--imagegen 1` to keep both loaded.
+
+```
+oflm serve llama3.2:1b --imagegen 1
+```
+
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
+result = client.images.generate(
+    model="flux2-klein:4b",
+    prompt="a red fox in fresh snow",
+    size="1024x1024",            # or "512x512"; "auto" is 1024x1024
+    n=1,
+    extra_body={"seed": 1},      # optional: the same seed gives the same image
+)
+with open("fox.png", "wb") as f:
+    f.write(base64.b64decode(result.data[0].b64_json))
+```
+
+- `output_format`: `png` (default) or `jpeg`; `output_compression` sets the JPEG quality.
+- Extras, under either spelling: `seed` (`-1` = random), `steps` / `num_inference_steps`
+  (1-50, default 4). `cfg_scale` / `guidance_scale` and `negative_prompt` are accepted and
+  ignored: klein has no CFG. `sampler` / `sampler_name` accepts the Euler family only.
+- Each returned image carries its `seed`, so a random one can be made again.

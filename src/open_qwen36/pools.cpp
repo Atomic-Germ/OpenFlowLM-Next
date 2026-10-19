@@ -10,6 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "open_qwen36/gguf_file.hpp"
+#include "open_qwen36/q4nx_file.hpp"
+
 namespace open_qwen36 {
 namespace pools {
 
@@ -87,6 +90,14 @@ size_t supertile_index(size_t rb, size_t q, size_t ncol128, size_t rg) {
     return ((rb / rg) * ncol128 + q) * rg + rb % rg;
 }
 
+const uint8_t* raw(const WeightFile& m, const std::string& name, size_t need, size_t* got = nullptr) {
+    size_t n = 0;
+    const uint8_t* p = m.raw(name, &n);
+    if (n < need) fail(name + " is " + std::to_string(n) + " B, the plan needs " + std::to_string(need));
+    if (got) *got = n;
+    return p;
+}
+
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
 constexpr size_t Q4_HALF = 2560;     // GPT-OSS's chunk: the same layout over 32 rows x 128 columns
@@ -148,15 +159,7 @@ inline unsigned code_index(unsigned r, unsigned b, unsigned i) {
     return (r / 16) * 4096 + b * 512 + i * 16 + (r % 16);
 }
 
-const uint8_t* raw(const Q4nxFile& m, const std::string& name, size_t need, size_t* got = nullptr) {
-    size_t n = 0;
-    const uint8_t* p = m.raw(name, &n);
-    if (n < need) fail(name + " is " + std::to_string(n) + " B, the plan needs " + std::to_string(need));
-    if (got) *got = n;
-    return p;
-}
-
-/// What a chunk size the packer does not read probably is, for the refusal message.
+/// What a chunk size that is neither 5120 nor 8704 probably is, for the refusal message.
 std::string chunk_guess(size_t ch) {
     if (ch == Q4_HALF)
         return "GPT-OSS's 32-row x 128-column chunk, which the std_fuse op reads -- the file raster "
@@ -185,10 +188,13 @@ bool signed_q4(const Q4nxFile& m, const std::string& name) {
     return true;
 }
 
-const uint8_t* q4_source(const Q4nxFile& m, const std::string& name, size_t chunk0, size_t nch, size_t ch,
+const uint8_t* q4_source(const WeightFile& m, const std::string& name, size_t chunk0, size_t nch, size_t ch,
                          std::vector<uint8_t>& tmp) {
-    const size_t src_ch = m.chunk_bytes(name);
-    if (src_ch == Q4_CHUNK && ch == Q4_CHUNK && signed_q4(m, name)) {
+    // q4_1 / q8 / Q4_K chunks only come from a q4nx container (GGUF goes through std_perm_gguf).
+    const auto* q = dynamic_cast<const Q4nxFile*>(&m);
+    if (!q) fail(name + " is not in a q4nx container; only std_perm_gguf packs GGUF tensors");
+    const size_t src_ch = q->chunk_bytes(name);
+    if (src_ch == Q4_CHUNK && ch == Q4_CHUNK && signed_q4(*q, name)) {
         const uint8_t* src = raw(m, name, (chunk0 + nch) * Q4_CHUNK) + chunk0 * Q4_CHUNK;
         tmp.resize(nch * Q4_CHUNK);
         q4_0_to_q4_1_chunks(src, nch, tmp.data());
@@ -244,6 +250,94 @@ void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst) {
                     nib[p >> 1] |= static_cast<uint8_t>((p & 1) ? (q << 4) : q);
                 }
     }
+}
+
+void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst) {
+    // A small weight (a layernorm) as bf16: the q4nx container stores it bf16;
+    // a GGUF may store it f32 / f16 / bf16 -- convert exactly as the container does.
+    size_t n = 0;
+    const uint8_t* src = raw(f, name, 0, &n);
+    auto* g = dynamic_cast<const GgufFile*>(&f);
+    if (!g) {
+        if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
+        std::memcpy(dst, src, n);
+        return;
+    }
+    switch (g->tensor(name).type) {
+        case GgufFile::Type::BF16: {
+            if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
+            std::memcpy(dst, src, n);
+            break;
+        }
+        case GgufFile::Type::F16: {
+            if (n != bytes) fail(name + " is " + std::to_string(n) + " B of fp16, the slot holds " + std::to_string(bytes) + " B of bf16");
+            for (size_t i = 0; i < bytes / 2; ++i) {
+                uint16_t u;
+                std::memcpy(&u, src + 2 * i, 2);
+                const float v = fp16_to_f32(u);
+                const uint16_t b = f32_to_bf16(v);
+                std::memcpy(dst + 2 * i, &b, 2);
+            }
+            break;
+        }
+        case GgufFile::Type::F32: {
+            if (n != 2 * bytes) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
+            for (size_t i = 0; i < bytes / 2; ++i) {
+                float v;
+                std::memcpy(&v, src + 4 * i, 4);
+                const uint16_t b = f32_to_bf16(v);
+                std::memcpy(dst + 2 * i, &b, 2);
+            }
+            break;
+        }
+        default:
+            fail(name + " is " + GgufFile::type_name(g->tensor(name).type) + "; a layernorm must be f32 / f16 / bf16");
+    }
+}
+
+namespace {
+// row r, column k of a tensor's chunks (32-row blocks major, then 256-k tiles), as the q8 / q4_1 GEMMs read it
+float q8_value(const uint8_t* src, size_t ncol, size_t r, size_t k) {
+    const uint8_t* c = src + ((r / 32) * ncol + k / 256) * Q8_CHUNK;
+    const unsigned rl = static_cast<unsigned>(r % 32), kin = static_cast<unsigned>(k % 256);
+    uint16_t s;
+    std::memcpy(&s, c + 2 * ((kin / 32) * 32 + rl), 2);
+    return static_cast<float>(static_cast<int8_t>(c[512 + code_index(rl, kin / 32, kin % 32)])) * bf16_to_f32(s);
+}
+float q4_1_value(const uint8_t* src, size_t ncol, size_t r, size_t k) {
+    const uint8_t* c = src + ((r / 32) * ncol + k / 256) * Q4_CHUNK;
+    const unsigned rl = static_cast<unsigned>(r % 32), kin = static_cast<unsigned>(k % 256);
+    uint16_t d, m;
+    std::memcpy(&d, c + 2 * ((kin / 32) * 32 + rl), 2);
+    std::memcpy(&m, c + 512 + 2 * ((kin / 32) * 32 + rl), 2);
+    const unsigned p = (rl / 16) * 4096 + kin * 16 + rl % 16;
+    const unsigned n = (c[1024 + (p >> 1)] >> (4 * (p & 1))) & 15u;
+    return bf16_to_f32(m) + static_cast<float>(n) * bf16_to_f32(d);
+}
+}  // namespace
+
+void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint16_t* dst) {
+    const size_t ncol = cols / 256, nkt = cols / 64;
+#pragma omp parallel for
+    for (long long bb = 0; bb < static_cast<long long>(rows / 64); ++bb) {
+        const size_t b = static_cast<size_t>(bb);
+        for (size_t kt = 0; kt < nkt; ++kt) {
+            uint16_t* e = dst + (b * nkt + kt) * 4096;
+            for (size_t z = 0; z < 16; ++z)
+                for (size_t i = 0; i < 8; ++i)
+                    for (size_t r = 0; r < 4; ++r)
+                        for (size_t kk = 0; kk < 8; ++kk) {
+                            const size_t row = 64 * b + 4 * z + r, k = 64 * kt + 8 * i + kk;
+                            e[(z * 8 + i) * 32 + r * 8 + kk] =
+                                f32_to_bf16(q8 ? q8_value(src, ncol, row, k) : q4_1_value(src, ncol, row, k));
+                        }
+        }
+    }
+}
+
+uint64_t op_bytes(const PackOp& op, size_t chunk_bytes) {
+    if (op.op == "t2_perm") return op.nch * (op.chunk_bytes ? op.chunk_bytes : 2560);   // its own stride (OPEN-GEMM-T2)
+    return op.op == "bf16_gemm" ? op.nch * 2 * 8192 : op.nch * chunk_bytes;
 }
 
 void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
@@ -389,7 +483,7 @@ bool t2_chunk(const uint8_t* s, uint8_t* o, size_t stride) {
     return ok;
 }
 
-void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t dst_bytes, size_t ch) {
+void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_t dst_bytes, size_t ch) {
     if (op.op == "std_perm") {
         const std::string name = with_layer(op.tensor, layer);
         if (op.nch == 0 || op.in_dim == 0) fail("std_perm " + name + " without nch / in_dim");
@@ -398,7 +492,9 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         const uint8_t* src = nullptr;
         if (!op.split.empty()) {
             // one half of a q8 projection's exact q4_1 split (split_q4_1_chunks)
-            if (m.chunk_bytes(name) != Q8_CHUNK || ch != Q4_CHUNK)
+            const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
+            if (!q4) fail("std_perm " + name + " split " + op.split + ": only a q4nx container stores q8 chunks to split");
+            if (q4->chunk_bytes(name) != Q8_CHUNK || ch != Q4_CHUNK)
                 fail("std_perm " + name + " split " + op.split + ": the source must be q8 and the pool q4_1");
             const uint8_t* q8 = raw(m, name, (op.chunk0 + op.nch) * Q8_CHUNK) + op.chunk0 * Q8_CHUNK;
             tmp.resize(op.nch * Q4_CHUNK);
@@ -429,7 +525,9 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
             fail("std_fuse " + name + ": the container is " + std::to_string(op.src_dim) +
                  " wide and the pool only " + std::to_string(op.in_dim) + "; a pool narrower than "
                  "the container would drop columns");
-        const size_t src_ch = m.chunk_bytes(name);
+        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
+        if (!q4) fail(name + ": std_fuse reads a q4nx container's supertile raster");
+        const size_t src_ch = q4->chunk_bytes(name);
         if (src_ch != Q4_HALF)
             fail(name + ": std_fuse reads " + std::to_string(Q4_HALF) + "-byte chunks (32 rows x "
                  "128 columns) and the container stores it in " + std::to_string(src_ch) + "-byte ones");
@@ -465,9 +563,11 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         // lm head (designs/lm_head_t2), 2560 when absent (the first t2 kernel sets).
         const std::string name = with_layer(op.tensor, layer);
         if (op.nch == 0 || op.in_dim == 0) fail("t2_perm " + name + " without nch / in_dim");
-        if (m.chunk_bytes(name) != Q4_CHUNK)
+        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
+        if (!q4) fail("t2_perm " + name + " is not in a q4nx container");
+        if (q4->chunk_bytes(name) != Q4_CHUNK)
             fail("t2_perm " + name + ": the source must be q4_1 (" + std::to_string(Q4_CHUNK) + " B chunks), not " +
-                 std::to_string(m.chunk_bytes(name)));
+                 std::to_string(q4->chunk_bytes(name)));
         // the pool stride is the kernels' w element (recipes/qwen36moe.py T2_CHUNK)
         const size_t stride = op.chunk_bytes ? op.chunk_bytes : T2_CHUNK_LEGACY;
         if (stride < T2_BODY || stride % 64)
@@ -484,6 +584,126 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         if (bad >= 0)
             fail("t2_perm " + name + ": chunk " + std::to_string(bad) + " is not exact ternary q4_1 "
                  "(q in 0..2, m = -d, one d per 128 columns) -- not a q4nx-build ternary container");
+    } else if (op.op == "std_perm_gguf") {
+        // A GGUF [out, in] matmul tensor (Q4_0 / Q4_1 blocks, row-major, fp16
+        // scales) into the pool's band order of f32-scale chunks (6144 B): the
+        // codes permute into the chunk's 16-lane interleave, the fp16 block
+        // scales widen EXACTLY to f32 (open_kernels/gguf_pool.py). Zero loss.
+        const std::string name = with_layer(op.tensor, layer);
+        if (op.nch == 0 || op.in_dim == 0) fail("std_perm_gguf " + name + " without nch / in_dim");
+        const GgufFile& g = dynamic_cast<const GgufFile&>(m);
+        const GgufFile::TensorInfo& t = g.tensor(name);
+        // Q8_0 / K-quant tensors (typical GGUF lm_head / tied embeddings) are
+        // dequantized per row and re-quantized here to the pool's q4 layout
+        // with fp16 scales -- the same conversion q4nx-build does offline. The
+        // matmul body of the repo stays untouched (Q4_1 etc. go through the
+        // byte-exact path below).
+        const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
+                        t.type == GgufFile::Type::Q6_K;
+        if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
+            fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
+                 "requantizes Q8_0/Q4_K/Q6_K (convert K-quants with q4nx-build otherwise)");
+        const bool has_min = t.type == GgufFile::Type::Q4_1 || kq;
+        const size_t blk = has_min ? 20 : 18;
+        const size_t nb = op.in_dim / 32;                        // k blocks per row
+        size_t n = 0;
+        const uint8_t* src = raw(m, name, 0, &n);
+        const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
+        if (!kq && n < static_cast<size_t>(out_dim) * nb * blk)
+            fail(name + " is " + std::to_string(n) + " B, the plan needs " +
+                 std::to_string(static_cast<uint64_t>(out_dim) * nb * blk));
+        bounds(op, op.nch * ch, dst_bytes);
+        auto perm = std_perm(op.nch, op.in_dim);
+        const size_t ncol = op.in_dim / 256;
+        std::vector<float> rd(kq ? op.in_dim : 0);
+        for (size_t c = 0; c < op.nch; ++c) {
+            uint8_t* d = dst + op.dst + c * ch;
+            const size_t row0 = 32 * (perm[c] / ncol);           // rows
+            const size_t blk0 = (perm[c] % ncol) * 8;            // k blocks (32 values each)
+            for (size_t r = 0; r < 32; ++r) {
+                const uint64_t row = row0 + r;
+                if (row >= out_dim) break;                       // padded rows: zeroed scales/codes
+                const uint8_t* srow = src + row * nb * blk;
+                const uint8_t rb = static_cast<uint8_t>(r / 16), rl = static_cast<uint8_t>(r % 16);
+                if (kq) g.embed_row(name, row, op.in_dim, rd.data());   // exact f32 row, once
+                for (size_t kb = 0; kb < 8; ++kb) {
+                    if (blk0 + kb >= nb) break;                  // padded columns stay zero
+                    const uint8_t* b = srow + (blk0 + kb) * blk;
+                    // scales: fp16 d (and m) -> f32, plane index j = kb*32 + r
+                    uint16_t ud, um = 0;
+                    if (kq) {
+                        // re-quantize the block to the pool's q4_1 law (fp16 d/m, 4-bit codes)
+                        const float* v = rd.data() + (blk0 + kb) * 32;
+                        float lo = v[0], hi = v[0];
+                        for (size_t i = 0; i < 32; ++i) {
+                            lo = std::min(lo, v[i]);
+                            hi = std::max(hi, v[i]);
+                        }
+                        const float mraw = lo, draw = (hi - lo) / 15.f;
+                        ud = f32_to_fp16(draw);
+                        um = f32_to_fp16(mraw);
+                        const float df = fp16_to_f32(ud), mf = fp16_to_f32(um);
+                        const float inv = df > 0.f ? 1.f / df : 0.f;
+                        std::memcpy(d + 4 * (kb * 32 + r), &df, 4);
+                        std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
+                        // codes: value i at nibble (kb*32+i, r), i+16 at (p0+256)
+                        uint8_t nib[16];
+                        for (size_t i = 0; i < 16; ++i) {
+                            const int q0 = std::lround((v[i] - mf) * inv);
+                            const int q1 = std::lround((v[i + 16] - mf) * inv);
+                            nib[i] = static_cast<uint8_t>(((q1 < 0 ? 0 : q1 > 15 ? 15 : q1) << 4) |
+                                                          (q0 < 0 ? 0 : q0 > 15 ? 15 : q0));
+                        }
+                        for (size_t i = 0; i < 16; ++i) {
+                            const size_t p0 = rb * 4096 + (kb * 32 + i) * 16 + rl;
+                            d[2048 + (p0 >> 1)] |= (p0 & 1) ? static_cast<uint8_t>(nib[i] << 4)
+                                                            : (nib[i] & 0xF);
+                            const size_t p1 = p0 + 256;              // i + 16: the block's high half
+                            d[2048 + (p1 >> 1)] |= (p1 & 1) ? (nib[i] & 0xF0) : (nib[i] >> 4);
+                        }
+                        continue;
+                    }
+                    std::memcpy(&ud, b, 2);
+                    if (has_min) std::memcpy(&um, b + 2, 2);
+                    const float df = fp16_to_f32(ud);
+                    const float mf = has_min ? fp16_to_f32(um) : -8.f * df;
+                    std::memcpy(d + 4 * (kb * 32 + r), &df, 4);
+                    std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
+                    // codes: block nibbles (two K per byte) -> two rows per byte at one K
+                    for (size_t i = 0; i < 16; ++i) {
+                        const uint8_t byte = b[(has_min ? 4 : 2) + i];
+                        const uint8_t lo = byte & 0xF, hi = byte >> 4;   // GGUF: value i | value i+16
+                        const size_t p0 = rb * 4096 + (kb * 32 + i) * 16 + rl;
+                        d[2048 + (p0 >> 1)] |= (p0 & 1) ? lo << 4 : lo;   // value j = lo
+                        const size_t p1 = p0 + 256;              // i + 16: the block's high half
+                        d[2048 + (p1 >> 1)] |= (p1 & 1) ? hi << 4 : hi;   // value j + 16 = hi
+                    }
+                }
+            }
+    }
+    } else if (op.op == "bf16_gemm") {
+        // `nch` SOURCE chunks from `chunk0`: q8 read exactly unless `via` q4_1 asks for the q4 ops' reading
+        const std::string name = with_layer(op.tensor, layer);
+        if (op.nch == 0 || op.in_dim == 0 || op.in_dim % 256) fail("bf16_gemm " + name + " without nch / in_dim");
+        const size_t ncol = op.in_dim / 256;
+        if (op.nch % ncol || (op.nch / ncol) % 2)
+            fail("bf16_gemm " + name + ": " + std::to_string(op.nch) + " chunks is not whole 64-row bands of a " +
+                 std::to_string(op.in_dim) + "-wide tensor");
+        bounds(op, op_bytes(op, ch), dst_bytes);
+        const size_t rows = op.nch / ncol * 32;
+        uint16_t* out = reinterpret_cast<uint16_t*>(dst + op.dst);
+        // q8 / q4_1 SOURCE chunks only exist in a q4nx container (a GGUF tensor
+        // goes through std_perm_gguf), so resolve the chunk size through the
+        // concrete type. apply() takes WeightFile& so one path serves both
+        // containers; this op is q4nx-only.
+        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
+        if (!q4) fail("bf16_gemm " + name + " is not in a q4nx container; only std_perm_gguf packs GGUF tensors");
+        if (q4->chunk_bytes(name) == Q8_CHUNK && op.via != "q4_1") {
+            bf16_gemm_pack(raw(m, name, (op.chunk0 + op.nch) * Q8_CHUNK) + op.chunk0 * Q8_CHUNK, true, rows, op.in_dim, out);
+        } else {
+            std::vector<uint8_t> tmp;
+            bf16_gemm_pack(q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp), false, rows, op.in_dim, out);
+        }
     } else if (op.op == "q8_perm") {
         // The projection stays at q8: `nch` counts POOL half-tiles (5120 B each, twice the
         // q4_1 bytes of the same tensor) and `chunk0` is a SOURCE file-chunk offset, as it
@@ -493,7 +713,9 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         if (op.nch % 2) fail("q8_perm " + name + ": " + std::to_string(op.nch) +
                              " half-tiles is not a whole number of chunks");
         bounds(op, op.nch * ch, dst_bytes);
-        const size_t src_ch = m.chunk_bytes(name);
+        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
+        if (!q4) fail(name + ": q8_perm requires a q4nx container");
+        const size_t src_ch = q4->chunk_bytes(name);
         if (src_ch != Q8_CHUNK)
             fail(name + ": the kernel set streams this projection at q8 (" + std::to_string(Q8_CHUNK) +
                  "-byte chunks) but the container stores it in " + std::to_string(src_ch) +
@@ -544,11 +766,17 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         }
     } else if (op.op == "put") {
         const std::string name = with_layer(op.tensor, layer);
-        size_t n = 0;
-        const uint8_t* src = raw(m, name, 0, &n);
-        if (n > op.cap) fail(name + " is " + std::to_string(n) + " B, its slot holds " + std::to_string(op.cap));
-        bounds(op, n, dst_bytes);
-        std::memcpy(dst + op.dst, src, n);
+        if (dynamic_cast<const GgufFile*>(&m)) {
+            // a GGUF's small weights may be f32/f16: convert to the blob's bf16 layout
+            bounds(op, op.cap, dst_bytes);
+            pack_norm(m, name, op.cap, dst + op.dst);
+        } else {
+            size_t n = 0;
+            const uint8_t* src = raw(m, name, 0, &n);
+            if (n > op.cap) fail(name + " is " + std::to_string(n) + " B, its slot holds " + std::to_string(op.cap));
+            bounds(op, n, dst_bytes);
+            std::memcpy(dst + op.dst, src, n);
+        }
     } else if (op.op == "lmhead_q8") {
         // 128-row supertile order. nk = K / 256 k-tiles, a band is 4 row quarters x nk k-tiles,
         // and the file holds chunk (rowblock32, ktile) at rowblock32 * nk + ktile:
@@ -568,6 +796,25 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
             size_t fch = (4 * s + r % 4) * nk + r / 4;
             std::memcpy(dst + op.dst + k * CH8, src + fch * CH8, CH8);
         }
+    } else if (op.op == "transpose_banked") {
+        const std::string name = with_layer(op.tensor, layer);
+        const uint64_t rows = op.rows, cols = op.cols, elem = op.elem;
+        if (!rows || !cols || !elem) fail("transpose_banked " + name + " without rows / cols / elem");
+        // Check against the actual destination before multiplying dimensions.
+        // The bank width is a format constant: no wider GEMV vector is implied.
+        const uint64_t banks = rows / 32 + (rows % 32 != 0);
+        if (op.dst > dst_bytes || banks > (dst_bytes - op.dst) / 32 / elem / cols)
+            fail("transpose_banked " + name + ": destination too small");
+        size_t n = 0;
+        const uint8_t* src = raw(m, name, rows * cols * elem, &n);
+        if (n != rows * cols * elem)
+            fail("transpose_banked " + name + ": tensor size does not match rows / cols / elem");
+        uint8_t* out = dst + op.dst;
+        std::memset(out, 0, banks * cols * 32 * elem);
+        for (uint64_t r = 0; r < rows; ++r)
+            for (uint64_t c = 0; c < cols; ++c)
+                std::memcpy(out + (((r / 32) * cols + c) * 32 + r % 32) * elem,
+                            src + (r * cols + c) * elem, elem);
     } else if (op.op == "transpose") {
         const std::string name = with_layer(op.tensor, layer);
         const uint64_t rows = op.rows, cols = op.cols, elem = op.elem ? op.elem : 2;
@@ -599,17 +846,17 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
     }
 }
 
-void pack_pool(const Manifest& m, const LayerType& lt, const Q4nxFile& f, int layer, uint8_t* dst) {
+void pack_pool(const Manifest& m, const LayerType& lt, const WeightFile& f, int layer, uint8_t* dst) {
     std::memset(dst, 0, m.pool_bytes);
     for (const auto& op : lt.pool) apply(op, f, layer, dst, m.pool_bytes, m.chunk_bytes);
 }
 
-void pack_consts(const Manifest& m, const LayerType& lt, const Q4nxFile& f, int layer, uint8_t* dst) {
+void pack_consts(const Manifest& m, const LayerType& lt, const WeightFile& f, int layer, uint8_t* dst) {
     std::memset(dst, 0, lt.consts_bytes);
     for (const auto& op : lt.consts) apply(op, f, layer, dst, lt.consts_bytes, m.chunk_bytes);
 }
 
-void pack_lmhead(const Manifest& m, const Q4nxFile& f, uint8_t* out) {
+void pack_lmhead(const Manifest& m, const WeightFile& f, uint8_t* out) {
     std::memset(out, 0, m.lmhead_pool_bytes);
     for (const auto& op : m.lmhead_ops) apply(op, f, 0, out, m.lmhead_pool_bytes, m.chunk_bytes);
 }
