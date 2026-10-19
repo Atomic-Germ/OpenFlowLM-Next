@@ -111,7 +111,8 @@ def test_causal_prefixes_reject_invalid_checkpoints(lengths):
 
 
 @pytest.mark.parametrize('boundaries',[False,True])
-def test_prepare_uses_each_prefix_state_and_own_prediction(tmp_path,monkeypatch,boundaries):
+@pytest.mark.parametrize('layers',[4,64])
+def test_prepare_uses_each_prefix_state_and_own_prediction(tmp_path,monkeypatch,boundaries,layers):
     import json
     import sys
     from types import SimpleNamespace as NS
@@ -123,7 +124,7 @@ def test_prepare_uses_each_prefix_state_and_own_prediction(tmp_path,monkeypatch,
     original=tmp_path/'original.json'
     original.write_text(json.dumps({str(model/'model.q4nx'):m.digest(model/'model.q4nx')}))
     spec=NS(family='qwen35',hidden=5120,num_layers=64,
-            layer_types=['linear_attention']*3+['full_attention'],real_vocab=32,vocab=32,
+            layer_types=(['linear_attention']*3+['full_attention'])*16,real_vocab=32,vocab=32,
             conv_kernel=4,lin_qkv_dim=1,lin_value_heads=1,lin_value_dim=1,
             num_kv_heads=1,head_dim=1)
     ids=[i%32 for i in range(270 if boundaries else 20)]
@@ -146,13 +147,99 @@ def test_prepare_uses_each_prefix_state_and_own_prediction(tmp_path,monkeypatch,
     monkeypatch.setattr(m,'tail_batch',head)
     out=tmp_path/'out'
     m.prepare(NS(out=out,model=model,kernels=kernels,original=original,
-                 message='fixture',boundaries=boundaries))
+                 message='fixture',boundaries=boundaries,layers=layers))
     for n in ((255,256,257) if boundaries else (20,)):
         d=out/str(n) if boundaries else out
         meta=json.loads((d/'reference.json').read_text())
-        expected=(ids[n-1]+4)%32
+        expected=(ids[n-1]+layers)%32
+        assert meta['layers']==layers
         assert meta['ids']==ids[:n]
-        assert meta['expected_tokens']==[expected,(expected+4)%32]
-        assert len(meta['references'])==n+9
+        assert meta['expected_tokens']==[expected,(expected+layers)%32]
+        assert len(meta['references'])==n+2*layers+1
         m.verify({str(d/name):sha for name,sha in meta['references'].items()})
-        np.testing.assert_array_equal(m.read(d/'ref_cont_res3.bin',5120),np.full(5120,expected+4))
+        np.testing.assert_array_equal(m.read(d/f'ref_cont_res{layers-1}.bin',5120),np.full(5120,expected+layers))
+
+
+@pytest.mark.parametrize('layers',[0,3,8,65,64.0,'64'])
+def test_invalid_depth_is_rejected(layers):
+    with pytest.raises(ValueError,match='layers'):m.checked_layers(layers)
+
+
+def test_full_depth_command_captures_layer_63(tmp_path):
+    from types import SimpleNamespace as NS
+    meta=dict(layers=64,model='model',kernels='kernels',max_ctx=2048)
+    cmd=m.native_command(tmp_path/'cli',tmp_path,meta,NS(AA_BYTES=100),'hybrid',['--gemm-block'])
+    assert cmd[cmd.index('--layers')+1]=='64'
+    assert cmd[cmd.index('--dump-act')+1]==f'63:0:100:{tmp_path}/hybrid-act.bin'
+    assert cmd[cmd.index('--decode-route')+1]=='npu'
+
+
+def test_reference_coverage_cannot_relabel_slice_as_full_depth():
+    meta=dict(layers=64,ids=[1,2],references={name:'hash' for name in
+        ['ref_p0.bin','ref_p1.bin','ref_cont_logits.bin']+
+        [f'ref_{part}res{i}.bin' for part in ('','cont_') for i in range(4)]})
+    with pytest.raises(ValueError,match='reference coverage'):m.check_reference_coverage(meta)
+    meta['references'].update({f'ref_{part}res{i}.bin':'hash'
+                              for part in ('','cont_') for i in range(64)})
+    m.check_reference_coverage(meta)
+
+
+def test_full_depth_memory_preflight_rejects_insufficient_ram():
+    assert m.memory_preflight(64,40*2**30)==40*2**30
+    assert m.memory_preflight(4,16*2**30)==16*2**30
+    with pytest.raises(RuntimeError,match='35 GiB'):m.memory_preflight(64,16*2**30)
+
+
+def test_low_memory_run_invalidates_success_without_starting_native(tmp_path,monkeypatch):
+    import json
+    from types import SimpleNamespace as NS
+    meta=dict(layers=64,ids=[1],references={name:'unused' for name in
+        ['ref_p0.bin','ref_cont_logits.bin']+
+        [f'ref_{part}res{i}.bin' for part in ('','cont_') for i in range(64)]})
+    (tmp_path/'reference.json').write_text(json.dumps(meta))
+    (tmp_path/'report.json').write_text('{"passed":true}')
+    preflight=m.memory_preflight
+    monkeypatch.setattr(m,'memory_preflight',lambda layers:preflight(layers,16*2**30))
+    def unexpected(*args,**kwargs):pytest.fail('native run must not start')
+    monkeypatch.setattr(m.subprocess,'run',unexpected)
+    with pytest.raises(RuntimeError,match='35 GiB'):
+        m.run(NS(out=tmp_path,cli=tmp_path/'cli'))
+    report=json.loads((tmp_path/'report.json').read_text())
+    assert not report['passed'] and not report['routes']
+    assert report['last_residual_layer']==63 and '35 GiB' in report['error']
+
+
+@pytest.mark.parametrize('wrong_last',[False,True])
+def test_full_depth_run_uses_final_layer_reference(tmp_path,monkeypatch,wrong_last):
+    import json
+    from types import SimpleNamespace as NS
+    meta=dict(layers=64,ids=[1],model='model',kernels='kernels',max_ctx=2048,
+              vocab=12,real_vocab=10,hidden=4,sources={},references={},expected_tokens=[9,9])
+    (tmp_path/'ids.txt').write_text('1\n');meta['ids_sha256']=m.digest(tmp_path/'ids.txt')
+    for part in ('','cont_'):
+        for i in range(64):
+            name=f'ref_{part}res{i}.bin'
+            value=np.array([12,15,18,21]) if i==63 else np.full(4,-999)
+            if part=='cont_' and i==63 and wrong_last:value+=1
+            value.astype('<f4').tofile(tmp_path/name);meta['references'][name]=m.digest(tmp_path/name)
+    for name in ('ref_p0.bin','ref_cont_logits.bin'):
+        np.arange(12,dtype='<f4').tofile(tmp_path/name);meta['references'][name]=m.digest(tmp_path/name)
+    (tmp_path/'reference.json').write_text(json.dumps(meta));(tmp_path/'cli').write_text('fixture')
+    monkeypatch.setattr(m,'memory_preflight',lambda layers:40*2**30)
+    monkeypatch.setattr(m,'spec_from_model_dir',lambda p:None)
+    monkeypatch.setattr(m,'layout',lambda *a,**k:NS(AA_BYTES=48,AA_RES=0,AA_OUT2=16,AA_OUT2B=32))
+    monkeypatch.setattr(m,'manifest',lambda *a,**k:None)
+    monkeypatch.setattr(m,'load_bundle',lambda *a:None)
+    calls=[]
+    def native(cmd,stdout,**kwargs):
+        assert cmd[cmd.index('--layers')+1]=='64'
+        prefix=cmd[cmd.index('--dump-logits')+1]
+        act=cmd[cmd.index('--dump-act')+1];assert act.startswith('63:0:48:')
+        for name in m.expected_dumps(prefix,1):np.arange(12,dtype='<f4').tofile(name)
+        np.arange(12,dtype='<f4').tofile(act.split(':',3)[3])
+        stdout.write('token 9\ntoken 9\n');calls.append(cmd)
+    monkeypatch.setattr(m.subprocess,'run',native)
+    assert m.run(NS(out=tmp_path,cli=tmp_path/'cli'))==int(wrong_last)
+    report=json.loads((tmp_path/'report.json').read_text())
+    assert report['passed']==(not wrong_last) and len(calls)==3
+    assert all(r['passed']==(not wrong_last) for r in report['routes'])

@@ -1,9 +1,13 @@
-# Causal prefill slice
+# Causal prefill validation
 
 Run a real, locally tokenized chat prompt through layers 0–3 (three DeltaNet
 layers and one full-attention layer), then perform one NPU decode step after
 prefill. This checks the complete four-layer computation and its state handoff;
 it is not full-depth model acceptance or a useful-text evaluation of the slice.
+`prepare --layers 64` selects the complete model; the default remains four layers.
+The native run takes its depth from the reference manifest, including the final
+residual capture at layer 3 or 63. Full-depth acceptance requires actual native
+results in addition to preparing a CPU reference.
 
 The independent CPU reference uses `replica_qwen35.layer_decode` with its
 existing FP64/FP32 layer arithmetic and effective packed-weight quantization.
@@ -48,7 +52,7 @@ rebuilt or changed by this checker.
 Every prompt position and the continuation requires full, finite logits,
 correlation **>0.9999** and the same argmax within the real vocabulary. The
 `_t0` and last `_pN` aliases must be byte-identical. After the continuation,
-layer 3's captured pre-FFN residual plus both down partials must match the
+the final layer's captured pre-FFN residual plus both down partials must match the
 independent final residual with normalized maximum error **<0.005**. Other
 layer residuals are retained by the CPU but not captured by this CLI check.
 The two hybrid schedules must produce byte-identical logits for all positions.
@@ -61,6 +65,46 @@ prior success are invalidated before a rerun. A run failure leaves a failed
 report. Run the CPU preparation and resident NPU tests serially to avoid
 competing for memory. Source conversion, all-layer residual coverage,
 full-depth prefill and serving are separate gates.
+
+## Full-depth preparation and resident run
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-slice/check.py prepare \
+  --out Models/qwen38-27b/prefill-full/short \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-consistent/kernels \
+  --original Models/qwen38-27b/production-consistent/input-sha256.json \
+  --layers 64 --message 'What is 2 + 2?'
+OPENBLAS_NUM_THREADS=1 LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+  ironvenv/bin/python utilities/prefill-slice/check.py run \
+  --out Models/qwen38-27b/prefill-full/short \
+  --cli /tmp/qwen38-main-merge-next/build/open_qwen36_cli
+```
+
+CPU preparation keeps one layer's dequantized weights at a time, retaining causal
+state for the subsequent CPU-selected continuation. It saves both prompt and
+continuation residual references for every selected layer. A 20-token, 64-layer
+fixture contains **149 reference files**: 64 prompt residual arrays, 64
+continuation residual vectors and 21 logit vectors. The runner requires the
+complete reference-file inventory; relabelling a four-layer fixture as 64 layers
+is rejected. The native CLI captures only the **last** continuation residual;
+retaining all CPU references does not establish all-layer native residual coverage.
+
+Full resident NPU runs need approximately **35–40 GiB available RAM** on the
+validated 2048-context export. The Linux checker reads `/proc/meminfo` before
+verification and again before each route, and refuses a 64-layer run below
+35 GiB. A failed preflight invalidates previous success, leaves a failed report
+and starts no native process. This is a minimum headroom check, not a memory
+reservation. CPU preparation does not require full model residency. Run it
+separately from resident native tests.
+
+The full-depth CPU fixture for the message above has been prepared and audited:
+**64 layers × 20 prompt positions + one continuation**, all **149 files** have
+the expected sizes, finite values and recorded hashes. The prompt residuals for
+layers 0–3 are byte-identical to the earlier four-layer fixture. CPU-selected
+token IDs are `[17, 478]`; these two tokens are a continuation prefix, not a
+complete answer. Host regression: **1419 passed, 47 skipped**, native CTest
+**4/4**. The full-depth NPU comparisons remain a separate acceptance step.
 
 ## Crossing a 256-token block
 

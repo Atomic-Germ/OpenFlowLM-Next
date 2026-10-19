@@ -1,4 +1,4 @@
-"""Four-layer causal prompt and NPU continuation, with an independent CPU oracle."""
+"""Four- or 64-layer causal prefill and NPU continuation against a CPU oracle."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -119,6 +119,38 @@ def causal_prefixes(xs,state,lengths,decode):
     return rows,states
 
 
+def checked_layers(layers):
+    if type(layers)!=int or layers not in (4,64):raise ValueError('layers must be 4 or 64')
+    return layers
+
+
+def check_reference_coverage(meta):
+    layers=checked_layers(meta['layers']);n=len(meta['ids'])
+    required={f'ref_{part}res{i}.bin' for part in ('','cont_') for i in range(layers)}
+    required.update(f'ref_p{i}.bin' for i in range(n));required.add('ref_cont_logits.bin')
+    if n<1 or set(meta['references'])!=required:raise ValueError('incomplete reference coverage')
+
+
+def memory_preflight(layers,available=None):
+    """Full resident validation needs measured headroom beyond the weight file."""
+    checked_layers(layers)
+    if available is None:
+        match=re.search(r'^MemAvailable:\s+(\d+)\s+kB$',Path('/proc/meminfo').read_text(),re.M)
+        if match is None:raise RuntimeError('cannot determine available RAM')
+        available=int(match[1])*1024
+    if layers==64 and available<35*2**30:
+        raise RuntimeError(f'64-layer resident run requires at least 35 GiB available RAM; available {available/2**30:.1f} GiB')
+    return available
+
+
+def native_command(cli,out,meta,offsets,route,extra):
+    layers=checked_layers(meta['layers'])
+    return [str(cli.resolve()),'--model',meta['model'],'--kernels',meta['kernels'],
+            '--ids-file',str(out/'ids.txt'),'--layers',str(layers),'--max-ctx',str(meta['max_ctx']),
+            '--max-tokens','2','--decode-route','npu','--pmode','none','--prefill-logits',
+            '--dump-logits',str(out/route),'--dump-act',f'{layers-1}:0:{offsets.AA_BYTES}:{out}/{route}-act.bin',*extra]
+
+
 def prepare(a):
     from tokenizers import Tokenizer
     out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
@@ -128,11 +160,12 @@ def prepare(a):
         for n in (255,256,257):
             for name in ('reference.json','report.json'):(out/str(n)/name).unlink(missing_ok=True)
     spec=spec_from_model_dir(a.model)
+    layers=checked_layers(getattr(a,'layers',4))
     m0=json.loads((a.kernels/'manifest.json').read_text())
     m=load_bundle(a.kernels,manifest(spec,max_ctx=m0['max_ctx_default']))
     if (spec.family!='qwen35' or spec.hidden!=5120 or spec.num_layers!=64
-            or list(spec.layer_types[:4])!=['linear_attention']*3+['full_attention']):
-        raise ValueError('requires the 27B four-layer linear/full slice')
+            or list(spec.layer_types)!=(['linear_attention']*3+['full_attention'])*16):
+        raise ValueError('requires the 27B linear/full layer geometry')
     source={};original=json.loads(a.original.read_text())
     path=(a.model/'model.q4nx').resolve();h=digest(path)
     prior={str((ROOT/Path(p)).resolve()):v for p,v in original.items()}
@@ -149,7 +182,7 @@ def prepare(a):
     for n,d in dirs.items():
         d.mkdir(parents=True,exist_ok=True)
         (d/'ids.txt').write_text(','.join(map(str,cases[n]))+'\n')
-    print(f'prompt: {len(ids)} tokens; four layers; one continuation step',flush=True)
+    print(f'prompt: {len(ids)} tokens; {layers} layers; one continuation step',flush=True)
     model=Q4NX(path);model.hidden=spec.hidden;model.native_q8=lambda name:False
     plain=model.matmul_w;cache={}
     def cached(name,o,i):
@@ -160,7 +193,7 @@ def prepare(a):
     states=[];refs={n:{} for n in cases}
     def save(n,name,value):
         p=dirs[n]/name;np.asarray(value,dtype='<f4').tofile(p);refs[n][name]=digest(p)
-    for layer in range(4):
+    for layer in range(layers):
         cache.clear()
         conv=np.zeros((spec.conv_kernel-1,spec.lin_qkv_dim))
         state=np.zeros((spec.lin_value_heads,spec.lin_value_dim,spec.lin_value_dim))
@@ -179,7 +212,7 @@ def prepare(a):
     print(f'CPU logits: {len(ids)} positions complete',flush=True)
     continuation={n:int(logits[n-1][:spec.real_vocab].argmax()) for n in cases}
     continuation_x={n:model.embed(t,spec.hidden).astype(np.float32) for n,t in continuation.items()}
-    for layer in range(4):
+    for layer in range(layers):
         cache.clear()
         for n in cases:
             x,*state=oracle.layer_decode(model,spec,layer,continuation_x[n],*states[layer][n],n)
@@ -192,12 +225,13 @@ def prepare(a):
     for (n,d),y in zip(dirs.items(),last):
         save(n,'ref_cont_logits.bin',y)
         expected=[continuation[n],int(y[:spec.real_vocab].argmax())]
-        meta=dict(version=1,layers=4,ids=cases[n],message=a.message,expected_tokens=expected,
+        meta=dict(version=1,layers=layers,ids=cases[n],message=a.message,expected_tokens=expected,
                   prompt_kind='chat_prefix' if boundaries else 'complete_chat',
                   vocab=spec.vocab,real_vocab=spec.real_vocab,hidden=spec.hidden,
                   build_key=m['build_key'],spec_hash=m['spec_hash'],max_ctx=m['max_ctx_default'],
                   sources=source,references=refs[n],ids_sha256=digest(d/'ids.txt'),
                   model=str(a.model.resolve()),kernels=str(a.kernels.resolve()))
+        check_reference_coverage(meta)
         (d/'reference.json').write_text(json.dumps(meta,indent=2)+'\n')
         print(f'CPU expected continuation at {n}: {expected}',flush=True)
 
@@ -206,25 +240,28 @@ def run(a):
     out=a.out.resolve();report_path=out/'report.json';report_path.unlink(missing_ok=True)
     report=dict(passed=False,routes=[])
     try:
-        meta=json.loads((out/'reference.json').read_text());verify(meta['sources'])
+        meta=json.loads((out/'reference.json').read_text());check_reference_coverage(meta)
+        layers=checked_layers(meta['layers'])
+        report.update(layers=layers,last_residual_layer=layers-1,
+                      scope=f'{layers}-layer causal prompt, all prompt logits and one NPU continuation')
+        report['available_memory_bytes']=memory_preflight(layers)
+        verify(meta['sources'])
         verify({str(out/p):h for p,h in meta['references'].items()})
         if digest(out/'ids.txt')!=meta['ids_sha256']:raise ValueError('prompt ids changed')
         spec=spec_from_model_dir(Path(meta['model']));offsets=layout(spec,max_ctx=meta['max_ctx'])
         load_bundle(Path(meta['kernels']),manifest(spec,max_ctx=meta['max_ctx']))
         report.update(reference_sha256=digest(out/'reference.json'),cli_sha256=digest(a.cli),
-                      scope='four-layer causal prompt, all prompt logits and one NPU continuation')
+                      prompt_tokens=len(meta['ids']))
         # Isolate explicit route selection from ambient experiment flags.
         env={k:v for k,v in os.environ.items() if not k.startswith('OFLM_OPEN_')}
         env.update(OMP_NUM_THREADS='2',OMP_WAIT_POLICY='PASSIVE',OFLM_OPEN_ATTN_BLOCK='0',
                    OFLM_OPEN_LAYER_MAJOR='1',OFLM_OPEN_STAGE_MAJOR='0')
         captures={};n=len(meta['ids'])
         for route,extra in [('sequential',[]),('hybrid',['--gemm-block']),('block_major',['--gemm-block','--block-major'])]:
+            memory_preflight(layers)
             names=expected_dumps(route,n)
             for name in names+[route+'-act.bin']:(out/name).unlink(missing_ok=True)
-            cmd=[str(a.cli.resolve()),'--model',meta['model'],'--kernels',meta['kernels'],
-                 '--ids-file',str(out/'ids.txt'),'--layers','4','--max-ctx',str(meta['max_ctx']),
-                 '--max-tokens','2','--decode-route','npu','--pmode','none','--prefill-logits',
-                 '--dump-logits',str(out/route),'--dump-act',f'3:0:{offsets.AA_BYTES}:{out}/{route}-act.bin',*extra]
+            cmd=native_command(a.cli,out,meta,offsets,route,extra)
             log=out/(route+'.log')
             print('running',route,flush=True)
             with log.open('w') as f:subprocess.run(cmd,stdout=f,stderr=subprocess.STDOUT,env=env,timeout=1800,check=True)
@@ -240,7 +277,8 @@ def run(a):
             except ValueError as e:tokens_ok=False;token_error=str(e)
             alias=(out/f'{route}_t0.bin').read_bytes()==(out/f'{route}_p{n-1}.bin').read_bytes()
             residual=final_residual((out/f'{route}-act.bin').read_bytes(),offsets,meta['hidden'])
-            ref=read(out/'ref_cont_res3.bin',meta['hidden'],meta['references']['ref_cont_res3.bin'])
+            residual_name=f'ref_cont_res{layers-1}.bin'
+            ref=read(out/residual_name,meta['hidden'],meta['references'][residual_name])
             err=float(np.max(np.abs(residual-ref))/max(float(np.max(np.abs(ref))),1e-30))
             hashes={name:digest(out/name) for name in names+[route+'-act.bin']};captures[route]=hashes
             result=dict(route=route,passed=tokens_ok and alias and err<RESIDUAL_MAXREL and all(r['passed'] for r in rows),
@@ -264,6 +302,7 @@ def main():
     p=sub.add_parser('prepare')
     for key in ('out','model','kernels','original'):p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--message',default='What is 2 + 2?')
+    p.add_argument('--layers',type=int,choices=(4,64),default=4)
     p.add_argument('--boundaries',action='store_true',help='prepare shared causal prefixes of 255/256/257 tokens; message must be long enough')
     p=sub.add_parser('run');p.add_argument('--out',type=Path,required=True);p.add_argument('--cli',type=Path,required=True)
     a=ap.parse_args();return prepare(a) if a.command=='prepare' else run(a)
