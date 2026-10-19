@@ -46,6 +46,7 @@ CLAUDE.md
 # and `build*/` alone let 1552 files into a `git add -A` (2026-09-13). Ignore the
 # artifacts too, so a directory named anything at all cannot carry them in.
 open_kernels/designs/*/build*/
+open_kernels/designs/.locks/
 open_kernels/designs/**/final.xclbin
 open_kernels/designs/**/final.prj/
 open_kernels/designs/**/insts.bin

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -65,6 +66,50 @@ from recipes.manifest import dumps, manifest  # noqa: E402
 # knobs that must NOT leak in from the caller's shell
 CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
 FILES = ("final.xclbin", "insts.bin")
+
+
+# ————————————————————————————————————————————————————————————————
+# Per-design build lock
+# ————————————————————————————————————————————————————————————————
+# 50 build_dir paths are shared between specs (e.g. lm_head_q4/build_151936 is
+# wanted by qwen25-3b, qwen3-4b and qwen3-8b). build_design.py wipes its work
+# dir (final.prj) before compiling, so two specs building the same design at
+# the same time delete each other's objects and fail with "unable to rename
+# temporary ... .o.tmp". The export runs specs in parallel, so the collision is
+# the default, not the exception. One lock per build_dir makes the shared
+# designs serialize while everything else stays parallel.
+
+LOCKS = DESIGNS / ".locks"
+
+
+@contextlib.contextmanager
+def design_lock(out: Path):
+    """Hold an exclusive cross-process lock for one build directory."""
+    LOCKS.mkdir(parents=True, exist_ok=True)
+    # The build dir is designs/<design>/<build_dir>; flatten it for the lock name.
+    key = str(out.relative_to(DESIGNS)).replace("/", "__").replace("\\", "__")
+    lock_path = LOCKS / f"{key}.lock"
+    fh = open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
 
 
 def sha256(p: Path) -> str:
@@ -168,26 +213,29 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
           f"{out.relative_to(HERE).as_posix()}", flush=True)
-    # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
-    # reports a core whose program does not fit only as an invalid ELF.
-    p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
-                         cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    tail, overflow = b"", False
-    for chunk in iter(lambda: p.stdout.read1(4096), b""):
-        sys.stdout.buffer.write(chunk)
-        sys.stdout.flush()
-        tail = (tail + chunk)[-4096:]
-        overflow = overflow or b"Overflow of program memory" in tail
-    if p.wait() != 0:
-        if overflow:
-            raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
-                               "program memory. This is a bug in the kernels for this model, not in your setup; "
-                               "please report it with this log.")
-        # Repeat the final compiler output in the exception: the outer exporter
-        # continues with other models, and parallel workers can interleave logs.
-        detail = tail.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
-                           f"Last build output:\n{detail or '(no output)'}")
+    # The lock keeps two specs out of the same build dir at once: the designs
+    # are shared, and build_design.py wipes its work dir before compiling.
+    with design_lock(out):
+        # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
+        # reports a core whose program does not fit only as an invalid ELF.
+        p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
+                             cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        tail, overflow = b"", False
+        for chunk in iter(lambda: p.stdout.read1(4096), b""):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.flush()
+            tail = (tail + chunk)[-4096:]
+            overflow = overflow or b"Overflow of program memory" in tail
+        if p.wait() != 0:
+            if overflow:
+                raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
+                                   "program memory. This is a bug in the kernels for this model, not in your setup; "
+                                   "please report it with this log.")
+            # Repeat the final compiler output in the exception: the outer exporter
+            # continues with other models, and parallel workers can interleave logs.
+            detail = tail.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
+                               f"Last build output:\n{detail or '(no output)'}")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
