@@ -221,7 +221,7 @@ the server, and a `test` requirement with no acceptance criteria.
      - the messages at `rest_handler.cpp:431` and `:434`;
      - SERVER-IMAGES-RESIDENCY (`specs/server-api/spec.md:388-416`);
      - `docs/docs/instructions/server/openapi.md:427`, `:430`;
-     - `.opencode/skill/open-diffusion/SKILL.md:136`;
+     - `.agents/skills/open-diffusion/SKILL.md:136`;
      - the comment at `test_images_api.py:275`.
      Archived plans stay as written.
    (B1)
