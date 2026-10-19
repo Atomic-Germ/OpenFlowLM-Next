@@ -17,7 +17,17 @@ a user who has not set one still has a value to show, tagged (global).
 """
 import argparse
 import json
+import re
 import sys
+
+
+def detect_indent(text: str) -> int:
+    """The indentation the file already uses, so injecting does not reformat it."""
+    for line in text.split("\n"):
+        m = re.match(r"^(\s+)\S", line)
+        if m:
+            return len(m.group(1))
+    return 2
 
 
 def main():
@@ -27,9 +37,11 @@ def main():
     parser.add_argument("--output", required=True, help="Output model_list.json path")
     args = parser.parse_args()
 
-    # Load input registry
-    with open(args.input, "r") as f:
-        registry = json.load(f)
+    # Load input registry, keeping the file's own formatting
+    with open(args.input, "r", encoding="utf-8") as f:
+        raw = f.read()
+    indent = detect_indent(raw)
+    registry = json.loads(raw)
 
     # Load schema
     with open(args.schema, "r") as f:
@@ -60,8 +72,8 @@ def main():
         registry["version"] = 1
 
     # Write output
-    with open(args.output, "w") as f:
-        json.dump(registry, f, indent=2)
+    with open(args.output, "w", encoding="utf-8") as f:
+        json.dump(registry, f, indent=indent, ensure_ascii=False)
         f.write("\n")
 
     print(f"Written: {args.output}")
