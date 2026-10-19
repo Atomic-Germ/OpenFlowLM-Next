@@ -274,11 +274,16 @@ void draft_tests() {
     d = resolve_draft("NoKernels", root.string());
     check(d.dir.empty() && d.why.find("no dflash2 kernel set") != std::string::npos, "a drafter whose kernel set is another family is refused");
 
-    open_qwen36::Manifest bonsai;
-    bonsai.verify.width = 4;
-    bonsai.hidden = 5120;
-    bonsai.vocab = 248320;
-    bonsai.layers.assign(64, "lin");
+    // Manifest is move-only (the GGUF-direct view), so each variant is built fresh
+    auto bonsai_like = [] {
+        open_qwen36::Manifest m;
+        m.verify.width = 4;
+        m.hidden = 5120;
+        m.vocab = 248320;
+        m.layers.assign(64, "lin");
+        return m;
+    };
+    open_qwen36::Manifest bonsai = bonsai_like();
     const DraftResolver res = [&](const std::string& n) { return resolve_draft(n, root.string()); };
     const J declared = {{"speculative", {{"method", "dflash2"}, {"draft", "Bonsai2-drafter"}}}};
 
@@ -291,17 +296,17 @@ void draft_tests() {
     a = spec_availability({{"speculative", {{"method", "dflash2"}, {"draft", "Missing"}}}}, &bonsai, res);
     check(a.status == Availability::kUnavailable && a.reason.find("is not installed") != std::string::npos,
           "dflash2 with a drafter that is not installed -> unavailable: \"" + a.reason + "\"");
-    open_qwen36::Manifest no_verify = bonsai;
+    open_qwen36::Manifest no_verify = bonsai_like();
     no_verify.verify.width = 0;
     a = spec_availability(declared, &no_verify, res);
     check(a.status == Availability::kUnavailable && a.reason.find("no verify program") != std::string::npos,
           "dflash2 on a kernel set without a verify program -> unavailable");
-    open_qwen36::Manifest small = bonsai;
+    open_qwen36::Manifest small = bonsai_like();
     small.hidden = 2560;
     a = spec_availability(declared, &small, res);
     check(a.status == Availability::kUnavailable && a.reason.find("trained for another target") != std::string::npos,
           "a drafter whose hidden size is not the target's -> unavailable: \"" + a.reason + "\"");
-    open_qwen36::Manifest short_stack = bonsai;
+    open_qwen36::Manifest short_stack = bonsai_like();
     short_stack.layers.assign(40, "lin");
     a = spec_availability(declared, &short_stack, res);
     check(a.status == Availability::kUnavailable && a.reason.find("taps layer 47") != std::string::npos,
@@ -375,11 +380,15 @@ void list_tests() {
     fs::remove_all(root);
     const J cfg = {{"model_type", "dflash2"}, {"hidden_size", 5120}, {"vocab_size", 248320}, {"target_layer_ids", {5, 19, 33, 47, 61}}};
     make_draft(root, "Drafter", cfg, "dflash2");
-    open_qwen36::Manifest m;
-    m.verify.width = 4;
-    m.hidden = 5120;
-    m.vocab = 248320;
-    m.layers.assign(64, "lin");
+    auto bonsai_like = [] {
+        open_qwen36::Manifest b;
+        b.verify.width = 4;
+        b.hidden = 5120;
+        b.vocab = 248320;
+        b.layers.assign(64, "lin");
+        return b;
+    };
+    open_qwen36::Manifest m = bonsai_like();
     const DraftResolver res = [&](const std::string& n) { return resolve_draft(n, root.string()); };
     const J lookup = {{"method", "lookup"}}, dflash2 = {{"method", "dflash2"}, {"draft", "Drafter"}};
 
@@ -418,7 +427,7 @@ void list_tests() {
     a = spec_availability({{"speculative", J::array({lookup, J{{"method", "dflash2"}, {"draft", "Missing"}}})}}, &m, res);
     check(a.status == Availability::kUnavailable && a.reason.find("is not installed") != std::string::npos && a.method == "lookup,dflash2",
           "one listed drafter that is not installed makes the whole stack unavailable: " + a.reason);
-    open_qwen36::Manifest nov = m;
+    open_qwen36::Manifest nov = bonsai_like();
     nov.verify.width = 0;
     a = spec_availability({{"speculative", J::array({lookup, dflash2})}}, &nov, res);
     check(a.status == Availability::kUnavailable && a.reason == "the kernel set has no verify program, which method \"lookup\" needs",
