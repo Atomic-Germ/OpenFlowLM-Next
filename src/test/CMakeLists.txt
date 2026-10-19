@@ -24,6 +24,22 @@ target_include_directories(settings_registry_test PRIVATE
     ${CMAKE_SOURCE_DIR})
 add_test(NAME settings_registry_test COMMAND settings_registry_test)
 
+# Settings resolver tests (host-only, no NPU needed)
+add_executable(settings_resolver_test settings_resolver_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/settings_resolver.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/config_store.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/utils.cpp)
+target_include_directories(settings_resolver_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR})
+target_compile_definitions(settings_resolver_test PRIVATE
+    CMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
+    OFLM_NO_XRT=1)
+add_test(NAME settings_resolver_test COMMAND settings_resolver_test)
+
 add_subdirectory(npu_platform)
 add_subdirectory(model_backend)
 add_subdirectory(downloader_pinning)
