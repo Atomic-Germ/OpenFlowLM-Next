@@ -4890,3 +4890,106 @@ manifest.
 - A kernel set without a verify program and `--speculative lookup`: refused, the message naming
   the missing verify program, and no registry written.
 - A kernel set without a verify program and no flag: no `speculative` field.
+
+### OPEN-HOST-ATTN-GUARD: the host attention refuses every model it does not compute
+
+**Applies to:** `src/open_qwen36` (`manifest.cpp`, `core.cpp`)
+**Verification:** test (the predicate); manual (the routes)
+**Tests:** `src/open_qwen36/manifest_test.cpp`
+
+The dense route's host attention (`OFLM_OPEN_HOST_ATTN` for prefill, `OFLM_OPEN_HOST_ATTN_DECODE`
+and `--decode-route host` for decode) computes K2's attention: no q/k norm, no bias, no gate,
+no window, a full half-split rotation, scale 1/sqrt(head_dim). `Manifest::host_attention_refusal()`
+returns why it cannot compute a model, or "" when it can. It accepts `family == "k2"` with that
+geometry (including an even head_dim and every layer's `qw` / `kvw` equal to heads * head_dim, the
+checks `host_attn_layer` repeats at dispatch) and refuses every other family by name. It is an allow-list: the variants (q/k norm
+before or after the rotation, a q/k/v bias, Granite's multiplier, Gemma 3's window, partial
+rotation) are family properties in the recipe, not manifest fields, so a family joins by
+measurement, as it does for FAST_ATTENTION. Origin: #171 (Qwen3-8B passed the old geometry-only
+guard and produced garbage with exit 0).
+
+- Setting either env var on a refused model fails when the engine loads, with the reason.
+- `set_decode_route("host")` fails the same way. `auto` never selects the host route for a
+  refused model, even with `OFLM_DECODE_AUTO_THRESHOLD` set, so a run cannot switch into a throw.
+- `host_attn_layer` keeps the check as a last line of defence.
+
+**Acceptance criteria (test):**
+- the qwen3, qwen36moe, qwen35, gemma3, hunyuan and phi3 fixtures are each refused, the message naming the family;
+- the qwen3_4b fixture with its family set to `k2` is accepted;
+- that fixture with `rotary_dim` halved is refused on geometry;
+- that fixture with an odd head_dim, or with a layer's `qw` off by one, is refused on geometry.
+
+**Verification (manual):** with a Qwen3-8B kernel set, `OFLM_OPEN_HOST_ATTN=1`,
+`OFLM_OPEN_HOST_ATTN_DECODE=1` and `--decode-route host` each fail at load with the reason;
+`--decode-route auto` with `OFLM_DECODE_AUTO_THRESHOLD=8` gives the same 24 tokens as the default
+route. With a K2 set, both env vars run and give the same 24 tokens as the default route.
+**Result 2026-10-08:** all of the above on Qwen3-8B (the dense-prefill kernel set) and
+K2-Horizon-3.7B (built from IFM's GGUF).
+
+### OPEN-SPEC-VERIFY: a verify pass over a token block, and the rollback to its accepted prefix
+**Applies to:** openflowlm-next (`src/open_qwen36/{block_host,core}.cpp`, `open_kernels/designs/{gemm_q4,moe_batch}/`)
+**Test category:** test + manual -- the host-stage rollback is unit-tested in
+`src/open_qwen36/block_host_test.cpp` against `open_kernels/model/replica_block.py`'s fixture
+(no XRT, no model); the device route needs the NPU and a resident `Qwen3.6-35B-A3B-NPU2`
+
+A kernel set may carry a **verify route**: B tokens (B in {8, 16}) through every layer in one
+pass, returning the logits of EVERY position rather than only the last, so a speculative decoder
+can check a block of drafted tokens for the cost of about one decode step. It is the block
+prefill route's arithmetic at a small B and not its kernels -- `gemm_q4_prefill` splits a block
+of T across the array's eight columns and compiles T in, so it has seven idle columns and no
+legal build at B = 16; the band-parallel `designs/gemm_q4` is the projection kernel, and
+`OPEN-MOE-BATCH`'s expert kernel is already batched at any multiple of its `nt`.
+
+A verify pass does not know how many of its tokens will be kept, so every piece of layer state
+it advances has to come back to the accepted prefix k:
+
+- **The full-attention KV rows** are each written from their own token's k / v, so rows
+  `[pos0, pos0 + k)` are already what k sequential tokens would have written: rolling back is
+  moving the position, and the rows past it are read by nothing until a later pass overwrites
+  them.
+- **The causal conv state** is the last `taps - 1` of the block's input rows, so the state at k
+  is a function of the block-start state and k rows, never of the B the pass ran.
+- **The GatedDeltaNet recurrent state S** cannot be run backwards. The route keeps the state the
+  block started from together with the per-token (k, v, decay, beta) the pass has already
+  computed, and replays k rank-1 updates per head: no projection runs twice, and the replay is
+  `k * value_heads * head_dim^2` multiplies rather than a second pass over the block.
+
+**Lossless** at temperature 0 means the accepted tokens are the ones sequential decode would have
+emitted, except where the reference's own top-2 margin is inside the route's spread -- the
+standard `OPEN-PREFILL-BATCH` is held to, and for the same reason: the batched products are not
+bit-identical to the sequential kernel's. The **state** rollback is held to the strong form
+instead, bit for bit, because a state that is only nearly right compounds over every later token
+of the request.
+
+**Acceptance criteria (unit):**
+- `deltanet_rollback` on a taped block of `t_real` tokens leaves, at every k in
+  {1, t_real / 2, t_real - 1, t_real}, the conv state and S that k single-token blocks carrying
+  the state leave -- **bit for bit** (`memcmp` and `==` on the bf16 rows, not a tolerance) -- and
+  at k = t_real the taped block's own final state. The tape carries the block-start state itself,
+  so a replay reads nothing the pass has already overwritten.
+- The forward pass and the replay run the same delta-rule helpers, so the two cannot drift
+  apart: the shared helpers leave `deltanet_block` exactly where it was on the fixture (og and S
+  within 1e-3 of `replica_block.py`, the conv state bit-exact), which is what the k = t_real case
+  above also asserts.
+- A tape that does not match the geometry it is replayed against, or a k past the tokens the
+  block ran, throws rather than replaying part of a block.
+
+**Procedure (manual, the device route -- not yet run):**
+1. B = 1 through the verify route against sequential decode on the same ids: the same token and
+   the same logits to within the route's spread, and the layer state after it bit-equal to the
+   sequential path's.
+2. B = 8 and B = 16 logits at every position against the same positions decoded sequentially:
+   argmax and top-5 equal except at documented near ties, corr > 0.999 per position.
+3. Accept k < B, then decode on: the continuation equals a sequential decode from the same k
+   tokens.
+4. `oflm-test --llm --tools` with the route on.
+
+**Result 2026-10-05 (the host-stage rollback).** The unit criteria PASS: `block_host_test.exe`
+on `replica_block.py`'s fixture (T 6, t_real 5, 4 value heads, head_dim 8, taps 4) gives the
+sequential conv state and S bit for bit at k = 1, 2, 4 and 5, k = 5 reproduces the taped block's
+own final state, and the five pre-existing `deltanet_block` checks are unchanged by the shared
+step. No kernel and no hardware is involved in any of it, which is the point of doing it first.
+
+**Result 2026-10-12 (the mismatched tape).** The throw criterion is now tested: a tape from a
+block of another `t_real`, and a tape with an oversized per-token array, both throw. Both
+replayed silently under the first version's at-least-this-big size checks.

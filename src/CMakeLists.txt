@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(oflm LANGUAGES CXX VERSION 0.1.0)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildAcceleration.cmake")
+
 if(POLICY CMP0207)
     cmake_policy(SET CMP0207 NEW)
 endif()
@@ -13,8 +15,10 @@ if(NOT DEFINED NPU_VERSION)
     message(FATAL_ERROR "NPU_VERSION must be specified externally. Use -DNPU_VERSION=<version> when running cmake.")
 endif()
 
-# Set build type to Release
-set(CMAKE_BUILD_TYPE Release)
+# Default to Release while honoring presets and multi-config generators.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)

@@ -222,7 +222,7 @@ with reproducible upstream builds or package-manager dependencies:
 > ship in the distribution. The list below is the original sequencing, kept for
 > history; the live per-family status and hardware evidence is in
 > [`specs/open-engine/spec.md`](../specs/open-engine/spec.md), and the
-> per-family guidance in the family skills (`.opencode/skill/`).
+> per-family guidance in the family skills (`.agents/skills/`).
 
 1. Establish shared open model/tensor interfaces in `utilities/q4nx-build` and
    the C++ runtime; keep safetensors as the canonical open weight source.
