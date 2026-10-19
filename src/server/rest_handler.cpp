@@ -11,6 +11,7 @@
 #include "streaming_ostream.hpp"
 #include "streaming_ostream_openai.hpp"
 #include "image/image_reader.hpp"
+#include "config/settings_resolver.hpp"
 #include <sstream>
 #include <iostream>
 #include <thread>
@@ -381,6 +382,9 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
     if (args.prefill_chunk_len != -1) {
         this->prefill_chunk_len = args.prefill_chunk_len >= 512 ? args.prefill_chunk_len : 512;
     }
+    else if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("prefill_chunk_len")) {
+        this->prefill_chunk_len = (*oflm::config::g_resolved_settings)["prefill_chunk_len"].get<int>();
+    }
     else {
         this->prefill_chunk_len = -1;
     }
@@ -567,7 +571,11 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
         }
         
         if (this->prefill_chunk_len == -1) {
-            this->prefill_chunk_len = model_info["max_prefill_len"].get<int>();;
+            if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("prefill_chunk_len")) {
+                this->prefill_chunk_len = (*oflm::config::g_resolved_settings)["prefill_chunk_len"].get<int>();
+            } else {
+                this->prefill_chunk_len = model_info.value("max_prefill_len", 4096);
+            }
         }
         set_current_model_tag(ensure_tag);
     }
@@ -692,10 +700,21 @@ void RestHandler::configure_chat_engine_parameters(const json& options, const js
         float repetition_penalty = request["repetition_penalty"];
         auto_chat_engine->set_repetition_penalty(repetition_penalty);
     }
+    
+    // Get default think from resolved settings
+    bool default_think = true;
+    if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("think")) {
+        default_think = (*oflm::config::g_resolved_settings)["think"].get<bool>();
+    }
+    
     if (request.contains("think")) {
         bool enable_thinking = request["think"];
         auto_chat_engine->configure_parameter("enable_think", enable_thinking);
+    } else {
+        // Use resolved setting as default
+        auto_chat_engine->configure_parameter("enable_think", default_think);
     }
+    
     if (request.contains("reasoning_effort")) {
         std::string reasoning_effort = request["reasoning_effort"];
         auto_chat_engine->configure_parameter("reasoning_effort", reasoning_effort);

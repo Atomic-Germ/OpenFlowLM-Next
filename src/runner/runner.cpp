@@ -11,6 +11,7 @@
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
 #include "AutoEmbeddingModel/all_embedding_model.hpp"
 #endif
+#include "config/settings_resolver.hpp"
 #include <iostream>
 #include <sstream>
 #include <filesystem>
@@ -89,8 +90,11 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
         if (args.prefill_chunk_len != -1) {
             this->prefill_chunk_len = args.prefill_chunk_len >= 512 ? args.prefill_chunk_len : 512;
         }
+        else if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("prefill_chunk_len")) {
+            this->prefill_chunk_len = (*oflm::config::g_resolved_settings)["prefill_chunk_len"].get<int>();
+        }
         else {
-            this->prefill_chunk_len = model_info["max_prefill_len"].get<int>();;
+            this->prefill_chunk_len = model_info.value("max_prefill_len", 4096);
         }
     }
     catch (const std::exception& e) {
