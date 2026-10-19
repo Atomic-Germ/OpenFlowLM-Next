@@ -801,3 +801,12 @@ error **0.0002930006 <0.005**. All **774** hybrid logit files match bytewise
 between schedules. This covers the 256-token block boundary on four layers;
 full-depth prefill, all-layer residual coverage and long-context acceptance
 remain open.
+
+The checker also supports `prepare --layers 64`, with one layer's dequantized
+weights cached at a time and independent causal state retained for continuation.
+The runner derives its depth and final residual capture (layer 63) from the
+reference manifest and requires references for every selected layer. On Linux,
+full resident runs require at least 35 GiB available RAM; insufficient memory
+leaves a failed report without starting a native process. Preparing a full-depth
+CPU fixture is not evidence of NPU prefill acceptance. See the checker's README
+for preparation and resume commands.
