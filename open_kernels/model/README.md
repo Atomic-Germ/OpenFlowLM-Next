@@ -810,3 +810,12 @@ full resident runs require at least 35 GiB available RAM; insufficient memory
 leaves a failed report without starting a native process. Preparing a full-depth
 CPU fixture is not evidence of NPU prefill acceptance. See the checker's README
 for preparation and resume commands.
+
+Full-depth testing now distinguishes the routes: the 20-token prompt plus
+continuation passes sequential NPU prefill (**21/21** logits, minimum correlation
+**0.9999943778**). Both hybrid schedules fail position **17** at correlation
+**0.9998908204**, below **0.9999**, despite matching argmax, continuation and
+byte-identical schedules. A retained-reference depth scan passes at
+4/8/16/32/48 layers and fails at 60 (positions 16 and 18). Hybrid precision
+remains open; see the checker's README for the failed gates and reproduction
+commands. The scan does not identify a specific faulty layer or operation.
