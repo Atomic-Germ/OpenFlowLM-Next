@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <string>
+#include <cstdint>
 
 #ifdef _WIN32
 #include <windows.h>
