@@ -2,37 +2,42 @@
 
 ## Latest checkpoint — 2026-10-19
 
-A private paired-BF16-input hybrid GEMM experiment passes the full 64-layer,
-20-token causal prompt and one NPU continuation on all three schedules:
-**63/63 logit comparisons**. Hybrid minimum correlation improves from
-**0.9998908204** (control FAIL) to **0.9999488108** (candidate PASS), with the
-unchanged >0.9999 gate. L63 continuation residual maxrel improves from
-**0.0018923571** to **0.0011956505**, below 0.005.
+Full-depth 255/256/257-token prefill and one NPU continuation have now run on
+all three schedules. **Accuracy remains FAIL:** only **1668/2313** logit gates
+pass. Sequential first fails at position **80**, minimum correlation
+**0.9351669042** at **220**; both paired-input hybrid schedules first fail at
+**82**, minimum **0.9422035563** at **205**. Hybrid argmax also differs at
+**181/183/234**. At length 256, hybrid final continuation residual maxrel is
+**0.0096012460 >0.005**. All other final continuation residuals pass. Matching
+continuation IDs [248046,198] do not override the numerical failures.
 
-The original control reproduces all **66** historical logit files bytewise.
-Candidate sequential outputs remain identical in **22/22** files; its hybrid
-schedules match in **22/22** files. Independent CPU references, production
-engine sources and NPU kernels are unchanged. The private builder retains the
-single-dispatch implementation and calls it on the original input and its
-BF16 rounding remainder, then sums in host memory. This confirms a contribution
-from input rounding, not a complete explanation of every error.
+The two hybrid schedules agree bytewise in **774/774** logit files, and all
+**1533/1533** common-prefix comparisons across lengths are exact on all routes.
+The capture audit completes with a numerical FAIL. Errors
+already occur before the block boundary, so this is not solely a 256-token
+transition issue. All **2331 native output files** are retained. The CLI only
+captures L63 after continuation; identifying the first divergent layer requires
+native intermediate residual captures. Full CPU residual references are ready.
 
-The reproducible experiment and auditor are in
-[`utilities/prefill-paired-input`](../../../utilities/prefill-paired-input/README.md).
-TDD and audit regressions: **11 new tests**, host suite **1436 passed, 47 skipped**;
-native CTest **4/4 per build**. Full-depth block boundaries, intermediate
-residuals, production promotion, serving and final resource/performance checks
-remain open. The candidate doubles projection dispatches and explicitly
-rejects stage-major; this is not full model acceptance.
+Independent boundary references pass all **1155 files**, **128** common-prefix
+residual arrays, **511** logit prefixes and **12** first-four-layer arrays against
+the earlier slice. Source/export identity is verified. These are truncated chat
+prefixes used for numerical validation, not an answer-quality test. The new
+reference/native auditor adds **11 TDD tests**; host suite **1447 passed,
+47 skipped**. Reproduction and measurements are documented in
+[`utilities/prefill-slice`](../../../utilities/prefill-slice/README.md).
 
-Full-depth CPU boundary references are now ready for 255/256/257 tokens plus
-one continuation per prefix. The audit passes **1155 reference files**, **128**
-common-prefix residual arrays, **511** logit prefixes and **12** first-four-layer
-arrays against the retained four-layer fixture. Source/export identity is
-verified; selected continuation IDs are [248046,198] for each case. These are
-truncated chat prefixes for numerical checks. Native boundary acceptance is
-separate. The boundary auditor adds **11 TDD tests**, bringing the host suite to
-**1447 passed, 47 skipped**.
+The preceding private paired-input experiment remains a useful short-prompt
+result: **63/63** gates pass on 20 tokens plus one continuation. It reproduces
+all **66** control logits, preserves **22/22** sequential outputs and improves
+hybrid correlation from **0.9998908204** to **0.9999488108**. It confirms an
+input-rounding contribution, but does not resolve the longer-sequence drift.
+Its [runbook](../../../utilities/prefill-paired-input/README.md) describes the
+two-pass GEMM, host-only output summation and build provenance. Production
+engine sources, kernels and weight packing remain unchanged. The candidate
+doubles projection dispatches and rejects stage-major. Precision correction,
+production promotion, serving and final performance/resource acceptance remain
+open.
 
 ## Earlier decode-entry checkpoint — 2026-10-13
 

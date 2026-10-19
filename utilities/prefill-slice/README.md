@@ -304,3 +304,42 @@ chat requests or an answer-quality test. The same 41-set production-consistent
 export is used. TDD: **11 new tests**, host suite **1447 passed, 47 skipped**.
 Evidence is in `Models/qwen38-27b/prefill-full/boundaries/`; the reference audit
 alone does not establish native acceptance.
+
+### Full-depth boundary measurement — 2026-10-19: precision FAIL
+
+All nine resident runs completed with the private paired-input CLI and explicit
+NPU continuation. Acceptance remains **FAIL**; the short-prompt correction is
+insufficient on these longer prefixes. No threshold was relaxed.
+
+| Tokens | Sequential logits passing | Each hybrid route passing | Sequential continuation maxrel | Each hybrid continuation maxrel |
+|---|---:|---:|---:|---:|
+| 255 | 183/256 | 186/256 | 0.0026296296 | 0.0018321448 |
+| 256 | 183/257 | 186/257 | 0.0015172531 | **0.0096012460 (FAIL)** |
+| 257 | 184/258 | 187/258 | 0.0042892308 | 0.0019920430 |
+
+Overall **1668/2313** position gates pass. On each length, the sequential route
+first fails at position **80**, with minimum correlation **0.9351669042** at
+position **220**. Both hybrid schedules first fail at **82**, with minimum
+**0.9422035563** at **205**. Their argmax also differs from CPU at **181, 183,
+234**. Sequential argmax matches at every position, and all three routes emit
+the CPU-selected continuation IDs `[248046,198]`. These token matches do not
+override the failed numerical gates.
+
+The two hybrid schedules agree bytewise in **774/774** logit files, including
+last-prompt aliases and continuation. All **1533/1533** common-prefix identities
+across lengths pass on all three routes. `native-audit.json` returns failure
+because numerical gates fail, not because captures are missing or inconsistent.
+Failures before position 255 show this is
+not solely a transition across the 256-token boundary. The 256-token hybrid
+continuation additionally fails the final residual bound. This does not yet
+identify the responsible layer or operation.
+
+The retained CPU reference includes every layer's prompt residual, but this
+native CLI captures only L63 after continuation. Next add native intermediate
+residual captures and localize the first layer/position divergence, prioritizing
+positions 80/82, 205/220 and the hybrid argmax mismatches. Verify any instrumented
+control against these captured logits before using its internal boundaries.
+All reports and **2331 native output files** are retained beneath
+`Models/qwen38-27b/prefill-full/boundaries/`. No additional kernel/native build
+was needed; the measured CLI hash remains
+`f2b8882051782078bc3d5717ada5762c1ea220a79a9bb3b8a09aa2ff917be054`.
