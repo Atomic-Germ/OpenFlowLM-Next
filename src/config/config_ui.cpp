@@ -129,11 +129,14 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
         if (record.EventType != KEY_EVENT) continue;
         if (!record.Event.KeyEvent.bKeyDown) continue;
 
-        if (record.Event.KeyEvent.wVirtualKeyCode == VK_UP && selected > 0) {
-            selected--;
+        // Up at the top wraps to the bottom, and down at the bottom wraps to
+        // the top: a list that stops dead at the ends makes you look for the
+        // arrow that does nothing.
+        if (record.Event.KeyEvent.wVirtualKeyCode == VK_UP) {
+            selected = (selected + items.size() - 1) % items.size();
             render();
-        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_DOWN && selected < items.size() - 1) {
-            selected++;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_DOWN) {
+            selected = (selected + 1) % items.size();
             render();
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) {
             SetConsoleMode(hIn, orig_mode);
@@ -177,8 +180,10 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
             char seq[2];
             if (read(STDIN_FILENO, &seq[0], 1) == 1 && seq[0] == '[') {
                 if (read(STDIN_FILENO, &seq[1], 1) == 1) {
-                    if (seq[1] == 'A' && selected > 0) selected--; // Up
-                    else if (seq[1] == 'B' && selected < items.size() - 1) selected++; // Down
+                    // Up at the top wraps to the bottom, and down at the
+                    // bottom wraps to the top.
+                    if (seq[1] == 'A') selected = (selected + items.size() - 1) % items.size();      // Up
+                    else if (seq[1] == 'B') selected = (selected + 1) % items.size();                  // Down
                     else if (seq[1] == 'C' || seq[1] == 'D') { /* left/right — ignore */ }
                 }
             } else {
@@ -218,6 +223,16 @@ static std::string current_value_only(const EffectiveConfig& cfg,
     return v->value;
 }
 
+// After putting something on the screen, wait for the user to acknowledge it.
+// The next menu redraws the whole screen, so without this the output is wiped
+// before it can be read.
+static void wait_for_ack() {
+    std::cout << "\n  [press Enter to continue]" << std::flush;
+    std::string line;
+    std::getline(std::cin, line);
+    std::cout << std::endl;
+}
+
 int guided_flow() {
     auto tier = detect_ui_tier();
     auto pick = [&](const std::string& title, const std::vector<PickerItem>& items) -> size_t {
@@ -240,20 +255,35 @@ int guided_flow() {
 
     EffectiveConfig cfg = load_effective_config();
 
-    // The model list is built once: the registry does not change under us.
+    // The model list is rebuilt whenever the config changes, so the markers
+    // stay true: "(user-added)" for a model the user installed, and the
+    // number of settings they have customised.
     std::vector<PickerItem> models;
-    models.push_back({"[Global settings]", ""});
-    for (auto it_type = cfg.merged["models"].begin(); it_type != cfg.merged["models"].end(); ++it_type) {
-        const std::string& type = it_type.key();
-        for (auto it_size = it_type->begin(); it_size != it_type->end(); ++it_size) {
-            const std::string& size = it_size.key();
-            std::string tag = type + ":" + size;
-            bool is_user = cfg.user_settings.contains("models") &&
-                           cfg.user_settings["models"].contains(type) &&
-                           cfg.user_settings["models"][type].contains(size);
-            models.push_back({tag, is_user ? "(user-added)" : ""});
+    auto rebuild_models = [&]() {
+        models.clear();
+        models.push_back({"[Global settings]", ""});
+        for (auto it_type = cfg.merged["models"].begin(); it_type != cfg.merged["models"].end(); ++it_type) {
+            const std::string& type = it_type.key();
+            for (auto it_size = it_type->begin(); it_size != it_type->end(); ++it_size) {
+                const std::string& size = it_size.key();
+                std::string tag = type + ":" + size;
+                std::string note;
+                bool is_user = cfg.user_settings.contains("models") &&
+                               cfg.user_settings["models"].contains(type) &&
+                               cfg.user_settings["models"][type].contains(size);
+                if (is_user) note = "(user-added)";
+                if (cfg.user_settings.contains("settings") &&
+                    cfg.user_settings["settings"].contains(type) &&
+                    cfg.user_settings["settings"][type].contains(size)) {
+                    size_t n = cfg.user_settings["settings"][type][size].size();
+                    if (!note.empty()) note += " ";
+                    note += "(" + std::to_string(n) + " custom)";
+                }
+                models.push_back({tag, note});
+            }
         }
-    }
+    };
+    rebuild_models();
 
     std::vector<PickerItem> settings;
     std::vector<PickerItem> options;
@@ -306,6 +336,9 @@ int guided_flow() {
                 program_args_t show_args;
                 show_args.config_model = model_tag;
                 config_show(show_args);
+                // The next menu redraws the screen; let the user read this
+                // first.
+                wait_for_ack();
                 step = Step::ACTION;
                 break;
             }
@@ -405,11 +438,15 @@ int guided_flow() {
             save_user_settings(settings_json, cfg.user_settings_path);
             std::cout << "Set '" << key << "' = '" << options[o].label << "'" << std::endl;
 
+            // The next menu redraws the screen; let the user read this first.
+            wait_for_ack();
+
             // Back to the menu we came from -- the model list for a model's
             // setting, the action list for a global one -- so the user lands
             // where they were, with the value now showing as their own.
             // The config in memory is refreshed so the list shows the new value.
             cfg = load_effective_config();
+            rebuild_models();
             step = settings_back_to;
             break;
         }
