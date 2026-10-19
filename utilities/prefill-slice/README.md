@@ -104,7 +104,62 @@ the expected sizes, finite values and recorded hashes. The prompt residuals for
 layers 0–3 are byte-identical to the earlier four-layer fixture. CPU-selected
 token IDs are `[17, 478]`; these two tokens are a continuation prefix, not a
 complete answer. Host regression: **1419 passed, 47 skipped**, native CTest
-**4/4**. The full-depth NPU comparisons remain a separate acceptance step.
+**4/4**. Preparing this fixture alone is not NPU acceptance.
+
+### Full-depth measurement and remaining precision failure
+
+On 2026-10-19, all three native routes loaded **64 weight pools plus LM-head**
+and completed the 20-token prompt followed by NPU decode. Sequential prefill
+passes **21/21** logit comparisons, minimum correlation **0.9999943778**, and
+final continuation residual maxrel **0.0003932455**.
+
+Both hybrid schedules fail **one of 21 positions**: at prompt position **17**,
+correlation is **0.9998908204**, below the unchanged **>0.9999** gate. Their
+final continuation residual passes at **0.0018923571 <0.005**; all argmax values
+and generated IDs `[17, 478]` match CPU. All **22** hybrid logit files are
+byte-identical across schedules. This is a numerical acceptance failure even
+though token IDs and the continuation agree. Full-depth hybrid prefill remains
+unaccepted. Evidence: `Models/qwen38-27b/prefill-full/short/report.json`.
+
+### Hybrid depth diagnostic
+
+`depth.py` applies the same production tail reference to saved CPU prompt
+residuals at selected depths. It then runs the same complete prompt on native
+hybrid layer-major prefill with those depths. It never feeds native residuals
+into the oracle. Every position retains the original correlation/argmax gates;
+this diagnostic omits continuation and intermediate native residual captures.
+The source fixture, residual files, model/export, checker sources, CLI, logs
+and outputs are pinned by hashes. CPU preparation and native runs are serial.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-slice/depth.py prepare \
+  --fixture Models/qwen38-27b/prefill-full/short \
+  --out Models/qwen38-27b/prefill-full/depth-scan
+OPENBLAS_NUM_THREADS=1 LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+  ironvenv/bin/python utilities/prefill-slice/depth.py run \
+  --out Models/qwen38-27b/prefill-full/depth-scan \
+  --cli /tmp/qwen38-main-merge-next/build/open_qwen36_cli
+```
+
+The 2026-10-19 scan produced:
+
+| Depth | Minimum correlation | Failing positions |
+|---:|---:|---|
+| 4 | 0.9999989974 | none |
+| 8 | 0.9999962133 | none |
+| 16 | 0.9999970907 | none |
+| 32 | 0.9999800818 | none |
+| 48 | 0.9999196879 | none |
+| 60 | 0.9998648409 | 16, 18 |
+
+All argmax values match CPU. The scan passes through depth 48 and fails at 60;
+it does not identify the first faulty operation or prove an error originates
+in layers 48–59. `Core::gemm_run` converts FP32 inputs to BF16 via `host::tile_x`;
+accumulated input rounding is a candidate for a controlled precision experiment,
+not an established cause. No production kernel or arithmetic changed in this
+diagnostic. Regression: **1425 passed, 47 skipped**; native CTest **4/4** from
+the unchanged native sources. Both failed reports are retained; thresholds
+remain unchanged.
 
 ## Crossing a 256-token block
 
