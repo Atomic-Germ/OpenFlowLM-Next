@@ -3,6 +3,7 @@
 #include "config/config_store.hpp"
 #include "config/settings_registry.hpp"
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -251,6 +252,136 @@ TEST(migration_idempotent) {
     ASSERT_TRUE(log2.size() >= 1);
 
     std::filesystem::remove_all(dir);
+}
+
+// ============================================================================
+// Shipped-default change detection tests
+//
+// The shipped defaults can change between releases. A user who overrode one
+// of them would otherwise sit on a stale preference without being told, so
+// the settings file records the defaults_version it was written against and
+// the loader compares it with the shipped one.
+//
+// These go through the real loader: OFLM_CONFIG_PATH and OFLM_SETTINGS_PATH
+// point it at files on disk, so what is checked is the code that runs, not a
+// copy of its logic.
+// ============================================================================
+
+namespace {
+
+// Write a shipped registry and a settings file, and point the loader at them.
+struct Fixture {
+    std::string dir;
+    std::string shipped_path;
+    std::string settings_path;
+
+    Fixture(nlohmann::json shipped, nlohmann::json settings) {
+        dir = make_temp_dir();
+        shipped_path = dir + "/model_list.json";
+        settings_path = dir + "/settings.json";
+        write_json(shipped_path, shipped);
+        write_json(settings_path, settings);
+        setenv("OFLM_CONFIG_PATH", shipped_path.c_str(), 1);
+        setenv("OFLM_SETTINGS_PATH", settings_path.c_str(), 1);
+    }
+    ~Fixture() {
+        unsetenv("OFLM_CONFIG_PATH");
+        unsetenv("OFLM_SETTINGS_PATH");
+        std::filesystem::remove_all(dir);
+    }
+};
+
+nlohmann::json shipped_with_defaults(const std::string& version, const std::string& pmode) {
+    return {
+        {"model_path", "models"},
+        {"defaults", {{"pmode", pmode}}},
+        {"defaults_version", version},
+        {"models", nlohmann::json::object()}
+    };
+}
+
+}  // namespace
+
+TEST(conflict_detected_when_the_shipped_defaults_changed) {
+    Fixture f(shipped_with_defaults("new_hash", "performance"),
+              {{"version", 1},
+               {"defaults_version", "old_hash"},
+               {"defaults", {{"pmode", "balanced"}}},
+               {"settings", nlohmann::json::object()},
+               {"models", nlohmann::json::object()}});
+
+    auto cfg = oflm::config::load_effective_config();
+    ASSERT_TRUE(cfg.defaults_changed);
+    ASSERT_EQ(cfg.shipped_defaults_version, std::string("new_hash"));
+    ASSERT_EQ(cfg.user_defaults_version, std::string("old_hash"));
+    // The override the user made is named, so the warning says what to look at.
+    ASSERT_TRUE(cfg.affected_overrides.size() >= 1);
+    bool names_pmode = false;
+    for (const auto& line : cfg.affected_overrides) {
+        if (line.find("pmode") != std::string::npos) names_pmode = true;
+    }
+    ASSERT_TRUE(names_pmode);
+}
+
+TEST(no_conflict_when_the_defaults_version_matches) {
+    Fixture f(shipped_with_defaults("same_hash", "performance"),
+              {{"version", 1},
+               {"defaults_version", "same_hash"},
+               {"defaults", {{"pmode", "balanced"}}},
+               {"settings", nlohmann::json::object()},
+               {"models", nlohmann::json::object()}});
+
+    auto cfg = oflm::config::load_effective_config();
+    ASSERT_FALSE(cfg.defaults_changed);
+}
+
+TEST(no_conflict_on_a_file_written_before_the_version_existed) {
+    // A settings file from before defaults_version must not be reported as
+    // conflicting: the first run records the current version instead.
+    Fixture f(shipped_with_defaults("new_hash", "performance"),
+              {{"version", 1},
+               {"defaults", {{"pmode", "balanced"}}},
+               {"settings", nlohmann::json::object()},
+               {"models", nlohmann::json::object()}});
+
+    auto cfg = oflm::config::load_effective_config();
+    ASSERT_FALSE(cfg.defaults_changed);
+    // And the version is now recorded, so the next run is quiet.
+    std::ifstream f2(cfg.user_settings_path);
+    auto settings = nlohmann::json::parse(f2);
+    ASSERT_TRUE(settings.contains("defaults_version"));
+    ASSERT_EQ(settings["defaults_version"], std::string("new_hash"));
+}
+
+TEST(the_users_override_wins_over_a_changed_shipped_default) {
+    // The conflict is only reported. The value in effect is still the user's.
+    Fixture f(shipped_with_defaults("new_hash", "performance"),
+              {{"version", 1},
+               {"defaults_version", "old_hash"},
+               {"defaults", {{"pmode", "balanced"}}},
+               {"settings", nlohmann::json::object()},
+               {"models", nlohmann::json::object()}});
+
+    auto cfg = oflm::config::load_effective_config();
+    ASSERT_EQ(cfg.merged["defaults"]["pmode"], "balanced");
+}
+
+TEST(a_per_model_override_beats_the_app_wide_default) {
+    // One model can differ from the app-wide value: the model block wins for
+    // that model, the app-wide value applies to the others.
+    Fixture f({{"model_path", "models"},
+               {"defaults", {{"pmode", "balanced"}}},
+               {"defaults_version", "h"},
+               {"models", {{"qwen3.6-moe", {{"35b-a3b", {{"name", "moe"}}}}}}}},
+              {{"version", 1},
+               {"defaults_version", "h"},
+               {"defaults", {{"pmode", "balanced"}}},
+               {"settings", {{"qwen3.6-moe", {{"35b-a3b", {{"pmode", "turbo"}}}}}}},
+               {"models", nlohmann::json::object()}});
+
+    auto cfg = oflm::config::load_effective_config();
+    ASSERT_EQ(cfg.merged["defaults"]["pmode"], "balanced");
+    ASSERT_EQ(cfg.merged["models"]["qwen3.6-moe"]["35b-a3b"]["pmode"], "turbo");
 }
 
 // ============================================================================

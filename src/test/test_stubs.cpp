@@ -23,11 +23,19 @@ std::string getenv_oflm(const char* oflm_name) {
 }
 
 std::string find_shipped_registry() {
-    throw std::runtime_error("stub: find_shipped_registry not available in tests");
+    // Honour the same variables the real one does, so a test can point the
+    // loader at a registry on disk and exercise the whole load path.
+    if (const char* p = getenv("OFLM_CONFIG_PATH")) {
+        if (*p) return p;
+    }
+    throw std::runtime_error("stub: set OFLM_CONFIG_PATH to a registry for this test");
 }
 
 std::string find_user_settings() {
-    return std::string();
+    if (const char* p = getenv("OFLM_SETTINGS_PATH")) {
+        if (*p) return p;
+    }
+    return std::string("/tmp") + "/settings.json";
 }
 
 std::string get_models_directory() {

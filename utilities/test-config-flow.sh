@@ -303,6 +303,108 @@ else
 fi
 "$OFLM" config unset --config-model "$MODEL" --config-key pmode >/dev/null 2>&1
 
+# ------------------------------------------------ 20. a changed shipped default is reported
+step "20. a shipped default that changed under the user is reported"
+CONFLICT="$WORK/conflict"
+mkdir -p "$CONFLICT"
+cp "$OFLM_CONFIG_PATH" "$CONFLICT/model_list.json"
+# A settings file written against an older shipped registry.
+cat > "$CONFLICT/settings.json" <<'EOF'
+{
+  "version": 1,
+  "defaults_version": "an_older_hash",
+  "defaults": { "pmode": "balanced" },
+  "settings": {},
+  "models": {}
+}
+EOF
+out=$(OFLM_CONFIG_PATH="$CONFLICT/model_list.json" \
+        OFLM_SETTINGS_PATH="$CONFLICT/settings.json" \
+        "$OFLM" config show 2>&1)
+if echo "$out" | grep -q "Shipped defaults changed"; then
+  ok "the change is reported"
+else
+  bad "the change was not reported:"; echo "$out" | head -6
+fi
+if echo "$out" | grep -q "pmode"; then
+  ok "the override that is affected is named"
+else
+  bad "the affected override was not named:"; echo "$out" | head -6
+fi
+if echo "$out" | grep -q "oflm config review"; then
+  ok "the way to reconcile it is offered"
+else
+  bad "no way to reconcile was offered:"; echo "$out" | head -6
+fi
+# The user's own value still wins.
+if echo "$out" | grep -q "balanced"; then
+  ok "the user's value is still the one in effect"
+else
+  bad "the user's value was lost:"; echo "$out" | head -6
+fi
+
+# ------------------------------------------------ 21. config review reconciles
+step "21. config review reconciles the overrides"
+# A redundant override: the same value the application ships.
+cat > "$CONFLICT/settings.json" <<'EOF'
+{
+  "version": 1,
+  "defaults_version": "an_older_hash",
+  "defaults": { "pmode": "performance" },
+  "settings": {},
+  "models": {}
+}
+EOF
+out=$(OFLM_CONFIG_PATH="$CONFLICT/model_list.json" \
+        OFLM_SETTINGS_PATH="$CONFLICT/settings.json" \
+        "$OFLM" config review --accept-shipped 2>&1)
+if echo "$out" | grep -qi "removed"; then
+  ok "review --accept-shipped reports what it removed"
+else
+  bad "review --accept-shipped said nothing useful:"; echo "$out" | head -5
+fi
+left=$(python3 -c "
+import json
+print(len(json.load(open('$CONFLICT/settings.json')).get('defaults', {})))
+" 2>/dev/null)
+if [ "$left" = "0" ]; then
+  ok "the redundant override is gone"
+else
+  bad "the redundant override is still there ($left left)"
+fi
+ver=$(python3 -c "
+import json
+print(json.load(open('$CONFLICT/settings.json')).get('defaults_version', ''))
+" 2>/dev/null)
+if [ -n "$ver" ] && [ "$ver" != "an_older_hash" ]; then
+  ok "the defaults version was updated, so the warning stops"
+else
+  bad "the defaults version was not updated ('$ver')"
+fi
+
+# --keep-all changes nothing but the version.
+cat > "$CONFLICT/settings.json" <<'EOF'
+{
+  "version": 1,
+  "defaults_version": "an_older_hash",
+  "defaults": { "pmode": "balanced" },
+  "settings": {},
+  "models": {}
+}
+EOF
+out=$(OFLM_CONFIG_PATH="$CONFLICT/model_list.json" \
+        OFLM_SETTINGS_PATH="$CONFLICT/settings.json" \
+        "$OFLM" config review --keep-all 2>&1)
+kept=$(python3 -c "
+import json
+print(json.load(open('$CONFLICT/settings.json')).get('defaults', {}).get('pmode', ''))
+" 2>/dev/null)
+if [ "$kept" = "balanced" ]; then
+  ok "review --keep-all leaves the override alone"
+else
+  bad "review --keep-all changed the override ('$kept')"
+fi
+
 # ------------------------------------------------------------- summary
 echo
 echo "================================"
