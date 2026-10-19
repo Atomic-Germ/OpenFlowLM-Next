@@ -74,5 +74,12 @@ struct program_args_t {
     bool cors = false;
     bool sub_process_mode = false;
     
+    // Config command fields
+    std::string config_key;
+    std::string config_value;
+    std::string config_model;
+    bool config_accept_shipped = false;
+    bool config_keep_all = false;
+    
     program_args_t() {}
 };
