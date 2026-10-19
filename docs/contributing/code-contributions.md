@@ -91,6 +91,11 @@ git checkout -b feat/your-feature-name
 - **Test** frequently with `git diff`
 - **Keep changes focused** -- one feature per branch
 - **Follow patterns** -- don't reinvent existing patterns
+- **Stage only what you changed** -- `git add <path> <path>`, never
+  `git add -A` or `git add .`. `src/models/` holds tens of gigabytes and
+  `build/` a build tree, so a blanket add walks both and can time out
+  mid-index-write; it also picks up other people's in-progress work.
+  Check `git diff --cached --stat` before committing.
 
 ### 3. Test Your Changes
 

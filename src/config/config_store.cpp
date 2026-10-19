@@ -382,12 +382,26 @@ EffectiveConfig load_effective_config() {
     // Check for legacy migration: old full-copy model_list.json exists, settings.json doesn't
     std::string legacy_path;
     {
-        // Check user directories for old model_list.json
+        // Check the user directory for the old registry.
         std::string models_dir = utils::get_models_directory();
         std::string legacy_candidate = models_dir + "/model_list.json";
         if (std::filesystem::exists(legacy_candidate) &&
             !std::filesystem::exists(cfg.user_settings_path)) {
-            legacy_path = legacy_candidate;
+            // Never migrate the shipped registry itself. The migration RENAMES
+            // what it finds, and the shipped registry is what every other
+            // install and the release pipeline read. A dev tree, a relocated
+            // install, or a models directory that happens to hold the shipped
+            // file would otherwise lose it.
+            std::error_code ec;
+            auto legacy_canon = std::filesystem::weakly_canonical(legacy_candidate, ec);
+            auto shipped_canon = std::filesystem::weakly_canonical(cfg.shipped_path, ec);
+            if (!legacy_canon.empty() && !shipped_canon.empty() &&
+                legacy_canon == shipped_canon) {
+                std::cerr << "[OFLM] The model registry at " << legacy_candidate
+                          << " is the shipped one; leaving it alone." << std::endl;
+            } else {
+                legacy_path = legacy_candidate;
+            }
         }
     }
 

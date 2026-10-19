@@ -55,7 +55,10 @@ UiTier detect_ui_tier() {
 }
 
 size_t numbered_menu(const std::string& title, const std::vector<PickerItem>& items) {
-    std::cout << title << ":\n";
+    // The title may already end in a colon; do not double it.
+    std::cout << title;
+    if (title.empty() || title.back() != ':') std::cout << ':';
+    std::cout << "\n";
     for (size_t i = 0; i < items.size(); i++) {
         std::cout << "  " << (i + 1) << ". " << items[i].label;
         if (!items[i].description.empty()) {
@@ -192,21 +195,18 @@ int guided_flow() {
         return numbered_menu(title, items);
     };
 
-    // Step 1: Choose action
-    std::vector<PickerItem> actions = {
-        {"Edit global settings", ""},
-        {"Edit a model's settings", ""},
-        {"Show effective configuration", ""},
-        {"Exit", ""},
-    };
-    size_t action = pick("What do you want to do?", actions);
-    if (action == SIZE_MAX || action == 3) return 0;
+    // The flow is a small state machine. Cancelling a step (Esc, or 0 in the
+    // numbered menu) goes back to the step before it; cancelling the first one
+    // leaves the flow. A linear chain of prompts would have quit the program
+    // on the first Esc, which is not what a menu is expected to do.
+    enum class Step { ACTION, MODEL, SETTING, VALUE };
+    Step step = Step::ACTION;
 
-    // Step 2: Choose model (or global)
     EffectiveConfig cfg = load_effective_config();
+
+    // The model list is built once: the registry does not change under us.
     std::vector<PickerItem> models;
     models.push_back({"[Global settings]", ""});
-    // Add all models from merged registry
     for (auto it_type = cfg.merged["models"].begin(); it_type != cfg.merged["models"].end(); ++it_type) {
         const std::string& type = it_type.key();
         for (auto it_size = it_type->begin(); it_size != it_type->end(); ++it_size) {
@@ -219,86 +219,144 @@ int guided_flow() {
         }
     }
 
-    size_t model_idx = pick("Select model:", models);
-    if (model_idx == SIZE_MAX) return 0;
-    std::string model_tag = (model_idx == 0) ? "" : models[model_idx].label;
-
-    if (action == 2) {
-        // Show effective configuration
-        program_args_t show_args;
-        show_args.config_model = model_tag;
-        return config_show(show_args);
-    }
-
-    // Step 3: Choose setting
     std::vector<PickerItem> settings;
-    for (const auto& def : settings_registry()) {
-        if (def.scope == SettingScope::PER_MODEL && model_tag.empty()) continue;
-        settings.push_back({def.key, def.description});
-    }
-    size_t setting_idx = pick("Select setting:", settings);
-    if (setting_idx == SIZE_MAX) return 0;
-    std::string key = settings[setting_idx].label;
+    std::vector<PickerItem> options;
+    size_t action = 0;
+    std::string model_tag;
+    std::string key;
+    // Where the setting step goes back to: the model list when a model was
+    // chosen, the action list when the global settings were.
+    Step settings_back_to = Step::ACTION;
 
-    // Step 4: Choose value (or unset)
-    auto def = find_setting(key);
-    if (def && def->type == SettingType::ENUM) {
-        std::vector<PickerItem> options;
-        for (const auto& opt : def->options) {
-            options.push_back(PickerItem{opt.value, opt.description});
-        }
-        size_t opt_idx = pick("Select value for " + key + ":", options);
-        if (opt_idx == SIZE_MAX) return 0;
-        
-        // Set the value
-        SettingsLock lock(cfg.user_settings_path);
-        if (!lock.locked()) {
-            std::cerr << "Error: Could not acquire lock on settings file" << std::endl;
-            return 1;
-        }
-        
-        nlohmann::json settings_json = cfg.user_settings;
-        if (settings_json.is_null()) {
-            settings_json = nlohmann::json::object();
-        }
-        
-        if (model_tag.empty()) {
-            // Global setting
-            if (!settings_json.contains("defaults")) {
-                settings_json["defaults"] = nlohmann::json::object();
+    for (;;) {
+        switch (step) {
+        case Step::ACTION: {
+            std::vector<PickerItem> actions = {
+                {"Edit global settings", ""},
+                {"Edit a model's settings", ""},
+                {"Show effective configuration", ""},
+                {"Exit", ""},
+            };
+            size_t a = pick("What do you want to do?", actions);
+            if (a == SIZE_MAX) return 0;   // nothing above this step
+            if (a == 3) return 0;          // Exit
+            action = a;
+            if (action == 0) {
+                // The global settings: no model to choose.
+                model_tag.clear();
+                settings.clear();
+                for (const auto& def : settings_registry()) {
+                    if (def.scope == SettingScope::PER_MODEL) continue;
+                    settings.push_back({def.key, def.description});
+                }
+                settings_back_to = Step::ACTION;
+                step = Step::SETTING;
+            } else {
+                step = Step::MODEL;
             }
-            settings_json["defaults"][key] = options[opt_idx].label;
-        } else {
-            // Per-model setting
-            auto model_parts = split_tag(model_tag);
-            std::string type = model_parts.first;
-            std::string size = model_parts.second;
-            if (!settings_json.contains("settings")) {
-                settings_json["settings"] = nlohmann::json::object();
-            }
-            if (!settings_json["settings"].contains(type)) {
-                settings_json["settings"][type] = nlohmann::json::object();
-            }
-            if (!settings_json["settings"][type].contains(size)) {
-                settings_json["settings"][type][size] = nlohmann::json::object();
-            }
-            settings_json["settings"][type][size][key] = options[opt_idx].label;
+            break;
         }
-        
-        // Update defaults_version
-        if (cfg.shipped_registry.contains("defaults") &&
-            cfg.shipped_registry["defaults"].contains("defaults_version")) {
-            settings_json["defaults_version"] = cfg.shipped_registry["defaults"]["defaults_version"];
-        }
-        
-        save_user_settings(settings_json, cfg.user_settings_path);
-        std::cout << "Set '" << key << "' = '" << options[opt_idx].label << "'" << std::endl;
-    } else {
-        std::cerr << "Error: Setting '" << key << "' is not an ENUM type or not found" << std::endl;
-        return 1;
-    }
 
-    return 0;
+        case Step::MODEL: {
+            size_t m = pick("Select model:", models);
+            if (m == SIZE_MAX) { step = Step::ACTION; break; }   // back
+            model_tag = (m == 0) ? "" : models[m].label;
+
+            if (action == 2) {
+                // Show effective configuration, then back to the top.
+                program_args_t show_args;
+                show_args.config_model = model_tag;
+                config_show(show_args);
+                step = Step::ACTION;
+                break;
+            }
+
+            settings.clear();
+            for (const auto& def : settings_registry()) {
+                if (def.scope == SettingScope::PER_MODEL && model_tag.empty()) continue;
+                settings.push_back({def.key, def.description});
+            }
+            settings_back_to = Step::MODEL;
+            step = Step::SETTING;
+            break;
+        }
+
+        case Step::SETTING: {
+            size_t s = pick("Select setting:", settings);
+            if (s == SIZE_MAX) { step = settings_back_to; break; }   // back
+            key = settings[s].label;
+
+            options.clear();
+            auto def = find_setting(key);
+            if (def && def->type == SettingType::ENUM) {
+                for (const auto& opt : def->options) {
+                    options.push_back(PickerItem{opt.value, opt.description});
+                }
+            }
+            step = Step::VALUE;
+            break;
+        }
+
+        case Step::VALUE: {
+            if (options.empty()) {
+                // Not an enum: there is nothing to pick here.
+                std::cerr << "Setting '" << key << "' is not an ENUM type; set it with"
+                          << " 'oflm config set --config-key " << key << " --config-value <value>'"
+                          << std::endl;
+                step = Step::SETTING;
+                break;
+            }
+            size_t o = pick("Select value for " + key + ":", options);
+            if (o == SIZE_MAX) { step = Step::SETTING; break; }  // back
+
+            SettingsLock lock(cfg.user_settings_path);
+            if (!lock.locked()) {
+                std::cerr << "Error: Could not acquire lock on settings file" << std::endl;
+                return 1;
+            }
+
+            nlohmann::json settings_json = cfg.user_settings;
+            if (settings_json.is_null()) {
+                settings_json = nlohmann::json::object();
+            }
+
+            if (model_tag.empty()) {
+                // Global setting
+                if (!settings_json.contains("defaults")) {
+                    settings_json["defaults"] = nlohmann::json::object();
+                }
+                settings_json["defaults"][key] = options[o].label;
+            } else {
+                // Per-model setting
+                auto model_parts = split_tag(model_tag);
+                std::string type = model_parts.first;
+                std::string size = model_parts.second;
+                if (!settings_json.contains("settings")) {
+                    settings_json["settings"] = nlohmann::json::object();
+                }
+                if (!settings_json["settings"].contains(type)) {
+                    settings_json["settings"][type] = nlohmann::json::object();
+                }
+                if (!settings_json["settings"][type].contains(size)) {
+                    settings_json["settings"][type][size] = nlohmann::json::object();
+                }
+                settings_json["settings"][type][size][key] = options[o].label;
+            }
+
+            // Remember the shipped defaults version this file was written against.
+            if (cfg.shipped_registry.contains("defaults_version")) {
+                settings_json["defaults_version"] = cfg.shipped_registry["defaults_version"];
+            }
+
+            save_user_settings(settings_json, cfg.user_settings_path);
+            std::cout << "Set '" << key << "' = '" << options[o].label << "'" << std::endl;
+
+            // Back to the top: the user may want to change something else.
+            step = Step::ACTION;
+            break;
+        }
+        }
+    }
 }
 
 int browse_tui() {

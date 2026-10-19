@@ -25,6 +25,25 @@ Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
 
 Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setup.sh also *if needed*
 
+## Git rules for agents
+
+**Never use `git add -A`, `git add .`, or `git add --all`.** Stage the
+specific paths you changed, by name:
+
+```bash
+git add src/config/config_store.cpp src/test/config_store_test.cpp
+```
+
+`src/models/` holds tens of gigabytes of model weights and `build/` holds a
+build tree; a blanket add walks both, takes minutes, and can time out
+mid-index-write. It also stages files that belong to other work in the tree,
+so a commit picks up changes you never made and never looked at.
+
+If you are unsure what is yours, `git status --short` first, then name the
+paths explicitly. Never `git add` a path you did not edit.
+
+Before committing, `git diff --cached --stat` must show only your files.
+
 <available_skills>
   <skill>
     <name>npu_offload_pipeline</name>
