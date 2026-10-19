@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/dflash2.hpp"
 #include "open_qwen36/spec.hpp"
 
 using open_qwen36::Core;
@@ -114,12 +115,24 @@ struct Args {
     int spec_width = 0;             // --spec-width N: positions per verify pass (0 = the kernel set's, else 4)
     bool spec_ref = false;          // --spec-ref: the reference verifier even when the set has a verify program
     bool spec_log = false;          // --spec-log: one line per pass
-    std::string spec_method = "lookup";   // --spec-method M: this CLI has no registry entry to read the method from
+    std::string spec_method = "lookup";   // --spec-method M[,M]: this CLI has no registry entry to read the methods from
+    int lookup_min = 0;             // --lookup-min N: the shortest suffix match lookup proposes from (default: 2, 4 in front of dflash2)
+    size_t draft_deepen = 0;        // --draft-deepen N: refill the cold cache with the whole window after N drafts (default 4)
+    size_t draft_fill = 0;          // --draft-fill N: put at most the last N prompt positions into a cold drafter cache (0 = its window)
+    bool stack_eager = false;       // --stack-eager: the draft model catches up every pass lookup drafted
     int verify_check = 0;           // --verify-check N: N greedy positions by step(), then by verify() passes, compared
     int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
+    int verify_n = 0;               // --verify-n n: the bench's positions a pass (default: the kernel set's width)
     int verify_probe = 0;           // --verify-probe L (with OFLM_OPEN_VERIFY_STOP=L): act of layers < L, verify vs step
     std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
+    std::vector<int> taps;          // --taps L,L,...: keep the residual after these layers (OPEN-DECODE-TAPS)
+    std::string taps_out;           // --taps-out PATH: the ring's rows after the run, f32 [rows][taps * hidden], PATH.txt says which
+    std::string residual_out;       // --residual-out PATH: the decode buffer after every step(), f32 [steps][hidden]
+    // OPEN-DRAFT-DFLASH2 gate: the drafter on dumped taps (tf3's <run>/<pid>.jsonl + <pid>.taps)
+    std::string draft_dir, draft_kernels, draft_run, draft_out;
+    std::vector<std::string> draft_pids;
+    int draft_stride = 2, draft_max_steps = 0, draft_bench = 0;
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -201,7 +214,18 @@ Args parse(int argc, char** argv) {
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else if (k == "--det-step") a.det_step = std::atoi(val().c_str());
         else if (k == "--verify-check") a.verify_check = std::atoi(val().c_str());
+        else if (k == "--taps") {
+            std::string v = val();
+            if (v == "dflash2") v = "5,19,33,47,61";
+            for (size_t i = 0; i < v.size();) {
+                const size_t c = v.find(',', i);
+                a.taps.push_back(std::atoi(v.substr(i, c - i).c_str()));
+                i = c == std::string::npos ? v.size() : c + 1;
+            }
+        } else if (k == "--taps-out") a.taps_out = val();
+        else if (k == "--residual-out") a.residual_out = val();
         else if (k == "--bench-verify") a.bench_verify = std::atoi(val().c_str());
+        else if (k == "--verify-n") a.verify_n = std::atoi(val().c_str());
         else if (k == "--verify-probe") a.verify_probe = std::atoi(val().c_str());
         else if (k == "--det-full") a.det_full = true;
         else if (k == "--bench-step") a.bench_step = std::atoi(val().c_str());
@@ -212,6 +236,10 @@ Args parse(int argc, char** argv) {
         else if (k == "--spec-ref") { a.spec = true; a.spec_ref = true; }
         else if (k == "--spec-log") a.spec_log = true;
         else if (k == "--spec-method") { a.spec = true; a.spec_method = val(); }
+        else if (k == "--lookup-min") a.lookup_min = std::atoi(val().c_str());
+        else if (k == "--stack-eager") a.stack_eager = true;
+        else if (k == "--draft-fill") a.draft_fill = std::strtoul(val().c_str(), nullptr, 10);
+        else if (k == "--draft-deepen") a.draft_deepen = std::strtoul(val().c_str(), nullptr, 10);
         // The server has a host gap right here that the CLI does not: between the last
         // prefill dispatch and the first decode one it samples, detokenises and writes
         // the first SSE chunk to a socket. Every dx timeout so far has landed on that
@@ -220,8 +248,25 @@ Args parse(int argc, char** argv) {
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
+        else if (k == "--draft") a.draft_dir = val();
+        else if (k == "--draft-kernels") a.draft_kernels = val();
+        else if (k == "--draft-run") a.draft_run = val();
+        else if (k == "--draft-out") a.draft_out = val();
+        else if (k == "--draft-stride") a.draft_stride = std::atoi(val().c_str());
+        else if (k == "--draft-max-steps") a.draft_max_steps = std::atoi(val().c_str());
+        else if (k == "--draft-bench") a.draft_bench = std::atoi(val().c_str());
+        else if (k == "--draft-pids") {
+            const std::string v = val();
+            for (size_t i0 = 0; i0 < v.size();) {
+                size_t j = v.find(',', i0);
+                if (j == std::string::npos) j = v.size();
+                if (j > i0) a.draft_pids.push_back(v.substr(i0, j - i0));
+                i0 = j + 1;
+            }
+        }
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
+    if (!a.draft_run.empty() && a.ids.empty()) a.ids = {0};
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
@@ -233,6 +278,9 @@ Args parse(int argc, char** argv) {
     return a;
 }
 
+std::unique_ptr<open_qwen36::spec::Drafter> g_drafter;   // built once, after the weights load
+open_qwen36::dflash2::Proposer* g_proposer = nullptr;   // its dflash2 member, if it has one
+
 // greedy tokens do not depend on the draft, so this prints the same `token <id>` lines as the plain loop
 std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     namespace sp = open_qwen36::spec;
@@ -243,7 +291,10 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     if (W < 2) { std::fprintf(stderr, "--spec-width must be >= 2\n"); std::exit(2); }
     std::fprintf(stderr, "speculative decode: width %zu, method %s, %s\n", W, a.spec_method.c_str(),
                  fast ? "the kernel set's verify pass" : "reference verify (step + checkpoint/restore)");
-    const std::unique_ptr<sp::Drafter> drafter = sp::make_drafter(a.spec_method);
+    sp::Drafter* const drafter = g_drafter.get();
+    const open_qwen36::dflash2::Proposer::Stats ps0 = g_proposer ? g_proposer->stats() : open_qwen36::dflash2::Proposer::Stats{};
+    std::vector<size_t> accept_hist(W + 1, 0);
+    double propose_ms = 0;
     sp::ReferenceVerify<Core> ref(core);
     sp::CoreVerify<Core> cv(core);
     sp::Stats st;
@@ -257,7 +308,9 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
     while (out.size() < static_cast<size_t>(a.max_tokens)) {
         const size_t left = static_cast<size_t>(a.max_tokens) - out.size();
         std::vector<int> ids{tok};
+        const auto tq = clock::now();
         for (int d : drafter->propose(hist, tok, std::min(W - 1, left - 1))) ids.push_back(d);
+        propose_ms += std::chrono::duration<double, std::milli>(clock::now() - tq).count();
         const auto tp = clock::now();
         const size_t before = out.size();
         size_t m = 1;
@@ -273,6 +326,7 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
         const double ms = std::chrono::duration<double, std::milli>(clock::now() - tp).count();
         pass_ms[ids.size() > 1] += ms;
         st.add(ids.size(), m);
+        ++accept_hist[std::min(m, W)];
         if (a.spec_log)
             std::fprintf(stderr, "  pass @%d: %zu positions, %zu kept, %.1f ms\n", core.position() - static_cast<int>(m),
                          ids.size(), m, ms);
@@ -287,6 +341,29 @@ std::vector<int> decode_spec(Core& core, const Args& a, int tok) {
                  " plain steps %.0f ms, drafted passes %.0f ms\n",
                  st.passes, st.drafted, st.positions, st.accepted, st.passes ? double(st.emitted) / st.passes : 0.0,
                  pass_ms[0], pass_ms[1]);
+    std::fprintf(stderr, "spec: tokens per pass histogram:");
+    for (size_t m = 1; m <= W; ++m) std::fprintf(stderr, " %zu:%zu", m, accept_hist[m]);
+    std::fprintf(stderr, "\nspec: proposing %.0f ms in all (%.1f ms a pass)\n", propose_ms, st.passes ? propose_ms / st.passes : 0.0);
+    if (auto* sk = dynamic_cast<sp::Stacked*>(drafter)) std::fprintf(stderr, "spec: stack drafted by: %s\n", sk->report().c_str());
+    if (g_proposer) {
+        const auto& ps = g_proposer->stats();
+        const double n = static_cast<double>(std::max<size_t>(1, ps.drafts - ps0.drafts));
+        const double sn = static_cast<double>(std::max<size_t>(1, ps.drafts - ps0.drafts - (ps.restarts - ps0.restarts)));
+        std::fprintf(stderr,
+                     "spec: dflash2 %zu drafts (%zu skipped, %zu cache restarts), %zu cache rows; per draft: block pass %.1f ms,"
+                     " cache rows %.1f ms (gathering the taps %.2f ms)\n",
+                     ps.drafts - ps0.drafts, ps.skipped - ps0.skipped, ps.restarts - ps0.restarts, ps.rows - ps0.rows,
+                     (ps.draft_ms - ps0.draft_ms) / n, (ps.inject_ms - ps0.inject_ms) / n, (ps.stage_ms - ps0.stage_ms) / n);
+        std::fprintf(stderr,
+                     "spec: dflash2 the prompt's %zu rows went in once, %.0f ms; the other drafts' cache rows %.1f ms each\n",
+                     ps.restart_rows - ps0.restart_rows, ps.restart_ms - ps0.restart_ms,
+                     (ps.inject_ms - ps0.inject_ms - (ps.restart_ms - ps0.restart_ms)) / sn);
+        const auto& l = ps.last;
+        std::fprintf(stderr,
+                     "spec: dflash2 the last block pass %.1f ms: matrices %.1f (head %.1f), attention %.1f, host around the matrices %.1f,"
+                     " selector %.1f\n",
+                     l.total_ms, l.gemv_ms, l.head_ms, l.attn_ms, l.host_ms, l.select_ms);
+    }
     return out;
 }
 
@@ -298,17 +375,34 @@ void verify_check(Core& core, const Args& a) {
     const size_t V = core.vocab();
     auto snap = core.checkpoint();
     std::vector<int> tokens{argmax(core.logits(), core.real_vocab())};
-    std::vector<std::vector<float>> ref;
+    std::vector<std::vector<float>> ref, ref_taps;
+    const size_t TW = core.tap_width();
+    const int p_start = core.position();
+    int tap_bad = 0;
     for (int i = 0; i < n; ++i) {
         core.step(tokens.back(), true);
+        if (TW) {
+            const float* t = core.tap_row(p_start + i);
+            if (!t) { std::fprintf(stderr, "  TAPS missing after step at position %d\n", p_start + i); ++tap_bad; ref_taps.emplace_back(TW); }
+            else ref_taps.emplace_back(t, t + TW);
+        }
         ref.push_back(core.logits());
         tokens.push_back(argmax(core.logits(), core.real_vocab()));
     }
     core.restore(snap);
     const int p0 = core.position();
-    int bad = 0, passes = 0, checked = 0;
+    int bad = tap_bad, passes = 0, checked = 0;
     double vms = 0, sms = 0;
     int nv = 0, ns = 0;
+    long tap_rows = 0;
+    auto cmp_taps = [&](int i, const char* what) {
+        if (!TW) return;
+        ++tap_rows;
+        const float* t = core.tap_row(p0 + i);
+        if (t && std::memcmp(t, ref_taps[i].data(), TW * 4) == 0) return;
+        std::fprintf(stderr, "  TAPS MISMATCH %s position %d (+%d)%s\n", what, p0 + i, i, t ? "" : ": none held");
+        ++bad;
+    };
     auto cmp = [&](const std::vector<float>& got, int i, const char* what) {
         ++checked;
         if (std::memcmp(got.data(), ref[i].data(), V * 4) == 0) return;
@@ -323,70 +417,77 @@ void verify_check(Core& core, const Args& a) {
                      p0 + i, i, nd, V, md);
         ++bad;
     };
+    // passes of 2 .. width positions in turn; every third one has a wrong draft at a rotating position, so accept()
+    // takes 1 .. W positions and the next pass starts from each state slot
+    const int VW = static_cast<int>(core.verify_width());
     int i = 0;
     for (int k = 0; i + 1 < n; ++k) {
-        if (k % 4 == 3) {                          // a plain step after an accept
+        const int W = 2 + (k / 4) % (VW - 1);
+        if (k % 4 == 3 || i + W > n) {             // a plain step after an accept, and the tail
             core.step(tokens[i], true);
             sms += core.last_timing().total_ms;
             ++ns;
             cmp(core.logits(), i, "step");
+            cmp_taps(i, "step");
             ++i;
             continue;
         }
-        const bool right = k % 3 != 2;
-        const int draft = right ? tokens[i + 1] : (tokens[i + 1] + 1) % static_cast<int>(core.real_vocab());
-        const int ids[2] = {tokens[i], draft};
-        int am[2] = {-1, -1};
-        core.verify(ids, 2, am);
+        const int wrong = k % 3 == 2 ? 1 + (k / 3) % (W - 1) : W;
+        std::vector<int> ids(W), am(W, -1);
+        for (int j = 0; j < W; ++j)
+            ids[j] = j == wrong ? (tokens[i + j] + 1) % static_cast<int>(core.real_vocab()) : tokens[i + j];
+        core.verify(ids.data(), W, am.data());
         vms += core.last_timing().total_ms;
         ++nv;
         ++passes;
-        cmp(core.verify_logits(0), i, "verify[0]");
-        if (am[0] != tokens[i + 1]) {
-            std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i, am[0], tokens[i + 1]);
-            ++bad;
-        }
-        if (right) {
-            cmp(core.verify_logits(1), i + 1, "verify[1]");
-            if (am[1] != tokens[i + 2]) {
-                std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i + 1, am[1], tokens[i + 2]);
+        for (int j = 0; j < wrong; ++j) {
+            char what[32];
+            std::snprintf(what, sizeof what, "verify[%d]", j);
+            cmp(core.verify_logits(j), i + j, what);
+            cmp_taps(i + j, what);
+            if (am[j] != tokens[i + j + 1]) {
+                std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i + j, am[j], tokens[i + j + 1]);
                 ++bad;
             }
-            core.accept(2);
-            i += 2;
-        } else {
-            core.accept(1);
-            i += 1;
         }
+        core.accept(wrong);
+        if (TW)
+            for (int j = wrong; j < W; ++j)
+                if (core.tap_row(p0 + i + j)) {
+                    std::fprintf(stderr, "  TAPS held for dropped row %d of the pass at position %d\n", j, p0 + i);
+                    ++bad;
+                }
+        i += wrong;
         if (core.position() != p0 + i) {
             std::fprintf(stderr, "  POSITION after accept: %d, want %d\n", core.position(), p0 + i);
             ++bad;
         }
     }
     std::fprintf(stderr, "verify check: %d positions from %d, %d verify passes (%.1f ms mean), %d steps (%.1f ms mean), "
-                         "%d logit rows compared: %s (%d bad)\n",
-                 i, p0, passes, nv ? vms / nv : 0.0, ns, ns ? sms / ns : 0.0, checked, bad ? "FAIL" : "PASS", bad);
+                         "%d logit rows and %ld tap rows compared: %s (%d bad)\n",
+                 i, p0, passes, nv ? vms / nv : 0.0, ns, ns ? sms / ns : 0.0, checked, tap_rows, bad ? "FAIL" : "PASS", bad);
     std::printf(bad ? "VERIFY CHECK FAIL\n" : "VERIFY CHECK PASS\n");
     g_verify_bad = bad;
 }
 
-// both positions of each pass are accepted, so the position advances by two
+// every position of each pass is accepted, so the position advances by the width
 void bench_verify(Core& core, const Args& a) {
     const int n = a.bench_verify;
+    const size_t W = a.verify_n > 0 ? static_cast<size_t>(a.verify_n) : core.verify_width();
     int tok = argmax(core.logits(), core.real_vocab());
     std::vector<double> v2, v1;
+    std::vector<int> ids(W), am(W);
     for (int r = 0; r < n; ++r) {
-        const int ids[2] = {tok, tok};
-        int am[2];
-        core.verify(ids, 2, am);
+        std::fill(ids.begin(), ids.end(), tok);
+        core.verify(ids.data(), W, am.data());
         v2.push_back(core.last_timing().total_ms);
         {
             const auto& t = core.last_timing();
             std::fprintf(stderr, "  verify @%d: %.1f ms (layers blocked %.1f, tail %.1f, host read+argmax %.2f, embed %.2f, patch %.2f)\n",
                          core.position(), t.total_ms, t.part0_ms, t.part1_ms, t.route_ms, t.embed_ms, t.patch_ms);
         }
-        core.accept(2);
-        tok = am[1];
+        core.accept(W);
+        tok = am[W - 1];
     }
     for (int r = 0; r < n; ++r) {
         core.step(tok, true);
@@ -406,20 +507,45 @@ void bench_verify(Core& core, const Args& a) {
     // alternating, as a loop with draftless passes does: each switch of hardware context costs
     std::vector<double> a2, a1;
     for (int r = 0; r < n; ++r) {
-        const int ids[2] = {tok, tok};
-        int am[2];
-        core.verify(ids, 2, am);
+        std::fill(ids.begin(), ids.end(), tok);
+        core.verify(ids.data(), W, am.data());
         a2.push_back(core.last_timing().total_ms);
-        core.accept(2);
-        core.step(am[1], true);
+        core.accept(W);
+        core.step(am[W - 1], true);
         a1.push_back(core.last_timing().total_ms);
         tok = argmax(core.logits(), core.real_vocab());
     }
-    stat(v2, "verify2");
+    const std::string vn = "verify" + std::to_string(W);
+    stat(v2, vn.c_str());
     stat(v1, "step1");
-    stat(a2, "verify2-after-step");
+    stat(a2, (vn + "-after-step").c_str());
     stat(a1, "step1-after-verify");
     core.dump_step_trace("--bench-verify");
+}
+
+void append_residual(Core& core, const Args& a) {
+    if (a.residual_out.empty()) return;
+    std::vector<float> r(core.manifest().hidden);
+    core.read_residual(r.data());
+    std::FILE* f = std::fopen(a.residual_out.c_str(), core.position() == 1 ? "wb" : "ab");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", a.residual_out.c_str()); return; }
+    std::fwrite(r.data(), 4, r.size(), f);
+    std::fclose(f);
+}
+
+void dump_taps(Core& core, const Args& a) {
+    const long hi = core.position();
+    long lo = hi;
+    while (lo > 0 && core.tap_row(lo - 1)) --lo;
+    std::FILE* f = std::fopen(a.taps_out.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", a.taps_out.c_str()); return; }
+    for (long p = lo; p < hi; ++p) std::fwrite(core.tap_row(p), 4, core.tap_width(), f);
+    std::fclose(f);
+    if (std::FILE* m = std::fopen((a.taps_out + ".txt").c_str(), "w")) {
+        std::fprintf(m, "first_pos %ld rows %ld taps %zu hidden %zu\n", lo, hi - lo, core.tap_count(), core.manifest().hidden);
+        std::fclose(m);
+    }
+    std::fprintf(stderr, "taps: positions [%ld, %ld) -> %s\n", lo, hi, a.taps_out.c_str());
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -498,6 +624,7 @@ std::vector<int> request(Core& core, const Args& a) {
         bool last = i + 1 == a.ids.size();
         bool want = a.prefill_logits || last;
         core.step(a.ids[i], want);
+        append_residual(core, a);
         if (!a.dump_prefix.empty() && want) dump_pos(a.dump_prefix, static_cast<int>(i), core.logits());
         if (!a.dump_prefix.empty() && last) dump(a.dump_prefix, dumped++, core.logits());  // preserve the original _t<i> convention
     }
@@ -596,6 +723,7 @@ std::vector<int> request(Core& core, const Args& a) {
         if (const char* r = sched_route(n)) core.set_decode_route(r);
         const std::string rt = core.decode_route_at(core.position());
         core.step(tok, true);
+        append_residual(core, a);
         if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
         const auto& tm = core.last_timing();
         std::fprintf(stderr,
@@ -619,6 +747,83 @@ std::vector<int> request(Core& core, const Args& a) {
     return out;
 }
 
+// OPEN-DRAFT-DFLASH2 gate: one 7-token walk per position on tf3's dumped taps; k = 3 and 7 are its prefixes
+int draft_gate(Core& core, const Args& a) {
+    namespace d2 = open_qwen36::dflash2;
+    using nlohmann::json;
+    d2::Drafter dr(a.draft_dir, a.draft_kernels, core, a.cfg.verbose);
+    dr.load_weights();
+    const size_t tw = dr.config().tap_width();
+    std::ofstream out(a.draft_out.empty() ? "drafts.jsonl" : a.draft_out);
+    std::vector<double> tot, gemv, head, attn, host, sel;
+    for (const std::string& pid : a.draft_pids) {
+        std::ifstream jf(a.draft_run + "/" + pid + ".jsonl");
+        if (!jf) throw std::runtime_error("no " + a.draft_run + "/" + pid + ".jsonl");
+        std::string line;
+        std::getline(jf, line);
+        const json hdr = json::parse(line);
+        std::vector<int> g;
+        while (std::getline(jf, line))
+            if (!line.empty()) g.push_back(json::parse(line).at("g").get<int>());
+        const std::vector<int> prompt = hdr.at("prompt_ids").get<std::vector<int>>();
+        const long n0 = hdr.at("prompt_n").get<long>() - 1;
+        std::ifstream tf(a.draft_run + "/" + pid + ".taps", std::ios::binary | std::ios::ate);
+        if (!tf) throw std::runtime_error("no " + a.draft_run + "/" + pid + ".taps");
+        std::vector<float> taps(static_cast<size_t>(tf.tellg()) / 4);
+        tf.seekg(0);
+        tf.read(reinterpret_cast<char*>(taps.data()), static_cast<std::streamsize>(taps.size() * 4));
+        const long n_taps = static_cast<long>(taps.size() / tw);
+        dr.reset();
+        int done = 0;
+        for (size_t s = 0; s < g.size(); s += static_cast<size_t>(std::max(1, a.draft_stride))) {
+            if (a.draft_max_steps && done >= a.draft_max_steps) break;
+            const long p0 = n0 + static_cast<long>(s);
+            if (p0 > n_taps) break;
+            if (dr.cached() < p0) dr.inject(&taps[static_cast<size_t>(dr.cached()) * tw], static_cast<size_t>(p0 - dr.cached()));
+            const int anchor = s == 0 ? prompt.back() : g[s - 1];
+            d2::Lattice lat;
+            const std::vector<int> d = dr.draft(anchor, 7, &lat);
+            const auto& t = dr.last_pass();
+            tot.push_back(t.total_ms); gemv.push_back(t.gemv_ms); head.push_back(t.head_ms);
+            attn.push_back(t.attn_ms); host.push_back(t.host_ms); sel.push_back(t.select_ms);
+            out << json{{"pid", pid}, {"s", s}, {"p0", p0}, {"d", d}, {"m", d2::walk_margins(lat)},
+                        {"c1", std::vector<int>(lat.cand.begin(), lat.cand.begin() + d2::kTopK)},
+                        {"ms", t.total_ms}}.dump() << "\n";
+            ++done;
+        }
+        out.flush();
+        std::fprintf(stderr, "dflash2 gate: %s %d drafts\n", pid.c_str(), done);
+        for (int r = 0; r < a.draft_bench; ++r) {
+            const auto d = dr.draft(g.empty() ? prompt.back() : g[0], 7);
+            const auto& t = dr.last_pass();
+            std::fprintf(stderr, "bench pass %d at context %ld: total %.2f ms, gemv %.2f (head %.2f), attention %.2f, "
+                                 "host around gemv %.2f (tables %.2f, y read-back %.2f, sum %.2f), selector %.2f, %d dispatches\n",
+                         r, dr.cached(), t.total_ms, t.gemv_ms, t.head_ms, t.attn_ms, t.host_ms, t.prep_ms, t.sync_ms,
+                         t.reduce_ms, t.select_ms, t.dispatches);
+            std::string ops;
+            for (const auto& [name, ms] : t.op_ms) ops += " " + name + " " + std::to_string(ms).substr(0, 5);
+            std::fprintf(stderr, "  per op (ms):%s\n", ops.c_str());
+            (void)d;
+        }
+        for (int r = 0; r < a.draft_bench && n_taps >= dr.cached() + 8; ++r) {
+            const auto ti = std::chrono::steady_clock::now();
+            dr.inject(&taps[static_cast<size_t>(dr.cached()) * tw], 8);
+            std::fprintf(stderr, "bench inject of 8 rows: %.2f ms (fc + K|V for every layer)\n",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ti).count());
+        }
+    }
+    auto med = [](std::vector<double> v) {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    std::fprintf(stderr, "dflash2 gate: %zu drafts, median pass %.2f ms (gemv %.2f, head %.2f, attention %.2f, "
+                         "host around gemv %.2f, selector %.2f)\n",
+                 tot.size(), med(tot), med(gemv), med(head), med(attn), med(host), med(sel));
+    std::printf("DONE\n");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -632,12 +837,23 @@ int main(int argc, char** argv) {
     try {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);
+        open_qwen36::spec::Availability spec_av;
         if (a.spec) {
-            const open_qwen36::spec::Availability av =
-                open_qwen36::spec::spec_availability({{"speculative", {{"method", a.spec_method}}}}, &core.manifest());
-            if (!av.ok()) {
+            nlohmann::json list = nlohmann::json::array();
+            for (size_t i = 0; i <= a.spec_method.size();) {
+                const size_t j = std::min(a.spec_method.find(',', i), a.spec_method.size());
+                nlohmann::json item = {{"method", a.spec_method.substr(i, j - i)}};
+                if (item["method"] == "dflash2" && !a.draft_dir.empty()) item["draft"] = a.draft_dir;
+                list.push_back(item);
+                i = j + 1;
+            }
+            nlohmann::json entry = {{"speculative", list}};
+            spec_av = open_qwen36::spec::spec_availability(
+                entry, &core.manifest(),
+                [&](const std::string& d) { return open_qwen36::spec::resolve_draft(d, "", a.draft_kernels); });
+            if (!spec_av.ok()) {
                 std::fprintf(stderr, "--spec: speculative decode is not available with %s: %s\n", a.cfg.kernel_dir.c_str(),
-                             av.reason.c_str());
+                             spec_av.reason.c_str());
                 return 2;
             }
         }
@@ -649,8 +865,18 @@ int main(int argc, char** argv) {
         // switches silently under an env user.
         if (!a.decode_route.empty()) core.set_decode_route(a.decode_route);
         else if (!std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) core.set_decode_route("auto");
+        if (!a.taps.empty()) core.set_taps(a.taps);
+        if (a.spec) {
+            open_qwen36::dflash2::StackOptions so;
+            so.lookup_min = a.lookup_min;
+            so.eager = a.stack_eager;
+            so.fill_rows = a.draft_fill;
+            so.deepen_after = a.draft_deepen;
+            g_drafter = open_qwen36::dflash2::make_stack(core, spec_av, so, a.cfg.verbose, &g_proposer);
+        }
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        if (!a.draft_run.empty()) return draft_gate(core, a);
         if (a.bench) {
             core.bench_dispatch(a.bench_layer, a.bench);
             std::printf("DONE\n");
@@ -707,6 +933,7 @@ int main(int argc, char** argv) {
             return bad ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
+        if (!a.taps_out.empty() && a.verify_check == 0) dump_taps(core, a);
         if (a.verify_check > 0) return g_verify_bad ? 1 : 0;
         for (const std::string& d : a.dump_act) dump_act_slice(core, d);   // all from the same last step
         int reps = a.twice ? 2 : a.repeat;

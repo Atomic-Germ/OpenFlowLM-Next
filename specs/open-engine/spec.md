@@ -4665,74 +4665,193 @@ tok/s). Timer stamps: the down projection's second piece (preps + GEMV) 259 -> 2
 wait for its x elements. Splitting the first piece's preps over the main cores (A1(b)) and moving the
 second piece's table to the prep core were built, byte-identical, and timing-neutral; not kept.
 
-### OPEN-DECODE-SPECULATIVE-VERIFY: a verify pass of two positions, bit-identical to two decode steps
-**Applies to:** openflowlm-next (`open_kernels/designs/verify/vux.py` and `gemv_t2x2.h`, `open_kernels/recipes/qwen35.py` `verify_image()`, `open_kernels/harness/stream_patch.hpp` `stateslot` / `attnposv`, `src/open_qwen36/core.cpp` `verify()` / `accept()`, `src/open_qwen36/verify_slots.hpp`)
+### OPEN-DECODE-SPECULATIVE-VERIFY: a verify pass of 2 to 4 positions, bit-identical to decode steps
+**Applies to:** openflowlm-next (`open_kernels/designs/verify/vux.py`, `vdn.h` and `gemv_t4.h`, `open_kernels/recipes/qwen35.py` `verify_image()`, `open_kernels/harness/stream_patch.hpp` `stateslot` / `attnposv`, `src/open_qwen36/core.cpp` `verify()` / `accept()`, `src/open_qwen36/manifest.cpp` `verify.narrow`, `src/open_qwen36/verify_slots.hpp`)
 **Verification:** test (the slot and position bookkeeping and the two stream patches against a fake, `src/open_qwen36/verify_slots_test.cpp`, ctest `OPEN-DECODE-SPECULATIVE-VERIFY`, run by `build.cmd`; the recipe's emission, `tests/test_verify_image.py`) + manual (bit-identity on the NPU, below)
 
-Speculative decode needs a pass that runs the last committed token and a drafted one through the
-model at once and returns both positions' logits. For an all-t2 merged-image spec (Ternary Bonsai 2
-27B, `verify_image()`), the export adds a **verify image**: three more instruction streams `vlx`,
-`vax`, `vlm` over one more xclbin, in their own hardware context `verify`, sharing the decode
-image's weight pools, consts, KV caches and DeltaNet state buffers. `Core::verify(ids, n, argmax)`
-runs n positions from the current position and returns each position's greedy argmax (cli.cpp's tie
-rule: the first maximum over the real vocabulary) and its logits (`verify_logits(j)`); `accept(m)`
-keeps the first m. `verify_width()` is 2 (0 when the kernel set has no verify image, or when
-`OFLM_OPEN_VERIFY=0`). n = 1 is a decode step.
+Speculative decode needs a pass that runs the last committed token and up to three drafted ones
+through the model at once and returns every position's logits. For an all-t2 merged-image spec
+(Ternary Bonsai 2 27B, `verify_image()`), the export adds a **verify image**: one more xclbin in its
+own hardware context `verify`, sharing the decode image's weight pools, consts, KV caches and
+DeltaNet state buffers, with one set of instruction streams per pass width: `vlx`, `vax`, `vlm`
+for 4 positions and `vlxN`, `vaxN`, `vlmN` for N = 2, 3 (the manifest's `verify.narrow`). The
+cores are the same for every width and read n from run-time words. `Core::verify(ids, n, argmax)`
+runs n positions from the current position and returns each position's greedy argmax (cli.cpp's
+tie rule: the first maximum over the real vocabulary; `argmax` may be null) and its logits
+(`verify_logits(j)`, copied from the device on first use); `accept(m)` keeps the first m.
+`verify_width()` is 4 (0 when the kernel set has no verify image, or when `OFLM_OPEN_VERIFY=0`).
+n = 1 is a decode step.
 
 - **Every position's logits are bit for bit what `step()` computes at that position.** Each weight
-  chunk is streamed once for both positions: the 2-token tile (`gemv_t2x2.h`) puts the two tokens in
-  rows 0 and 1 of the 1-wide tile's mmul, whose int32 sums are exact, and then runs the 1-wide
-  float epilogue per token in the same order. The activation preps, SwiGLU, DeltaNet, glue, post,
-  norms and attention are the decode image's own kernels from the same generated sources and flags,
-  run once per position in position order.
-- **Width 2.** Two tables of 20,736 B fit a main core's data memory only with the x fifo one element
-  deep and DeltaNet's scratch inside the first table; three do not fit without cutting K into slices.
+  chunk is streamed once for all positions: the four-token tile (`gemv_t4.h`) reads four tokens as
+  the four A rows of the 1-wide tile's mmul from an interleaved table, so each token's int32 sums are
+  exact, and runs the 1-wide float epilogue per token in the same order. GEMVs wider than the hidden
+  size run in 2048-wide K slices with their partial y kept on core in fp32 (the chunk order is
+  unchanged; the 1-wide tile stores and reloads y between chunks too). DeltaNet reads each head's S
+  once and computes every position's S' in place with the 1-wide per-column op order (`vdn.h`); the
+  attention cores walk the cached window once for every query, each with its own running max, sum
+  and output (blocks past a query's position are all padding to it and are skipped); the glue runs
+  every position's conv per tile. Preps, SwiGLU, norms and post are the decode image's own
+  expressions; o's 1/sqrt(128) moved to the post core with the same ops.
+- **Width 4.** Four tokens' tables at K = 5120 (42,240 B) fill a main core's table region, which
+  DeltaNet reuses for its half-head block; the main cores' program is 16,320 B of 16,384.
+- **Run-time words.** Every core reads its per-dispatch words (n, band counts) after a barrier the
+  stream sets once they are written (acquire-greater-equal, so each dispatch consumes it); an
+  acquire-equal barrier stays set after the first dispatch and later dispatches read the previous
+  dispatch's words.
 - **No copies on rollback.** A linear layer's state buffer holds width + 1 slots (`verify.slot_bytes`
   each). Position j reads its conv rows and S from the j-th slot of the pass's map and writes the
   (j+1)-th; the committed slot is never written. `accept(m)` makes slot map[m] the committed one; the
-  decode stream `lx` and the verify stream `vlx` address the state through slots (`stateslot`: every
-  DDR patch on the state argument is re-pointed by an instruction patch). An attention layer writes
-  KV rows pos .. pos + n - 1 and position j attends rows [0, pos + j] (`attnposv`: one window length,
-  row drain and record per position); rows past the accepted position are dead and are overwritten.
+  decode stream `lx` and the verify streams address the state through slots (`stateslot`: every DDR
+  patch on the state argument is re-pointed by an instruction patch). An attention layer writes KV
+  rows pos .. pos + n - 1 and position j attends rows [0, pos + j] (`attnposv`: the window fill once,
+  patched for the last position, and per position its row drain, its row read back and its record);
+  rows past the accepted position are dead and are overwritten.
 - **Buffers.** Every layer's act holds width copies of `verify.act_bytes` (position j at j x
   act_bytes); the verify image's xres, logits and the tail's scratch are their own globals (`vxres`,
   `vlogits`, `vlmact`). `checkpoint()` / `restore()` / `reset()` and the block prefill route read and
   write the committed slot.
 
 **Acceptance criteria (test):**
-- After any sequence of 1- or 2-position passes, accepts of 1..n and plain steps, the committed slot
-  holds the state after exactly `position()` tokens, and no pass writes the committed slot.
+- After any sequence of 1- to width-position passes, accepts of 1..n and plain steps, the committed
+  slot holds the state after exactly `position()` tokens, and no pass writes the committed slot.
 - `accept` with no pass pending, after a step, or with m > n is refused.
 - `slot_table` decodes every state transfer's slot; `slot_apply` re-points slot s to perm[s] and keeps
   the offset inside the slot; a transfer past the last slot is refused.
-- `attnv_table` finds one window length, window offset, row drain and record per position;
-  `attnv_apply(pos)` gives position j the values `attn_apply(pos + j)` would.
-- The recipe emits the verify block (width 2, a 4 KB-aligned slot no smaller than the state, one
-  position's act), the three streams in context `verify`, `stateslot` on `lx` and `vlx`, `attnposv`
-  on `vax`; `OPEN_LAYER_VERIFY=0` (in the build key) or a spec without the in-layer ternary head
-  emits none of it and leaves `lx` unpatched.
+- `attnv_table` finds one window length, window offset, row drain and record per position, or one
+  shared window (assigned to the last position) with each row drained and read back; a third patch of
+  one position's row is refused; `attnv_apply(pos)` gives position j the values `attn_apply(pos + j)`
+  would.
+- The recipe emits the verify block (width 4, a 4 KB-aligned slot no smaller than the state, one
+  position's act, `narrow` streams for 2 and 3), the nine streams in context `verify`, `stateslot` on
+  `lx` and the `vlx` streams, `attnposv` (with `nq` on the narrow ones) on the `vax` streams;
+  `OPEN_LAYER_VERIFY=0` (in the build key) or a spec without the in-layer ternary head emits none of
+  it and leaves `lx` unpatched.
 
 **Verification (manual):**
-1. Export with the verify image (`verify_image()` true); every core of `vlx`, `vax`, `vlm` fits
-   16384 B of program memory and the three images' core ELFs are identical.
+1. Export with the verify image (`verify_image()` true); every core fits 16,384 B of program memory
+   and the nine streams' core ELFs are byte-identical.
 2. `open_qwen36_cli --model <Bonsai lmhead container> --kernels <set> --ids-file short.ids
-   --verify-check 40` and `--ids-file prompt512.ids --gemm-block --verify-check 40`: 40 greedy
-   positions by `step()` from a checkpoint, then the same positions by verify passes whose draft is
-   right on two passes of three and wrong on the third, with a plain step every fourth pass. Every
-   compared logit row must be byte-identical (memcmp over the whole vocabulary) and every argmax the
-   reference token: the run prints `VERIFY CHECK PASS`.
-3. The decode step unchanged: the normal token gates (33/33 short.ids, 129/129 prompt512
-   `--gemm-block`) on the verify-capable set, and an A/B of the 1-token step against the same set
-   without it in one clean window (within 1%).
-4. Cost: `--bench-verify N` under the timing lock gives the verify pass (n = 2) and the step (n = 1).
+   --verify-check 48` and `--ids-file prompt512.ids --gemm-block --verify-check 48`: 48 greedy
+   positions by `step()` from a checkpoint, then the same positions by verify passes of 2, 3 and 4
+   positions in turn, whose draft is right on two passes of three and wrong at a rotating position
+   on the third, with a plain step every fourth pass. Every compared logit row must be
+   byte-identical (memcmp over the whole vocabulary) and every argmax the reference token: the run
+   prints `VERIFY CHECK PASS`.
+3. The decode step unchanged: the decode images are untouched by the verify image; the token gates
+   (33/33 short.ids, 129/129 prompt512 `--gemm-block`) on the verify-capable set.
+4. Cost: `--bench-verify N --verify-n n` under the timing lock gives the n-position pass and the
+   step (n = 1).
 
-**Result 2026-10-08 (`open_kernels_v6`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`).** The 2-token
-tile alone (`designs/gemv_t2` probe, `t2x2`): y byte-identical per token to the 1-wide tile on the
-gate, og and down shapes at 1, 2 and 8 cores. `--verify-check 40`: PASS on short.ids and on prompt512
-`--gemm-block`, every logit row memcmp-identical. Tokens 33/33 and 129/129. The step is unchanged by
-the verify image (2026-10-07, `open_kernels_v1`: step minimum 155.7 / 155.8 / 155.7 -> 155.9 / 155.7 /
-155.6 ms, clean A/B, 3 rounds). Cost at ctx ~512 (`--bench-verify 10`, clean, min): a 2-position
-pass 190.4-190.8 ms against a step of 158.2-159.9 ms. History: `plans/archive/bonsai2-speculative.md`.
+**Result 2026-10-08 (`open_kernels_v6`, the two-position image).** `--verify-check 40` PASS on
+short.ids and on prompt512 `--gemm-block`. Cost at ctx ~512 (`--bench-verify 10`, clean, min): a
+2-position pass 190.4-190.8 ms against a step of 158.2-159.9 ms. History:
+`plans/archive/bonsai2-speculative.md`.
+
+**Result 2026-10-12 (`open_kernels_w4h`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`, width 4).**
+Program memory of the nine streams (identical core ELFs): main cores 16,320 of 16,384 B, attention
+core 0 15,440, glue 16,096, norm 4,704, post 5,856. `--verify-check 48` PASS on short.ids and on
+prompt512 `--gemm-block` (n cycling 2, 3, 4; 47 logit rows each, every one memcmp-identical). CLI
+`--spec` on == off on six cases (up to 4.00 tokens a pass on prompt512), and `oflm serve` spec
+0 / 1 / `--spec` on four prompts identical, a sampled request served. Cost at ctx ~512
+(`--bench-verify 10`, minimum, quiet machine: CPU 30% or less before and after each run, rounds
+with a background job or a load spike discarded, three rounds interleaved): step 164.2-165.0 ms;
+2 positions 197.0-199.1 ms (the v6 image 195.7); 3 positions 230.5-231.2 ms; 4 positions
+261.3-261.5 ms. Each added position costs 31-33 ms: per dispatch the linear layer's `vlx` grows
+0.57 ms a position (48 layers, 27 ms), the full layer's `vax` 0.27 ms (16 layers, 4 ms), the tail
+nothing. A 4-position pass is 1.59 times a step. The 2-position pass did not get cheaper than
+v6's (one S read, one window walk and the parallel argmax saved host time, the weight pass
+dominates); per-position cost stays above the 20-25 ms the four-token tile would need.
+History: `plans/archive/bonsai2-speculative.md`.
+
+### OPEN-DECODE-TAPS: the target's residual at declared layers, kept for the drafter
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp` `set_taps()` / `tap_row()` and the hooks in `step_impl`, `verify`, `accept`, `step_gemm_prompt`, `step_block_moe`; `src/open_qwen36/tap_ring.hpp`; `cli.cpp` `--taps` / `--taps-out`)
+**Verification:** test (the ring, `src/open_qwen36/taps_test.cpp`, ctest `OPEN-DECODE-TAPS`, run by `build.cmd`) + manual (the three routes on the NPU, below)
+**Tests:** `src/open_qwen36/taps_test.cpp`
+
+A drafter that conditions on the target's hidden states (OPEN-DRAFT-DFLASH2: five taps per position)
+needs the target's residual stream at a few layers for every position the target runs. `Core::set_taps(layers,
+window = 2048)` turns that on: the residual **after** each listed 0-based layer has finished (its attention
+and FFN adds both in), as f32 `[hidden]`, for every position a decode step, a verify pass or a block prefill
+runs. `tap_row(pos)` returns position `pos`'s taps, the listed layers back to back in the order given
+(`tap_width() = tap_count() * hidden` floats), or nullptr. The layer ids are the drafter's
+`target_layer_ids` (Ternary Bonsai 2 27B: 5, 19, 33, 47, 61; llama.cpp stores these as the inputs of
+layers 6, 20, 34, 48, 62, which is the same tensor). The residual is the engine's own, unrotated.
+
+- **A ring of the last `window` positions.** Row p % window holds position p. A position is held once
+  every tap of its pass is written and until a later position takes its row. Nothing is held for a
+  position that was never run, that is older than the window, or whose pass did not finish.
+- **No kernel changes.** Every layer is one dispatch writing `xres` (`vxres` for a verify pass) in
+  place, so a tap is a host copy between two dispatches. A step or verify pass therefore queues no
+  dispatch behind a tap layer (the next layer would overwrite the residual) and waits for it, reads the
+  residual back and copies it out; with taps off the walk is the one it always was and the kernel set is
+  untouched.
+- **A verify row is a step's.** Row j of `verify(ids, n)` holds, byte for byte, the taps a `step()` at that
+  position holds (the pass is bit-identical, OPEN-DECODE-SPECULATIVE-VERIFY). `accept(m)` takes back rows
+  m.. of the last verify pass: `tap_row` of those positions is nullptr until a later pass writes them.
+- **Block prefill** writes the taps of the last `min(prompt, window)` positions: both schedules
+  (layer-major `step_gemm_prompt`, block-major `step_block_moe`) copy the layer's output rows after the
+  layer. These come from the bfp16 GEMM route and differ numerically from the decode route's, like its
+  logits do. The dense-family block route (`step_gemm_block_layer`) refuses taps.
+- `reset()` empties the ring. `restore(s)` drops the rows of positions from `s.pos` on and keeps the ones
+  before it, which are the snapshot's only if the history that led here shares the snapshot's prefix:
+  the caller that cannot tell clears them (`clear_taps()`; `Engine::restore` does, when its token
+  history disagrees with the snapshot's, OPEN-DRAFT-DFLASH2-SYNC).
+- **Cost.** Taps off: nothing (a flag test, no kernel change). Taps on: five host waits and copies of
+  20 KB per row per step or verify pass (about 2 ms a pass), and one 20 KB-per-row copy per tap layer in a prefill.
+
+**Acceptance criteria (test, `taps_test.cpp`):**
+- A ring of 3 taps x 6 floats and a window of 8: after 20 one-position passes, positions 12..19 hold
+  exactly the values written, positions 0..11, 20 and -1 hold nothing.
+- A 4-position verify pass then `drop(2)`: positions 20, 21 held, 22, 23 not; a later 3-position pass from
+  22 holds its own rows and the kept ones; `drop(3)` drops nothing; `drop` after a plain step, or twice,
+  changes nothing.
+- A pass begun and never ended holds nothing for its rows and leaves the others; `clear()` empties the ring.
+- `truncate(pos)` drops the rows from `pos` on and keeps the ones before it.
+- A prefill of 20 positions from 5 into a window of 8 writes positions 17..24 and evicts the rows the earlier
+  positions held; a prefill shorter than the window keeps the positions before it.
+- No taps (`configure(0, ...)`) is off and holds nothing.
+
+**Verification (manual):**
+1. **Step vs the engine's own prefix (the capture is the residual).** `open_qwen36_cli --model <Bonsai lmhead
+   container> --kernels <set> --ids-file short.ids --max-tokens 1 --taps dflash2 --taps-out full.bin`, then for
+   each L in 5, 19, 33, 47, 61 the same with `--layers L+1 --residual-out prefix_L.bin` (no `--taps`): the
+   prefix run's residual after every prompt step must equal `full.bin`'s tap for L, byte for byte.
+2. **Step vs verify.** `--ids-file short.ids --verify-check 48 --taps dflash2` and `--ids-file prompt512.ids
+   --gemm-block --verify-check 48 --taps dflash2`: every verify row j before the wrong draft, and every plain
+   step, holds the taps of the reference step at its position (memcmp), and no tap is held for a row accept()
+   dropped. The run prints `VERIFY CHECK PASS` and the tap row count.
+3. **Against llama.cpp (the convention).** Feed the engine a PrismML llama.cpp run's prompt and greedy tokens
+   (`--ids`, `--taps-out`, step route) and compare with the `.taps` dump of the same ids (`tf3.exe`, `DACC_DUMP`):
+   cosine per position and tap above 0.999 for layers 5, 19 and 33; the two deeper taps carry both engines'
+   numerics (a few rows lower, see the result).
+4. **Block prefill.** `--gemm-block --taps dflash2 --taps-out blk.bin` against the step route's on the same ids:
+   report cosine per tap (the prefill route's own drift). A prompt longer than the window (`first_pos` in
+   `blk.bin.txt` = prompt - 2048) checks the slice against llama.cpp's rows.
+5. **Cost.** `--bench-verify N --verify-n n` with and without `--taps dflash2` (interleaved, on a quiet box:
+   no other NPU job, `--taps` the only difference) and prefill of prompt512 and a 2600-token prompt with
+   `--gemm-block` with and without.
+
+**Result 2026-10-12 (`open_kernels_w4h`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`, taps 5, 19, 33, 47, 61).**
+- Step vs the prefix runs (1): byte-identical at all five taps, 20 positions of `short.ids`.
+- Step vs verify (2): `--verify-check 48 --taps dflash2` on `short.ids` and on `prompt512.ids --gemm-block`: 47 logit
+  rows and 47 tap rows each memcmp-identical, 17 verify passes (n = 2..4, wrong drafts at rotating positions),
+  no tap held for a dropped row.
+- llama.cpp (3), PrismML runs of chat_1, reason_1 (200 positions each) and code_1, doc_1 (640 each), step route:
+  per-position cosine at layers 5 / 19 / 33 never below 0.9999 / 0.9999 / 0.9992 (code_1 layer 33: 0.9997); at layers 47 / 61 the mean is
+  0.9998-0.9999 and 0-14 of 640 rows are under 0.999 (worst 0.934 / 0.954, on ordinary tokens whose massive
+  channel 3994 differs by 10-40% between the two engines). The convention is the layer output: the same
+  comparison one layer early is not close.
+- Block prefill (4), layer-major: on `short.ids` cosine against the step route is 0.9999 at every tap; on
+  `prompt512` 0.9999 at layers 5 / 19, then 36, 131 and 117 of 512 rows under 0.999 at layers 33 / 47 / 61 (means
+  0.9996 / 0.9964 / 0.9954, the bfp16 GEMM route's drift, growing with position). A 2600-token prefill holds
+  positions 552..2599 and those rows match llama.cpp's (layer 61 mean 0.9992). Through the D0 drafter reference
+  (k = 7), the drafts from the block route's taps equal the step route's in 70 of 71 positions of prompt512 (first
+  token 71 of 71); the step route's taps against llama.cpp's give 51 of 54 identical drafts on code_1.
+- Cost (5), clean rounds, no other NPU or GPU job, system CPU 28-38%: taps off is the pre-taps CLI (verify of 4 positions
+  251.4 ms vs 251.0-251.6). Taps on adds about 2 ms a pass: verify of 2 +1.8..+3.8 ms (of ~192), of 3 +0.0..+1.2 (of
+  ~225), of 4 +2.0..+2.3 (of ~251), step +0.7..+2.9 (of ~162): about 1%. Prefill of prompt512 and of 2600 tokens: within
+  run-to-run noise (4.43-4.71 s and 25.5-25.8 s, taps on and off interleaved).
 
 ### OPEN-DECODE-SPECULATIVE: speculative greedy decode, opt-in and declared per model, with the same output
 **Applies to:** openflowlm-next (`src/open_qwen36/spec.hpp`, `cli.cpp`, `engine.cpp`; `src/include/causal_lm.hpp` `forward_speculative`; `src/common/AutoModel/automodel.cpp` `_spec_*`, `speculative_unavailable` and the decode loops of `_shared_generate` and `modeling_qwen3_5vl.cpp`; `src/src/main.cpp` and `src/include/utils/vm_args.hpp` `--spec`)
@@ -4746,16 +4865,21 @@ it on and off**, token for token: a wrong draft token only shortens the pass.
 
 - **Opt-in.** Off by default. `open_qwen36_cli --spec` (`--spec-method M`, default `lookup`;
   `--spec-width N`, default the kernel set's verify width, else 4; `--spec-ref` forces the
-  reference verifier; `--spec-log` prints one line per pass). In the app, `OFLM_OPEN_SPEC=1` or
+  reference verifier; `--spec-log` prints one line per pass; `--spec-method dflash2` also takes
+  `--draft <drafter container>` and `--draft-kernels <its kernel set>`, and the run's `spec:` lines then
+  give the tokens-per-pass histogram, the drafter's block pass and cache-row times, and the last block
+  pass's breakdown). In the app, `OFLM_OPEN_SPEC=1` or
   `oflm serve|run --spec` (which sets the variable); `OFLM_OPEN_SPEC_WIDTH` overrides the width
   (>= 2), `OFLM_OPEN_SPEC_REF=1` forces the reference verifier.
 - **Declared per model.** Speculative decode runs only for a model whose registry entry declares
   a method (`"speculative": {"method": "lookup"}`, written by `oflm add`,
   OPEN-REGISTRY-SPECULATIVE) that this build knows and whose kernel set can serve it: `lookup`
-  needs the verify program. `spec::spec_availability(entry, manifest)` decides, and gives one of
-  three answers: available; unavailable, with the reason (the entry declares no method, no open
-  kernel set was found, the set has no verify program); or an error for a method this build does
-  not know, naming the ones it does. Without the flag or the variable the field is not read.
+  needs the verify program; `dflash2` needs it too, plus the drafter container the entry's `draft`
+  names, with its own kernel set. `spec::spec_availability(entry, manifest, resolve)` decides, and
+  gives one of three answers: available; unavailable, with the reason (the entry declares no method,
+  no open kernel set was found, the set has no verify program, the drafter is not installed or was
+  trained for another target); or an error for a method this build does not know, or a `dflash2`
+  with no `draft`, naming what is wrong. Without the flag or the variable the field is not read.
   - `oflm run|serve <model> --spec` checks the model it names before the NPU is touched (the
     registry entry and the kernel manifest; no weights) and refuses to start unless it is
     available: `[ERROR] --spec: speculative decode is not available for <tag>: <reason>`, exit 1.
@@ -4776,11 +4900,15 @@ it on and off**, token for token: a wrong draft token only shortens the pass.
   argmax, to the app.)
 - **The drafter** sits behind `spec::Drafter`: `propose` up to k tokens to follow the token the
   pass will feed, given every token the engine has fed, and `observe` the tokens a pass kept;
-  `make_drafter(method)` builds the declared one. Method `lookup`, the only one so far, is
+  `make_drafter(method)` builds the declared one. Method `lookup` is
   prompt lookup over every token the engine has fed (prompt and output): the longest suffix of
   length 4 down to 2 that occurred earlier, its most recent earlier occurrence, and the tokens
   that followed it, cut at the end of the history. No suffix of length >= 2 recurs: no draft,
-  and the pass is a plain step. There is no draft model and no MTP head.
+  and the pass is a plain step. Method `dflash2` (OPEN-DRAFT-DFLASH2, `dflash2::Proposer`) turns
+  the target's own taps into drafts: it turns the taps on (OPEN-DECODE-TAPS) when the engine loads,
+  brings its cache to the history before every draft (OPEN-DRAFT-DFLASH2-SYNC) and proposes
+  `verify_width() - 1` tokens; it is built by the engine, not by `make_drafter`, because it needs the
+  core. No hook is needed for a new request, a rewind or a restore: the next `propose` repairs the cache.
 - **Nothing is fed that plain decode would not have fed.** A pass ends after EOS and at the
   request's remaining length (and the context limit), so the engine's context after a request
   equals plain decode's; tokens a pass produced are handed out before a cancel is honoured.
@@ -4811,11 +4939,11 @@ per-position attention rows):
 - A native verify costs one step per position run.
 - `spec_availability`: `{"speculative": {"method": "lookup"}}` with a manifest whose verify
   width is 2 -> available, method `lookup`; no `speculative` field, or `null` -> unavailable,
-  "the registry entry declares no speculative method"; `{"method": "dflash2"}` -> error
-  "unknown speculative method "dflash2" (this build knows: lookup)"; a `speculative` without a
+  "the registry entry declares no speculative method"; `{"method": "mtp"}` -> error
+  "unknown speculative method "mtp" (this build knows: lookup, dflash2)"; a `speculative` without a
   `method` -> error naming `lookup`; `lookup` with a manifest without a verify program ->
   unavailable, "the kernel set has no verify program, which method "lookup" needs"; no kernel
-  set -> unavailable.
+  set -> unavailable. The `dflash2` cases are OPEN-REGISTRY-SPECULATIVE's.
 - `make_drafter("lookup")` proposes `[7,8,9]` from fed `[5,6,7,8,9,5]` and next `6`;
   `make_drafter` of a method this build lacks builds nothing.
 
@@ -4844,26 +4972,30 @@ per-position attention rows):
    at load, a greedy request answers, and no `speculative decode: T tokens` line follows. (d)
    `open_qwen36_cli --spec-method mtp` exits 2 naming `lookup`; `--spec` against a kernel set
    without a verify program exits 2 naming the missing verify program.
+5. **Method `dflash2`.** Install the drafter: `oflm add <Bonsai container> --tag <tag> --speculative
+   dflash2 --draft-model <drafter container>` (the container from `q4nx-build --dflash2-drafter`, its kernel
+   set built by `export_qwen36_kernels.py`; OPEN-REGISTRY-SPECULATIVE). (a) CLI gate with `--spec
+   --spec-method dflash2 --draft <drafter container> --draft-kernels <its set> --spec-width N`, N = 2, 3, 4,
+   the six cases of gate 1: tokens identical to the run without `--spec`. The `spec:` lines give the
+   tokens-per-pass histogram, the drafter's block pass and cache-row times. (b) Serve gate 2 through the
+   entry above, with `--spec`: content identical to the plain run; a `temperature 0.7` request does not
+   speculate; `oflm serve <undeclared tag> --spec` is refused as in 4(b), and so is the drafter with its
+   kernel set missing. (c) Speed as gate 3, per class, against `--spec-method lookup` and no speculation, at
+   widths 2 to 4, with the CPU sampled around every run and busy rounds dropped.
 
-**Result 2026-10-08 (the same container, `open_kernels_v6`).** Both gates PASS: identical tokens on
-all six CLI cases (`short` and `prompt512` also equal their reference lists), identical content on
-all four serve prompts through the variable and two through `--spec`, and a `temperature 0.7`
-request does not speculate. Speed, three rounds under the timing lock, all CLEAN, 256 generated
-tokens, median decode tok/s off -> on:
-
-- CLI: code 5.85 -> 9.19 (1.57x), doc 5.91 -> 7.03 (1.19x), reasoning 6.41 -> 6.96 (1.09x),
-  chat 6.34 -> 6.46 (1.02x).
-- `oflm serve`: code 5.81 -> 8.74 (1.50x), doc 5.85 -> 6.54 (1.12x), reasoning 6.36 -> 6.66
-  (1.05x), chat 6.34 -> 6.55 (1.03x).
-
-Chat sits near breakeven: its drafts are accepted about one time in three, and a rejected draft
-costs the pass's extra ~32 ms, and an accepted one saves a step less that, ~125 ms. History:
+**Results** (CLI, 256 tokens, 3 clean rounds, decode tok/s, spec off -> on; the tokens are identical on all six
+CLI cases and the serve prompts, and a `temperature 0.7` request does not speculate). Lookup at width 2 on
+`open_kernels_v6` (2026-10-08): code 5.85 -> 9.19 (1.57x), doc 1.19x, reasoning 1.09x, chat 1.02x. Method
+`dflash2` at width 4 on `open_kernels_w4h` (2026-10-13): chat 6.06 -> 9.43 (1.56x), code 5.59 -> 9.76
+(1.75x), doc 5.61 -> 9.01 (1.61x), reasoning 6.06 -> 9.74 (1.61x); `oflm serve` 1.26x / 1.43x / 1.46x / 1.53x
+on its own prompts. Prompt lookup at width 4 beats it on code (12.84 tok/s, 2.30x). The per-width,
+per-pass and serve tables and the history are in `plans/archive/bonsai2-dflash2.md` and
 `plans/archive/bonsai2-speculative.md`.
 
 ### OPEN-REGISTRY-SPECULATIVE: `oflm add` declares a model's speculative method from its kernel set
-**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `speculative_field`, `choose_open_kernels`, `--speculative`)
-**Verification:** test
-**Tests:** `utilities/oflm-add/tests/test_speculative.py`
+**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `speculative_field`, `choose_open_kernels`, `install_draft`, `--speculative`, `--draft-model`; `src/open_qwen36/spec.hpp` `resolve_draft`, `spec_availability`)
+**Verification:** test (`oflm add`'s entry and install, the engine's availability rule)
+**Tests:** `utilities/oflm-add/tests/test_speculative.py`, `src/open_qwen36/spec_test.cpp`
 
 Speculative decode (OPEN-DECODE-SPECULATIVE) has two declarations with two owners. The kernel
 manifest says what the kernels can do: its `verify` block (OPEN-DECODE-SPECULATIVE-VERIFY), and
@@ -4880,9 +5012,25 @@ drafter the model uses:
 written only when the kernel set has what it needs (`lookup`: a verify program); otherwise the
 command is refused, naming what is missing, before the registry is written. Re-adding a model
 rewrites its entry, this field included. Later methods -- an MTP head inside the container
-(`{"method": "mtp"}`), a draft checkpoint trained for the target (`{"method": "dflash2", "draft":
-"<tag>"}`), a separate draft model -- are further values here, each with what it needs from the
-manifest.
+(`{"method": "mtp"}`), a separate draft model -- are further values here, each with what it needs
+from the manifest.
+
+**Method `dflash2`** (OPEN-DRAFT-DFLASH2) is written as `{"method": "dflash2", "draft": "<name>"}`, where
+`<name>` is the directory of the drafter container under the models root (a directory path also
+resolves). `oflm add <model> --speculative dflash2 --draft-model <drafter container dir>` (or
+`--draft-model` alone) shall, before it writes the registry: require the target's kernel set to have a
+verify program; require the drafter to be a drafter container (`config.json` with `model_type` `dflash2`,
+`model.q4nx`) trained for this target (the same `hidden_size` and `vocab_size`, tap layers that exist in
+its `num_hidden_layers`); find the drafter's own open kernel set by its `spec_hash`, like any model's
+(kernels belong to families), and refuse with the `export_qwen36_kernels.py` command when none is
+installed. Then it copies the drafter container beside the model, links the set at
+`<drafter dir>/open_kernels`, and writes the entry. The engine resolves `draft` the same way
+(`spec::resolve_draft`: a directory, else a name beside the model; the kernel set is
+`<drafter dir>/open_kernels`, or `OFLM_OPEN_DRAFT_KERNELS_DIR`), and `spec_availability` answers
+available only when the entry names a `draft`, the container and its dflash2 kernel set are there, the
+kernel set has a verify program, and the drafter's hidden size, vocabulary and tap layers fit the
+target; otherwise unavailable with the reason, so `oflm serve --spec` refuses before loading weights.
+No second registry: the drafter has no model entry of its own.
 
 **Acceptance criteria:**
 - A kernel set with a verify program and no flag: the entry has `"speculative": {"method": "lookup"}`.
@@ -4993,3 +5141,176 @@ step. No kernel and no hardware is involved in any of it, which is the point of 
 **Result 2026-10-12 (the mismatched tape).** The throw criterion is now tested: a tape from a
 block of another `t_real`, and a tape with an oversized per-token array, both throw. Both
 replayed silently under the first version's at-least-this-big size checks.
+
+- `--speculative dflash2 --draft-model D` (and `--draft-model D` alone): the entry has `{"method":
+  "dflash2", "draft": "<D's name>"}`, D's `config.json` and `model.q4nx` are beside the model, and
+  `<D>/open_kernels` resolves to the drafter's kernel set.
+- Refused, no registry written: dflash2 on a kernel set without a verify program; a drafter whose hidden
+  size differs from the target's; a drafter that taps layer 99 of a 64-layer target; a drafter with no
+  installed kernel set (the message carries the build command); `--speculative dflash2` without
+  `--draft-model`; `--draft-model` with `--speculative lookup`; a drafter whose `model_type` is not `dflash2`.
+- `spec_availability` (`spec_test.cpp`): dflash2 with a verify program, a named drafter that is installed with
+  a dflash2 kernel set and a matching hidden size / vocabulary / tap layers -> available, with the resolved
+  directories; no `draft` -> error naming it; a drafter that is not installed -> unavailable, "is not
+  installed"; no verify program, another hidden size, a tap layer past the target's last layer, or a caller
+  with no way to look for a drafter -> unavailable. `resolve_draft` resolves a name beside the models, a
+  directory path, and refuses a container of another model type, a kernel set of another family, and a
+  missing directory, each with its reason.
+
+### OPEN-DRAFT-DFLASH2: the DFlash 2 block drafter runs on the NPU
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2.{hpp,cpp}` (`Drafter`, and `Proposer`, its `spec::Drafter`),
+`dflash2_host.{hpp,cpp}`, `engine.cpp`, `cli.cpp` `--draft` / `--spec-method dflash2`,
+`open_kernels/designs/gemv_t2n/`, `open_kernels/recipes/dflash2.py`, `utilities/dflash2_ref.py`)
+**Verification:** manual (the drafts against the reference); the walk and the GEMV tables have their own
+`test` requirements below
+
+The ternary DFlash 2 drafter for Ternary Bonsai 2 (z-lab's design, naklitechie's Bonsai tune, made ternary in
+the 1024-block Hadamard basis by `utilities/dflash2_train.py`) shall run with every matrix on the NPU and the
+rest on the host, borrowing the target's embedding and its rotated t2 lm head (`lmpool`):
+
+- **Injection, once per committed target position p:** the target's residual after its layers
+  `target_layer_ids` (0-based, unrotated), concatenated, through `fc` and `hidden_norm`; then every layer's
+  K = rope(k_norm(Wk g), p) and V = Wv g into the drafter's cache, rounded to f16. Rows older than the
+  sliding window (2048) are dropped.
+- **A draft:** the block [the last committed token, MASK x 7] at positions p0 .. p0 + 7, embedded with the
+  target's embedding; five layers of norm -> conv_proj -> dynamic 2-tap conv (inside the block only) ->
+  q|k|v -> q/k norm, NeoX RoPE (theta 1e7, all 128 dims) -> attention over the cached rows with p0 + t - p <
+  2048 and every block row -> o -> conv -> residual -> norm -> conv_proj -> conv -> gate|up -> silu * up ->
+  down -> conv -> residual; the final norm; the head on the block rows; top-16 per row and the selector
+  lattice; the greedy walk (OPEN-DRAFT-DFLASH2-WALK). The block is always eight rows and a draft of k tokens
+  is the walk's first k.
+- **The matrices** run on `gemv_t2n` (OPEN-GEMV-T2N), one hardware context for the drafter, one instruction
+  stream per shape: fc 5120 x 25600, every layer's K|V for injection at once 10240 x 5120, conv_proj
+  1280 x 5120, q|k|v 6144 x 5120, o 5120 x 4096, gate|up 34816 x 5120, down 5120 x 17408, the head
+  248320 x 5120.
+
+- **In the engine** (method `dflash2` of OPEN-DECODE-SPECULATIVE) the drafter is a second hardware context on the
+  target's device, built when the weights are resident, which also turns the target's taps on
+  (OPEN-DECODE-TAPS; the drafter's `target_layer_ids`, a ring of its window). Each pass the engine hands it the
+  history and the token to feed; `Proposer::propose` brings the cache to that history (OPEN-DRAFT-DFLASH2-SYNC)
+  and returns `verify_width() - 1` tokens from the 8-row block, cut at the first id the tokenizer does not
+  have. A token it cannot embed (outside the real vocabulary) is no anchor: no draft, a plain step. The verify
+  pass decides every token, so the output is the target's, whatever the drafter says.
+
+The drafter needs no exactness: a different numeric only moves acceptance. So the gate is agreement with
+the reference, not byte identity.
+
+**Verification (manual):**
+1. Taps: `tf3.exe` (d01's teacher-forcing tool over PrismML llama.cpp, HIP) with the fine-tuned drafter,
+   `DACC_DUMP` on, over the 20 prompts (dacc's `prompts/*.txt`, 512 tokens each): every position's taps and
+   the target's greedy trajectory.
+2. Reference: `python utilities/dflash2_ref.py drafts --run <run> --drafter <ft.gguf> --target <PQ2_0.gguf>
+   --pids <20> --stride 2 --out ref.jsonl` (an 8-row block per step, the walk's 7 tokens and margins).
+3. NPU: `open_qwen36_cli --model <Bonsai container> --kernels <its set> --layers 1 --draft <drafter container>
+   --draft-kernels <dflash2 set> --draft-run <run> --draft-pids <20> --draft-stride 2 --draft-out npu.jsonl`.
+4. `python utilities/dflash2_ref.py compare --run <run> --npu npu.jsonl --ref ref.jsonl --k 3 7`: at k = 3
+   and k = 7, at least 99% of drafts identical in all k tokens once near-ties are excepted (a selector
+   margin under 0.1 at the first differing row, or a top-16 boundary swap), and teacher-forced tokens per
+   pass within 2% of the reference's.
+5. Time one pass (k = 7, the 8-row block): `--draft-bench N`, with nothing else heavy running (CPU under 15% and
+   no other NPU process: another session's NPU context or CPU job moves every number by 2-20x).
+6. In the engine: OPEN-DECODE-SPECULATIVE's verification item 5 (tokens identical to spec off at widths 2-4, the
+   speed per class). `--draft-run` (with `--draft-pids`) selects the gate above; `--draft <dir>` with `--spec
+   --spec-method dflash2` drafts for a real decode.
+
+**Result 2026-10-12/13.** Against the reference (fine-tuned t2 drafter, llama.cpp taps): k = 3 99.60% of 2495
+drafts identical (100% excluding near-ties), k = 7 98.40% (99.76%), tokens per pass within 0.06%; the shipped
+FT-3 weights 373/373 on three prompts. A drafter pass is 42 ms on a quiet box (matrices 30.3 of it, the 248k head
+11.3) plus 6 ms to put 8 committed rows into the cache. In the engine: 47 ms and 7 ms at a short context, 69 ms
+and 7 ms at a full window (host attention), the prompt's rows going in once at ~0.85 ms a row. Per-pass
+breakdown, the DMA-floor analysis and the end-to-end tables: `plans/archive/bonsai2-dflash2.md`.
+
+### OPEN-DRAFT-DFLASH2-WALK: the selector walk picks the draft path
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2_host.cpp` `walk`)
+**Verification:** test
+**Tests:** `src/open_qwen36/dflash2_test.cpp` (`walk_tests`, `top16_tests`)
+
+The lattice of a draft holds, per draft row i, the head's top 16 candidates (descending, the lower id first
+on a tie) and score[i][p][s] = next[cand_s] . (prev[pred_p] * gate_i) + logit[cand_s], where row 0's only
+predecessor is the anchor. The walk shall be common/speculative.cpp's greedy one (beam 1, p_min 0): row 0
+reads predecessor column 0, row i reads the column of the slot row i - 1 chose, the highest score wins and
+the lowest slot on a tie, one token per row.
+
+**Acceptance criteria:**
+- A larger score in another predecessor column of row 0 is not read; row 1 reads column s0, the slot row 0
+  chose, whatever column 0 holds.
+- Two equal best scores in a row: the lower slot wins.
+- The margins along the walk are the winner's score minus the best other slot's in the column read.
+- top16 returns the 16 largest values descending, the lower id first on a tie.
+
+### OPEN-DRAFT-DFLASH2-SYNC: the drafter's cache follows the engine's history
+**Applies to:** openflowlm-next (`src/open_qwen36/dflash2_host.hpp` `plan_sync`, `dflash2.cpp` `Proposer`, `core.cpp` and `engine.cpp` `restore`)
+**Verification:** test (`plan_sync`) + manual (the end-to-end gates of OPEN-DECODE-SPECULATIVE, item 5)
+**Tests:** `src/open_qwen36/dflash2_test.cpp` (`sync_tests`)
+
+Before every draft whose anchor token sits at position P = (tokens fed), the drafter's cache shall hold, for
+the positions [max(0, P - 2048), P) of the history, the taps the target wrote at each, and nothing else.
+`plan_sync(cached, base, fed, window, has_taps)` decides from the token ids the cache holds: keep the longest
+prefix that still equals `fed`; take the taps of the positions after it from the target (`Core::tap_row`),
+at most a window's worth; a position whose taps the target has lost (a prompt longer than its tap ring, an
+image prompt, a rewind past the ring) restarts the cache after it; with no taps for the last position and
+nothing cached there is no draft and the pass is a plain step. So nothing has to tell the drafter about a
+new request, a prompt cache `restore`, a sampled stretch it did not draft in, or a rejected draft: the next
+`propose` repairs the cache from the history. Rows go in by 64, eight to a cache dispatch pair.
+
+**Acceptance criteria (`dflash2_test.cpp`):** an empty cache takes every position; a cache that is the
+history takes only the new rows; one that is up to date takes none; a different token at 60 rewinds it
+to 60; a request that rewound below the cache drops the rest; a 5000-token history injects the last 2048
+only, restarting a cache that ended before the window and extending one inside it; a position the target
+lost restarts the cache after it, unless the cache already covers it; no taps for the last position with
+nothing cached, or an empty history, gives no draft; a cache that begins late is extended from its end.
+
+### OPEN-GEMV-T2N: eight rows through a ternary GEMV, on the host's tables
+**Applies to:** openflowlm-next (`open_kernels/designs/gemv_t2n/`, `src/open_qwen36/dflash2_host.cpp`
+`build_records`, `build_tables`, `reduce_y`)
+**Verification:** test (the host tables and the y layout, against a CPU model of the kernel's contract) and
+manual (the kernel on the NPU)
+**Tests:** `src/open_qwen36/dflash2_test.cpp` (`table_tests`)
+
+`gemv_t2n` shall compute Y[8, N] = X[8, K] W[N, K]^T on the t2 pool (OPEN-QUANT-T2's 2176 B chunks in
+std_perm band order) for every shape the drafter has, on one xclbin: eight cores, each with its own weight
+stream (lm_head_t2's dataflow), work split into items of (64-row bands, a K slice of at most 8 k-tiles) by
+`t2n_plan.plan`, which both the design and the manifest use. The host builds, per (k-tile, 128-group, token
+quad), int16 values at one shift for the quad, each token's integer group sum and the shift; the
+mmul<4, 8, 8, int16, uint8>'s four rows are the quad's tokens, field j's product is 4^j sum(x code), and
+(C_j >> 2j) - sum(x) is the product with (code - 1), exact in int32. Items over different K slices of a band
+are partial sums the host adds.
+
+**Acceptance criteria:**
+- Tables built from x [8][K] and fed through the kernel's contract on the CPU, then `reduce_y`, give
+  W x within 1e-4 of each row's magnitude (fp64 reference), rows of different scales included, with K split
+  into slices and bands over items.
+
+**Verification (manual):** `designs/gemv_t2n/make_test.py --n N --k K` (random ternary weights, eight rows at
+scales up to e^+-3 apart), `run_kernel.exe test/run.cfg`, `make_test.py --compare`: cosine above 0.99999 on
+every row against the fp64 product of the table's own values, at every shape the drafter runs.
+
+### OPEN-CONVERT-DFLASH2: q4nx-build converts the ternary DFlash 2 drafter
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/dflash2.py`, `cli.py` `--dflash2-drafter`)
+**Verification:** test
+**Tests:** `utilities/q4nx-build/tests/test_dflash2.py`
+
+`q4nx-build -i <drafter.gguf> --dflash2-drafter --target-gguf <target PQ2_0.gguf> [--drafter-codes <ckpt.pt>]
+-o <dir>` shall write `model.q4nx` and `config.json` (model_type `dflash2`): fc and every layer's q, k, v, o,
+gate, up, down and both conv_proj as exact-ternary q4_1 in the Hadamard basis (q = code, d = s, m = -s, the
+converter's own chunk layout), norms and conv_base as f32, the selector tables as bf16, and the target's
+5120-wide signs folded into the output norm and the selector gate's columns (the borrowed head reads
+H(s * hn), the gate reads hn). The codes come from the trainer's checkpoint when given (checked against the
+GGUF), else from the GGUF's bf16 weights, whose W Hn recovers them; a GGUF that is not ternary in that basis
+is refused. `target_layer_ids` is the tap convention (the output of 0-based layer L), one less than the
+layer numbers llama.cpp's GGUF lists.
+
+**Acceptance criteria:**
+- `pack_q4_1` gives byte for byte what the converter's `_pack_q4nx` gives for the same (d, -d, codes), and
+  decodes by the pool law (`(r >> 4) * 4096 + k * 16 + (r & 15)`, d at g * 32 + r, m = d with the sign bit
+  flipped).
+- bf16(((codes - 1) s) Hn) gives back the codes and the bf16 scales exactly; a dense matrix is refused.
+
+**Result 2026-10-12:** `make_test.py --n 6144 --k 5120` (10 items over 3 K slices): cosine 1.000000000, maxrel
+2.55e-6, the argmax of every row equal; one core program of 4,240 of 16,384 B serves all eight shapes (the eight
+xclbins differ only in build stamps). **Not done, and why:** four cores a column (the weight stream split over
+them in the memtile) would make the kernel DMA-bound instead of compute-bound, but a round's fill
+[group][k-tile][band][4,352 B] is five loops against the shim's four (and its inner run must stay under 1,023
+32-bit words), so it needs either a drafter-specific pack order or a K split across the column's cores with an
+on-chip sum.
+

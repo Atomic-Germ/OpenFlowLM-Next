@@ -62,6 +62,20 @@ if errorlevel 1 goto :clfail
 set "WHICH=gguf_pack_test"
 out\gguf_pack_test.exe
 if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] taps_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" taps_test.cpp /Fe:out\taps_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=taps_test"
+out\taps_test.exe
+if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] dflash2_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 ^
+   /I ".." /I "..\include" dflash2_test.cpp dflash2_host.cpp /Fe:out\dflash2_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=dflash2_test"
+out\dflash2_test.exe
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^
@@ -80,7 +94,7 @@ REM C:\dev\XRT source checkout (no XRT build step run in it) never produces,
 REM and cl fails with C1083 before ever reaching this file's own code.
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   q4nx_file.cpp gguf_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   q4nx_file.cpp gguf_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp dflash2_host.cpp dflash2.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_qwen36_cli.exe /Fo:out\ ^
    /link /DELAYLOAD:VCOMP140.DLL delayimp.lib
 if errorlevel 1 goto :clfail

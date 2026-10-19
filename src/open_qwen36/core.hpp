@@ -47,6 +47,7 @@
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 #include "open_qwen36/weight_file.hpp"
+#include "open_qwen36/tap_ring.hpp"
 #include "stream_patch.hpp"
 #include "open_qwen36/verify_slots.hpp"
 
@@ -282,16 +283,32 @@ public:
 
     /// 0 = the kernel set has no verify program, or OFLM_OPEN_VERIFY=0 (OPEN-DECODE-SPECULATIVE-VERIFY).
     size_t verify_width() const { return vw_; }
-    /// Each position's logits are bit for bit a step()'s; n = 1 is a decode step.
+    /// Each position's logits are bit for bit a step()'s; n = 1 is a decode step. argmax_out may be null.
     void verify(const int* ids, size_t n, int* argmax_out);
     /// Later KV rows are dead: attention reads only rows below pos_.
     void accept(size_t m);
-    const std::vector<float>& verify_logits(size_t i) const { return vlogits_.at(i); }
+    /// Copied from the device buffer on first use after each pass.
+    const std::vector<float>& verify_logits(size_t i) const;
 
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
     const WeightFile& file() const { return *file_; }
+    /// A manifest global's device buffer: the DFlash 2 drafter streams `lmpool` (OPEN-DRAFT-DFLASH2).
+    xrt::bo& global_bo(const std::string& name) { return globals_.at(name); }
+    xrt::device& device() { return *dev_; }
+
+    /// OPEN-DECODE-TAPS: keep the residual after each of `layers` (0-based, caller's order) for the last `window` positions; empty = off.
+    void set_taps(const std::vector<int>& layers, size_t window = 2048);
+    size_t tap_count() const { return tap_layers_.size(); }
+    /// Floats per position: tap_count() * hidden, the taps back to back.
+    size_t tap_width() const { return tap_ring_.width(); }
+    /// Position `pos`'s taps (f32, valid until the next pass), or nullptr: off, never run, out of the window, or a row accept() dropped.
+    const float* tap_row(long pos) const { return tap_ring_.row(pos); }
+    /// Forget every held row (the caller knows they are not the history restore() went back to).
+    void clear_taps() { tap_ring_.clear(); }
+    /// Bring-up: the decode buffer after the last step, f32 [hidden].
+    void read_residual(float* dst);
 
 private:
     struct Kern {
@@ -458,7 +475,9 @@ private:
     uint64_t slot_bytes_ = 0;                  ///< one linear-state slot (manifest verify.slot_bytes)
     VerifySlots vs_;
     bool slots_dirty_ = true;                  ///< the decode stream still points at another slot
-    std::vector<std::vector<float>> vlogits_;
+    mutable std::vector<std::vector<float>> vlogits_;
+    mutable unsigned vready_ = 0;              ///< bit i: vlogits_[i] holds the last pass's row i
+    xrt::bo* vbo_ = nullptr;
     /// The committed linear state's byte offset in every linear layer's state buffer.
     size_t lin_off() const { return static_cast<size_t>(vs_.cur) * slot_bytes_; }
     /// Patches either the verify streams or the decode stream, never both, per verify_kernels.
@@ -516,6 +535,12 @@ private:
     bool route_sentinel_ = true;
     uint64_t route_reads_ = 0, route_late_ = 0;
     void arm_route_records();
+
+    // ---- taps (OPEN-DECODE-TAPS)
+    std::vector<int> tap_layers_;              ///< in the caller's order
+    std::vector<int> tap_index_;               ///< per layer: its place in tap_layers_, or -1
+    TapRing tap_ring_;
+    bool tap_on(int l) const { return !tap_index_.empty() && tap_index_[l] >= 0; }
 
     xrt::hw_context& context(const std::string& name);
     void load_kernel(const std::string& name, const KernelDesc& d);

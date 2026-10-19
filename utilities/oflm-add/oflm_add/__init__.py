@@ -27,6 +27,15 @@ the second place open_qwen36::Engine::find_kernels looks. When that set
 carries a verify program, the entry declares speculative decode by prompt
 lookup ("speculative": {"method": "lookup"}); --speculative overrides it.
 
+--speculative takes one method or a comma list in priority order ("lookup,dflash2": prompt lookup drafts when it has a
+draft, the draft model when it has not); the entry is the method's object, or a list of them for several.
+--speculative dflash2 --draft-model DIR installs a DFlash 2 drafter container (config.json +
+model.q4nx, q4nx-build --dflash2-drafter) beside the model, links the drafter's own open
+kernel set (its spec_hash, like any model's) and declares
+"speculative": [{"method": "lookup"}, {"method": "dflash2", "draft": "<drafter directory name>"}]
+(--draft-model alone implies lookup,dflash2). It is refused when
+the target's kernel set has no verify program or the drafter was trained for another target.
+
 The script never rewrites the system model list or the system xclbins; it
 writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
 symlink into ~/.config/oflm/xclbins/ for the new model directory. Custom OFLM
@@ -1393,7 +1402,9 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
 # -------------------------------------------------------- speculative decode
 
 # method -> the kernel manifest block it needs; the registry entry names the method (OPEN-REGISTRY-SPECULATIVE)
-SPECULATIVE_METHODS = {"lookup": "verify"}
+SPECULATIVE_METHODS = {"lookup": "verify", "dflash2": "verify"}
+DRAFT_FILES = ["config.json", "model.q4nx"]
+ALWAYS_DRAFTS = {"dflash2"}   # proposes on every pass: a method listed after it would never run
 
 
 def _manifest_has(kernel_dir, block):
@@ -1405,23 +1416,115 @@ def _manifest_has(kernel_dir, block):
     return isinstance(b, dict) and int(b.get("width", 0) or 0) >= 2
 
 
-def speculative_field(kernel_dir, requested=None):
-    """The entry's `speculative` value for `kernel_dir` and --speculative `requested`; None writes no field."""
-    if requested == "none":
-        return None
+def _read_config(model_dir):
+    try:
+        cfg = load_json(Path(model_dir) / "config.json")
+    except Exception:
+        return {}
+    return cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
+
+
+def check_draft_source(draft_src):
+    """The drafter container directory, or SystemExit saying what is wrong with it."""
+    src = Path(draft_src)
+    if not src.is_dir():
+        raise SystemExit(f"--draft-model {src}: not a directory")
+    missing = [f for f in DRAFT_FILES if not (src / f).is_file()]
+    if missing:
+        raise SystemExit(f"--draft-model {src}: missing {', '.join(missing)} "
+                         "(a drafter container is what q4nx-build --dflash2-drafter writes)")
+    if _read_config(src).get("model_type") != "dflash2":
+        raise SystemExit(f"--draft-model {src}: config.json model_type is not dflash2")
+    return src
+
+
+def check_draft_target(draft_src, target_dir):
+    """SystemExit unless the drafter reads this target: same hidden size and vocabulary, tap layers that exist."""
+    d, t = _read_config(draft_src), _read_config(target_dir)
+    for key in ("hidden_size", "vocab_size"):
+        if d.get(key) != t.get(key):
+            raise SystemExit(f"--draft-model {draft_src}: the drafter was trained for another target "
+                             f"({key} {d.get(key)}, this model has {t.get(key)})")
+    layers = t.get("num_hidden_layers")
+    bad = [i for i in d.get("target_layer_ids", []) if not isinstance(layers, int) or not 0 <= i < layers]
+    if bad:
+        raise SystemExit(f"--draft-model {draft_src}: the drafter taps layer {bad[0]} "
+                         f"but this model has {layers} layers")
+
+
+def install_draft(draft_src, models_root, roots, force=False, quiet=False):
+    """Copy the drafter container beside the models and link its kernel set; the directory name the registry's `draft` holds."""
+    src = Path(draft_src)
+    target = Path(models_root) / src.name
+    spec_hash, note = model_spec_hash(src)
+    if not spec_hash:
+        raise SystemExit(f"--draft-model {src}: cannot derive its kernel spec ({note})")
+    kernel_dir, source = find_open_kernels(spec_hash, roots, src.name)
+    if kernel_dir is None:
+        checkout = open_kernels_checkout()
+        script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
+        raise SystemExit(f"--draft-model {src}: no installed open kernel set has its spec_hash {spec_hash[:19]}; "
+                         f'build one with: python "{script}" --model-dir "{src}"')
+    target.mkdir(parents=True, exist_ok=True)
+    for f in DRAFT_FILES:
+        dest = target / f
+        if dest.is_file() and not force:
+            continue
+        shutil.copy2(src / f, dest)
+    if not quiet:
+        log(f"[INFO] drafter installed at {target}; open kernels from '{source}'")
+    if not link_open_kernels(target, kernel_dir, force=force, quiet=quiet):
+        raise SystemExit(f"could not link the drafter's kernel set into {target}")
+    return src.name
+
+
+def parse_speculative(requested):
+    """--speculative's value as an ordered list of method names: "lookup,dflash2" -> ["lookup", "dflash2"]; "none" -> [];
+    None (no flag) -> None. SystemExit for an unknown method, a repeat, or a method after one that always drafts."""
     if requested is None:
-        return {"method": "lookup"} if kernel_dir and _manifest_has(kernel_dir, "verify") else None
-    need = SPECULATIVE_METHODS.get(requested)
-    if need is None:
-        raise SystemExit(f"--speculative {requested}: unknown method "
-                         f"(known: {', '.join(sorted(SPECULATIVE_METHODS))}, none)")
-    if not kernel_dir:
-        raise SystemExit(f"--speculative {requested}: this model has no open kernel set, "
-                         f"and {requested} needs one with a {need} program")
-    if not _manifest_has(kernel_dir, need):
-        raise SystemExit(f"--speculative {requested}: the kernel set {kernel_dir} has no {need} program, "
-                         f"which {requested} needs")
-    return {"method": requested}
+        return None
+    names = [n.strip() for n in requested.split(",")]
+    if names == ["none"]:
+        return []
+    for n in names:
+        if n not in SPECULATIVE_METHODS:
+            raise SystemExit(f"--speculative {requested}: unknown method {n or '(empty)'!r} "
+                             f"(known: {', '.join(sorted(SPECULATIVE_METHODS))}, none)")
+    for i, n in enumerate(names):
+        if n in names[:i]:
+            raise SystemExit(f"--speculative {requested}: {n} is listed twice")
+        if i and names[i - 1] in ALWAYS_DRAFTS:
+            raise SystemExit(f"--speculative {requested}: {n} is listed after {names[i - 1]}, which drafts on every pass, "
+                             f"so it would never run")
+    return names
+
+
+def speculative_field(kernel_dir, requested=None, draft=None):
+    """The entry's `speculative` value for `kernel_dir`, --speculative `requested` (a comma list in priority order) and the
+    drafter's directory name `draft`; None writes no field. One method is the object {"method": ...}, several are a list of
+    them: the first with a draft drafts (OPEN-DECODE-SPECULATIVE)."""
+    names = parse_speculative(requested)
+    if names == []:
+        if draft:
+            raise SystemExit("--draft-model goes with --speculative dflash2, not none")
+        return None
+    if names is None:
+        if draft:
+            names = ["lookup", "dflash2"]
+        else:
+            return {"method": "lookup"} if kernel_dir and _manifest_has(kernel_dir, "verify") else None
+    if draft and "dflash2" not in names:
+        raise SystemExit(f"--draft-model goes with --speculative dflash2, not {','.join(names)}")
+    if "dflash2" in names and not draft:
+        raise SystemExit("--speculative dflash2 needs --draft-model <drafter container directory>")
+    for n in names:
+        need = SPECULATIVE_METHODS[n]
+        if not kernel_dir:
+            raise SystemExit(f"--speculative {n}: this model has no open kernel set, and {n} needs one with a {need} program")
+        if not _manifest_has(kernel_dir, need):
+            raise SystemExit(f"--speculative {n}: the kernel set {kernel_dir} has no {need} program, which {n} needs")
+    items = [{"method": n, "draft": draft} if n == "dflash2" else {"method": n} for n in names]
+    return items[0] if len(items) == 1 else items
 
 
 # ---------------------------------------------------------------------- main
@@ -1886,9 +1989,11 @@ def main():
     ap.add_argument("--modelscope", action="store_true", help="Treat REPO as a ModelScope repo id (implied by www.modelscope.ai/.cn URLs)")
     ap.add_argument("--open-kernels", help="open kernel set for this model (a directory holding manifest.json); default: the installed set whose manifest spec_hash matches")
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
-    ap.add_argument("--speculative", metavar="METHOD", choices=sorted(SPECULATIVE_METHODS) + ["none"],
+    ap.add_argument("--speculative", metavar="METHOD[,METHOD]",
                     help="speculative decode method for the registry entry (default: lookup when the open kernel set "
                          "has a verify program); 'none' declares none")
+    ap.add_argument("--draft-model", metavar="DIR", help="DFlash 2 drafter container to install beside the model (implies "
+                    "--speculative dflash2): config.json + model.q4nx from q4nx-build --dflash2-drafter")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and exit")
@@ -1910,6 +2015,12 @@ def main():
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
 
+    draft_src = check_draft_source(args.draft_model) if args.draft_model else None
+    methods = parse_speculative(args.speculative)
+    if methods and "dflash2" in methods and not draft_src:
+        raise SystemExit("--speculative dflash2 needs --draft-model <drafter container directory>")
+    if draft_src and methods is not None and "dflash2" not in methods:
+        raise SystemExit(f"--draft-model goes with --speculative dflash2, not {args.speculative}")
     # ---- scan the repo for a compatible GGUF (the GGUF-direct path): a repo
     # that carries llama.cpp-style weights installs one of them as model.gguf;
     # repos that ship model.q4nx take the NPU2 path even if a gguf also sits
@@ -2132,7 +2243,7 @@ def main():
             found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
             print(f"spec hash      : {sh or '(' + note + ')'}")
             print(f"open kernels   : {found or '(none installed)'}")
-            print(f"speculative    : {speculative_field(found, args.speculative) or '(none)'}")
+            print(f"speculative    : {speculative_field(found, args.speculative, draft_src.name if draft_src else None) or '(none)'}")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return
@@ -2267,12 +2378,18 @@ def main():
             override=args.open_kernels,
             quiet=args.quiet,
         )
-    speculative = speculative_field(kernel_dir, args.speculative)
+    speculative = speculative_field(kernel_dir, args.speculative, draft_src.name if draft_src else None)
+    if draft_src:
+        check_draft_target(draft_src, target)
     if speculative:
         entry["speculative"] = speculative
-        log(f"[INFO] speculative decode: method {speculative['method']}")
+        names = ",".join(m["method"] for m in (speculative if isinstance(speculative, list) else [speculative]))
+        log(f"[INFO] speculative decode: {names}")
     else:
         entry.pop("speculative", None)
+
+    if draft_src:
+        install_draft(draft_src, models_root, [user_xclbin_dir(args.xclbin_dir), system_root], force=args.force, quiet=args.quiet)
 
     register(user_list, tag, entry, system_registry)
     log(f"[INFO] Registered tag '{tag}' in {user_list}")

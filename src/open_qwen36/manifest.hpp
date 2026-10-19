@@ -194,6 +194,7 @@ struct KernelDesc {
     /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
     /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
     uint64_t rb = 1;
+    uint64_t nq = 0;                         ///< attnposv: positions the stream was built for (0 = the verify width)
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -211,13 +212,25 @@ struct RowGlobal {
     uint64_t switch_row = kSwitchNever;
 };
 
+/// The streams of a pass of n positions on the verify image (its cores read n from run-time words).
+struct VerifyStreams {
+    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es)
+    std::vector<Step> tail;                            ///< the final norm + head for every position
+};
+
 /// Shares the decode image's state buffers, so a linear state needs width + 1 slots (OPEN-DECODE-SPECULATIVE-VERIFY).
 struct VerifyProgram {
     size_t width = 0;                                  ///< 0 = the kernel set has no verify program
     uint64_t slot_bytes = 0, act_bytes = 0;
-    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es)
+    std::map<std::string, std::vector<Step>> programs; ///< per layer type: its verify dispatch(es), width positions
     std::vector<Step> tail;                            ///< the final norm + head for every position
+    std::map<size_t, VerifyStreams> narrow;            ///< passes of 2 .. width - 1 positions, where the set has them
     std::string xres, logits;                          ///< the globals holding width rows of xres / logits
+    /// The streams for an n-position pass, or null when the set has none for n.
+    const VerifyStreams* streams(size_t n) const {
+        auto it = narrow.find(n);
+        return it == narrow.end() ? nullptr : &it->second;
+    }
 };
 
 struct Manifest {

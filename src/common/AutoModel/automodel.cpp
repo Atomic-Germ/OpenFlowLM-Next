@@ -352,6 +352,7 @@ int AutoModel::_spec_next(int last, int max_emit) {
 }
 
 void AutoModel::_spec_begin() {
+    if (this->lm_engine) (void)this->lm_engine->speculative_report();   // a request's own count
     this->spec_pending_.clear();
     this->spec_declined_ = false;
     this->spec_calls_ = 0;
@@ -363,6 +364,8 @@ void AutoModel::_spec_end() {
     std::ostringstream ss;
     ss << "speculative decode: " << this->spec_tokens_ << " tokens in " << this->spec_calls_ << " passes ("
        << std::fixed << std::setprecision(2) << double(this->spec_tokens_) / double(this->spec_calls_) << " tokens/pass)";
+    const std::string rep = this->lm_engine->speculative_report();
+    if (!rep.empty()) ss << "; " << rep;
     header_print("OFLM", ss.str());
 }
 

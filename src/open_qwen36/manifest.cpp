@@ -204,6 +204,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         d.rb_win = v.value("rb_win", 1ull);
+        d.nq = v.value("nq", 0ull);
         // attn_stepb*.cc build RB 2 and 4 only; any other count pads the stream for rows the
         // kernel never takes, and the core waits on its fifo forever
         if (d.rb_win != 1 && d.rb_win != 2 && d.rb_win != 4)
@@ -637,6 +638,23 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             if (!vp.programs.count(lt)) fail(vw, "no verify program for layer type " + lt);
         vp.tail = parse_program(need(v, "tail", vw), vw + " tail");
         for (const auto& s : vp.tail) check_step(m, s, vw, "tail");
+        if (v.contains("narrow")) {
+            for (const auto& [nk, nv] : v["narrow"].items()) {
+                const size_t n = static_cast<size_t>(std::stoul(nk));
+                const std::string nw = vw + " narrow " + nk;
+                if (n < 2 || n >= vp.width) fail(nw, "a narrow pass is 2 .. width - 1 positions");
+                VerifyStreams& st = vp.narrow[n];
+                for (const auto& [lt, prog] : need(nv, "programs", nw).items()) {
+                    if (!m.layer_types.count(lt)) fail(nw, "programs names unknown layer type " + lt);
+                    st.programs[lt] = parse_program(prog, nw + " " + lt);
+                    for (const auto& s : st.programs[lt]) check_step(m, s, nw, lt.c_str());
+                }
+                for (const auto& [lt, t] : m.layer_types)
+                    if (!st.programs.count(lt)) fail(nw, "no program for layer type " + lt);
+                st.tail = parse_program(need(nv, "tail", nw), nw + " tail");
+                for (const auto& s : st.tail) check_step(m, s, nw, "tail");
+            }
+        }
         for (const auto& g : {vp.xres, vp.logits})
             if (!m.globals.count(g)) fail(vw, g + " is not a declared global");
     }

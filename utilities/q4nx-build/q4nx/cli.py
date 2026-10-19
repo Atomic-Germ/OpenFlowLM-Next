@@ -682,6 +682,21 @@ def _parse_args(argv):
         help="With --open-diffusion: keep the per-weight packed files here and reuse them "
              "on the next build (default: a temporary directory)",
     )
+    parser.add_argument(
+        "--dflash2-drafter", dest="dflash2_drafter", action="store_true",
+        help="Convert a DFlash 2 block drafter GGUF (llama.cpp arch 'dflash') for the open engine's "
+             "t2 path: exact-ternary q4_1 in the Hadamard basis, plus config.json. Needs --target-gguf.",
+    )
+    parser.add_argument(
+        "--target-gguf", dest="target_gguf", default=None,
+        help="With --dflash2-drafter: the target's PrismML GGUF, whose hidden-width signs fold into the "
+             "drafter's output norm and selector gate (the borrowed head reads the rotated basis).",
+    )
+    parser.add_argument(
+        "--drafter-codes", dest="drafter_codes", default=None,
+        help="With --dflash2-drafter: the ternary trainer's checkpoint (codes + scales); without it the "
+             "codes are recovered from the GGUF's bf16 weights.",
+    )
     return parser.parse_args(argv)
 
 
@@ -750,6 +765,19 @@ def main(argv=None) -> int:
             f"{os.path.join(result['output_dir'], MODEL_INFO_ARTIFACT)}; "
             "merge it into src/model_info.json under the model tag."
         )
+        return 0
+
+    if args.dflash2_drafter:
+        from q4nx.dflash2 import build_dflash2_drafter
+
+        if not args.target_gguf:
+            sys.exit("Error: --dflash2-drafter needs --target-gguf (the target's PrismML GGUF)")
+        output_folder = os.path.abspath(args.output_flag or ".")
+        result = build_dflash2_drafter(input_path, output_folder, args.target_gguf, args.drafter_codes)
+        print(f"[INFO] DFlash 2 drafter container built at {result['output_dir']}")
+        print(f"[INFO] Tensors: {result['tensor_count']} (ternary codes from the {result['ternary_source']})")
+        print("[INFO] Kernels: python open_kernels/export_qwen36_kernels.py --model-dir "
+              f"{result['output_dir']} (the dflash2 family); install with oflm-add.")
         return 0
 
     if args.open_embedding or args.open_causal_lm:

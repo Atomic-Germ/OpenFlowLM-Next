@@ -104,3 +104,6 @@ bin/
 # local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
 TestGGUF/
 *.gguf
+
+# gemv_t2n make_test.py vectors and MLIR dumps
+open_kernels/designs/gemv_t2n/test/
