@@ -233,7 +233,6 @@ def main() -> int:
     a = ap.parse_args()
 
     if a.jobs <= 0:
-        import os
         a.jobs = max(1, os.cpu_count() or 4)
 
     if a.skip_bert and a.bert_only:
