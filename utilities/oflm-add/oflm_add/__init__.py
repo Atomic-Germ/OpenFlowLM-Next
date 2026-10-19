@@ -285,6 +285,22 @@ def save_json(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def save_json_atomic(path: Path, data: dict) -> None:
+    """Save JSON atomically (temp file + rename)."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except:
+        try:
+            os.unlink(tmp)
+        except:
+            pass
+        raise
+
+
 def _engine_dirs():
     """Directories holding an installed engine. An explicit OFLM_EXECUTABLE
     goes before `oflm` on PATH, so a checkout build stays ahead of a release
@@ -343,13 +359,22 @@ def user_xclbin_dir(arg):
     return base if base.name == "xclbins" else base / "xclbins"
 
 
-def user_registry_path(arg):
-    if arg:
-        return Path(arg)
-    env = os.environ.get("OFLM_CONFIG_PATH")
-    if env:
-        return Path(env)
-    return Path.home() / ".config" / "oflm" / "model_list.json"
+def user_settings_path(cli_config: str | None = None) -> Path:
+    """Path to the user's settings.json (overlay file, never overwritten by releases)."""
+    if cli_config:
+        return Path(cli_config)
+    env_path = os.environ.get("OFLM_SETTINGS_PATH")
+    if env_path:
+        return Path(env_path)
+    # Default: sibling of models directory
+    models_root = models_root_dir(None)
+    return models_root / "settings.json"
+
+
+# Backward compat alias
+def user_registry_path(cli_config: str | None = None) -> Path:
+    """Deprecated alias for user_settings_path()."""
+    return user_settings_path(cli_config)
 
 
 def models_root_dir(arg):
@@ -1147,15 +1172,65 @@ def build_entry(base_entry, dir_name, files, size):
     return entry
 
 
-def register(user_list_path, tag, entry, system_registry):
-    if user_list_path.is_file():
-        registry = load_json(user_list_path)
+def register(
+    entry: dict,
+    settings_path: Path,
+    system_registry: dict,
+    force: bool = False,
+    name_override: str | None = None,
+) -> str:
+    """Register a model in the user's settings.json (not model_list.json).
+
+    Returns the tag the model was registered under.
+    Raises SystemExit on collision (without force/name_override).
+    """
+    # Load user settings (create if missing)
+    if settings_path.exists():
+        with open(settings_path) as f:
+            settings = json.load(f)
     else:
-        registry = json.loads(json.dumps(system_registry))
-    registry.setdefault("model_path", "models")
-    model_type, size = tag.split(":", 1)
-    registry.setdefault("models", {}).setdefault(model_type, {})[size] = entry
-    save_json(user_list_path, registry)
+        settings = {
+            "version": 1,
+            "defaults": {},
+            "settings": {},
+            "models": {},
+        }
+
+    # Determine tag
+    model_type = entry.get("type", "unknown")
+    size = entry.get("size", "unknown")
+    tag = name_override or f"{model_type}:{size}"
+
+    if ":" in tag:
+        model_type, size = tag.split(":", 1)
+
+    # Collision check: shipped registry
+    if (model_type in system_registry.get("models", {}) and
+        size in system_registry["models"][model_type]):
+        if not name_override:
+            raise SystemExit(
+                f"Model {tag} already exists in the shipped registry. "
+                f"Use --name to install under a different name."
+            )
+
+    # Collision check: user settings
+    if (model_type in settings.get("models", {}) and
+        size in settings["models"][model_type]):
+        if not force:
+            raise SystemExit(
+                f"Model {tag} is already installed. Use --force to overwrite."
+            )
+
+    # Write complete entry to settings.models
+    settings.setdefault("models", {}).setdefault(model_type, {})[size] = entry
+
+    # Ensure parent directory exists
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save atomically
+    save_json_atomic(settings_path, settings)
+
+    return tag
 
 
 # ------------------------------------------------------------------- xclbins
@@ -1833,6 +1908,7 @@ def main():
     )
     ap.add_argument("repo", help="Hugging Face repo id (Org/Name), ModelScope id (with --modelscope), URL, or local directory")
     ap.add_argument("--tag", help="Registry tag (default: derived from the repo name, e.g. qwen3.5-claude:9b)")
+    ap.add_argument("--name", help="Install under a custom tag (e.g. my-finetune:3b). Overrides --tag.")
     ap.add_argument("--family", help="details.family for engine dispatch (default: from matching official entry)")
     ap.add_argument("--config", help="model_list.json to update (default: $OFLM_CONFIG_PATH or ~/.config/oflm/model_list.json)")
     ap.add_argument("--models-root", help="models directory (default: $OFLM_MODEL_PATH or ~/.config/oflm/models)")
@@ -2207,8 +2283,15 @@ def main():
         # weights to their source repository (a licensing statement, not optional).
         entry["url"] = base_entry.get("url") or f"https://huggingface.co/{repo}"
 
-    register(user_list, tag, entry, system_registry)
-    log(f"[INFO] Registered tag '{tag}' in {user_list}")
+    settings_path = user_settings_path(args.config)
+    tag = register(
+        entry,
+        settings_path,
+        system_registry,
+        force=args.force,
+        name_override=args.name,
+    )
+    log(f"[INFO] Registered tag '{tag}' in {settings_path}")
 
     system_root = find_system_xclbin_root()
     if not args.no_xclbin:
