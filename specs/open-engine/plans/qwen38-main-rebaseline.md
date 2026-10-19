@@ -25,6 +25,15 @@ residuals, production promotion, serving and final resource/performance checks
 remain open. The candidate doubles projection dispatches and explicitly
 rejects stage-major; this is not full model acceptance.
 
+Full-depth CPU boundary references are now ready for 255/256/257 tokens plus
+one continuation per prefix. The audit passes **1155 reference files**, **128**
+common-prefix residual arrays, **511** logit prefixes and **12** first-four-layer
+arrays against the retained four-layer fixture. Source/export identity is
+verified; selected continuation IDs are [248046,198] for each case. These are
+truncated chat prefixes for numerical checks. Native boundary acceptance is
+separate. The boundary auditor adds **11 TDD tests**, bringing the host suite to
+**1447 passed, 47 skipped**.
+
 ## Earlier decode-entry checkpoint — 2026-10-13
 
 Updated 2026-10-13. This branch adds strict decode/source validation, FP32

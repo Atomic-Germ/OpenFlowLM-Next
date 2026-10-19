@@ -247,3 +247,60 @@ both hybrid schedules now pass all 21 position gates: minimum correlation
 logit files remain exact and the hybrid schedules agree in 22/22 files.
 Production engine sources and kernels are unchanged; this is a controlled
 precision result, not a production default or full-context acceptance.
+
+## Auditing full-depth boundary references
+
+Use `prepare --layers 64 --boundaries` with the same repeated message as the
+four-layer boundary fixture. Weights are streamed by layer; the three causal
+state snapshots and CPU-selected continuation IDs remain independent.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-slice/boundaries.py \
+  --out Models/qwen38-27b/prefill-full/boundaries \
+  --slice Models/qwen38-27b/prefill-slice/boundaries
+```
+
+The audit requires all **1155** references (384/385/386 files), exact float32
+sizes, finite data and matching hashes. It verifies model/source/export identity,
+exact ID files and that each continuation was selected by that case's CPU logits.
+It compares all **128** adjacent-length prompt residual prefixes and **511**
+logit prefixes bytewise, then compares the **12** layer-0..3 prompt arrays with
+the prior four-layer fixture. Continuation residuals are deliberately independent:
+different prefix lengths and model depths can select different next tokens.
+
+The older four-layer checker hash may differ because it predates full-depth
+support; every other oracle/packing/recipe source hash must agree. A missing,
+changed or inconsistent reference leaves `reference-audit.json` failed. A passing
+reference audit explicitly records `native_acceptance: false`; it is not a
+hardware result. Full-depth native runs use the ordinary `check.py run` command
+for each length, serially, with the private candidate CLI when measuring paired
+input precision.
+
+After the three native runs, add `--cli` to audit their actual captures:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-slice/boundaries.py \
+  --out Models/qwen38-27b/prefill-full/boundaries \
+  --slice Models/qwen38-27b/prefill-slice/boundaries \
+  --cli Models/qwen38-27b/prefill-paired-input/paired/build/open_qwen36_cli
+```
+
+This does not launch NPU work. It recomputes the per-case numerical gates using
+the paired-input capture auditor, requires the same CLI hash for all cases,
+and checks **1533** native common-prefix logit identities across lengths on all
+three routes. Each case already checks both hybrid schedules against each
+other. The result goes to `native-audit.json`, separate from reference-only
+acceptance. Missing files, incomplete routes, stale hashes, a failed numerical
+gate or any changed common-prefix logit cannot produce a passing native audit.
+A passing audit covers final L63 continuation residuals; intermediate native
+prefill residuals require separate captures.
+
+On 2026-10-19 full-depth CPU preparation and the reference audit passed: all
+**1155 files**, **128 residual prefixes**, **511 logit prefixes**, and **12**
+first-four-layer arrays matched their required sizes, hashes and identities.
+Each case independently selected continuation IDs **[248046, 198]**. These
+are truncated chat prefixes used to exercise numerical state carry, not complete
+chat requests or an answer-quality test. The same 41-set production-consistent
+export is used. TDD: **11 new tests**, host suite **1447 passed, 47 skipped**.
+Evidence is in `Models/qwen38-27b/prefill-full/boundaries/`; the reference audit
+alone does not establish native acceptance.
