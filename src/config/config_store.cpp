@@ -3,7 +3,14 @@
 /// \note Migration and load_effective_config are in Task 07.
 #include "config/config_store.hpp"
 #include "config/settings_registry.hpp"
-#include "utils/utils.hpp"
+// Forward-declare utils functions instead of including utils/utils.hpp
+// (which transitively includes buffer.hpp → XRT dependency)
+namespace utils {
+    std::string getenv_oflm(const char* oflm_name);
+    std::string find_shipped_registry();
+    std::string find_user_settings();
+    std::string get_models_directory();
+}
 #include <fstream>
 #include <sstream>
 #include <filesystem>

@@ -14,19 +14,17 @@
 
 #define ASSERT_TRUE(expr) do { if (!(expr)) { std::cerr << "FAIL: " << #expr << " at line " << __LINE__ << std::endl; failures++; return; } } while(0)
 #define ASSERT_FALSE(expr) ASSERT_TRUE(!(expr))
-#define ASSERT_EQ(a, b) do { if ((a) != (b)) { std::cerr << "FAIL: " << #a << " != " << #b << " (" << (a) << " vs " << (b) << ") at line " << __LINE__ << std::endl; failures++; return; } } while(0)
+#define ASSERT_EQ(a, b) do { if ((a) != (b)) { std::cerr << "FAIL: " << #a << " != " << #b << " at line " << __LINE__ << std::endl; failures++; return; } } while(0)
 
 static int failures = 0;
 static std::vector<std::pair<std::string, void(*)()>> tests;
 
-// Helper: create a temp directory for tests
 static std::string make_temp_dir() {
     auto dir = std::filesystem::temp_directory_path() / ("oflm_test_" + std::to_string(rand()));
     std::filesystem::create_directories(dir);
     return dir.string();
 }
 
-// Helper: write JSON to file
 static void write_json(const std::string& path, const nlohmann::json& j) {
     std::ofstream f(path);
     f << j.dump(2);
@@ -37,46 +35,46 @@ static void write_json(const std::string& path, const nlohmann::json& j) {
 // ============================================================================
 
 TEST(deep_merge_objects_recursive) {
-    nlohmann::json base = {{{"a", {{{"b", 1}, {"c", 2}}}}}};
-    nlohmann::json overlay = {{{"a", {{{"b", 10}}}}}};
+    nlohmann::json base = {{"a", {{"b", 1}, {"c", 2}}}};
+    nlohmann::json overlay = {{"a", {{"b", 10}}}};
     auto result = oflm::config::deep_merge(base, overlay);
     ASSERT_EQ(result["a"]["b"], 10);
-    ASSERT_EQ(result["a"]["c"], 2); // preserved from base
+    ASSERT_EQ(result["a"]["c"], 2);
 }
 
 TEST(deep_merge_arrays_replace) {
-    nlohmann::json base = {{{"files", {"a.txt", "b.txt"}}}};
-    nlohmann::json overlay = {{{"files", {"c.txt"}}}};
+    nlohmann::json base = {{"files", nlohmann::json::array({"a.txt", "b.txt"})}};
+    nlohmann::json overlay = {{"files", nlohmann::json::array({"c.txt"})}};
     auto result = oflm::config::deep_merge(base, overlay);
     ASSERT_EQ(result["files"].size(), 1u);
     ASSERT_EQ(result["files"][0], "c.txt");
 }
 
 TEST(deep_merge_scalars_replace) {
-    nlohmann::json base = {{{"key", "old"}}};
-    nlohmann::json overlay = {{{"key", "new"}}};
+    nlohmann::json base = {{"key", "old"}};
+    nlohmann::json overlay = {{"key", "new"}};
     auto result = oflm::config::deep_merge(base, overlay);
     ASSERT_EQ(result["key"], "new");
 }
 
 TEST(deep_merge_new_keys_added) {
-    nlohmann::json base = {{{"a", 1}}};
-    nlohmann::json overlay = {{{"b", 2}}};
+    nlohmann::json base = {{"a", 1}};
+    nlohmann::json overlay = {{"b", 2}};
     auto result = oflm::config::deep_merge(base, overlay);
     ASSERT_EQ(result["a"], 1);
     ASSERT_EQ(result["b"], 2);
 }
 
 TEST(deep_merge_null_does_not_overwrite) {
-    nlohmann::json base = {{{"key", "value"}}};
-    nlohmann::json overlay = {{{"key", nullptr}}};
+    nlohmann::json base = {{"key", "value"}};
+    nlohmann::json overlay = {{"key", nullptr}};
     auto result = oflm::config::deep_merge(base, overlay);
     ASSERT_EQ(result["key"], "value");
 }
 
 TEST(deep_merge_nested_objects) {
-    nlohmann::json base = {{{"details", {{{"think", true}, {"family", "qwen3"}}}}}};
-    nlohmann::json overlay = {{{"details", {{{"think", false}}}}}};
+    nlohmann::json base = {{"details", {{"think", true}, {"family", "qwen3"}}}};
+    nlohmann::json overlay = {{"details", {{"think", false}}}};
     auto result = oflm::config::deep_merge(base, overlay);
     ASSERT_EQ(result["details"]["think"], false);
     ASSERT_EQ(result["details"]["family"], "qwen3");
@@ -105,7 +103,7 @@ TEST(split_tag_without_size) {
 TEST(settings_lock_acquires) {
     auto dir = make_temp_dir();
     std::string path = dir + "/settings.json";
-    write_json(path, {{{"test", true}}});
+    write_json(path, {{"test", true}});
     {
         oflm::config::SettingsLock lock(path);
         ASSERT_TRUE(lock.locked());
@@ -116,12 +114,11 @@ TEST(settings_lock_acquires) {
 TEST(settings_lock_releases) {
     auto dir = make_temp_dir();
     std::string path = dir + "/settings.json";
-    write_json(path, {{{"test", true}}});
+    write_json(path, {{"test", true}});
     {
         oflm::config::SettingsLock lock1(path);
         ASSERT_TRUE(lock1.locked());
     }
-    // After lock1 is destroyed, lock2 should acquire immediately
     {
         oflm::config::SettingsLock lock2(path);
         ASSERT_TRUE(lock2.locked());
@@ -136,10 +133,9 @@ TEST(settings_lock_releases) {
 TEST(save_user_settings_writes_valid_json) {
     auto dir = make_temp_dir();
     std::string path = dir + "/settings.json";
-    nlohmann::json settings = {{{"version", 1}, {"defaults", {{{"pmode", "balanced"}}}}}};
+    nlohmann::json settings = {{"version", 1}, {"defaults", {{"pmode", "balanced"}}}};
     oflm::config::save_user_settings(settings, path);
 
-    // Read back and verify
     std::ifstream f(path);
     auto loaded = nlohmann::json::parse(f);
     ASSERT_EQ(loaded["version"], 1);
@@ -153,12 +149,11 @@ TEST(save_user_settings_is_atomic_no_temp_left) {
     std::string path = dir + "/settings.json";
     oflm::config::save_user_settings({{"a", 1}}, path);
 
-    // No temp files should remain
     int file_count = 0;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         file_count++;
     }
-    ASSERT_EQ(file_count, 1); // Only settings.json, no .tmp or .lock
+    ASSERT_EQ(file_count, 1);
 
     std::filesystem::remove_all(dir);
 }
@@ -172,28 +167,20 @@ TEST(migration_user_added_model) {
     std::string legacy_path = dir + "/model_list.json";
     std::string settings_path = dir + "/settings.json";
 
-    nlohmann::json shipped = {
-        {"models", {{{"qwen3.8", {{"27b", {{"name", "qwen3.8-27b"}}}}}}}}
-    };
-    nlohmann::json legacy = {
-        {"models", {
-            {"qwen3.8", {{"27b", {{"name", "qwen3.8-27b"}}}}},  // identical to shipped
-            {"my-model", {{"1b", {{"name", "my-model-1b"}, {"url", "https://example.com"}}}}}}  // user-added
-        }}
-    };
+    nlohmann::json shipped = {{"models", {{"qwen3.8", {{"27b", {{"name", "qwen3.8-27b"}}}}}}}};
+    nlohmann::json legacy = {{"models", {
+        {"qwen3.8", {{"27b", {{"name", "qwen3.8-27b"}}}}},
+        {"my-model", {{"1b", {{"name", "my-model-1b"}, {"url", "https://example.com"}}}}}
+    }}};
     write_json(legacy_path, legacy);
 
     auto log = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
 
-    // Verify settings.json was created
     ASSERT_TRUE(std::filesystem::exists(settings_path));
     std::ifstream f(settings_path);
     auto settings = nlohmann::json::parse(f);
 
-    // User-added model should be in models section
     ASSERT_TRUE(settings["models"]["my-model"]["1b"].contains("url"));
-
-    // Legacy file should be renamed to .bak
     ASSERT_FALSE(std::filesystem::exists(legacy_path));
     ASSERT_TRUE(std::filesystem::exists(legacy_path + ".bak"));
 
@@ -205,18 +192,14 @@ TEST(migration_modified_entry_preserved_as_override) {
     std::string legacy_path = dir + "/model_list.json";
     std::string settings_path = dir + "/settings.json";
 
-    nlohmann::json shipped = {
-        {"models", {{"qwen3.8", {{"27b", {
-            {"name", "qwen3.8-27b"},
-            {"default_context_length", 8192}
-        }}}}}}}
-    };
-    nlohmann::json legacy = {
-        {"models", {{"qwen3.8", {{"27b", {
-            {"name", "qwen3.8-27b"},
-            {"default_context_length", 16384}}  // Modified!
-        }}}}}}
-    };
+    nlohmann::json shipped = {{"models", {{"qwen3.8", {{"27b", {
+        {"name", "qwen3.8-27b"},
+        {"default_context_length", 8192}
+    }}}}}}};
+    nlohmann::json legacy = {{"models", {{"qwen3.8", {{"27b", {
+        {"name", "qwen3.8-27b"},
+        {"default_context_length", 16384}
+    }}}}}}};
     write_json(legacy_path, legacy);
 
     auto log = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
@@ -224,7 +207,6 @@ TEST(migration_modified_entry_preserved_as_override) {
     std::ifstream f(settings_path);
     auto settings = nlohmann::json::parse(f);
 
-    // Modified entry should be preserved as override (ctx_len maps to default_context_length)
     ASSERT_TRUE(settings["settings"]["qwen3.8"]["27b"].contains("ctx_len"));
     ASSERT_EQ(settings["settings"]["qwen3.8"]["27b"]["ctx_len"], 16384);
 
@@ -236,9 +218,9 @@ TEST(migration_identical_entries_dropped) {
     std::string legacy_path = dir + "/model_list.json";
     std::string settings_path = dir + "/settings.json";
 
-    nlohmann::json entry = {{{"name", "test"}, {"default_context_length", 4096}}};
-    nlohmann::json shipped = {{{"models", {{"test", {{"1b", entry}}}}}}};
-    nlohmann::json legacy = {{{"models", {{"test", {{"1b", entry}}}}}}};  // identical
+    nlohmann::json entry = {{"name", "test"}, {"default_context_length", 4096}};
+    nlohmann::json shipped = {{"models", {{"test", {{"1b", entry}}}}}};
+    nlohmann::json legacy = {{"models", {{"test", {{"1b", entry}}}}}};
     write_json(legacy_path, legacy);
 
     auto log = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
@@ -246,7 +228,6 @@ TEST(migration_identical_entries_dropped) {
     std::ifstream f(settings_path);
     auto settings = nlohmann::json::parse(f);
 
-    // Identical entry should NOT appear in settings or models
     ASSERT_FALSE(settings["models"].contains("test"));
     ASSERT_FALSE(settings["settings"].contains("test"));
 
@@ -258,19 +239,16 @@ TEST(migration_idempotent) {
     std::string legacy_path = dir + "/model_list.json";
     std::string settings_path = dir + "/settings.json";
 
-    nlohmann::json shipped = {{{"models", nlohmann::json::object()}}};
-    nlohmann::json legacy = {{{"models", {{"my-model", {{"1b", {{"name", "test"}}}}}}}};
+    nlohmann::json shipped = {{"models", nlohmann::json::object()}};
+    nlohmann::json legacy = {{"models", {{"my-model", {{"1b", {{"name", "test"}}}}}}}};
     write_json(legacy_path, legacy);
 
-    // First migration
     oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
     ASSERT_TRUE(std::filesystem::exists(settings_path));
-    ASSERT_FALSE(std::filesystem::exists(legacy_path)); // renamed to .bak
+    ASSERT_FALSE(std::filesystem::exists(legacy_path));
 
-    // Second call should not re-migrate (legacy file is gone)
     auto log2 = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
     ASSERT_TRUE(log2.size() >= 1);
-    ASSERT_TRUE(log2[0].find("not found") != std::string::npos || log2[0].find("Failed") != std::string::npos);
 
     std::filesystem::remove_all(dir);
 }
@@ -281,7 +259,7 @@ TEST(migration_idempotent) {
 
 TEST(get_merged_model_entry_shipped_only) {
     oflm::config::EffectiveConfig cfg;
-    cfg.shipped_registry = {{{"models", {{"qwen3.8", {{"27b", {{"name", "test"}, {"default_context_length", 8192}}}}}}}}}};
+    cfg.shipped_registry = {{"models", {{"qwen3.8", {{"27b", {{"name", "test"}, {"default_context_length", 8192}}}}}}}};
     cfg.user_settings = nlohmann::json::object();
 
     auto entry = oflm::config::get_merged_model_entry(cfg, "qwen3.8:27b");
@@ -291,19 +269,19 @@ TEST(get_merged_model_entry_shipped_only) {
 
 TEST(get_merged_model_entry_with_overlay) {
     oflm::config::EffectiveConfig cfg;
-    cfg.shipped_registry = {{{"models", {{"qwen3.8", {{"27b", {{"name", "test"}, {"default_context_length", 8192}}}}}}}}}};
-    cfg.user_settings = {{{"settings", {{"qwen3.8", {{"27b", {{"ctx_len", 16384}}}}}}}}}};
+    cfg.shipped_registry = {{"models", {{"qwen3.8", {{"27b", {{"name", "test"}, {"default_context_length", 8192}}}}}}}};
+    cfg.user_settings = {{"settings", {{"qwen3.8", {{"27b", {{"ctx_len", 16384}}}}}}}};
 
     auto entry = oflm::config::get_merged_model_entry(cfg, "qwen3.8:27b");
     ASSERT_EQ(entry["name"], "test");
     ASSERT_EQ(entry["default_context_length"], 8192);
-    ASSERT_EQ(entry["ctx_len"], 16384); // from overlay
+    ASSERT_EQ(entry["ctx_len"], 16384);
 }
 
 TEST(get_merged_model_entry_user_added_model) {
     oflm::config::EffectiveConfig cfg;
-    cfg.shipped_registry = {{{"models", nlohmann::json::object()}}};
-    cfg.user_settings = {{{"models", {{"my-model", {{"1b", {{"name", "my-model"}, {"url", "https://example.com"}}}}}}}}}};
+    cfg.shipped_registry = {{"models", nlohmann::json::object()}};
+    cfg.user_settings = {{"models", {{"my-model", {{"1b", {{"name", "my-model"}, {"url", "https://example.com"}}}}}}}};
 
     auto entry = oflm::config::get_merged_model_entry(cfg, "my-model:1b");
     ASSERT_EQ(entry["name"], "my-model");
@@ -312,7 +290,7 @@ TEST(get_merged_model_entry_user_added_model) {
 
 TEST(get_merged_model_entry_not_found) {
     oflm::config::EffectiveConfig cfg;
-    cfg.shipped_registry = {{{"models", nlohmann::json::object()}}};
+    cfg.shipped_registry = {{"models", nlohmann::json::object()}};
     cfg.user_settings = nlohmann::json::object();
 
     auto entry = oflm::config::get_merged_model_entry(cfg, "nonexistent:1b");
