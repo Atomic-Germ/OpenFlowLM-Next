@@ -261,7 +261,7 @@ jobs:
 
       - name: Inject settings schema
         run: |
-          ./build/src/oflm config gen-schema > /tmp/schema.json
+          OFLM_CONFIG_PATH="$PWD/src/model_list.json" ./build/src/oflm config gen-schema > /tmp/schema.json
           python3 utilities/release/inject-schema.py \
             --input src/model_list.json \
             --schema /tmp/schema.json \
