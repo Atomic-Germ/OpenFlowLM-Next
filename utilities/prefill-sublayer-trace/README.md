@@ -140,3 +140,91 @@ fixture), regardless of the successful diagnostic checks.
 Evidence is under `Models/qwen38-27b/prefill-sublayer-trace/`:
 `run-257/sublayer-audit.json`, `run-257/report.json`, both build records, source/
 compiler-dependency hashes, RED logs, host/CTest logs and `validation-evidence.json`.
+
+## CPU vector attribution
+
+Reuse these captures without a resident model or a new native build:
+
+```bash
+mkdir -p Models/qwen38-27b/prefill-ffn-attribution
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sublayer-trace/attribute.py \
+  --run Models/qwen38-27b/prefill-sublayer-trace/run-257 \
+  --build Models/qwen38-27b/prefill-sublayer-trace/verified \
+  --baseline Models/qwen38-27b/prefill-residual-trace/run-257 \
+  --out Models/qwen38-27b/prefill-ffn-attribution/attribution.json
+```
+
+The analyzer verifies the retained source/build/reference/capture hash chain,
+baseline logit/residual identity and independent causal reconstruction record.
+It streams one layer's FFN weights at a time and analyzes the three hybrid rows.
+Both hybrid schedules share the result only after their captures and layer
+outputs are proved identical. No CPU history is inserted into native execution.
+
+Let `un, gn` be ideal projections of captured norm, `uc, gc` the captured
+projections, `du = uc-un`, and `ds = SiLU(gc)-SiLU(gn)`. Activation discrepancy
+from projections is exactly:
+
+```text
+du * SiLU(gn) + un * ds + du * ds
+    up-only    gate-only  interaction
+```
+
+Project each term through the same FP64 down matrix. Also retain norm error,
+captured activation minus `uc*SiLU(gc)`, captured down minus ideal down of
+captured activation, and final residual-add rounding. The baseline is the
+existing oracle FFN on captured pre-FFN residual, preserving its FP32 norm and
+activation boundaries; a separate bridge accounts for the oracle activation
+rounding. This bridge is bookkeeping, not a native defect.
+
+The complete vectors, including propagated baseline error, must sum to native
+output minus the stored independent **FP32** output within an FP64 reduction
+bound. This stored reference can differ slightly from the preceding checker's
+unrounded causal output. Every component uses one common final-output reference
+scale. Maxima are still non-additive; signed components at the worst native
+coordinate and all vectors (`attribution.npz`) preserve cancellation information.
+The `passed` fields on component magnitudes only apply the same 0.005 threshold;
+they are not new primitive acceptance gates.
+
+Two diagnostic counterfactuals remain distinct: ideal suffixes recompute all
+downstream operations on CPU; algebraic component removals freeze observed
+downstream errors. A real NPU replay can change those errors, so neither predicts
+the result of a kernel correction. Removing up or gate includes its interaction.
+Attribution validity never promotes model acceptance. Exceptions invalidate old
+success in the output JSON.
+
+### Attribution results — 2026-10-20
+
+All three vector decompositions close; largest absolute closure discrepancy is
+**3.98e-14**. At L63/P7 the retained output scale is **44.3703270** and the worst
+native coordinate is **3994**. The two schedules are byte-identical.
+
+| Component | Maximum absolute contribution / common scale | Signed contribution at coordinate 3994 / common scale |
+|---|---:|---:|
+| Propagated ideal-FFN baseline | 0.0046311444 | -0.0027144259 |
+| Up projection | 0.0044931327 | -0.0044931327 |
+| Gate projection | 0.0002682804 | +0.0000108906 |
+| Up/gate interaction | 0.0000014409 | -0.0000014409 |
+| Activation | 0.0000000619 | -0.0000000619 |
+| Down projection | 0.0013581369 | +0.0013581369 |
+
+Norm, oracle-rounding bridge and residual-add terms are each below 5.1e-8
+on this scale. Up is the largest local contribution; down partially cancels it.
+Native output maxrel is **0.0058400461**. Ideal down on captured activation
+increases it to **0.0071981830**. Ideal up → activation → down with captured gate
+reduces it to **0.0046451266**; ideal gate → activation → down with captured up
+gives **0.0072075708**. Algebraically removing up including interaction while
+freezing downstream errors gives **0.0045399893**.
+
+The L60/P38 and L35/P80 hybrid control outputs remain below threshold
+(**0.0014798680 / 0.0001922195**). No correction has been executed on the NPU;
+global logits remain **558/774 PASS**, so full-model accuracy still fails.
+Next replay the L63/P7 up/gate GEMM with production layout, captured norm and a
+byte-exact control before changing precision. Preserve T256 and row position 7;
+if filling other rows with zeros, first prove the selected result is unchanged.
+This attribution does not distinguish weight packing from GEMM arithmetic.
+Sequential propagated-state/input failures require a separate investigation.
+
+Tests: **16 new cases**, 15 observed RED before implementation; full host suite
+**1500 passed / 47 skipped**. No new native build or NPU dispatch. Reports,
+complete contribution vectors, provenance and test logs are retained under
+`Models/qwen38-27b/prefill-ffn-attribution/`.

@@ -1,6 +1,47 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — selected causal sublayers, 2026-10-20
+## Latest checkpoint — hybrid FFN vector attribution, 2026-10-20
+
+Added CPU-only attribution from retained hybrid sublayers at L63/P7, L60/P38
+and L35/P80. It revalidates source/build/reference/capture provenance and exact
+baseline identity, then streams one layer's FFN weights. Both hybrid schedules
+share each result only after capture/output identity checks. Complete signed
+vectors use the same independent final-output scale and sum to the actual
+output error; worst closure discrepancy is **3.98e-14** across all three rows.
+
+At **L63/P7**, up is the largest local FFN contribution (**0.0044931327** on the
+common output scale), followed by down (**0.0013581369**) and gate
+(**0.0002682804**). Down partially cancels up at the worst output coordinate
+(3994). Up/gate interaction is explicit; activation, norm and rounding terms
+are small. These maxima must not be summed.
+
+| L63/P7 diagnostic | Output maxrel |
+|---|---:|
+| Captured native output | 0.0058400461 |
+| Ideal down on captured activation | 0.0071981830 |
+| Ideal up, activation and down; captured gate | 0.0046451266 |
+| Ideal gate, activation and down; captured up | 0.0072075708 |
+| Ideal complete FFN on captured pre-FFN input | 0.0046311444 |
+
+The stored independent FP32 output is the common reference here, accounting for
+the small difference from the earlier unrounded causal-output metric. CPU ideal
+suffixes and algebraic removals with frozen downstream errors are separate
+diagnostics; neither establishes what corrected NPU execution will produce.
+No production arithmetic, kernels, weights or native state changed.
+Long-prefix accuracy remains **FAIL (558/774 logits)**.
+
+Next isolate the L63/P7 up/gate GEMM with production layout and a byte-exact
+control. A replay must preserve T256/row 7 and prove any other-row substitution
+does not change that result before testing a precision change. Weight packing
+versus GEMM arithmetic remains unresolved; sequential propagated-history drift
+is a separate open investigation.
+
+TDD: **16 new tests**, 15 observed RED; full host suite **1500 passed, 47 skipped**.
+No native build or NPU run was needed. Commands, formulas, signed contributions,
+provenance and limitations are in the
+[sublayer runbook](../../../utilities/prefill-sublayer-trace/README.md).
+
+## Selected causal sublayers checkpoint — 2026-10-20
 
 A private native CLI now captures selected prefill sublayers at L63/P7,
 L60/P38 and L35/P80 (zero-based). Sequential NPU captures activation scratch;
