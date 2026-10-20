@@ -71,3 +71,30 @@ Next isolate up/gate, activation and down contributions at L63/P7; retain the
 separate sequential upstream-history investigation. Full-model accuracy remains
 FAIL. The initial audit's stale builder-source refusal is preserved, then the
 separate audit uses the verified byte-identical binary; do not erase that history.
+
+## CPU vector attribution follow-up
+
+Use `attribute.py` from the runbook on retained captures; it requires no new
+native build or NPU dispatch. Verify the audit/build/reference/capture hash
+chain and baseline identity before interpreting results. Stream one layer's
+FFN weights. Compare all signed contributions on the stored independent FP32
+output scale. Keep up-only, gate-only and nonlinear interaction separate;
+retain norm, oracle activation-rounding bridge, activation, down and residual
+addition terms. Require their sum plus propagated error to reproduce native
+output error within the FP64 reduction bound. Full vectors are saved in NPZ.
+Ideal CPU suffixes and algebraic removals with frozen downstream errors are
+separate diagnostics, not predictions of corrected NPU execution.
+
+2026-10-20: all three hybrid rows close (worst absolute discrepancy 3.98e-14).
+At L63/P7, up contributes 0.0044931327 on the common scale, gate 0.0002682804,
+and down 0.0013581369. Down partly cancels up at worst coordinate 3994.
+Ideal down alone worsens output error from 0.0058400461 to 0.0071981830;
+ideal up/activation/down with captured gate gives 0.0046451266. Full-model
+accuracy still fails. Evidence: Models/qwen38-27b/prefill-ffn-attribution/.
+Host suite: 1500 passed / 47 skipped; 16 new tests, 15 observed RED.
+
+Next isolate the L63/P7 up/gate GEMM with production layout and byte-exact
+control; preserve T256 and row 7, proving any zero-filled other rows preserve
+the selected output. Then distinguish packing/arithmetic and test precision.
+Do not assume the isolated down correction helps: cancellation was measured.
+Keep sequential upstream causal-state/input failures as a separate inquiry.
