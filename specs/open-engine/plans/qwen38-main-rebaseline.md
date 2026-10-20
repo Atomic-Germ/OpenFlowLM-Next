@@ -1,6 +1,44 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — isolated up/gate replay, 2026-10-20
+## Latest checkpoint — paired-weight GEMM candidate, 2026-10-20
+
+Added private control and low-weight GEMM builds with unchanged Q4NX packing
+and DMA layout. The low kernel emits the BF16 residual of the dequantized
+weight after its high BF16 part. Four native products are combined in FP32;
+production sources, recipes and binaries remain unchanged.
+
+**Eight NPU dispatches complete.** Fresh control high/low outputs individually
+match retained production outputs bytewise. Candidate outputs at T256 slots
+7 and 135 are byte-identical; inactive columns are zero. At L63/P7, separate
+primary up/gate accuracy improves against the original FP32-input and exact-
+effective-weight reference:
+
+| Projection | Control maxrel | Candidate maxrel | Candidate rel_fro |
+|---|---:|---:|---:|
+| Up | 0.0019482680 | 0.0000015091 | 0.0000010450 |
+| Gate | 0.0002586737 | 0.0000013845 | 0.0000012487 |
+
+Both primary gates pass and improve strictly; bounds are unchanged. This
+validates an isolated projection correction only. The candidate has not run
+full FFN or propagated layer/logit gates. Long-prefix model accuracy remains
+unresolved, with **558/774 retained logit gates** passing. Up/down cancellation
+means projection improvement alone cannot establish model acceptance.
+
+All 32 cores pass resource checks: maximum text **4784/5568 bytes** for control/
+low, maximum buffer end **61448 bytes**, configured stack 4096 bytes. Both
+builds pin **801 compiler dependencies**. An unsupported BF16-vector conversion
+was corrected by widening through an FP32 accumulator; the failed attempt is
+retained, and fresh v2 builds provide final provenance. Toolchain: mlir-aie
+1.4.2, Peano 21.0.0.2026080301+c9c5ecb7.
+
+TDD: **9 new RED-to-GREEN tests**; host suite **1522 passed, 47 skipped**.
+The [paired-weight runbook](../../../utilities/prefill-paired-weights/README.md)
+records build/run commands, hashes and limits. Next validate the complete FFN
+and layer output on captured causal inputs with exact control before expanding
+coverage or integrating. The extra weight pass doubles this projection's
+GEMM dispatch count; performance remains unmeasured.
+
+## Isolated up/gate replay checkpoint — 2026-10-20
 
 Added an isolated L63/P7 paired-input GEMM replay using the existing production
 kernel and captured norm. Only one projection's weight/input/output buffers

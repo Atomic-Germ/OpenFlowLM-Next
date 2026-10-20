@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-paired-weights</name>
+    <description>Build private paired-weight GEMM kernels and validate causal up/gate precision with byte-exact native controls.</description>
+    <location>.agents/skills/open-qwen38-prefill-paired-weights/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-upgate-replay</name>
     <description>Replay captured hybrid up/gate with exact native controls and diagnose weight-rounding error without full-model residency.</description>
     <location>.agents/skills/open-qwen38-prefill-upgate-replay/SKILL.md</location>
