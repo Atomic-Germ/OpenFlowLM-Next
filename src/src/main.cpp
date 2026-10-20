@@ -559,6 +559,16 @@ int main(int argc, char* argv[]) {
         return 1; // Help was already printed by Boost Program Options
     }
 
+    // Which environment variables are the user's, before we write any of our
+    // own into the environment. The env-var delivery mechanism writes the
+    // settings into the environment, and a server that serves several models
+    // would have the first model's values shadow the later ones.
+    //
+    // Before the config dispatch, which resolves settings too: `oflm config
+    // show` has to report the same value and the same source as the runtime
+    // commands, and a variable the user set is an override in both.
+    oflm::config::capture_external_env_vars();
+
     // Early dispatch for config — doesn't need the model registry
     if (parsed_args.command == "config") {
         return oflm::config::config_command_main_guarded(parsed_args);
@@ -642,12 +652,6 @@ int main(int argc, char* argv[]) {
         parsed_args.command == "image") {
         // effective_cfg was loaded above, together with the merged model
         // list -- the same merged registry feeds both.
-
-        // Which environment variables are the user's, before we write any of
-        // our own into the environment. The env-var delivery mechanism writes
-        // the settings into the environment, and a server that serves several
-        // models would have the first model's values shadow the later ones.
-        oflm::config::capture_external_env_vars();
 
         // Resolve settings (applies precedence: shipped < user < env < CLI)
         std::string tag = parsed_args.model_tag;
