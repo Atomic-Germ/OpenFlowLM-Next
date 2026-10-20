@@ -191,24 +191,45 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
         return name, rc == 0
 
     families = spec["families"]
-    if jobs > 1 and len(families) > 1:
-        with ThreadPoolExecutor(max_workers=min(jobs, len(families))) as ex:
-            futures = {ex.submit(build_family, fam): fam for fam in families}
-            for fut in as_completed(futures):
-                name, ok = fut.result()
-                if ok:
-                    print(f"   ok: {name}", flush=True)
-                else:
-                    failed.append(name)
-                    print(f"   FAILED: {name}", flush=True)
-    else:
-        for fam in families:
+    # families.json: "qkv and attn_out here are IDENTICAL to BERT-h768-bfp16's
+    # -- neither depends on --gated-ffn or --intermediate -- so these two
+    # families share 8 of their 16 cache markers and must never be built
+    # concurrently." Each family purges matching directories in the same
+    # ~/.npu/cache, so two families sharing design geometry (same --hidden)
+    # would delete each other's in-progress or retained artifacts if built at
+    # the same time. Serialize families within one hidden size; different
+    # hidden sizes still build in parallel.
+    def hidden_of(fam: dict) -> str:
+        args = fam["args"]
+        return str(args[args.index("--hidden") + 1]) if "--hidden" in args else str(fam["name"])
+
+    groups: dict[str, list[dict]] = {}
+    for fam in families:
+        groups.setdefault(hidden_of(fam), []).append(fam)
+
+    def build_group(group: list[dict]) -> list[tuple[str, bool]]:
+        results = []
+        for fam in group:
             name, ok = build_family(fam)
+            results.append((name, ok))
             if ok:
                 print(f"   ok: {name}", flush=True)
             else:
                 failed.append(name)
                 print(f"   FAILED: {name}", flush=True)
+        return results
+
+    if jobs > 1 and len(groups) > 1:
+        with ThreadPoolExecutor(max_workers=min(jobs, len(groups))) as ex:
+            # one worker per hidden size; families inside a group build
+            # sequentially
+            futures = {ex.submit(build_group, group): gname
+                       for gname, group in groups.items()}
+            for fut in as_completed(futures):
+                fut.result()
+    else:
+        for group in groups.values():
+            build_group(group)
 
     # The built sets and the spec they were built from must agree.
     rc = subprocess.run([str(py), str(BERT_CHECK), "--xclbins", str(XCLBINS)]).returncode

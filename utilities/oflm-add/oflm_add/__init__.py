@@ -46,6 +46,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -299,6 +300,85 @@ def save_json_atomic(path: Path, data: dict) -> None:
         except:
             pass
         raise
+
+
+try:
+    import fcntl as _fcntl  # POSIX record locks (fcntl/F_SETLK)
+except ImportError:  # Windows
+    _fcntl = None
+    import msvcrt as _msvcrt
+
+
+class _settings_lock:
+    """File lock on <settings.json>.lock, compatible with the C++ SettingsLock.
+
+    The C++ side takes a fcntl record lock (LockFileEx on Windows) on the
+    same "<path>.lock" file and holds it for its whole load-modify-save
+    cycle. Registration must hold the same lock across read-modify-replace,
+    or a concurrent `config set` (C++) and `oflm add` (Python) can lose each
+    other's writes: atomic rename only prevents partial JSON, not lost
+    updates. Waits up to 2 seconds, like the C++ side; past the deadline it
+    proceeds unlocked rather than failing the install.
+    """
+
+    def __init__(self, path):
+        self.lock_path = Path(str(path) + ".lock")
+        self.fd = None
+        self.handle = None
+
+    def __enter__(self):
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return self
+        try:
+            if _fcntl is not None:
+                self.fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        _fcntl.lockf(self.fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                        return self
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            os.close(self.fd)
+                            self.fd = None
+                            return self  # proceed unlocked, like C++ locked()==false
+                        time.sleep(0.1)
+            else:
+                self.handle = open(str(self.lock_path), "a+b")
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        self.handle.seek(0)
+                        _msvcrt.locking(self.handle.fileno(), _msvcrt.LK_NBLCK, 1)
+                        return self
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            self.handle.close()
+                            self.handle = None
+                            return self
+                        time.sleep(0.1)
+        except OSError:
+            # Locking is best-effort: an unmanageable lock file must not
+            # block an install.
+            self.fd = None
+            self.handle = None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self.fd is not None:
+                _fcntl.lockf(self.fd, _fcntl.LOCK_UN)
+                os.close(self.fd)
+            elif self.handle is not None:
+                self.handle.seek(0)
+                _msvcrt.locking(self.handle.fileno(), _msvcrt.LK_UNLCK, 1)
+                self.handle.close()
+        except OSError:
+            pass
+        self.fd = None
+        self.handle = None
 
 
 def _engine_dirs():
@@ -1178,59 +1258,85 @@ def register(
     system_registry: dict,
     force: bool = False,
     name_override: str | None = None,
+    tag: str | None = None,
 ) -> str:
     """Register a model in the user's settings.json (not model_list.json).
 
     Returns the tag the model was registered under.
     Raises SystemExit on collision (without force/name_override).
+
+    ``tag`` is the tag derived in main() from the repo name (including
+    --tag); it is used as-is. Reconstructing a tag from the entry metadata
+    would be wrong: build_entry() carries no ``type`` and its ``size`` is a
+    numeric byte count, not the tag suffix -- such an entry would register
+    as ``unknown:3000000000``.
     """
-    # Load user settings (create if missing)
-    if settings_path.exists():
-        with open(settings_path) as f:
-            settings = json.load(f)
-    else:
-        settings = {
-            "version": 1,
-            "defaults": {},
-            "settings": {},
-            "models": {},
-        }
+    # Hold the same lock the C++ SettingsLock takes, for the whole
+    # read-modify-write: two concurrent `oflm add`s (or an add racing a
+    # `config set`) would otherwise both read the old document and the
+    # second atomic rename would silently drop the first one's changes.
+    with _settings_lock(settings_path):
+        # Load user settings (create if missing)
+        if settings_path.exists():
+            with open(settings_path) as f:
+                settings = json.load(f)
+        else:
+            settings = {
+                "version": 1,
+                "defaults": {},
+                "settings": {},
+                "models": {},
+            }
 
-    # Determine tag
-    model_type = entry.get("type", "unknown")
-    size = entry.get("size", "unknown")
-    tag = name_override or f"{model_type}:{size}"
+        # Determine tag: --name wins, then the tag derived in main();
+        # the entry-metadata fallback exists for callers without a derived
+        # tag (the tests).
+        model_type = entry.get("type", "unknown")
+        size = entry.get("size", "unknown")
+        final_tag = name_override or tag or f"{model_type}:{size}"
 
-    if ":" in tag:
-        model_type, size = tag.split(":", 1)
+        if ":" in final_tag:
+            model_type, size = final_tag.split(":", 1)
 
-    # Collision check: shipped registry
-    if (model_type in system_registry.get("models", {}) and
-        size in system_registry["models"][model_type]):
-        if not name_override:
-            raise SystemExit(
-                f"Model {tag} already exists in the shipped registry. "
-                f"Use --name to install under a different name."
+        # Collision check: shipped registry -- on the FINAL destination tag,
+        # and unconditionally. Checking only when --name was absent let
+        # `--name qwen3.8:27b` write a user entry that shadows the shipped
+        # one through the merged overlay. Exception: the NPU-embedding flow
+        # deliberately re-installs the official design under its shipped tag
+        # (the engine routes by that exact tag); a same-design re-install
+        # is not a takeover of the name.
+        shipped_entry = (system_registry.get("models", {})
+                         .get(model_type, {}).get(size))
+        if shipped_entry is not None:
+            same_npue_design = (
+                entry.get("npue_design_family")
+                and shipped_entry.get("npue_design_family")
+                and entry["npue_design_family"] == shipped_entry["npue_design_family"]
             )
+            if not same_npue_design:
+                raise SystemExit(
+                    f"Model {final_tag} already exists in the shipped registry. "
+                    f"Use --name to install under a different name."
+                )
 
-    # Collision check: user settings
-    if (model_type in settings.get("models", {}) and
-        size in settings["models"][model_type]):
-        if not force:
-            raise SystemExit(
-                f"Model {tag} is already installed. Use --force to overwrite."
-            )
+        # Collision check: user settings
+        if (model_type in settings.get("models", {}) and
+            size in settings["models"][model_type]):
+            if not force:
+                raise SystemExit(
+                    f"Model {final_tag} is already installed. Use --force to overwrite."
+                )
 
-    # Write complete entry to settings.models
-    settings.setdefault("models", {}).setdefault(model_type, {})[size] = entry
+        # Write complete entry to settings.models
+        settings.setdefault("models", {}).setdefault(model_type, {})[size] = entry
 
-    # Ensure parent directory exists
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure parent directory exists
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save atomically
-    save_json_atomic(settings_path, settings)
+        # Save atomically
+        save_json_atomic(settings_path, settings)
 
-    return tag
+    return final_tag
 
 
 # ------------------------------------------------------------------- xclbins
@@ -2284,12 +2390,15 @@ def main():
         entry["url"] = base_entry.get("url") or f"https://huggingface.co/{repo}"
 
     settings_path = user_settings_path(args.config)
+    # Pass the tag derived in main() (repo name + --tag); register() must not
+    # reconstruct it from the entry, whose `size` is a byte count.
     tag = register(
         entry,
         settings_path,
         system_registry,
         force=args.force,
         name_override=args.name,
+        tag=tag,
     )
     log(f"[INFO] Registered tag '{tag}' in {settings_path}")
 

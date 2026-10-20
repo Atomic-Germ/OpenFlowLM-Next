@@ -14,6 +14,50 @@ from pathlib import Path
 # Required manual fields (fail if missing)
 REQUIRED_MANUAL = ["type", "scope", "delivery", "category"]
 
+# Scan discoveries that are intentionally NOT user settings. The reverse
+# cross-check fails the build for any flag/env var the scanner finds that is
+# neither in settings.json nor listed here: a new engine knob must be
+# classified (add it to settings.json) or explicitly excluded (add it here,
+# with a reason). Without this, an unregistered option left both generated
+# files unchanged and the CI diff check passed -- no drift protection at all.
+NON_SETTING_FLAGS = {
+    # command selection / CLI plumbing, not tunable values
+    "--accept-shipped", "--asr", "--asrmodel", "--bench-iterations",
+    "--command", "--cors", "--embed", "--embeddingmodel", "--filter",
+    "--force", "--host", "--image", "--imagegen", "--imagemodel",
+    "--json", "--keep-all", "--max-batch", "--out", "--port",
+    "--prompt", "--prompt-name", "--q-len", "--quiet", "--seed",
+    "--size", "--socket", "--preemption", "--img-pre-resize",
+}
+NON_SETTING_ENV_VARS = {
+    # install layout / paths
+    "OFLM_CONFIG_PATH", "OFLM_SETTINGS_PATH", "OFLM_MODELINFO_PATH",
+    "OFLM_MODEL_PATH", "OFLM_MODEL_DIR", "OFLM_EXECUTABLE", "OFLM_PYTHON",
+    "OFLM_PACK_SCRIPT", "OFLM_ADD_SCRIPT",
+    # runtime plumbing
+    "OFLM_BACKEND", "OFLM_PLATFORM", "OFLM_SERVE_PORT",
+    "OFLM_DISABLE_UPDATE_CHECK", "OFLM_HF_OWNER",
+    # device / kernel selection
+    "OFLM_NPU_DEVICE_ID", "OFLM_NPU_DISABLE", "OFLM_XCLBIN_PATH",
+    "OFLM_KERNELS_DIR", "OFLM_OPEN_KERNELS_DIR", "OFLM_DIFFUSION_KERNELS_DIR",
+    "OFLM_WHISPER_KERNELS_DIR",
+    # debug / engineering knobs (not for the settings UI)
+    "OFLM_DECODE_AUTO_THRESHOLD", "OFLM_DET_ROUTE", "OFLM_GRANITE_ENGINE",
+    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
+    "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN",
+    "OFLM_OPEN_HOST_ATTN", "OFLM_OPEN_HOST_ATTN_DECODE",
+    "OFLM_OPEN_LAYER_MAJOR", "OFLM_OPEN_MOE_BATCH",
+    "OFLM_OPEN_MOE_BATCH_LOG", "OFLM_OPEN_MOE_REDISPATCH",
+    "OFLM_OPEN_OMP_PASSIVE", "OFLM_OPEN_OMP_THREADS",
+    "OFLM_OPEN_QUIET", "OFLM_OPEN_READ_FENCE",
+    "OFLM_OPEN_ROUTE_SENTINEL", "OFLM_OPEN_SPIN_US",
+    "OFLM_OPEN_STAGE_MAJOR", "OFLM_OPEN_STEP_TRACE",
+    "OFLM_OPEN_SUBMIT_AHEAD", "OFLM_OPEN_TIMEOUT_MS",
+    "OFLM_OPEN_TIMEOUT_RETRY_MS", "OFLM_ROUTE_CHECK",
+    "OFLM_WHISPER_DUMP_MEL", "OFLM_WHISPER_ENGINE",
+    "OFLM_WHISPER_PROTOCOL",
+}
+
 def generate_cpp_header(settings):
     """Generate C++ header content from settings list."""
     lines = []
@@ -143,7 +187,8 @@ def main():
             sys.exit(1)
         scan = json.loads(result.stdout)
 
-    # Cross-check: warn if settings.json has entries not found in code
+    # Cross-check, both directions:
+    # 1. settings.json entries must exist in code (drift the other way)
     scan_flags = set(scan.get("cli_flags", {}).keys())
     scan_envs = set(scan.get("env_vars", {}).keys())
     for s in settings:
@@ -151,6 +196,34 @@ def main():
             print(f"WARNING: {s['cli_flag']} in settings.json but not found in vm_args.hpp")
         if s.get("env_var") and s["env_var"] not in scan_envs:
             print(f"WARNING: {s['env_var']} in settings.json but not found in source code")
+    # 2. scan discoveries must be classified: in settings.json, or in the
+    #    explicit exclusion lists above. An unclassified discovery fails the
+    #    build -- otherwise adding an engine option changes neither generated
+    #    file and the CI diff check passes, defeating the drift protection.
+    settings_flags = {s["cli_flag"] for s in settings if s.get("cli_flag")}
+    settings_envs = {s["env_var"] for s in settings if s.get("env_var")}
+    unclassified_flags = sorted(scan_flags - settings_flags - NON_SETTING_FLAGS)
+    unclassified_envs = sorted(scan_envs - settings_envs - NON_SETTING_ENV_VARS)
+    if unclassified_flags or unclassified_envs:
+        print("ERROR: the code scan found CLI flags/env vars that settings.json does not",
+              file=sys.stderr)
+        print("classify and the generator does not exclude:", file=sys.stderr)
+        for f in unclassified_flags:
+            print(f"  - CLI flag {f}: add it to src/config/settings.json (with type/",
+                  file=sys.stderr)
+            print(f"      scope/delivery/category) or to NON_SETTING_FLAGS in",
+                  file=sys.stderr)
+            print(f"      utilities/generate-registry.py with a reason.", file=sys.stderr)
+        for v in unclassified_envs:
+            print(f"  - env var {v}: add it to src/config/settings.json (with type/",
+                  file=sys.stderr)
+            print(f"      scope/delivery/category) or to NON_SETTING_ENV_VARS in",
+                  file=sys.stderr)
+            print(f"      utilities/generate-registry.py with a reason.", file=sys.stderr)
+        print("Unclassified options must be classified for the registry to stay",
+              file=sys.stderr)
+        print("in sync with the code.", file=sys.stderr)
+        sys.exit(1)
 
     # Generate C++ header
     cpp = generate_cpp_header(settings)
