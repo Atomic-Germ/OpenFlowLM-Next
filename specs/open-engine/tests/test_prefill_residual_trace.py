@@ -215,3 +215,34 @@ int main(int argc,char** argv) {
     expected=np.concatenate((np.arange(n*3,dtype='<f4')-1.5,np.arange(3,dtype='<f4')-1.5)).tobytes()
     for route in ('sequential','hybrid','block_major'):
         for layer in range(4): assert (tmp_path/f'{route}_res{layer}.bin').read_bytes()==expected
+
+
+def test_localization_distinguishes_first_position_from_shallowest_layer():
+    m=load('audit')
+    rows=[dict(route=route,layer=l,position=p,maxrel=0.001,maxabs=0.01,passed=True)
+          for route in m.ROUTES for l in range(4) for p in range(3)]
+    for row in rows:
+        if row['route']=='sequential' and (row['layer'],row['position']) in ((3,0),(1,2)):
+            row.update(passed=False,maxrel=0.02 if row['layer']==3 else 0.03)
+    summary=m.localize(rows,4,3)
+    seq=summary['sequential']
+    assert (seq['first_by_position']['position'],seq['first_by_position']['layer'])==(0,3)
+    assert (seq['first_by_layer']['position'],seq['first_by_layer']['layer'])==(2,1)
+    assert seq['worst']['maxrel']==0.03
+    assert seq['passed']==10 and seq['total']==12
+    assert seq['positions'][1]['first_failure'] is None
+    assert seq['positions'][2]['first_failure']['layer']==1
+    assert seq['layers'][3]['first_failure']['position']==0
+    assert summary['hybrid']['first_by_position'] is None
+
+
+@pytest.mark.parametrize('damage',['missing','duplicate','unknown_route','out_of_range'])
+def test_localization_requires_exact_route_layer_position_coverage(damage):
+    m=load('audit')
+    rows=[dict(route=r,layer=l,position=p,maxrel=0.,maxabs=0.,passed=True)
+          for r in m.ROUTES for l in range(2) for p in range(2)]
+    if damage=='missing': rows.pop()
+    if damage=='duplicate': rows[-1]=rows[0].copy()
+    if damage=='unknown_route': rows[-1]['route']='other'
+    if damage=='out_of_range': rows[-1]['position']=2
+    with pytest.raises(ValueError,match='coverage'): m.localize(rows,2,2)

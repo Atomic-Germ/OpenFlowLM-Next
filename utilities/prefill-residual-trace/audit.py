@@ -38,6 +38,38 @@ def require_identity(before, after, tokens):
     return checks
 
 
+def localize(rows, layers, positions):
+    """Keep temporal onset and shallowest failing depth separate."""
+    index = {(r['route'], r['layer'], r['position']): r for r in rows}
+    required = {(route, l, p) for route in ROUTES for l in range(layers) for p in range(positions)}
+    if layers <= 0 or positions <= 0 or len(index) != len(rows) or set(index) != required:
+        raise ValueError('incomplete or duplicate localization coverage')
+
+    def worst(group):
+        # A nonzero error against an exact-zero reference has no finite maxrel.
+        return max(group, key=lambda r: float('inf') if r['maxrel'] is None else r['maxrel'])
+
+    def section(group):
+        failures = [r for r in group if not r['passed']]
+        return dict(passed=len(group)-len(failures), total=len(group),
+                    first_failure=failures[0] if failures else None, worst=worst(group))
+
+    result = {}
+    for route in ROUTES:
+        depth = [[index[route,l,p] for p in range(positions)] for l in range(layers)]
+        time = [[index[route,l,p] for l in range(layers)] for p in range(positions)]
+        ordered = [r for group in time for r in group]
+        failures = [r for r in ordered if not r['passed']]
+        result[route] = dict(
+            passed=len(ordered)-len(failures), total=len(ordered),
+            first_by_position=failures[0] if failures else None,
+            first_by_layer=min(failures, key=lambda r:(r['layer'],r['position'])) if failures else None,
+            worst=worst(ordered),
+            layers=[dict(layer=l, **section(group)) for l,group in enumerate(depth)],
+            positions=[dict(position=p, **section(group)) for p,group in enumerate(time)])
+    return result
+
+
 def verify_build(directory, variant):
     evidence = json.loads((directory/'build-evidence.json').read_text())
     if not evidence['complete'] or evidence['variant'] != variant:
@@ -90,7 +122,7 @@ def audit(a):
         result.update(capture_valid=True, numerical_passed=report['passed'] and all(r['passed'] for r in rows),
                       native_logits_passed=report['passed'], threshold=base.RESIDUAL_MAXREL,
                       first_failing_position_layer=first, rows=rows, trace_hashes=hashes,
-                      hybrid_residual_identity=pairs)
+                      hybrid_residual_identity=pairs, localization=localize(rows,layers,n+1))
         evidence = [Path(__file__), a.run/'reference.json', a.run/'report.json', a.baseline/'report.json',
                     a.build/'build-evidence.json', a.baseline_build/'build-evidence.json']
         result['evidence'] = {str(p.resolve()):base.digest(p) for p in evidence}
