@@ -1,6 +1,42 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — hybrid FFN vector attribution, 2026-10-20
+## Latest checkpoint — isolated up/gate replay, 2026-10-20
+
+Added an isolated L63/P7 paired-input GEMM replay using the existing production
+kernel and captured norm. Only one projection's weight/input/output buffers
+are resident per process (about **0.1395 GiB**, excluding XRT overhead).
+Independently packed weights match the retained L63 pool bytewise, and their
+dequantized values match the source container's effective weights elementwise.
+
+**Four NPU dispatches complete.** High/low inputs in T256 slots 7 and 135 both
+reproduce all **34816 captured up/gate values bytewise**. Inactive columns are
+zero in each individual output. Thus sparse-row substitution preserves this
+selected projection result; it does not establish dense-prompt accuracy.
+
+| Independent comparison | Up maxrel | Gate maxrel |
+|---|---:|---:|
+| Exact effective weights, original FP32 norm | 0.0019482680 | 0.0002586737 |
+| Exact weights, paired BF16 input | 0.0019495638 | 0.0002587289 |
+| BF16-rounded weights, paired input (diagnostic) | 0.0000011273 | 0.0000015830 |
+
+The CPU weight-rounding effect is **0.0019497818 / 0.0002588257**, closely
+accounting for the measured up/gate discrepancy. This localizes most of the
+tested projection error to the BF16 weight boundary, with correct effective
+packing. The rounded-weight reference is diagnostic only; original bounds and
+references remain unchanged. No production arithmetic or kernel was changed,
+and global long-prefix accuracy remains **FAIL (558/774 retained logit gates)**.
+
+Next test an isolated higher-precision dequantization/GEMM candidate against
+the byte-exact control before integration. Up/down cancellation and propagated
+state require renewed causal checks after any correction.
+
+TDD: **13 new RED-to-GREEN tests**; full host suite **1513 passed, 47 skipped**.
+The standard harness was built with GCC 15.2.0 and 326 pinned compiler
+dependencies; all production kernel binaries were reused. Reproduction,
+provenance and limitations are in the
+[isolated replay runbook](../../../utilities/prefill-upgate-replay/README.md).
+
+## Hybrid FFN vector attribution checkpoint — 2026-10-20
 
 Added CPU-only attribution from retained hybrid sublayers at L63/P7, L60/P38
 and L35/P80. It revalidates source/build/reference/capture provenance and exact
