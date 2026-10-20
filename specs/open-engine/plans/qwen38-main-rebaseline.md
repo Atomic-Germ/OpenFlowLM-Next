@@ -1,6 +1,44 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — 2026-10-19
+## Latest checkpoint — 2026-10-20
+
+The instrumented native CLI completed **64 layers × 257 prompt positions plus
+one continuation** on sequential NPU, hybrid layer-major and hybrid block-major.
+All **777/777** logits and aliases match the retained paired-input baseline
+bytewise. All **64/64** hybrid residual files are identical across schedules.
+The synchronization needed for capture preserved the measured outputs.
+
+The **192 residual files** expose failures earlier than logits alone:
+**46314/49536** layer/position gates pass, with the unchanged **maxrel <0.005**.
+Indices are zero-based.
+
+| Route | Residual PASS | First failure by position | Worst maxrel |
+|---|---:|---|---|
+| Sequential | 15510/16512 | P38/L60: 0.0090391466 | 0.5389499720 at P220/L58 |
+| Hybrid layer-major | 15402/16512 | P7/L63: 0.0058400461 | 0.4325418278 at P205/L58 |
+| Hybrid block-major | 15402/16512 | P7/L63: 0.0058400461 | 0.4325418278 at P205/L58 |
+
+At hybrid P7 the incoming L62 residual maxrel is 0.0007421414; L63 is a full
+attention layer. At sequential P38 the incoming L59 error is 0.0040749071; L60
+is a linear layer. These are threshold crossings in propagated outputs, not
+proof of a faulty operation. The shallowest failures are sequential P241/L33
+and hybrid P162/L32. At the first failing logit positions, residual first fails
+at sequential P80/L35 and hybrid P82/L58. Logit gates remain **558/774 PASS**;
+matching generated IDs and passing continuation residuals do not override this.
+
+Added chronological/depth localization with per-layer and per-position summaries
+and complete coverage checks. Five tests failed before implementation; full host
+suite **1476 passed, 47 skipped**, native CTest rerun **4/4**. Build/source and
+reference hashes pass. The existing CLI and all production artifacts were reused;
+no new compilation or numerical correction was required in this measurement step.
+
+Evidence and commands are in the
+[trace runbook](../../../utilities/prefill-residual-trace/README.md). Next inspect
+causal sublayer boundaries at hybrid P7/L63, sequential P38/L60 and sequential
+P80/L35, separating incoming error from attention/DeltaNet and FFN outputs.
+Long-prefix numerical acceptance, production promotion and serving remain open.
+
+## Previous preparation and boundary measurements — 2026-10-19
 
 A private per-layer native prefill tracer is now built and CPU-tested. It
 captures actual FP32 residuals after every layer, including continuation, on
