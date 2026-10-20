@@ -87,12 +87,40 @@ TEST(env_var_overrides_user_settings) {
         nlohmann::json::object(),
         {{"qwen3.8", {{"27b", {{"prefill_mode", "lean"}}}}}}
     );
+    // An env var is an override only when the USER set it -- one we wrote
+    // ourselves is not (see the test below). The user sets them in their
+    // shell, so they are there when the process starts: that is when
+    // capture_external_env_vars() runs.
     setenv("OFLM_OPEN_PREFILL_MODE", "fast", 1);
+    oflm::config::capture_external_env_vars();
     auto args = make_args();
     auto resolved = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
-    // Env var "fast" should override user setting "lean" (unless CLI flag wins)
-    // CLI flag for prefill_mode returns nullopt if "fast" (default), so env wins
     ASSERT_EQ(resolved["prefill_mode"], "fast");
+    unsetenv("OFLM_OPEN_PREFILL_MODE");
+}
+
+TEST(a_value_we_wrote_ourselves_is_not_an_override) {
+    // The env-var delivery mechanism writes the settings into the
+    // environment, and the environment is process-wide: a server that serves
+    // several models would have the first model's values shadow every later
+    // one. So a value WE wrote is not an override -- it belongs to the model we
+    // wrote it for, and the next model resolves its own.
+    nlohmann::json user_settings;
+    user_settings["qwen3.8"]["27b"]["prefill_mode"] = "lean";
+    user_settings["qwen3.6-moe"]["35b-a3b"]["prefill_mode"] = "fast";
+    auto cfg = make_cfg(nlohmann::json::object(), nlohmann::json::object(), user_settings);
+    // The variable is in the environment -- we put it there for qwen3.8:27b.
+    setenv("OFLM_OPEN_PREFILL_MODE", "lean", 1);
+    // ... but it was not in the environment when the process started, so it is
+    // ours and not the user's.
+    oflm::config::g_external_env_vars.erase("OFLM_OPEN_PREFILL_MODE");
+
+    auto args = make_args();
+    auto one = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
+    auto two = oflm::config::resolve_settings(cfg, "qwen3.6-moe:35b-a3b", args);
+
+    ASSERT_EQ(one["prefill_mode"], "lean");
+    ASSERT_EQ(two["prefill_mode"], "fast");
     unsetenv("OFLM_OPEN_PREFILL_MODE");
 }
 
