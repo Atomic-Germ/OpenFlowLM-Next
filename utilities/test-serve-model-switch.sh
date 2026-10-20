@@ -32,7 +32,24 @@ fi
 REGISTRY="${OFLM_CONFIG_PATH:-src/model_list.json}"
 export OFLM_CONFIG_PATH="$REGISTRY"
 export OFLM_SETTINGS_PATH="$WORK/settings.json"
-export OFLM_XCLBIN_PATH="${OFLM_XCLBIN_PATH:-$(dirname "$REGISTRY")}"
+# The xclbin root is where the kernels live, which is not necessarily next
+# to the registry: the registry may be a copy in a scratch directory while
+# the kernels stay in the source tree. Look for one, and say so if there is
+# none -- an empty prefix fails much later, as "No such file '/xclbins/...'".
+if [ -z "${OFLM_XCLBIN_PATH:-}" ]; then
+  for cand in "$(dirname "$REGISTRY")" "$(dirname "$(dirname "$REGISTRY")")"               "$(pwd)/src" "$(pwd)"; do
+    if [ -d "$cand/xclbins" ]; then
+      OFLM_XCLBIN_PATH="$cand"
+      break
+    fi
+  done
+fi
+if [ -n "${OFLM_XCLBIN_PATH:-}" ]; then
+  export OFLM_XCLBIN_PATH
+  echo "xclbins: $OFLM_XCLBIN_PATH"
+else
+  echo "WARNING: no xclbins directory found; set OFLM_XCLBIN_PATH." >&2
+fi
 
 # Pick two chat models that are actually on disk.
 read -r MODEL_A MODEL_B <<EOF
