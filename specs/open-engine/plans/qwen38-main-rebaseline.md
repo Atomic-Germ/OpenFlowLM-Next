@@ -1,6 +1,49 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — 2026-10-20
+## Latest checkpoint — selected causal sublayers, 2026-10-20
+
+A private native CLI now captures selected prefill sublayers at L63/P7,
+L60/P38 and L35/P80 (zero-based). Sequential NPU captures activation scratch;
+both hybrid routes capture input, pre-FFN residual, norm, up/gate, activation
+and down. Causal native state and all arithmetic are preserved.
+
+All three full-depth 257-token runs complete. **777/777 logit files** and
+**192/192 residual files** reproduce the controlled baseline bytewise.
+All **39** selected captures pass coverage/shape/finite checks; **18/18** hybrid
+capture pairs match. Each output reconstructs from captured residual/down within
+FP32 summation bounds. Three independent causal CPU layer replays reproduce
+the retained outputs exactly. **54/54 conditioned FFN gates pass**, worst
+maxrel **0.0024681085**, across nine route/target cases.
+
+| Failure (zero-based) | Pre-FFN maxrel | Native output maxrel | Ideal FFN on actual pre-FFN input: output maxrel | Local FFN error at layer output |
+|---|---:|---:|---:|---:|
+| Sequential L60/P38 | 0.0093615690 | 0.0090391466 | 0.0090472423 | 0.0000081696 |
+| Sequential L35/P80 | 0.0084320701 | 0.0051683727 | 0.0051656855 | 0.0000027012 |
+| Hybrid L63/P7 | 0.0008105224 | 0.0058400461 | 0.0046310385 | 0.0031273746 |
+
+Sequential error is already present before FFN and is closely reproduced by
+the ideal FFN. At hybrid L63/P7, the ideal FFN counterfactual passes the global
+residual gate while the native result fails. Hybrid FFN arithmetic therefore
+contributes to this crossing even though its conditioned gates pass. The scalar
+errors have different reference scales and cannot be added as contributions.
+This does not identify one faulty operation or validate full-model accuracy:
+the same **558/774** logit gates pass, with unchanged thresholds.
+
+Next isolate up/gate, activation and down contributions at hybrid L63/P7 before
+selecting a precision change. Sequential upstream causal-input/state drift
+remains a separate investigation. Ideal-state replay driven by native inputs is
+explicitly diagnostic; it never substitutes CPU state in the native engine.
+
+TDD: eight new tests, seven observed RED before implementation/fix; full host
+suite **1484 passed, 47 skipped**. Both private builds pass CTest **4/4**.
+A builder protection fix was rebuilt and proved byte-identical to the CLI that
+produced the native captures; the initial stale-source refusal is retained and
+the final audit uses current verified build evidence. Production sources,
+kernels and weights remain unchanged. The
+[sublayer runbook](../../../utilities/prefill-sublayer-trace/README.md) records
+commands, source/compiler provenance, artifacts and interpretation limits.
+
+## Residual localization checkpoint — 2026-10-20
 
 The instrumented native CLI completed **64 layers × 257 prompt positions plus
 one continuation** on sequential NPU, hybrid layer-major and hybrid block-major.
