@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-sublayer-trace</name>
+    <description>Capture selected causal prefill sublayers and separate incoming residual drift from conditioned FFN arithmetic with exact native controls.</description>
+    <location>.agents/skills/open-qwen38-prefill-sublayer-trace/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-residual-trace</name>
     <description>Build a private synchronized native prefill residual tracer and audit per-layer drift after byte-exact baseline logit identity.</description>
     <location>.agents/skills/open-qwen38-prefill-residual-trace/SKILL.md</location>
