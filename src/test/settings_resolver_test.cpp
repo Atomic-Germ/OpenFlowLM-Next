@@ -34,7 +34,7 @@ static oflm::config::EffectiveConfig make_cfg(
 static program_args_t make_args() {
     program_args_t args;
     args.power_mode = "performance";
-    args.prefill_mode = "fast";
+    args.prefill_mode = ""; // the parser's default sentinel: not supplied
     args.ctx_length = -1;
     args.prefill_chunk_len = -1;
     return args;
@@ -130,11 +130,28 @@ TEST(get_setting_value_source_user) {
     auto args = make_args();
     // Clear env var so user setting wins
     unsetenv("OFLM_OPEN_PREFILL_MODE");
-    args.prefill_mode = "fast"; // This is the default, get_cli_flag_value returns nullopt
+    // make_args() leaves prefill_mode empty: the CLI flag was not supplied,
+    // so the user's saved `lean` wins.
     auto val = oflm::config::get_setting_value(cfg, "qwen3.8:27b", "prefill_mode", args);
     ASSERT_TRUE(val.has_value());
     ASSERT_EQ(val->source, oflm::config::SettingValue::USER);
     ASSERT_EQ(val->value, "lean");
+}
+
+TEST(explicit_prefill_mode_fast_wins_over_saved_lean) {
+    // `--prefill-mode fast` is a real CLI override: "fast" is not the
+    // parser's not-supplied sentinel (the empty string is), so it must beat
+    // a saved `lean` preference.
+    auto cfg = make_cfg(
+        nlohmann::json::object(),
+        nlohmann::json::object(),
+        {{"qwen3.8", {{"27b", {{"prefill_mode", "lean"}}}}}}
+    );
+    auto args = make_args();
+    args.prefill_mode = "fast";
+    unsetenv("OFLM_OPEN_PREFILL_MODE");
+    auto resolved = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
+    ASSERT_EQ(resolved["prefill_mode"], "fast");
 }
 
 TEST(get_setting_value_unknown_key) {
@@ -147,7 +164,7 @@ TEST(get_setting_value_unknown_key) {
 TEST(built_in_default_used) {
     auto cfg = make_cfg(nlohmann::json::object(), nlohmann::json::object());
     auto args = make_args();
-    args.prefill_mode = "fast"; // default, nullopt from CLI
+    // Not supplied on the CLI: the registry's own default ("fast") applies.
     unsetenv("OFLM_OPEN_PREFILL_MODE");
     auto resolved = oflm::config::resolve_settings(cfg, "qwen3.8:27b", args);
     // prefill_mode default is "fast" from registry definition

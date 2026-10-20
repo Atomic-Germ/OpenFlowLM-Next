@@ -41,8 +41,12 @@ static std::string external_env_value(const std::string& var) {
 // Pattern matches main.cpp: `bool got_power_mode = (parsed_args.power_mode != "performance");`
 static std::optional<std::string> get_cli_flag_value(const program_args_t& args, const std::string& flag) {
     if (flag == "--prefill-mode") {
-        // Default is "fast" — only return if user changed it
-        if (!args.prefill_mode.empty() && args.prefill_mode != "fast") return args.prefill_mode;
+        // The parser's sentinel for "not supplied" is the empty string
+        // (vm_args.hpp: default_value("")), and it validates the value to
+        // fast|lean. An explicit `--prefill-mode fast` is therefore a real
+        // override and must win over a saved or env `lean` -- "fast" cannot
+        // be treated as "not supplied".
+        if (!args.prefill_mode.empty()) return args.prefill_mode;
         return std::nullopt;
     }
     if (flag == "--pmode") {

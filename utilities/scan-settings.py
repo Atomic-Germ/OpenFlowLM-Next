@@ -14,21 +14,28 @@ def scan_cli_flags(source_dir):
         return {}
     content = vm_args.read_text()
     flags = {}
-    # Pattern: ("--flag-name", po::value<T>(&parsed_args.field)->default_value(X), "description")
-    # or: ("--flag-name", po::bool_switch(&parsed_args.field), "description")
-    # or: ("--flag-name", po::value<T>(&parsed_args.field), "description")
+    # Pattern: ("name[,alias]", po::value<T>(&parsed_args.field)->default_value(X), "description")
+    # or: ("name[,alias]", po::bool_switch(&parsed_args.field), "description")
+    # or: ("name[,alias]", po::value<T>(&parsed_args.field), "description")
+    #
+    # Boost declares option names WITHOUT the leading "--" (e.g. "pmode",
+    # "ctx-len,c", "prefill-mode"), so matching a "--"-prefixed name found
+    # nothing. The long name is the first comma-separated element; aliases
+    # (",c", ",pcl") are dropped. The result is normalized to "--name".
     pattern = re.compile(
-        r'\("(--[a-z0-9-]+)"\s*,\s*'
+        r'\("([a-z0-9-]+(?:,[a-z0-9-]+)*)"\s*,\s*'
         r'po::(value<([^>]+)>|bool_switch)\(&parsed_args\.(\w+)\)'
         r'(?:->default_value\(([^)]+)\))?'
-        r'\s*,\s*"([^"]*)"\s*\)'
+        r'\s*,\s*"([^"]*)"(?:\s*"[^"]*")*\s*\)'  # desc; concatenated string literals allowed
     )
     for m in pattern.finditer(content):
-        flag, boost_type, value_type, field, default, desc = m.groups()
+        names, boost_type, value_type, field, default, desc = m.groups()
+        long_name = names.split(",")[0]
+        flag = "--" + long_name
         type_hint = "bool" if boost_type == "bool_switch" else (
             "int" if value_type and "int" in value_type else "string"
         )
-        key = flag.lstrip("-").replace("-", "_")
+        key = long_name.replace("-", "_")
         flags[flag] = {
             "key": key,
             "description": desc,
