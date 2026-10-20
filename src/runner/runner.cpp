@@ -46,9 +46,19 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
 
     if (args.ctx_length != -1) {
         this->ctx_length = args.ctx_length >= 512 ? args.ctx_length : 512;
-    } 
+    }
     else {
         this->ctx_length = -1;
+    }
+
+    // Initialize from the CLI before apply_model_settings() runs: that
+    // helper reads this->prefill_chunk_len, and an indeterminate value
+    // could skip the model's own setting or poison the env delivery.
+    if (args.prefill_chunk_len != -1) {
+        this->prefill_chunk_len = args.prefill_chunk_len >= 512 ? args.prefill_chunk_len : 512;
+    }
+    else {
+        this->prefill_chunk_len = -1;
     }
 
     if (this->auto_chat_engine != nullptr) {
@@ -467,68 +477,84 @@ void Runner::cmd_status(std::vector<std::string>& input_list) {
 void Runner::cmd_load(std::vector<std::string>& input_list) {
     std::string model_name = input_list[1];
 
-    if (model_name != this->tag) {
-        this->tag = model_name;
+    if (model_name == this->tag) {
+        header_print("OFLM", "Model already loaded: " << model_name);
+        return;
+    }
 
-        switch (this->downloader.is_model_downloaded(this->tag)) {
-            case ModelDownloader::ModelStatus::Ready:
-                break;
-            case ModelDownloader::ModelStatus::Outdated:
-            case ModelDownloader::ModelStatus::Missing:
-                this->downloader.pull_model(this->tag, this->modelscope);
-                break;
-            case ModelDownloader::ModelStatus::Incompatible:
-                header_print("ERROR", "Model is incompatible with this version of OpenFlowLM: " + this->tag);
-                exit(EXIT_FAILURE);
-        }
-        auto_chat_engine.reset();
-        if(model_name=="gpt-oss:20b")
-            std::this_thread::sleep_for(std::chrono::milliseconds(2800));
+    switch (this->downloader.is_model_downloaded(model_name)) {
+        case ModelDownloader::ModelStatus::Ready:
+            break;
+        case ModelDownloader::ModelStatus::Outdated:
+        case ModelDownloader::ModelStatus::Missing:
+            this->downloader.pull_model(model_name, this->modelscope);
+            break;
+        case ModelDownloader::ModelStatus::Incompatible:
+            header_print("ERROR", "Model is incompatible with this version of OpenFlowLM: " + model_name);
+            exit(EXIT_FAILURE);
+    }
+    if(model_name=="gpt-oss:20b")
+        std::this_thread::sleep_for(std::chrono::milliseconds(2800));
 
-        // The model changed, so its settings are not the ones in effect: the
-        // context length and the prefill chunk length were the previous
-        // model's, and the prefill mode is in the environment from them. The
-        // new model's settings have to be in the environment BEFORE the
-        // engine is built -- the engine reads the env-var-delivered ones in
-        // its constructor.
-        this->ctx_length = (this->args.ctx_length != -1)
-            ? (this->args.ctx_length >= 512 ? this->args.ctx_length : 512) : -1;
-        this->prefill_chunk_len = (this->args.prefill_chunk_len != -1)
-            ? (this->args.prefill_chunk_len >= 512 ? this->args.prefill_chunk_len : 512) : -1;
+    // The model changed, so its settings are not the ones in effect: the
+    // context length and the prefill chunk length were the previous
+    // model's, and the prefill mode is in the environment from them. The
+    // new model's settings have to be in the environment BEFORE the
+    // engine is built -- the engine reads the env-var-delivered ones in
+    // its constructor.
+    //
+    // The previous model's state is saved first: if the new tag turns out
+    // to be one this build cannot run, everything is restored and the
+    // previous model stays loaded -- which is what the error below
+    // promises. The old engine is not unloaded until the new one exists.
+    const std::string previous_tag = this->tag;
+    const int previous_ctx_length = this->ctx_length;
+    const int previous_prefill_chunk_len = this->prefill_chunk_len;
+
+    this->tag = model_name;
+    this->ctx_length = (this->args.ctx_length != -1)
+        ? (this->args.ctx_length >= 512 ? this->args.ctx_length : 512) : -1;
+    this->prefill_chunk_len = (this->args.prefill_chunk_len != -1)
+        ? (this->args.prefill_chunk_len >= 512 ? this->args.prefill_chunk_len : 512) : -1;
+    {
+        auto [tag_for_settings, info_for_settings] = this->supported_models.get_model_info(this->tag);
+        apply_model_settings(tag_for_settings, info_for_settings);
+    }
+
+    // The engine is built here, not above: it reads the env-var-delivered
+    // settings in its constructor, so they have to be in the environment
+    // first.
+    std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(this->tag, this->supported_models, &this->npu_device_inst);
+    if (auto_model.second == nullptr) {
+        // The new model cannot run in this build. Put the previous model's
+        // settings back in effect -- its engine is still loaded.
+        this->tag = previous_tag;
+        this->ctx_length = previous_ctx_length;
+        this->prefill_chunk_len = previous_prefill_chunk_len;
         {
             auto [tag_for_settings, info_for_settings] = this->supported_models.get_model_info(this->tag);
             apply_model_settings(tag_for_settings, info_for_settings);
         }
-
-        // The engine is built here, not above: it reads the env-var-delivered
-        // settings in its constructor, so they have to be in the environment
-        // first.
-        std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(this->tag, this->supported_models, &this->npu_device_inst);
-        if (auto_model.second == nullptr) {
-            header_print("ERROR", "cannot load '" + this->tag + "': it is either unknown to this "
-                                  "build or not a chat model -- keeping the previous one. "
-                                  "`oflm list` shows what this build can run.");
-            return;
-        }
-        this->tag = auto_model.first;
-        this->auto_chat_engine = std::move(auto_model.second);
-
-        auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
-        this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
-        try {
-            this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
-        }
-        catch (const std::exception& e) {
-            header_print("ERROR", "Failed to load model: " + std::string(e.what()));
-            exit(EXIT_FAILURE);
-        }
-
-        this->auto_chat_engine->configure_parameter("system_prompt", this->system_prompt);
-
+        header_print("ERROR", "cannot load '" + model_name + "': it is either unknown to this "
+                              "build or not a chat model -- keeping the previous one. "
+                              "`oflm list` shows what this build can run.");
+        return;
     }
-    else
-        header_print("OFLM", "Model already loaded: " << model_name);
+    // Only now is the old engine released: the new one exists.
+    this->tag = auto_model.first;
+    this->auto_chat_engine = std::move(auto_model.second);
 
+    auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
+    this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
+    try {
+        this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
+    }
+    catch (const std::exception& e) {
+        header_print("ERROR", "Failed to load model: " + std::string(e.what()));
+        exit(EXIT_FAILURE);
+    }
+
+    this->auto_chat_engine->configure_parameter("system_prompt", this->system_prompt);
 }
 
 /// \brief Save the history

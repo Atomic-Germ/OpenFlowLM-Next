@@ -580,9 +580,35 @@ int main(int argc, char* argv[]) {
     // Get the models directory from environment variable or default
     std::string models_dir = utils::get_models_directory();
 
-    
-    model_list availble_models(config_path, models_dir);
-    
+    // The registry every command reads is the merged one: the shipped
+    // model_list.json plus the user's settings.json (their `oflm add`-ed
+    // models and their metadata overrides). A model list built from the
+    // shipped file alone leaves those invisible to run/serve/list/pull.
+    // Commands that never touch the model registry (version, port, ...)
+    // skip the merge -- loading it would print migration notices for a
+    // command that does not care.
+    static oflm::config::EffectiveConfig effective_cfg;
+    const bool uses_registry = (parsed_args.command == "run" || parsed_args.command == "serve" ||
+        parsed_args.command == "pull" || parsed_args.command == "remove" || parsed_args.command == "check" ||
+        parsed_args.command == "bench" || parsed_args.command == "bench-embed" ||
+        parsed_args.command == "image" || parsed_args.command == "list");
+    if (uses_registry) {
+        try {
+            effective_cfg = oflm::config::load_effective_config();
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[OFLM] Warning: " << e.what() << std::endl;
+            // Continue with empty config — will use defaults
+        }
+    }
+    if (!effective_cfg.merged.is_object() || !effective_cfg.merged.contains("models")) {
+        // No merged registry (command does not use one, or the load
+        // failed) -- read the shipped file.
+        std::ifstream config_file(config_path);
+        effective_cfg.merged = nlohmann::json::parse(config_file);
+    }
+    model_list availble_models(effective_cfg.merged, models_dir);
+
     // Extract parsed values
     bool got_power_mode = (parsed_args.power_mode != "performance"); // Check if user explicitly set power mode
     bool stable_stack = false;
@@ -605,23 +631,6 @@ int main(int argc, char* argv[]) {
         }
     }
   
-    if (parsed_args.command == "serve" || parsed_args.command == "run" || parsed_args.command == "bench" || parsed_args.command == "bench-embed" || parsed_args.command == "image"){
-        // Configure AMD XRT for the specified power mode
-        if (parsed_args.power_mode == "default" || parsed_args.power_mode == "powersaver" || parsed_args.power_mode == "balanced" || 
-            parsed_args.power_mode == "performance" || parsed_args.power_mode == "turbo") {
-#ifdef _WIN32
-            std::string xrt_cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + parsed_args.power_mode + " > NUL 2>&1";
-            header_print("OFLM", "Configuring NPU Power Mode to " + parsed_args.power_mode + (got_power_mode ? "" : " (oflm default)"));
-            (void)system(xrt_cmd.c_str());
-#endif
-        }
-        else{
-            std::cout << "Invalid power mode: " << parsed_args.power_mode << std::endl;
-            std::cout << "Valid power modes: default, powersaver, balanced, performance, turbo" << std::endl;
-            return 1;
-        }
-    }
-
     // Handle special case for serve command - use default tag if none provided
     if (parsed_args.command == "serve" && parsed_args.model_tag.empty()) {
         parsed_args.model_tag = "model-faker"; // Use default tag
@@ -631,14 +640,8 @@ int main(int argc, char* argv[]) {
     if (parsed_args.command == "run" || parsed_args.command == "serve" ||
         parsed_args.command == "bench" || parsed_args.command == "bench-embed" ||
         parsed_args.command == "image") {
-        // Load effective config (shipped + user settings, with migration)
-        static oflm::config::EffectiveConfig effective_cfg;
-        try {
-            effective_cfg = oflm::config::load_effective_config();
-        } catch (const std::exception& e) {
-            std::cerr << "[OFLM] Warning: " << e.what() << std::endl;
-            // Continue with empty config — will use defaults
-        }
+        // effective_cfg was loaded above, together with the merged model
+        // list -- the same merged registry feeds both.
 
         // Which environment variables are the user's, before we write any of
         // our own into the environment. The env-var delivery mechanism writes
@@ -661,6 +664,29 @@ int main(int argc, char* argv[]) {
         resolved_storage = resolved;
         oflm::config::g_effective_config = &cfg_storage;
         oflm::config::g_resolved_settings = &resolved_storage;
+
+        // Configure AMD XRT for the power mode in effect. `pmode` is a DIRECT
+        // setting: apply_settings() deliberately does not deliver it, so it
+        // is consumed here -- and it must be the RESOLVED value, not the CLI
+        // flag alone, or a saved `pmode` preference (settings.json or env)
+        // would never reach xrt-smi while `config show` reported it.
+        std::string effective_pmode = parsed_args.power_mode;
+        if (resolved.contains("pmode")) {
+            effective_pmode = resolved["pmode"].get<std::string>();
+        }
+        if (effective_pmode == "default" || effective_pmode == "powersaver" || effective_pmode == "balanced" ||
+            effective_pmode == "performance" || effective_pmode == "turbo") {
+#ifdef _WIN32
+            std::string xrt_cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + effective_pmode + " > NUL 2>&1";
+            header_print("OFLM", "Configuring NPU Power Mode to " + effective_pmode + (got_power_mode ? "" : " (oflm default)"));
+            (void)system(xrt_cmd.c_str());
+#endif
+        }
+        else {
+            std::cout << "Invalid power mode: " << effective_pmode << std::endl;
+            std::cout << "Valid power modes: default, powersaver, balanced, performance, turbo" << std::endl;
+            return 1;
+        }
     }
 
 #ifndef _WIN32

@@ -154,6 +154,18 @@ inline std::wstring utf8_to_wstring(const std::string& str) {
     MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &wstr[0], size_needed);
     return wstr;
 }
+/// \brief Convert a wide string to a UTF-8 string (Windows counterpart)
+/// \param str the wide string
+/// \return the UTF-8 string
+/// \note The POSIX branch below defines wstring_to_utf8 inside the same
+///       #else; without this counterpart the callers (runner.cpp) would not
+///       link on Windows.
+inline std::string wstring_to_utf8(const std::wstring& str) {
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0, nullptr, nullptr);
+    std::string out(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, str.c_str(), (int)str.size(), &out[0], size_needed, nullptr, nullptr);
+    return out;
+}
 #else
 /// \brief Convert a UTF-8 string to a wide string
 /// \param str the UTF-8 string
@@ -161,18 +173,21 @@ inline std::wstring utf8_to_wstring(const std::string& str) {
 /// \note std::wstring_convert is deprecated in C++17 and removed in C++20, but
 ///       it is still the only exact, locale-independent UTF-8 decoder in the
 ///       standard library: std::filesystem::path's conversion goes through the
-///       locale, which is not UTF-8 in general, and driving
-///       std::codecvt_utf8_utf16 by hand does not work because its base class
-///       hides the five-argument out() behind a seven-argument one that
-///       converts the other way. So keep wstring_convert and silence the
-///       deprecation here, in the one place it is used. If the standard does
-///       remove it, this is the line to rewrite.
+///       locale, which is not UTF-8 in general. So keep wstring_convert and
+///       silence the deprecation here, in the one place it is used. If the
+///       standard does remove it, this is the line to rewrite.
+///       codecvt_utf8 (NOT codecvt_utf8_utf16) is required: on a platform where
+///       wchar_t is 32 bits it yields whole code points. codecvt_utf8_utf16
+///       would yield UTF-16 code units, so a non-BMP character (an emoji)
+///       would land in the wstring as two surrogate values that
+///       wstring_to_utf8() -- a code-point encoder -- cannot combine, and the
+///       character would not round-trip through terminal input.
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
 inline std::wstring utf8_to_wstring(const std::string& str) {
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
     return conv.from_bytes(str);
 }
 #if defined(__GNUC__) && !defined(__clang__)
