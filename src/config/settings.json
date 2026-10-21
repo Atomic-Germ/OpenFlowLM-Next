@@ -70,6 +70,18 @@
       "category": "generation",
       "reload_required": false,
       "registry_key": "details.think"
+    },
+    {
+      "key": "speculative",
+      "cli_flag": "--speculative",
+      "env_var": "OFLM_SPECULATIVE",
+      "description": "Use the model's draft (Uno) pass for lossless greedy speedup",
+      "type": "bool",
+      "scope": "per_model",
+      "delivery": "env_var",
+      "category": "performance",
+      "reload_required": true,
+      "default_value": false
     }
   ]
 }

@@ -17,8 +17,19 @@
 static int failures = 0;
 static std::vector<std::pair<std::string, void(*)()>> tests;
 
-TEST(registry_has_5_settings) {
-    ASSERT_EQ(oflm::config::settings_registry().size(), 5u);
+TEST(registry_has_the_expected_settings) {
+    // Not a count: a setting added later must not break this, and a setting
+    // that went missing must. The names are what matters.
+    std::set<std::string> keys;
+    for (const auto& def : oflm::config::settings_registry()) keys.insert(def.key);
+    for (const char* expected : {"prefill_mode", "pmode", "ctx_len",
+                                 "prefill_chunk_len", "think", "speculative"}) {
+        if (!keys.count(expected)) {
+            std::cerr << "missing setting: " << expected << std::endl;
+            failures++;
+            return;
+        }
+    }
 }
 
 TEST(every_setting_has_required_fields) {
@@ -108,8 +119,18 @@ TEST(settings_for_scope_global) {
 }
 
 TEST(settings_for_scope_per_model) {
+    // The names, not the count: a setting added later must not break this.
     auto per_model = oflm::config::settings_for_scope(oflm::config::SettingScope::PER_MODEL);
-    ASSERT_EQ(per_model.size(), 4u); // prefill_mode, ctx_len, prefill_chunk_len, think
+    std::set<std::string> keys;
+    for (const auto& def : per_model) keys.insert(def.key);
+    for (const char* expected : {"prefill_mode", "ctx_len", "prefill_chunk_len",
+                                 "think", "speculative"}) {
+        if (!keys.count(expected)) {
+            std::cerr << "not per-model: " << expected << std::endl;
+            failures++;
+            return;
+        }
+    }
 }
 
 TEST(generate_schema_json_structure) {
@@ -118,7 +139,8 @@ TEST(generate_schema_json_structure) {
     ASSERT_EQ(schema["version"].get<int>(), 1);
     ASSERT_TRUE(schema.contains("settings"));
     ASSERT_TRUE(schema["settings"].is_array());
-    ASSERT_EQ(schema["settings"].size(), 5u);
+    // The schema carries every setting the registry has, no more and no less.
+    ASSERT_EQ(schema["settings"].size(), oflm::config::settings_registry().size());
     // Each setting should have key, type, description, scope, delivery
     for (const auto& s : schema["settings"]) {
         ASSERT_TRUE(s.contains("key"));
@@ -197,19 +219,19 @@ TEST(convert_type_enum) {
 
 TEST(get_all_setting_keys) {
     auto keys = oflm::config::get_all_setting_keys();
-    ASSERT_EQ(keys.size(), 5u);
     std::set<std::string> key_set(keys.begin(), keys.end());
     ASSERT_TRUE(key_set.count("prefill_mode") == 1);
     ASSERT_TRUE(key_set.count("pmode") == 1);
     ASSERT_TRUE(key_set.count("ctx_len") == 1);
     ASSERT_TRUE(key_set.count("prefill_chunk_len") == 1);
     ASSERT_TRUE(key_set.count("think") == 1);
+    ASSERT_TRUE(key_set.count("speculative") == 1);
 }
 
 TEST(generate_help_lines) {
     auto lines = oflm::config::generate_help_lines();
     ASSERT_FALSE(lines.empty());
-    // Should contain all 5 setting keys
+    // Should contain every setting key
     std::string all_text;
     for (const auto& l : lines) all_text += l + "\n";
     ASSERT_TRUE(all_text.find("prefill_mode") != std::string::npos);
@@ -217,6 +239,7 @@ TEST(generate_help_lines) {
     ASSERT_TRUE(all_text.find("ctx_len") != std::string::npos);
     ASSERT_TRUE(all_text.find("prefill_chunk_len") != std::string::npos);
     ASSERT_TRUE(all_text.find("think") != std::string::npos);
+    ASSERT_TRUE(all_text.find("speculative") != std::string::npos);
 }
 
 int main() {

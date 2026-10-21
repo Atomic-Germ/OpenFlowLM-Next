@@ -105,6 +105,23 @@ inline const std::vector<SettingDef>& build_registry() {
             .registry_key = "details.think",
             .delivery = DeliveryMechanism::API_FIELD,
         },
+        SettingDef{
+            .key = "speculative",
+            .cli_flag = "--speculative",
+            .env_var = "OFLM_SPECULATIVE",
+            .description = "Use the model's draft (Uno) pass for lossless greedy speedup",
+            .type = SettingType::BOOL,
+            .options = {},
+            .min_value = std::nullopt,
+            .max_value = std::nullopt,
+            .presets = {},
+            .default_value = "false",
+            .scope = SettingScope::PER_MODEL,
+            .reload_required = true,
+            .category = "performance",
+            .registry_key = "",
+            .delivery = DeliveryMechanism::ENV_VAR,
+        },
     };
     return registry;
 }

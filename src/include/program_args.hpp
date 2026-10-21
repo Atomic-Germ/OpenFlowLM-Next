@@ -28,6 +28,7 @@ struct program_args_t {
     int ctx_length = -1; // let model decide
     int prefill_chunk_len = -1; // let model decide
     std::string prefill_mode = ""; // fast | lean; empty leaves OFLM_OPEN_PREFILL_MODE as it is
+    bool speculative = false;     // use the model's draft (Uno) pass; false leaves OFLM_SPECULATIVE as it is
 
     // handling input file
     std::string input_file_name = "";

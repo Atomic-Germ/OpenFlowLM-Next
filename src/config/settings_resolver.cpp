@@ -62,6 +62,12 @@ static std::optional<std::string> get_cli_flag_value(const program_args_t& args,
         if (args.prefill_chunk_len > 0) return std::to_string(args.prefill_chunk_len);
         return std::nullopt;
     }
+    if (flag == "--speculative") {
+        // A switch: absent means "not supplied", so the saved or env value
+        // stands. Only an explicit --speculative overrides it.
+        if (args.speculative) return "true";
+        return std::nullopt;
+    }
     return std::nullopt;
 }
 

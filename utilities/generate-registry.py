@@ -117,8 +117,14 @@ def generate_cpp_header(settings):
             lines.append(f"            .presets = {{{presets}}},")
         else:
             lines.append("            .presets = {},")
-        # Default
-        lines.append(f'            .default_value = "{s.get("default_value", "")}",')
+        # Default. A JSON bool would land as Python's "True"/"False" in the
+        # C++ string, so spell the booleans the way the engine reads them.
+        default = s.get("default_value", "")
+        if isinstance(default, bool):
+            default = "true" if default else "false"
+        else:
+            default = str(default)
+        lines.append(f'            .default_value = "{default}",')
         # Scope
         scope_map = {"global": "SettingScope::GLOBAL", "per_model": "SettingScope::PER_MODEL",
                      "both": "SettingScope::BOTH"}
