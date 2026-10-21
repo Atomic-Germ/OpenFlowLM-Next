@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-weighted-cli</name>
+    <description>Build private paired-weight FFN CLIs and validate causal propagation with exact controls and residual tracing.</description>
+    <location>.agents/skills/open-qwen38-prefill-weighted-cli/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-ffn-replay</name>
     <description>Compose paired-weight up/gate, native host activation and original down with exact controls and independent layer-output gates.</description>
     <location>.agents/skills/open-qwen38-prefill-ffn-replay/SKILL.md</location>
