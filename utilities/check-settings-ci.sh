@@ -34,15 +34,24 @@ fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 echo "check-settings-ci: branch $BRANCH, target $TARGET"
 
-# ---- fetch the target branch over the remote's own URL --------------------
+# ---- fetch the target branch over a remote's own URL ----------------------
 # SSH is not always usable (no key, no agent); the URL works with whatever
-# credentials git already has.
-remote="$(git config --get "branch.$BRANCH.remote" || echo origin)"
-url="$(git config --get "remote.$remote.url" || echo https://github.com/Atomic-Germ/OpenFlowLM-Next.git)"
+# credentials git already has. The upstream is tried first: a pull request is
+# merged with the upstream's branch, not with the fork's.
 name="$(basename "$TARGET")"
-if timeout 300 git fetch --quiet "$url" "+refs/heads/$name:refs/remotes/ci-check/$name" 2>/dev/null; then
+fetched=0
+for remote in origin "$(git config --get "branch.$BRANCH.remote" 2>/dev/null)"; do
+  [ -n "$remote" ] || continue
+  url="$(git config --get "remote.$remote.url" 2>/dev/null)" || continue
+  [ -n "$url" ] || continue
+  if timeout 300 git fetch --quiet "$url" "+refs/heads/$name:refs/remotes/ci-check/$name" 2>/dev/null; then
+    echo "check-settings-ci: fetched $name from $remote"
+    fetched=1
+    break
+  fi
+done
+if [ "$fetched" = "1" ]; then
   TARGET="refs/remotes/ci-check/$name"
-  echo "check-settings-ci: fetched $name"
 else
   echo "check-settings-ci: could not fetch $name; using the local copy of $TARGET"
 fi
