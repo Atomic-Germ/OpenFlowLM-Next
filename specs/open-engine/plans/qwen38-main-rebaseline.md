@@ -1,6 +1,42 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — private causal paired-weight FFN, 2026-10-21
+## Latest checkpoint — weighted-candidate sublayer diagnosis, 2026-10-21
+
+Instrumented copied weighted-candidate sources at L55/P7 and L51/P17 without
+changing arithmetic. All three full-resident routes complete on the retained
+20-token prompt plus continuation. **66/66 logits and 192/192 residual files**
+match the previous candidate bytewise; all **26 selected captures** are complete
+and **12 hybrid pairs** are identical. Independent causal CPU replay reproduces
+both stored selected outputs bytewise.
+
+All **36 conditioned FFN gates pass**, worst maxrel **0.0020749792**. Global
+hybrid errors are already present before FFN:
+
+| Row | Input maxrel | Pre-FFN maxrel | Native output maxrel | Ideal FFN on actual pre-FFN input |
+|---|---:|---:|---:|---:|
+| L55/P7 | 0.0029030925 | 0.0061193443 | 0.0062761194 | 0.0060717536 |
+| L51/P17 | 0.0057009925 | 0.0092505118 | 0.0138594086 | 0.0138246489 |
+
+Native-vs-ideal-FFN output error is **0.0002031324 / 0.0003275429**; ideal FFN
+still fails the unchanged <0.005 global bound. Pre-FFN differences against
+ideal causal state driven by native inputs are **0.0006651352 / 0.0004594719**.
+This points to propagated input/history drift; it does not identify a single
+faulty earlier operation or make ideal state a replacement for native history.
+Sequential selected outputs pass at 0.0002325612 / 0.0008600592.
+
+Full-model intermediate residual acceptance remains **FAIL (3974/4032)**.
+Next localize drift growth in preceding layers using retained causal prefixes,
+before further precision changes or longer-sequence acceptance.
+
+GCC 15.2.0; CTest **4/4**, **587 compiler dependencies** pinned. **8 new
+RED-to-GREEN tests; 1558 passed, 47 skipped** overall. The initial CPU audit
+rejected sublayer residual files as extra full-layer traces; a regression fixes
+that inventory distinction. The failed audit is retained and a CPU-only re-audit
+validates the same native captures. Commands and limitations are in the
+[weighted sublayer runbook](../../../utilities/prefill-weighted-sublayers/README.md).
+Production code, kernels and model weights are unchanged.
+
+## Private causal paired-weight FFN checkpoint — 2026-10-21
 
 Built private paired-input control and paired-weight candidate CLIs with
 synchronized residual capture. The candidate adds the verified low-weight
