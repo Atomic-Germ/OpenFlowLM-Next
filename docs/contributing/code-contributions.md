@@ -111,6 +111,41 @@ oflm run <model>
 oflm list
 ```
 
+### 3b. If you touched a setting, a CLI flag, or an `OFLM_*` variable
+
+The user-facing settings live in `src/config/settings.json`, and the C++
+registry the binary compiles in is **generated** from it. CI regenerates it and
+fails if the result differs from the committed
+`src/config/settings_registry_generated.hpp`.
+
+It fails, before that, when the scan finds a CLI flag or an `OFLM_*`
+variable that `settings.json` does not classify. Every flag and every
+variable the code reads must be either
+
+- a setting in `src/config/settings.json` (with type, scope, delivery,
+  category), or
+- listed in `NON_SETTING_ENV_VARS` / `NON_SETTING_FLAGS` in
+  `utilities/generate-registry.py`, with a reason.
+
+**The check runs against your branch merged with the target branch.** So it
+can also break on you without you having touched anything: the target branch
+added a variable while your branch was open, and the merge brings it in. That
+happened with `OFLM_SPECULATIVE`, added to `main` by #184.
+
+Run the check the way CI runs it, before you push — it merges the target
+branch in a scratch worktree and leaves your tree alone:
+
+```bash
+utilities/check-settings-ci.sh              # defaults to origin/main
+utilities/check-settings-ci.sh origin/main
+```
+
+If it fails, it names the flag or the variable and tells you whether the
+merged tree produces a different registry (copy the regenerated files over and
+commit them).
+
+Adding a setting itself is described in `src/create_new_model.md`.
+
 ### 4. Write Tests (if adding new functionality)
 
 - Add tests to `src/test/`

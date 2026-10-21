@@ -89,6 +89,48 @@ paths explicitly. Never `git add` a path you did not edit.
 
 Before committing, `git diff --cached --stat` must show only your files.
 
+## The settings registry is generated, and CI checks it
+
+`src/config/settings.json` is the source of truth for the user-facing
+settings. `utilities/generate-registry.py` turns it into
+`src/config/settings_registry_generated.hpp` (committed), and
+`utilities/scan-settings.py` reads the source tree for the CLI flags and the
+`OFLM_*` variables the code actually uses.
+
+CI regenerates the registry and fails if the result differs from the
+committed file. It also fails, before that, when the scan finds a flag or a
+variable that `settings.json` does not classify: **every** CLI flag and
+**every** `OFLM_*` variable the code reads must be
+
+- a setting in `src/config/settings.json` (with type, scope, delivery,
+  category), or
+- listed in `NON_SETTING_ENV_VARS` / `NON_SETTING_FLAGS` in
+  `utilities/generate-registry.py`, with a reason.
+
+**The check runs against your branch MERGED WITH THE TARGET BRANCH.** Two
+things break it, and only the first is yours:
+
+1. your branch adds a CLI flag or an `OFLM_*` variable and does not
+   classify it;
+2. the target branch adds one while your branch is open — you did nothing,
+   and the merge brings it in. This happened with `OFLM_SPECULATIVE`, added
+   to `main` by #184, which broke the check on a branch that had never
+   touched it.
+
+So before you push, run the check the way CI runs it — it merges the target
+branch in a scratch worktree, so your tree is untouched:
+
+```bash
+utilities/check-settings-ci.sh            # defaults to origin/main
+utilities/check-settings-ci.sh origin/main
+```
+
+It tells you what to do when it fails: the flag or variable to add, and
+whether the merged tree produces a different registry (in which case copy the
+regenerated files over and commit them).
+
+Adding a setting is documented in `src/create_new_model.md`.
+
 <available_skills>
   <skill>
     <name>npu_offload_pipeline</name>
