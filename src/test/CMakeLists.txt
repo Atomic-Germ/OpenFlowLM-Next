@@ -71,6 +71,8 @@ add_test(NAME config_ui_test COMMAND config_ui_test)
 add_subdirectory(npu_platform)
 add_subdirectory(model_backend)
 add_subdirectory(downloader_pinning)
+add_subdirectory(k2_chat)
+add_subdirectory(sampler_greedy)
 
 function(npu_test_setup)
     # Set build type to Release

@@ -296,14 +296,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = both;
+        Manifest fast = Manifest::parse(g, "lean");  // Manifest is move-only since #180 (its gguf view)
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = both;
+        Manifest lean = Manifest::parse(g, "lean");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -449,6 +449,13 @@ int main(int argc, char** argv) {
                   "qwen3: the dense route's attention products, declared qknorm_rope");
             refused_manifest(argv[2], "is not one this engine computes", "qwen3: an attn_block prep the engine does not compute is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "qknorm_post_rope"; });
+            {
+                std::ifstream rf(argv[2]);
+                json rj = json::parse(rf);
+                rj["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "rope";
+                const Manifest r = Manifest::parse(rj, "edited");
+                check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "k2 shape: prep rope (no q/k norm) parses");
+            }
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
@@ -520,10 +527,17 @@ int main(int argc, char** argv) {
             check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
             // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
             check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
-            // its norm follows the rotation, which the products' host half does not do: the
-            // recipe emits the streams but declares no prep, so the route keeps its dxB dispatches
-            check(!h.layer_types.at("dense").gemm_block.attn_block.present(),
-                  "hunyuan: an attn_block without a prep is left to the dxB route");
+            // its norm follows the rotation, which the products' host half does not do: no prep, so no products
+            check(!h.layer_types.at("dense").gemm_block.attn_block.present(), "hunyuan: no prep, no attn_block");
+            {   // an older kernel set still carries one without a prep: it is not read, the route keeps dxB
+                std::ifstream qf(argv[2]), hf(argv[4]);
+                json qj = json::parse(qf), hj = json::parse(hf);
+                json ab = qj["layer_types"]["dense"]["gemm_block"]["attn_block"];
+                ab.erase("prep");
+                hj["layer_types"]["dense"]["gemm_block"]["attn_block"] = ab;
+                check(!Manifest::parse(hj, "older set").layer_types.at("dense").gemm_block.attn_block.present(),
+                      "hunyuan: an older set's attn_block without a prep is left to the dxB route");
+            }
             check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
             json ok = matching_config(h);
             check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");

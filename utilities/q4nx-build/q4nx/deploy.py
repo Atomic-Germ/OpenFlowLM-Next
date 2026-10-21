@@ -58,6 +58,7 @@ MODEL_FILES = [
     "chat_template.jinja",
     "vision_weight.q4nx",
     "audio_weight.q4nx",
+    "uno.q4nx",
 ]
 
 _INSTALL_PREFIX_CANDIDATES = [
