@@ -1,6 +1,7 @@
 /// \file config_cmd.cpp
 /// \brief Implementation of `oflm config` CLI commands
 #include "config/config_cmd.hpp"
+#include "config/config_paths.hpp"
 #include "config/config_store.hpp"
 #include "config/settings_registry.hpp"
 #include "config/settings_resolver.hpp"
@@ -345,8 +346,20 @@ static int config_unset(const program_args_t& args) {
 
 // Show configuration
 int config_show(const program_args_t& args) {
+    // The paths first, and before the registry is loaded: they say where
+    // oflm reads and writes, and they are the answer to "the registry is
+    // not found" -- which is thrown right after this.
+    nlohmann::json paths = nlohmann::json::object();
+    for (const auto& p : resolve_paths()) {
+        paths[p.var] = p.value;
+    }
+    if (!args.json_output) {
+        print_paths(std::cout);
+        std::cout << std::endl;
+    }
+
     EffectiveConfig cfg = load_effective_config();
-    
+
     if (args.json_output) {
         // Output JSON format
         nlohmann::json output;
@@ -355,7 +368,9 @@ int config_show(const program_args_t& args) {
             // Show per-model settings
             auto model_entry = get_merged_model_entry(cfg, args.config_model);
             if (model_entry.is_null() || model_entry.empty()) {
-                std::cout << "{}" << std::endl;
+                nlohmann::json empty;
+                empty["paths"] = paths;
+                std::cout << empty.dump(2) << std::endl;
                 return 0;
             }
             
@@ -395,7 +410,11 @@ int config_show(const program_args_t& args) {
             
             output = global_settings;
         }
-        
+
+        // The paths, next to the settings: a caller that wants to know where
+        // oflm read the settings from has the answer in the same document.
+        output["paths"] = paths;
+
         std::cout << output.dump(2) << std::endl;
     } else {
         // Output human-readable format

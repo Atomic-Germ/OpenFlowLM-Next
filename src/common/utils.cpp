@@ -68,14 +68,22 @@ std::string find_model_list() {
     return find_shipped_registry();
 }
 
-std::string find_shipped_registry() {
+namespace {
+
+// The registry lookup, with the notice about the file that was picked on or
+// off. The notice is what tells a user WHICH registry oflm read, so it stays
+// on for the commands that read it -- but a view that shows the path itself
+// would print it twice.
+std::string find_shipped_registry_impl(bool quiet) {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
     // 1. Check OFLM_CONFIG_PATH environment variable (whole-registry override)
     const std::string env_path = getenv_oflm("OFLM_CONFIG_PATH");
     if (!env_path.empty()) {
         if (std::filesystem::exists(env_path)) {
-            std::cerr << "[OFLM]  Using custom model list path: " << env_path << std::endl;
+            if (!quiet) {
+                std::cerr << "[OFLM]  Using custom model list path: " << env_path << std::endl;
+            }
             return env_path;
         }
     }
@@ -110,6 +118,16 @@ std::string find_shipped_registry() {
                              "if you are running from a non-standard location.");
 }
 
+} // namespace
+
+std::string find_shipped_registry() {
+    return find_shipped_registry_impl(false);
+}
+
+std::string find_shipped_registry_quiet() {
+    return find_shipped_registry_impl(true);
+}
+
 std::string find_user_settings() {
     // 1. OFLM_SETTINGS_PATH (for testing)
     const std::string env_path = getenv_oflm("OFLM_SETTINGS_PATH");
@@ -123,14 +141,20 @@ std::string find_user_settings() {
     return settings_path;  // Return the path; caller checks if it exists
 }
 
-std::string find_model_info() {
+namespace {
+
+// The model info lookup, with the notice on or off. Same reasoning as the
+// registry lookup above.
+std::string find_model_info_impl(bool quiet) {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
     // 1. Check OFLM_MODELINFO_PATH environment variable
     const std::string env_path = getenv_oflm("OFLM_MODELINFO_PATH");
     if (!env_path.empty()) {
         if (std::filesystem::exists(env_path)) {
-            std::cerr << "[OFLM]  Using custom model info path: " << env_path << std::endl;
+            if (!quiet) {
+                std::cerr << "[OFLM]  Using custom model info path: " << env_path << std::endl;
+            }
             return env_path;
         }
     }
@@ -182,6 +206,16 @@ std::string find_model_info() {
     // If not found, throw an error
     throw std::runtime_error("model_info.json not found. Reinstall OpenFlowLM, or set OFLM_MODELINFO_PATH "
                              "if you are running from a non-standard location.");
+}
+
+} // namespace
+
+std::string find_model_info() {
+    return find_model_info_impl(false);
+}
+
+std::string find_model_info_quiet() {
+    return find_model_info_impl(true);
 }
 
 namespace {

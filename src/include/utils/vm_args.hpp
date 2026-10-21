@@ -38,6 +38,15 @@ inline void print_help(po::options_description& general) {
     std::cout << "  validate            - Validate the NPU stack" << std::endl;
     std::cout << std::endl;
     std::cout << general << std::endl;
+    std::cout << "Environment variables (paths oflm reads and writes):" << std::endl;
+    std::cout << "  OFLM_CONFIG_PATH      the model registry (model_list.json) to read" << std::endl;
+    std::cout << "  OFLM_MODELINFO_PATH   the model info file (model_info.json)" << std::endl;
+    std::cout << "  OFLM_XCLBIN_PATH      the directory that holds the xclbins/ tree" << std::endl;
+    std::cout << "  OFLM_MODEL_PATH       the directory that holds the models/ tree" << std::endl;
+    std::cout << "                        (the models are in $OFLM_MODEL_PATH/models)" << std::endl;
+    std::cout << "  OFLM_SETTINGS_PATH    your settings.json, the one oflm writes" << std::endl;
+    std::cout << "  'oflm config show' prints where each of them points right now." << std::endl;
+    std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
     std::cout << "\toflm run llama3.2:1b" << std::endl;
     std::cout << "\toflm run llama3.2:1b --asr 1" << std::endl;

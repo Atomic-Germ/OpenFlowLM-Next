@@ -379,6 +379,12 @@ std::string find_model_list();
 ///   5. CMAKE_INSTALL_PREFIX/share/oflm/model_list.json
 std::string find_shipped_registry();
 
+/// The same file, without the "Using custom model list path" notice.
+/// \note The notice says which file was picked, and it is printed by every
+///       command that reads the registry. A view that shows the path itself
+///       must not print it a second time.
+std::string find_shipped_registry_quiet();
+
 /// Find the user settings.json overlay file.
 /// Search order:
 ///   1. OFLM_SETTINGS_PATH (for testing)
@@ -387,6 +393,9 @@ std::string find_shipped_registry();
 std::string find_user_settings();
 
 std::string find_model_info();
+
+/// The same file, without the "Using custom model info path" notice.
+std::string find_model_info_quiet();
 
 
 ///@brief every directory that may hold an `xclbins/` tree, most specific first

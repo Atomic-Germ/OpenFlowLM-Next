@@ -21,6 +21,33 @@ When oflm starts, your settings are deep-merged on top of the shipped defaults.
 4. Command-line flags (`--ctx-len`, `--pmode`, etc.)
 5. Per-request API fields (serve mode)
 
+## Where oflm reads and writes
+
+Every path oflm uses is an environment variable, and none of them is
+visible from the outside — which is why a model that is right there on disk
+can be "not found".
+
+| Variable | What it points at |
+|----------|-------------------|
+| `OFLM_CONFIG_PATH` | the model registry (`model_list.json`) that is read |
+| `OFLM_MODELINFO_PATH` | the model info file (`model_info.json`) |
+| `OFLM_XCLBIN_PATH` | the directory that holds the `xclbins/` tree |
+| `OFLM_MODEL_PATH` | the directory that holds the `models/` tree |
+| `OFLM_SETTINGS_PATH` | your `settings.json`, the one oflm writes |
+
+`OFLM_MODEL_PATH` holds the directory that **contains** the models, not the
+models themselves: the registry says where the models live (`model_path`:
+`models`), so the models are in `$OFLM_MODEL_PATH/models`. `oflm add` resolves
+it the same way.
+
+To see where each of them points right now:
+
+```bash
+oflm config show          # the paths, then the settings
+oflm config show --json   # the same, in the "paths" key
+oflm config               # the guided flow: "Show the paths in use"
+```
+
 ## Commands
 
 ### Show effective settings
@@ -57,6 +84,18 @@ oflm config edit    # Opens ~/.config/oflm/settings.json in $EDITOR
 ```bash
 oflm config         # Interactive: pick model → setting → value
 ```
+
+The menus answer to the arrow keys and to the vim keys:
+
+| Key | Does |
+|-----|------|
+| `↑` / `k` | previous entry (the list wraps around) |
+| `↓` / `j` | next entry |
+| `Enter` / `l` | select |
+| `Esc` / `h` | back to the previous menu |
+| `Home` / `End` | first / last entry |
+| `PageUp` / `PageDown` | ten entries up / down |
+| `q` | quit |
 
 ### Full-screen TUI
 
