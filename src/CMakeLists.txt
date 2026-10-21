@@ -1710,6 +1710,19 @@ set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
 
 # Generate settings registry from source code scan + settings.json
+#
+# Python3 is looked for HERE, unconditionally: the target below is built
+# whatever the other options are, and with Python3_EXECUTABLE empty the
+# rule ran the scripts as programs -- which failed with "Permission
+# denied" on the CI, where the scripts are not executable.
+#
+# Not REQUIRED: a build that never runs the target (the Windows release)
+# must still configure on a machine with no python3.
+find_package(Python3 COMPONENTS Interpreter)
+if(NOT Python3_EXECUTABLE)
+    set(Python3_EXECUTABLE "python3")
+    message(STATUS "No python3 interpreter found: generate-settings will use 'python3' from PATH")
+endif()
 add_custom_target(generate-settings
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/scan-settings.py
             --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
