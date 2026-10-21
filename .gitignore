@@ -97,6 +97,10 @@ result-*
 bin/
 .env
 
+# reference-study venvs (torch/transformers/diffusers; not used by builds or the engine)
+ditref-venv
+refvenv
+
 # local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
 TestGGUF/
 *.gguf

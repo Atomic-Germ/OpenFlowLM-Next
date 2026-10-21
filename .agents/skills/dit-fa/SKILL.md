@@ -56,6 +56,8 @@ CPU model: `utilities/dit-ref/fa_emul.py`. exp2 probe: `utilities/aie-probes/exp
 
 ## Build / test
 
+Windows (as originally written):
+
 ```
 . C:\dev\mlir-aie\iron_env.ps1
 python open_kernels\export_dit_kernels.py --no-gemm            # -> src\xclbins\<family>\open_kernels\fa
@@ -65,6 +67,29 @@ open_kernels\harness\out\run_kernel.exe <t>\run.cfg
 python open_kernels\designs\dit_fa\compare.py <t>
 C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\fa_emul.py --check <t>
 ```
+
+Linux (this box, verified 2026-10-16; both platforms are in active use — the generated
+`run.cfg` is portable, fixtures and all):
+
+```
+# toolchain PATH as in dit-conv's SKILL.md; fa streams come from the export (already built
+#   at src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/fa, run_kernel built at
+#   open_kernels/harness/build)
+ironvenv/bin/python open_kernels/designs/dit_fa/make_test.py \
+  --kernels src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/fa --stream r1024_attn --out /tmp/op/<t>
+open_kernels/harness/build/run_kernel /tmp/op/<t>/run.cfg 2>/dev/null | grep -E "state|DONE"
+ironvenv/bin/python open_kernels/designs/dit_fa/compare.py /tmp/op/<t>
+# fa_emul wants torch + transformers: use the repo's typical venv layout, not a tool
+#   system interpreter. `uv venv ditref-venv --python 3.11 && uv pip install --python
+#   ditref-venv/bin/python torch transformers numpy` (cpu or rocm wheel, either is fine;
+#   diffusers is only needed for golden capture, not --check). A gitignored name like
+#   "ditref-venv" or "refvenv" keeps it off every other machine's expectations.
+ditref-venv/bin/python utilities/dit-ref/fa_emul.py --check /tmp/op/<t>
+```
+
+Verified r1024_attn (L=4608, 24 heads): 3 runs state 4, 30.7 ms / 260.9 GFLOP = 8.5 TFLOPS
+(README's 8.6); compare.py PASS worst rel_fro 2.64e-2, min row cos 0.99919; fa_emul model
+vs hw gap 6.6e-3 (the expected ~7e-3, each stage variant listed too).
 
 Single shapes: `DF_L`, `DF_HEADS`, `DF_KV_HEADS`, `DF_CAUSAL`, `DF_VALID_LEN`,
 `DF_EXP_FIX` with `open_kernels\build_design.py open_kernels\designs\dit_fa\dit_fa.py <out>`

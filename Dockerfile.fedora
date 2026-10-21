@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.7
+
+FROM fedora:latest AS builder
+
+# Update package cache and install system dependencies
+RUN dnf update -y
+
+RUN dnf install -y \
+    uv git cmake ninja-build ccache mold pkg-config doxygen cargo rustc clang \
+    lld uuid-devel libdrm-devel ocl-icd-devel boost-devel systemtap-sdt-devel \
+    uuid-c++-devel libuuid-devel openssl-devel rapidjson-devel glibc-static \
+    libstdc++-static rpmbuild python3-pybind11 curl libcurl-devel fftw-devel \
+    libavformat-free-devel libavcodec-free-devel libavutil-free-devel \
+    libswscale-free-devel libswresample-free-devel readline-devel 
+
+RUN uv python install 3.11
+COPY ironvenv-requirements.txt /code/ironvenv-requirements.txt
+
+# Clean up to reduce image size
+RUN dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Set up Xilinx XRT
+RUN git clone https://github.com/Xilinx/XRT --recursive \
+    && cd XRT/build \
+    && ./build.sh -noinit -npu -noctest -opt -j $(nproc) \
+    && dnf install Release/*.rpm -y \
+    && cmake --install Release/python
+
+# Set environment variables
+ENV VIRTUAL_ENV=/opt/ironvenv
+ENV OFLM_VENV_DIR=/opt/ironvenv
+ENV PATH="/opt/xilinx/xrt/bin:/opt/ironvenv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin:$PATH"
+ENV PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:$PKG_CONFIG_PATH"
+ENV NPU_CACHE_HOME=/root/.npu/cache
+ENV CCACHE_DIR=/var/cache/oflm-ccache
+ENV CCACHE_MAXSIZE=2G
+ENV XILINX_XRT="/opt/xilinx/xrt"
+ENV LD_LIBRARY_PATH="/opt/xilinx/xrt/lib"
+ENV PYTHONPATH="/opt/xilinx/xrt/python"
+
+WORKDIR /code/OpenFlowLM-Next
+
+RUN cmake --workflow linux-debug
+
+#RUN git clone https://github.com/Atomic-Germ/OpenFlowLM-Next --recursive \
+#    && cd OpenFlowLM-Next \
+#    && cmake --workflow --preset linux-debug
+
+RUN dnf install -y 
+
