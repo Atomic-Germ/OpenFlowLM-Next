@@ -45,7 +45,7 @@ Both platforms are in active use around this repo (Linux builds/hosts the genera
 Windows/WWSL and Linux both host the NPU). The same five steps apply; the generated
 `run.cfg` and `spec.json` are portable across both — only the toolchain prefix changes.
 
-### Linux (this box; verified 2026-10-16)
+### Linux (verified 2026-10-16)
 
 ```
 # toolchain PATH: ironvenv/bin (aiecc) + venv site-packages llvm-aie/bin (clang, opt)
@@ -85,6 +85,8 @@ default spec.
 Expected: PASS at rel_fro 1.6-2.8e-3 (norm ops, RoPE, Euler; bf16 floor 1.7e-3) and
 3.5-5.4e-3 (SiLU, SwiGLU). Verified Linux: res_ln_mod PASS 1.6-2.8e-3, silu PASS 3.5e-3,
 qk_qwen PASS 1.7-2.8e-3 (its make_test fixture prints a harmless invalid-cast warning).
+Expected: PASS at rel_fro 1.6-2.8e-3 (norm ops, RoPE, Euler; bf16 floor 1.7e-3) and
+3.5-5.4e-3 (SiLU, SwiGLU).
 
 ## Adding an op
 

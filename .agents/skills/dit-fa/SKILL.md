@@ -56,8 +56,6 @@ CPU model: `utilities/dit-ref/fa_emul.py`. exp2 probe: `utilities/aie-probes/exp
 
 ## Build / test
 
-Windows (as originally written):
-
 ```
 . C:\dev\mlir-aie\iron_env.ps1
 python open_kernels\export_dit_kernels.py --no-gemm            # -> src\xclbins\<family>\open_kernels\fa

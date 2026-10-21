@@ -38,8 +38,8 @@ docker run --rm -it \
   -e CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
   -e CTEST_PARALLEL_LEVEL="$(nproc)" \
   -e NPU_CACHE_HOME=/root/.npu/cache \
-  -v "$PWD:/code" \
-  -v "$PWD/npu-cache:/root/.npu/cache" \
+  -v "$PWD:/code:z" \
+  -v "$PWD/npu-cache:/root/.npu/cache:z" \
   -v oflm-ccache:/var/cache/oflm-ccache \
   "$IMAGE" \
   bash -eu -c '

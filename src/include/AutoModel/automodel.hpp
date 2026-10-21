@@ -205,6 +205,10 @@ protected:
 	bool _shared_insert(chat_meta_info_t& meta_info, std::vector<int>& tokens, std::function<bool()> is_cancelled = [] { return false; }, void* payload = nullptr, int first_len_run = 0);
 	buffer<bf16> _chunked_insert(chat_meta_info_t& meta_info, std::vector<int>& tokens, std::function<bool()> is_cancelled = [] { return false; }, void* payload = nullptr, int first_len_run = 0);
 	std::string _shared_generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os, std::function<bool()> is_cancelled = [] { return false; });
+	/// OPEN-UNO-DECODE: true when the open engine has a draft pass and the sampler is greedy with no penalties.
+	bool _uno_applies() const;
+	/// _shared_generate's contract a Uno cycle at a time; a family opts in by calling it when _uno_applies().
+	std::string _shared_generate_uno(chat_meta_info_t& meta_info, int length_limit, std::ostream& os, std::function<bool()> is_cancelled = [] { return false; });
 
 	/// \brief Render the client's conversation through the chat template
 	/// \note A template that refuses the conversation (roles out of order, a message
