@@ -401,6 +401,13 @@ def find_system_model_list(explicit=None):
             raise SystemExit(f"--system-list {p} is not a file")
         return p
     candidates = []
+    # The registry oflm itself reads comes first: when it is pointed at
+    # another file, that file is the one the tool has to use as well --
+    # otherwise a dev tree registers models against a different registry
+    # than the one it reads.
+    env_registry = os.environ.get("OFLM_CONFIG_PATH")
+    if env_registry:
+        candidates.append(Path(env_registry))
     for d in _engine_dirs():
         candidates.append(d / "model_list.json")
         candidates.append((d / ".." / "share" / "oflm" / "model_list.json").resolve())
@@ -418,6 +425,11 @@ def find_system_model_list(explicit=None):
 def find_system_xclbin_root():
     """Directory whose <root>/xclbins/ holds the per-model kernel folders."""
     candidates = []
+    # The xclbin root oflm itself searches comes first: when it is pointed
+    # somewhere else, the kernels are there, and a dev tree has its own.
+    env_xcl = os.environ.get("OFLM_XCLBIN_PATH")
+    if env_xcl:
+        candidates.append(Path(env_xcl))
     for d in _engine_dirs():
         candidates.append(d)
         candidates.append((d / ".." / "share" / "oflm").resolve())
