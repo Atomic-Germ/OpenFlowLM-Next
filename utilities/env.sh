@@ -417,6 +417,19 @@ if [ -x "$OFLM_ROOT/build/src/oflm" ]; then
     oflm_env_append "$OFLM_ROOT/build/src" PATH
 fi
 
+# The sentencepiece build needs the abseil headers, which are a nested
+# checkout of the tokenizers-cpp submodule. The link that points at them is
+# gitignored, so a tree that was copied from another machine keeps a link
+# aimed at THAT machine -- a link to nowhere, and the build stops with
+# "third_party/absl/log/check.h: No such file or directory". A relative one
+# survives the tree being moved.
+oflm_env_absl="$OFLM_ROOT/third_party/tokenizers-cpp/sentencepiece/third_party"
+if [ -d "$oflm_env_absl/abseil-cpp/absl" ] && [ ! -e "$oflm_env_absl/absl" ]; then
+    if ln -sfn abseil-cpp/absl "$oflm_env_absl/absl" 2>/dev/null; then
+        :
+    fi
+fi
+
 # -----------------------------------------------------------------------------
 # 6. the NPU itself
 # -----------------------------------------------------------------------------

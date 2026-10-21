@@ -1512,6 +1512,30 @@ def _make_dir_link(link, target):
         return False
 
 
+def _link_target(link, target):
+    """What the link should point at: a relative path when the two live in
+    the same tree, the absolute path otherwise.
+
+    A link from a model directory to a kernel set is inside one tree (a dev
+    checkout, or an install), and a relative one survives the tree being
+    moved or copied -- an absolute one does not, and a link that points at
+    the machine the tree came from is a link to nowhere. When the two are
+    in different trees (a user directory and an install prefix), the
+    absolute path is the honest one.
+    """
+    target = Path(target).resolve()
+    try:
+        common = Path(os.path.commonpath([Path(link).parent.resolve(), target]))
+    except ValueError:          # different drives on Windows
+        return target
+    if str(common) == common.anchor:  # the root: nothing in common but "/"
+        return target
+    try:
+        return Path(os.path.relpath(target, Path(link).parent.resolve()))
+    except ValueError:
+        return target
+
+
 def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     """Put the chosen kernel set where find_kernels looks for this model.
 
@@ -1536,11 +1560,12 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
         except OSError as e:
             log(f"[WARN] could not replace {link}: {e}")
             return False
-    if _make_dir_link(link, kernel_dir):
+    target = _link_target(link, kernel_dir)
+    if _make_dir_link(link, target):
         if not quiet:
-            log(f"[INFO] Linked open kernels: {link} -> {kernel_dir}")
+            log(f"[INFO] Linked open kernels: {link} -> {target}")
         return True
-    log(f"[WARN] Could not link {link} -> {kernel_dir} (a Windows symlink needs "
+    log(f"[WARN] Could not link {link} -> {target} (a Windows symlink needs "
         "developer mode or admin). Run oflm with:")
     log(f'           OFLM_OPEN_KERNELS_DIR="{kernel_dir}"')
     return False
