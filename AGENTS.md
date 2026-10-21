@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-weighted-sublayers</name>
+    <description>Capture weighted-candidate sublayers and distinguish propagated drift from conditioned FFN precision.</description>
+    <location>.agents/skills/open-qwen38-prefill-weighted-sublayers/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-weighted-cli</name>
     <description>Build private paired-weight FFN CLIs and validate causal propagation with exact controls and residual tracing.</description>
     <location>.agents/skills/open-qwen38-prefill-weighted-cli/SKILL.md</location>
