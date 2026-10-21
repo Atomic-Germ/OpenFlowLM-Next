@@ -1058,6 +1058,7 @@ stored.
 - HF and GGUF derivations agree; the global table is `1e6^(-2i/256) / 8`, the local `1e4^(-2i/256)`; `window_rows` gives `valid = min(p, 1023)`, `nf = max(1, valid)` for a 1024 window.
 - The 4B layout: two layer types sharing one design, `dx` / `dx_local` with windows 0 / 1024 on the same stream, `ptab` / `ptab_local` globals, six consts per layer.
 - A silu activation, softcapping, or a `query_pre_attn_scalar` unequal to the head dim is refused by name.
+- GGUF-direct reads the same norms as the container (`src/open_qwen36/gguf_pack_test.cpp`). In a GGUF that carries `post_ffw_norm` (Gemma's sandwich layout), `post_attention_layernorm` maps to `post_attention_norm` and `pre_feedforward_layernorm` to `ffn_norm`. In any other GGUF, `post_attention_layernorm` maps to `ffn_norm`, as for Llama.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Gemma3-4B-NPU2`, `out_g3`, 6 layers (five local, one global), prompt id 2; then `open_qwen36_cli --at-position 1100 --layers 6` (finite logits through the window path); then `chat.py` (the Gemma template when the tokenizer has `<start_of_turn>`).
 

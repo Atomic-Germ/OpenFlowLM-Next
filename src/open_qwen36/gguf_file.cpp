@@ -184,6 +184,7 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
             if (nb && t.offset + nb > map_size_) fail("tensor " + name + " runs past EOF in " + path);
             tensors_.emplace(name, std::move(t));
         }
+        sandwich_ = tensors_.count("blk.0.post_ffw_norm.weight") != 0;
         // Alignment is not stored in the header for either version: GGUF v2 and
         // v3 both take it from the optional `general.alignment` metadata key and
         // default to 32. (Only v1 carried a trailing alignment word.) Validate
@@ -241,7 +242,7 @@ void GgufFile::drop_pages() {
 #endif
 }
 
-std::string GgufFile::gguf_name(const std::string& name) {
+std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
     // The manifest's packing plan names tensors the q4nx/HF way; a GGUF uses
     // llama.cpp's conventions (utilities/q4nx-build/configs/*.json hold the
     // same map on the conversion side).
@@ -263,11 +264,11 @@ std::string GgufFile::gguf_name(const std::string& name) {
         dot("self_attn.o_proj", ".attn_output");
         dot("self_attn.q_norm", ".attn_q_norm");
         dot("self_attn.k_norm", ".attn_k_norm");
-        dot("self_attn.post_attention_layernorm", ".post_attention_norm");   // gemma3
         dot("input_layernorm", ".attn_norm");
-        dot("post_attention_layernorm", ".ffn_norm");
-        dot("pre_feedforward_layernorm", ".post_attention_norm");            // gemma3
-        dot("post_feedforward_layernorm", ".post_ffw_norm");                 // gemma3
+        // HF's post_attention_layernorm is the pre-FFN norm in Llama but the real post-attention norm in Gemma
+        dot("post_attention_layernorm", sandwich ? ".post_attention_norm" : ".ffn_norm");
+        dot("pre_feedforward_layernorm", ".ffn_norm");
+        dot("post_feedforward_layernorm", ".post_ffw_norm");
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
         dot("mlp.down_proj", ".ffn_down");
@@ -276,7 +277,7 @@ std::string GgufFile::gguf_name(const std::string& name) {
 }
 
 const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
-    std::string n = gguf_name(name);
+    std::string n = gguf_name(name, sandwich_);
     auto it = tensors_.find(n);
     if (it == tensors_.end() && n == "output.weight") {
         // tied embeddings: the GGUF has no output.weight; the (untied) rows
