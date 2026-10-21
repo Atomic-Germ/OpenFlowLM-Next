@@ -1,5 +1,4 @@
 /*!
- *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file metrics.hpp
  * \brief OpenTelemetry (OTLP/JSON) and Prometheus/OpenMetrics exposition for OpenFlowLM
  */
