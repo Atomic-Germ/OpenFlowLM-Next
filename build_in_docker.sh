@@ -13,7 +13,7 @@ echo "Using OS: $OS, preset: $PRESET"
 case "$OS" in
   "fedora")
     DOCKERFILE="Dockerfile.fedora"
-    IMAGE="fedora"
+    IMAGE="openflowlm-build:fedora"
     ;;
   "ubuntu")
     DOCKERFILE="Dockerfile"
@@ -45,10 +45,10 @@ docker run --rm -it \
   bash -eu -c '
     case "$1" in
       linux-package-deb|linux-package-rpm|linux-package-tgz)
-        cmake --workflow --preset linux-default
+        cmake --preset linux-default
         cpack --preset "$1"
         ;;
-      *) cmake --workflow --preset "$1" ;;
+      *) cmake --preset "$1" ;;
     esac
   ' -- "$PRESET"
 

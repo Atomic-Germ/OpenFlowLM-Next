@@ -114,7 +114,7 @@ RUN set -eux; \
 #     --device=/dev/accel/accel0 \
 #     -v "$PWD/oflm-build:/code/build" \
 #     openflowlm-build:ubuntu26 \
-#     cmake --workflow --preset linux-package
+#     cmake --preset linux-package
 #
 # DEB packaging:
 #   cmake --preset linux-default

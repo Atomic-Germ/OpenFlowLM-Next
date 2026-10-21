@@ -103,12 +103,14 @@
       "displayName": "Package (RPM + TGZ)",
       "description": "Everything linux-default installs, in the host-native RPM and portable TGZ formats",
       "configurePreset": "linux-default",
+      "cacheVariables": { "OFLM_STRICT_XCLBINS": "ON" },
       "generators": ["RPM", "TGZ"]
     },
     {
       "name": "linux-package-tgz",
       "displayName": "Package (TGZ)",
       "configurePreset": "linux-default",
+      "cacheVariables": { "OFLM_STRICT_XCLBINS": "ON" },
       "generators": ["TGZ"]
     },
     {
@@ -116,12 +118,14 @@
       "displayName": "Package (DEB)",
       "description": "Build on Debian/Ubuntu or in a Debian container; a DEB built on Fedora carries Fedora ABI/glibc/soname requirements and shlibdeps cannot resolve Depends there",
       "configurePreset": "linux-default",
+      "cacheVariables": { "OFLM_STRICT_XCLBINS": "ON" },
       "generators": ["DEB"]
     },
     {
       "name": "linux-package-rpm",
       "displayName": "Package (RPM)",
       "configurePreset": "linux-default",
+      "cacheVariables": { "OFLM_STRICT_XCLBINS": "ON" },
       "generators": ["RPM"]
     }
   ],

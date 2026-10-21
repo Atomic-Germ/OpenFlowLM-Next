@@ -454,7 +454,8 @@ DN_SCRATCH_FLOATS = 1280               # `ds` (dnx.h)
 FFN_MS_FLOATS = 2 * BAND_ROWS          # `ms` for the dense tail: u[64] | g[64]
 
 
-def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int:
+def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL,
+            chunk: int = CHUNK, stack: int = STACK) -> int:
     """A main core's L1 bytes for a given scratch layout.
 
     Every main core carries the same six things and nothing else
@@ -463,9 +464,13 @@ def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int
     weight elements, the x elements and the y elements, over a 0x1800 stack. Both tails
     compute it here rather than each restating the sum, for the reason the band law is
     shared -- two copies of a budget drift, and the one that drifts is the one no shipped
-    model exercises."""
+    model exercises.
+
+    `chunk` and `stack` are the two the dense recipe's f32-scale build changes (a 6 KB
+    chunk and a 5 KB stack); the MoE tail has one of each.
+    """
     return (tab + ms_floats * 4 + ds_floats * 4
-            + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
+            + 2 * pc * chunk + 2 * ELEM + 2 * BAND_ROWS * 4 + stack)
 
 
 def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
@@ -496,7 +501,7 @@ def kwide(spec: ModelSpec, ffn: str = "moe") -> int:
     return max(wide, *(down_split(spec) or (spec.intermediate,)))
 
 
-def down_split(spec: ModelSpec) -> tuple[int, ...]:
+def down_split(spec: ModelSpec, chunk: int = CHUNK, stack: int = STACK) -> tuple[int, ...]:
     """The dense down GEMV's K pieces, or () when FF's table fits a main core whole.
 
     The down GEMV reduces over FF, and its activation table is 2.25 FF bytes. At the 27B's
@@ -507,21 +512,27 @@ def down_split(spec: ModelSpec) -> tuple[int, ...]:
     below FF / 2. Nothing is repacked: inside a band, pool chunk c covers k-tile c / 2
     (gemv_q4.h's band law), so the first 2 K0 / 256 chunks of every FF-wide band ARE a
     K0-wide band and the rest a (FF - K0)-wide one, and each piece is a strided DMA tap over
-    the pool the packer already writes."""
+    the pool the packer already writes.
+
+    Shared with the dense recipe (recipes/dense.py): both tails run the same split, so the
+    pieces and the budget they are measured against live in one place. `chunk` and `stack`
+    are the build's own (the dense f32-scale build's chunk is 6 KB), so the decision and
+    the budget agree.
+    """
     if not spec.intermediate:
         return ()
     base = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
                spec.attn_q_width if spec.has_full else 0)
     ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
     ff = spec.intermediate
-    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1) <= L1_BUDGET:
+    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1, chunk, stack) <= L1_BUDGET:
         return ()
     e = ELEM // 4
     k0 = ff // 2 // e * e
     pieces = (k0, ff - k0)
-    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1) > L1_BUDGET
+    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1, chunk, stack) > L1_BUDGET
                                for k in pieces):
-        raise OpRangeError(f"qwen35: an FF of {ff} does not fit a main core's L1 in two pieces of "
+        raise OpRangeError(f"dense: an FF of {ff} does not fit a main core's L1 in two pieces of "
                            f"whole f32 elements ({pieces}); a three-way split is not implemented")
     return pieces
 

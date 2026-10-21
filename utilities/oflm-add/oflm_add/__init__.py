@@ -67,7 +67,7 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # end for Q6_K on gemma3-4b). Order is install preference: exact first,
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0", "IQ4"]
 # Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
@@ -1475,7 +1475,8 @@ GGML_TYPE_NAMES = {
 }
 # Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
 # quants, put/pack_norm for the small float weights).
-GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"}
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K",
+                     "IQ4_NL", "IQ4_XS"}
 
 
 class _GgufTruncated(Exception):

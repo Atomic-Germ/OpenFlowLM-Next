@@ -92,6 +92,45 @@ dump out .../rot13/out1.bin 1024
 Result 2026-09-01: `run k [2 bufs] -> state 4 (0.602 ms)` classic, `0.447 ms`
 ELF; output == ROT13(input) byte-exact for both.
 
+## Adding a model SIZE to a family that has kernels
+
+A size is a geometry, and the catalogue (`recipes/catalogue.py`) lists the
+geometries each kernel has actually been RUN at. One command takes a new size
+from a HuggingFace `config.json` to a built, validated, catalogue-allowed
+kernel set:
+
+```
+python utilities/build-new-spec.py --repo Qwen/Qwen3-0.6B
+```
+
+It generates the spec (`utilities/gen-kernel-spec.py`; a fine-tune links to
+its base model's spec instead), compiles the family's kernel set, runs the
+attention kernel at the new geometry against an fp64 oracle on the NPU
+(`designs/attn/probe_dense.py` + `make_test.py` + `compare.py` -- the
+PRODUCTION worker, lifted out of `designs/dense/dx.py`, with synthetic
+inputs; no model, no container, no engine), writes the validated point into the
+catalogue (`utilities/catalogue-add-point.py`) and rebuilds through the
+validated path.
+
+The gate covers the attention kernel's own arithmetic at that geometry. The
+projections' weights, the packing and the whole-layer integration still want
+the model-level check (`model/`). The skill
+`.agents/skills/open-attention-gate/SKILL.md` has the details.
+
+Two widths need more than a new spec, and the dense recipe now has both (the
+mechanisms the MoE / Qwen3.5 tail has been running since 2026-09-30, shared
+with it rather than copied):
+
+* an **FF whose table does not fit a main core's L1** (Qwen3-14B: FF 17408) --
+  the down GEMV runs in two K pieces (8192 + 9216) and the norm helper adds them
+  (`ln_add3`);
+* a **hidden whose norm helper cannot hold its inputs** (HID 5120) -- the helper
+  streams instead of holding five elements (`ln_add2`).
+
+`DENSE_DOWN_SPLIT=4096+5632` and `DENSE_NORM_SPLIT=1` force the split on a width
+that fits whole, so it can be compared against the whole path on a model that is
+already tested end to end.
+
 ## Designs
 
 - `designs/rot13/` — smoke test. Kernel + dataflow from

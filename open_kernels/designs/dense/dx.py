@@ -51,10 +51,11 @@ LN = HERE.parent / "ln"
 LINL = HERE.parent / "lin_layer"
 LX = HERE.parent / "layer_x"
 sys.path.insert(0, str(HERE.parent.parent))
-from ironutil import Pipeline, include_dirs  # noqa: E402
+from ironutil import Pipeline, include_dirs, piece_tap  # noqa: E402
+import ln_split as LS  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
-from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
+from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes, roundup  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
@@ -148,20 +149,9 @@ def bt(total, off, n):
     return TensorAccessPattern((1, total), off, [1, 1, 1, n], [0, 0, 0, 1])
 
 
-ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
-              f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
-              f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
-if G.RB > 1:                                           # attn.h defaults it to 1; adding the flag
-    ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")             # would change every other family's build line
+ATTN_FLAGS = QR.attn_flags(G, QR.probe_env().items())
 QKVB = G.QKVB
-if QKVB:                                               # same: only a family that has a bias sees the flag
-    ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
-NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position record; which holds cos / sin
-if NPTAB > 1:
-    ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
-for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
-    if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
-        ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
+NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM      # elements per position record; which holds cos / sin
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
@@ -223,6 +213,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
+    f_add3 = ef("ln_add3", LN / "ln_add3.cc", [u8_ln] * 4, LN_FLAGS) if G.DOWN_SPLIT else None
+    f_add2 = ef("ln_add2", LN / "ln_add2.cc", [u8_ln] * 3, LN_FLAGS) if G.NORM_SPLIT else None
     f_nr32 = ef("ln_nr32", LN / "ln_nr32.cc", [u8_ln] * 4 + [i32], LN_FLAGS) if G.SANDWICH else None
     pz = [u8_a] if NPTAB > 1 else []                        # the record's second element
     f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a] + pz + [bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
@@ -241,8 +233,11 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # ---- fifos
     of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
     of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
-    of_x = ObjectFifo(x_ty, name="x", depth=2)
-    of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
+    # The x stream: the activation elements the main cores take in one go (the layer's
+    # norms and the o projection's table). At HID 4096 that is two elements; at HID 5120
+    # (Qwen3-14B) it is three, and the fifo has to hold as many as the largest acquire.
+    of_x = ObjectFifo(x_ty, name="x", depth=max(2, G.XN_ELEMS, G.OG_ELEMS, G.XM_ELEMS))
+    of_lni = ObjectFifo(u8_ln, name="lni", depth=3 if G.NORM_SPLIT else 5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)      # one output element at a time (8 KB elements at 4096 wide)
     of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))   # a block is acquired at once
     # Attention over ACORES cores: heads are independent, so each core owns NHL of
@@ -344,12 +339,16 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         xin.release(G.XM_ELEMS)
         if stop == 3:
             return
-        # down against h (K = FF; H_ELEMS f32 elements)
-        for i in range_(G.H_ELEMS):
-            he = xin.acquire(1)
-            f_prepf(he, tab, FF, i)
-            xin.release(1)
-        role_bands(win, yout, tab, K, "ffn", G.DOWN_PC, FF, ms)
+        # down against h (K = FF; H_ELEMS f32 elements). With the split (G.DOWN_SPLIT) the
+        # reduction over FF runs in K pieces: each piece's h elements into the table -- which
+        # only ever holds one piece -- then that piece's bands, an ordinary GEMV of K = piece
+        # into its own y elements. The norm helper adds the pieces' outputs.
+        for k in (G.DOWN_SPLIT or (FF,)):
+            for i in range_(roundup(k * 4, ELEM) // ELEM):
+                he = xin.acquire(1)
+                f_prepf(he, tab, k, i)
+                xin.release(1)
+            role_bands(win, yout, tab, K, "ffn", G.DOWN_PC, k, ms)
 
     def ln_body(ain, aout, f_nr, f_lny, f_lnx, *rest):
         # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]
@@ -394,6 +393,50 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 add_norm(True)                 # 2. res = x + out; xm = post_attn_norm(res)
             if stop >= 99:                     # group 3 only in the full layer
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
+
+    def ln_body3(ain, aout, f_nr, f_lny, f_lnx, f_add3):
+        """The norm helper when the down GEMV ran in two K pieces (G.DOWN_SPLIT).
+
+        Step 3 then adds THREE things per half -- the residual and the two pieces'
+        partial outputs -- which is what `ln_add3` does (designs/ln/ln_add3.cc). Steps 1
+        and 2 are ln_body's: the split is in the FFN's tail only.
+
+        A separate body, not a defaulted argument: IRON presents the function it is
+        given, and a family that does not split must keep the kernel it always built.
+        """
+        e = ain.acquire(3)
+        o = aout.acquire(1)
+        f_nr(e[0], e[1], e[2], o)
+        aout.release(1)
+        ain.release(3)
+
+        def add_norm(with_xn):
+            # [x0 x1 w a0 a1] -> [y0] [y1] [xn]
+            e = ain.acquire(5)
+            for i in range(2):
+                o = aout.acquire(1)
+                f_lny(e[0], e[1], e[3], e[4], o, i)
+                aout.release(1)
+            if with_xn:
+                o = aout.acquire(1)
+                f_lnx(e[0], e[1], e[3], e[4], e[2], o)
+                aout.release(1)
+            ain.release(5)
+
+        def add3_norm():
+            # [res_i out2_i out2b_i] -> [xres_i]: the two down pieces' partial outputs
+            # sum to the down projection, and the residual adds to it.
+            for _ in range(2):
+                e = ain.acquire(3)
+                o = aout.acquire(1)
+                f_add3(e[0], e[1], e[2], o)
+                aout.release(1)
+                ain.release(3)
+
+        if stop >= 3:                          # group 2 runs from the o projection on
+            add_norm(True)                     # 2. res = x + out; xm = post_attn_norm(res)
+        if stop >= 99:                         # group 3 only in the full layer
+            add3_norm()                        # 3. xres = res + out2 + out2b
 
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
               f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in=None):
@@ -512,8 +555,21 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, h0)
             return body
 
-    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx] + ([f_nr32] if G.SANDWICH else []),
-                      tile=Tile(0, 3), stack_size=0x1800)]
+    if G.NORM_SPLIT:
+        # The norm helper streams (open_kernels/ln_split.py): at HID 5120 the fused form's
+        # five 10 KB input elements do not fit the norm core's 64 KB.
+        if G.DOWN_SPLIT:
+            workers = [Worker(LS.ln_split_body3, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_add2, f_add3],
+                              tile=Tile(0, 3), stack_size=0x1800)]
+        else:
+            workers = [Worker(LS.ln_split_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_add2],
+                              tile=Tile(0, 3), stack_size=0x1800)]
+    elif G.DOWN_SPLIT:
+        workers = [Worker(ln_body3, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx, f_add3],
+                          tile=Tile(0, 3), stack_size=0x1800)]
+    else:
+        workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx] + ([f_nr32] if G.SANDWICH else []),
+                          tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
                                                    Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
@@ -612,6 +668,21 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_T, HID * 4), wait=True, group=tg_ln2)
             lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_RES, HID * 4), wait=True, group=tg_ln2)
             lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_XM, ELN), wait=True, group=tg_ln2)
+        elif G.NORM_SPLIT:
+            # The streaming norm helper (open_kernels/ln_split.py): the residual add goes
+            # half by half (ln_add2), the sum goes to DDR, and the norm reads it back.
+            py.finish()                                           # out is in DDR
+            tg_ln2b = TaskGroup()
+            hh = HID // 2
+            for i in range(2):
+                lni.fill(c_xres, tap=bt(HID, i * hh, hh), wait=True, group=tg_ln2)
+                lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT + i * ELN, ELN), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_RES, HID * 4), wait=True, group=tg_ln2)
+            tg_ln2.finish()                                       # res is in DDR
+            lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_RES, HID * 4), wait=True, group=tg_ln2b)
+            lni.fill(a_consts, tap=bt(L.CD_BYTES, L.CD_POSTLN, ELN), wait=True, group=tg_ln2b)
+            lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_XM, ELN), wait=True, group=tg_ln2b)
+            tg_ln2b.finish()                                      # xm is in DDR
         else:
             lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
             lni.fill(a_consts, tap=bt(L.CD_BYTES, L.CD_POSTLN, ELN), wait=True, group=tg_ln2)
@@ -638,10 +709,24 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             tg_x.finish()
             return
         # 7. down against h, then the output residual -> xres
-        x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_H, G.H_ELEMS * ELEM), wait=True, group=tg_x)
-        for c in range(N_CORES):
-            pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_DOWN + c * G.DOWN_PC * BB_F, G.DOWN_PC * BB_F))
-            py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_OUT2 + c * G.DOWN_PC * YB, G.DOWN_PC * YB))
+        if G.DOWN_SPLIT:
+            # The down GEMV in K pieces (recipes/dense.py down_split): each piece's h
+            # elements, its strided slice of every band, and its own output region.
+            k0 = 0
+            for k, dst in zip(G.DOWN_SPLIT, (L.AD_OUT2, L.AD_OUT2B)):
+                x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_H + k0 * 4, k * 4), wait=True, group=tg_x)
+                for c in range(N_CORES):
+                    pw.fill(w_prods[c], a_pool,
+                            piece_tap(L.POOL_BYTES,
+                                      L.POOL_DOWN + c * G.DOWN_PC * BB_F + role_band_bytes("ffn", k0),
+                                      BB_F, role_band_bytes("ffn", k), G.DOWN_PC, CH))
+                    py.drain(y_conss[c], a_act, bt(L.AD_BYTES, dst + c * G.DOWN_PC * YB, G.DOWN_PC * YB))
+                k0 += k
+        else:
+            x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_H, G.H_ELEMS * ELEM), wait=True, group=tg_x)
+            for c in range(N_CORES):
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_DOWN + c * G.DOWN_PC * BB_F, G.DOWN_PC * BB_F))
+                py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_OUT2 + c * G.DOWN_PC * YB, G.DOWN_PC * YB))
         tg_ln3 = TaskGroup()
         if G.SANDWICH:
             py.finish()                                           # out2 is in DDR
@@ -654,13 +739,33 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             lni.fill(a_consts, tap=bt(L.CD_BYTES, L.CD_POSTFFN, ELN), wait=True, group=tg_ln3)   # unused w
             lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_T2, HID * 4), wait=True, group=tg_ln3)
             lno.drain(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln3)
-        else:
-            lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_RES, HID * 4), wait=True, group=tg_ln3)
-            lni.fill(a_consts, tap=bt(L.CD_BYTES, L.CD_POSTLN, ELN), wait=True, group=tg_ln3)
+        elif G.NORM_SPLIT:
+            # xres = res + out2 (+ out2b), half by half: the streaming helper's close.
+            for i in range(2):
+                lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_RES + i * ELN, ELN), wait=True, group=tg_ln3)
+                lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2 + i * ELN, ELN), wait=True, group=tg_ln3)
+                if G.DOWN_SPLIT:
+                    lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2B + i * ELN, ELN), wait=True, group=tg_ln3)
             lno.drain(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln3)
-            lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_JUNK, ELN), wait=True, group=tg_ln3)
-            py.finish()                                           # out2 is in DDR
-            lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2, HID * 4), wait=True, group=tg_ln3)
+            py.finish()                                           # out2, out2b are in DDR
+        else:
+            if G.DOWN_SPLIT:
+                # xres = res + out2 + out2b, half by half (ln_add3): the residual and the
+                # two down pieces' partial outputs. No norm weights: the FFN close is an
+                # add, not a norm.
+                for i in range(2):
+                    lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_RES + i * ELN, ELN), wait=True, group=tg_ln3)
+                    lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2 + i * ELN, ELN), wait=True, group=tg_ln3)
+                    lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2B + i * ELN, ELN), wait=True, group=tg_ln3)
+                lno.drain(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln3)
+                py.finish()                                       # out2, out2b are in DDR
+            else:
+                lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_RES, HID * 4), wait=True, group=tg_ln3)
+                lni.fill(a_consts, tap=bt(L.CD_BYTES, L.CD_POSTLN, ELN), wait=True, group=tg_ln3)
+                lno.drain(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln3)
+                lno.drain(a_act, tap=bt(L.AD_BYTES, L.AD_JUNK, ELN), wait=True, group=tg_ln3)
+                py.finish()                                       # out2 is in DDR
+                lni.fill(a_act, tap=bt(L.AD_BYTES, L.AD_OUT2, HID * 4), wait=True, group=tg_ln3)
         tg_ln3.finish()
         pw.finish()
         pa_in.finish()

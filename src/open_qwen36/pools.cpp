@@ -527,16 +527,17 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (op.nch == 0 || op.in_dim == 0) fail("std_perm_gguf " + name + " without nch / in_dim");
         const GgufFile& g = dynamic_cast<const GgufFile&>(m);
         const GgufFile::TensorInfo& t = g.tensor(name);
-        // Q8_0 / K-quant tensors (typical GGUF lm_head / tied embeddings) are
-        // dequantized per row and re-quantized here to the pool's q4 layout
-        // with fp16 scales -- the same conversion q4nx-build does offline. The
-        // matmul body of the repo stays untouched (Q4_1 etc. go through the
-        // byte-exact path below).
+        // Q8_0 / K-quant / i-quant tensors (typical GGUF lm_head / tied embeddings, and
+        // the IQ4_XS weights most GGUF downloads ship) are dequantized per row and
+        // re-quantized here to the pool's q4 layout with fp16 scales -- the same
+        // conversion q4nx-build does offline. The matmul body of the repo stays
+        // untouched (Q4_1 etc. go through the byte-exact path below).
         const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
-                        t.type == GgufFile::Type::Q6_K;
+                        t.type == GgufFile::Type::Q6_K || t.type == GgufFile::Type::IQ4_NL ||
+                        t.type == GgufFile::Type::IQ4_XS;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
             fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-                 "requantizes Q8_0/Q4_K/Q6_K (convert K-quants with q4nx-build otherwise)");
+                 "requantizes Q8_0/Q4_K/Q6_K/IQ4_NL/IQ4_XS (convert the others with q4nx-build)");
         const bool has_min = t.type == GgufFile::Type::Q4_1 || kq;
         const size_t blk = has_min ? 20 : 18;
         const size_t nb = op.in_dim / 32;                        // k blocks per row

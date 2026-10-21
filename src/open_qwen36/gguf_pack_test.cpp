@@ -144,6 +144,85 @@ BlocksQ6K make_blocks_q6k(unsigned rows, unsigned cols, std::mt19937_64& rng) {
     return b;
 }
 
+/// IQ4_XS tensor blocks and the reference dequant (llama.cpp's iq4_xs: a
+/// super-block of 256 values in 136 B -- fp16 d, 2 B of 2-bit scale highs, 4 B
+/// of 4-bit scale lows, 128 B of 4-bit codes; eight groups of 32 values, each
+/// with a signed 6-bit scale, and the same sixteen-entry codebook as iq4_nl).
+struct BlocksIQ4XS {
+    unsigned rows, cols;
+    std::vector<uint8_t> bytes;          // rows * (cols/256) * 136
+    std::vector<float> values;           // rows * cols
+};
+
+BlocksIQ4XS make_blocks_iq4xs(unsigned rows, unsigned cols, std::mt19937_64& rng) {
+    static const int8_t kv[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                  1, 13, 25, 38, 53, 69, 89, 113};
+    const unsigned nbs = cols / 256;
+    BlocksIQ4XS b;
+    b.rows = rows;
+    b.cols = cols;
+    b.bytes.assign(static_cast<size_t>(rows) * nbs * 136, 0);
+    b.values.resize(static_cast<size_t>(rows) * cols);
+    const uint16_t dh = f32_to_f16(0.25f);            // exactly representable
+    for (unsigned r = 0; r < rows; ++r) {
+        for (unsigned sb = 0; sb < nbs; ++sb) {
+            uint8_t* p = b.bytes.data() + (static_cast<size_t>(r) * nbs + sb) * 136;
+            std::memcpy(p, &dh, 2);                    // d
+            // the codes: 16 bytes per group of 32 values
+            for (int g = 0; g < 8; ++g)
+                for (int j = 0; j < 16; ++j) p[8 + g * 16 + j] = static_cast<uint8_t>(rng() % 256);
+            // the scales: eight signed 6-bit values, the low four bits in scales_l
+            // (two per byte) and the high two bits in scales_h (two bits per group)
+            uint8_t sc[8];
+            for (int g = 0; g < 8; ++g) sc[g] = static_cast<uint8_t>(rng() % 64);
+            for (int g = 0; g < 8; ++g) {
+                const uint8_t lo = sc[g] & 0xF, hi = (sc[g] >> 4) & 0x3;
+                if (g & 1) p[4 + g / 2] |= static_cast<uint8_t>(lo << 4);
+                else p[4 + g / 2] |= lo;
+                p[2] |= static_cast<uint8_t>(hi << (2 * g));
+            }
+            // the reference, from the bytes that hit the file
+            float* y = b.values.data() + static_cast<size_t>(r) * cols + sb * 256;
+            for (int g = 0; g < 8; ++g) {
+                const uint8_t lo = (g & 1) ? static_cast<uint8_t>(p[4 + g / 2] >> 4)
+                                           : static_cast<uint8_t>(p[4 + g / 2] & 0xF);
+                const uint8_t hi = static_cast<uint8_t>((p[2] >> (2 * g)) & 0x3);
+                const float dl = 0.25f * static_cast<float>(static_cast<int>(lo | (hi << 4)) - 32);
+                for (int j = 0; j < 16; ++j) {
+                    const uint8_t q = p[8 + g * 16 + j];
+                    y[g * 32 + j] = dl * kv[q & 0xF];
+                    y[g * 32 + 16 + j] = dl * kv[q >> 4];
+                }
+            }
+        }
+    }
+    return b;
+}
+
+/// A one-tensor GGUF carrying a single IQ4_XS tensor (rows x 256).
+std::string write_gguf_iq4xs(const fs::path& dir, const BlocksIQ4XS& b) {
+    std::vector<uint8_t> f;
+    f.insert(f.end(), {'G', 'G', 'U', 'F'});
+    put_u32(f, 3);
+    put_u64(f, 1);                                    // tensors
+    put_u64(f, 1);                                    // kv pairs
+    put_kv_str(f, "general.architecture", "llama");
+    const auto align32 = [](size_t n) { return (n + 31) / 32 * 32; };
+    put_str(f, "blk.0.attn_q.weight");
+    put_u32(f, 2);
+    put_u64(f, b.cols);                               // cols (fastest)
+    put_u64(f, b.rows);
+    put_u32(f, 23);                                   // GGML_TYPE_IQ4_XS
+    put_u64(f, 0);                                    // RELATIVE offset (0: data sits at the data base)
+    const size_t data_off = align32(f.size());        // == the GGUF's data base
+    while (f.size() < data_off) f.push_back(0);
+    f.insert(f.end(), b.bytes.begin(), b.bytes.end());
+    const fs::path out = dir / "test-iq4xs.gguf";
+    std::ofstream of(out, std::ios::binary);
+    of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
+    return out.string();
+}
+
 /// A one-tensor GGUF carrying a single Q6_K tensor (rows x 256).
 std::string write_gguf_q6k(const fs::path& dir, const BlocksQ6K& b) {
     std::vector<uint8_t> f;
@@ -408,6 +487,26 @@ int main() {
         }
         std::printf("%s embed_row Q6_K (both super-block halves bit-exact)\n", bad6 ? "FAIL" : "ok");
         if (bad6) return 1;
+    }
+
+    // ---- embed_row (IQ4_XS: the 6-bit group scales and the codebook)
+    {
+        BlocksIQ4XS iq = make_blocks_iq4xs(4, 512, rng);      // 4 rows x 2 super-blocks
+        GgufFile giq(write_gguf_iq4xs(dir, iq));
+        std::vector<float> row(512);
+        bool badiq = false;
+        for (unsigned r = 0; r < 4 && !badiq; ++r) {
+            giq.embed_row("blk.0.attn_q.weight", r, 512, row.data());
+            for (size_t i = 0; i < 512; ++i)
+                if (f32_bits(row[i]) != f32_bits(iq.values[static_cast<size_t>(r) * 512 + i])) {
+                    std::printf("FAIL embed_row(IQ4_XS)[r%u i%zu]: got %.9g want %.9g\n", r, i, row[i],
+                                iq.values[static_cast<size_t>(r) * 512 + i]);
+                    badiq = true;
+                    break;
+                }
+        }
+        std::printf("%s embed_row IQ4_XS (group scales and codebook bit-exact)\n", badiq ? "FAIL" : "ok");
+        if (badiq) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");

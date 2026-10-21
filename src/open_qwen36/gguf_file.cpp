@@ -86,9 +86,17 @@ uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
         case 8: return values / 32 * 34;                  // q8_0
         case 12: return values / 256 * 144;               // q4_k
         case 14: return values / 256 * 210;               // q6_k
+        case 20: return values / 32 * 18;                 // iq4_nl
+        case 23: return values / 256 * 136;               // iq4_xs
         default: return 0;                                // unsupported
     }
 }
+
+// llama.cpp's iq4_nl codebook: the sixteen values a 4-bit code indexes. iq4_xs
+// uses the same table (it is a finer-grained scale on top of it).
+static const int8_t kIQ4NLValues[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
+};
 
 inline float bf16_to_f32(uint16_t u) {
     uint32_t w = static_cast<uint32_t>(u) << 16;
@@ -471,9 +479,54 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             }
             break;
         }
+        case Type::IQ4_NL: {
+            // 4-bit "nibble lookup" (llama.cpp's iq4_nl): each code indexes the
+            // sixteen-entry codebook, scaled by the block's fp16 d. 18 B per 32 values.
+            const uint8_t* p = base + row * (dim / 32) * 18;
+            for (size_t b = 0; b < dim / 32; ++b, p += 18) {
+                uint16_t u;
+                std::memcpy(&u, p, 2);
+                const float d = fp16_to_f32(u);
+                for (size_t j = 0; j < 16; ++j) {
+                    out[b * 32 + j] = d * kIQ4NLValues[p[2 + j] & 0xF];
+                    out[b * 32 + 16 + j] = d * kIQ4NLValues[p[2 + j] >> 4];
+                }
+            }
+            break;
+        }
+        case Type::IQ4_XS: {
+            // llama.cpp's iq4_xs: a super-block of 256 values in 136 B --
+            //   fp16 d | 2 B of 2-bit scale highs | 4 B of 4-bit scale lows | 128 B of codes
+            // Eight groups of 32 values, each with a signed 6-bit scale (the low nibble
+            // | the high two bits << 4, minus 32) times d; the codes index the same
+            // sixteen-entry codebook as iq4_nl.
+            const uint8_t* p = base + row * (dim / 256) * 136;
+            for (size_t sb = 0; sb < dim / 256; ++sb, p += 136) {
+                uint16_t ud, sh;
+                std::memcpy(&ud, p, 2);
+                std::memcpy(&sh, p + 2, 2);
+                const float d = fp16_to_f32(ud);
+                const uint8_t* sl = p + 4;               // four bytes: eight scale lows
+                const uint8_t* qs = p + 8;               // 128 bytes: 256 codes
+                float* y = out + sb * 256;
+                for (int g = 0; g < 8; ++g) {
+                    const uint8_t lo = (g & 1) ? static_cast<uint8_t>(sl[g / 2] >> 4)
+                                               : static_cast<uint8_t>(sl[g / 2] & 0xF);
+                    const uint8_t hi = static_cast<uint8_t>((sh >> (2 * g)) & 0x3);
+                    const float dl = d * static_cast<float>(static_cast<int>(lo | (hi << 4)) - 32);
+                    const uint8_t* q = qs + g * 16;
+                    float* yg = y + g * 32;
+                    for (int j = 0; j < 16; ++j) {
+                        yg[j] = dl * kIQ4NLValues[q[j] & 0xF];
+                        yg[j + 16] = dl * kIQ4NLValues[q[j] >> 4];
+                    }
+                }
+            }
+            break;
+        }
         default:
             fail(std::string("the embedding is ") + type_name(t.type) +
-                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K rows "
+                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K/IQ4_NL/IQ4_XS rows "
                  "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
     }
 }

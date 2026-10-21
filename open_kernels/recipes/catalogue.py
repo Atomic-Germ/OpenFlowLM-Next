@@ -182,6 +182,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (256, 24, 4, 64, True, True, False, False),     # Qwen3.8-27B: 24 heads over 4 kv, six cores x 4 (OPEN-FAMILY-QWEN35)
                  (128, 16, 2, 128, False, False, False, True),   # Qwen2.5-3B: a q/k/v bias, and the narrowest
                                                                  # attention element yet at 512 B (OPEN-ATTN-QKV-BIAS)
+                 (64, 16, 8, 64, True, False, False, False),     # Qwen3-0.6B: head dim 64, a GQA group of 2 (the attention gate)
+                 (128, 40, 8, 128, True, False, False, False),   # Qwen3-14B: 40 heads over 8 kv, five cores of eight (the attention gate)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them
