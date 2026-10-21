@@ -56,6 +56,12 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_TIMEOUT_RETRY_MS", "OFLM_ROUTE_CHECK",
     "OFLM_WHISPER_DUMP_MEL", "OFLM_WHISPER_ENGINE",
     "OFLM_WHISPER_PROTOCOL",
+    # The Uno draft pass (K2-Horizon): a presence switch, read as "== 1", that
+    # turns on a pass the MODEL has to ship (its lora_file). It is a feature
+    # flag for a draft path still under development, not a preference about how
+    # to run a model, so it stays out of the settings UI. It becomes a
+    # per-model setting when the drafter settles.
+    "OFLM_SPECULATIVE",
 }
 
 def generate_cpp_header(settings):
