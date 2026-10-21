@@ -79,21 +79,26 @@ if ! git -C "$SCRATCH" merge --no-edit "$BASE" >/dev/null 2>&1; then
 fi
 
 # ---- the check CI runs ----------------------------------------------------
+# The generate-settings target runs two scripts; call them directly rather
+# than configuring a whole second build tree (which would need the XRT paths
+# and the version cache variables a preset carries).
 echo "check-settings-ci: regenerating the settings registry"
-if ! cmake -S src -B "$SCRATCH/build" >/dev/null 2>&1; then
-  echo "check-settings-ci: could not configure the scratch build"
-  exit 2
-fi
-if ! cmake --build "$SCRATCH/build" --target generate-settings 2>&1 | grep -vE "^\[|^ninja|Generating|Generated" | head -20; then
-  :
+if ! python3 "$SCRATCH/utilities/scan-settings.py" --source-dir "$SCRATCH/src" \
+        > "$WORK/scan.json" 2>"$WORK/scan.err"; then
+  echo
+  echo "check-settings-ci: the scanner FAILED on the merged tree."
+  head -20 "$WORK/scan.err"
+  exit 1
 fi
 
-# The generator writes into the source tree it was given.
-if ! cmake --build "$SCRATCH/build" --target generate-settings >/dev/null 2>&1; then
+if ! python3 "$SCRATCH/utilities/generate-registry.py" \
+        --settings "$SCRATCH/src/config/settings.json" \
+        --scan-output "$WORK/scan.json" \
+        --output "$SCRATCH/src/config/settings_registry_generated.hpp" \
+        --source-dir "$SCRATCH/src" 2>"$WORK/gen.err"; then
   echo
   echo "check-settings-ci: the generator FAILED on the merged tree."
-  echo "  Run it yourself to see what it says:"
-  echo "    cmake --build --preset linux-default --target generate-settings"
+  cat "$WORK/gen.err"
   echo "  Every CLI flag and every OFLM_* variable the code reads must be a"
   echo "  setting in src/config/settings.json, or be listed in"
   echo "  NON_SETTING_ENV_VARS / NON_SETTING_FLAGS in utilities/generate-registry.py"
