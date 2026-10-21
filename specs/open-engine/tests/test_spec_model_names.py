@@ -24,6 +24,9 @@ SPECS = Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "spec
 # A few specs are named after something other than their size (a distilled
 # fine-tune, a MoE's parameter count); they are listed with what they must say.
 EXPECTED = {
+    "qwen35-0.8b": "Qwen3.5-0.8B-NPU2",
+    "qwen35-2b": "Qwen3.5-2B-NPU2",
+    "qwen35-4b": "Qwen3.5-4B-NPU2",
     "qwen35-9b": "Qwen3.5-9B-NPU2",
     "qwen35-27b": "Qwen3.8-27B-NPU2",
     "k2-horizon-3.7b": "K2-Horizon-3.7B-NPU2",
