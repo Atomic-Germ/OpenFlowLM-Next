@@ -1,6 +1,50 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — early causal sublayer boundaries, 2026-10-21
+## Latest checkpoint — projection weight-rounding attribution, 2026-10-21
+
+Added a CPU-only analysis of captured QKV/Z prefixes and selected out
+projections. Nine manifest-packed/source effective-weight comparisons are exact.
+Prior native/build/reference provenance validates. Each CPU prediction separates
+paired-input approximation from BF16 weight rounding and accumulation residual.
+The analysis covers **7683 comparisons**, using separate Q/K/V/Z head scales
+and conditioned on captured norm/gated-output inputs.
+
+**7681/7683 native projection gates pass**; two failures were hidden by aggregate
+QKV scaling (zero-based indices):
+
+| Role | Layer / position / head | Native maxrel | BF16-weight prediction gap maxrel |
+|---|---|---:|---:|
+| Q | 34 / 6 / 13 | 0.0050724904 | 7.3845882e-7 |
+| V | 37 / 0 / 46 | 0.0071224278 | 1.4109131e-6 |
+
+Worst BF16-weight prediction gap is **2.9830263e-6**; its remaining L2 error
+is at most **0.2262%** of native-minus-effective-weight error. This strongly
+supports weight rounding as the source of the measured local projection errors.
+It is a CPU prediction, not byte-exact NPU replay or corrected model execution.
+
+All three causal residual decompositions close (worst **2.2204460e-16**).
+They preserve native input prefixes, independent state per variant, FP32
+projection storage and signed QKV/Z interaction on a common reference scale.
+
+| Pre-FFN row | Native maxrel | Joint ideal QKV/Z/host/out maxrel | Out-projection component maxrel |
+|---|---:|---:|---:|
+| L34/P17 | 0.0007177295 | 0.0006092193 | 0.0000179964 |
+| L37/P7 | 0.0010862168 | 0.0008486373 | 0.0000323107 |
+| L53/P17 | 0.0075342533 | 0.0066083261 | 0.0008264166 |
+
+The ideal suffix still fails at L53/P17; inherited drift remains. Its largest
+measured local component is out projection. Next prioritize isolated fused
+QKV/Z replay at L34/P6 and L37/P0 with byte-exact native controls, then evaluate
+paired-weight precision at unchanged per-head bounds. L53/P17 out projection
+remains a follow-up target. Existing full residual accuracy is still
+**3974/4032, FAIL**; no full-model or long-prefix acceptance is claimed.
+
+**11 new RED-to-GREEN tests; 1592 passed, 47 skipped** overall. No native build
+or NPU execution. Reproduction, signed-vector interpretation and scope are in
+the [projection attribution runbook](../../../utilities/prefill-projection-attribution/README.md).
+Production and candidate arithmetic remain unchanged.
+
+## Early causal sublayer boundaries — 2026-10-21
 
 A private instrumented weighted CLI captures L34/P17, L37/P7 and L53/P17,
 including complete 20-row norm/QKV/Z/DeltaNet prefixes, selected output

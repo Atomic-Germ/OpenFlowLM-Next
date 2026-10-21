@@ -46,3 +46,23 @@ weights on the captured complete prefixes. Separate Q/K/V and head scales;
 keep conditioned host history distinct from primary references. Test the
 rounding hypothesis against actual captures before selecting a new NPU replay.
 No resident run is required for that attribution step.
+
+CPU attribution follow-up (2026-10-21): use
+[the rounding runbook](../../../utilities/prefill-projection-attribution/README.md).
+No build/NPU execution. Nine manifest-packed/source weight identities pass;
+7683 conditioned projection comparisons preserve individual Q/K/V/Z head scales.
+Two failures emerge: Q L34/P6/H13 0.0050724904 and V L37/P0/H46 0.0071224278.
+BF16-weight predictions fit within 2.9830263e-6 maxrel, with remaining L2
+error <=0.2262% of native-minus-effective-weight error. This strongly supports
+weight rounding but is not byte-exact native replay. Three signed causal
+residual decompositions close; joint ideal suffix still leaves L53/P17 pre-FFN
+at 0.0066083261 FAIL. Its largest local component is out projection 0.0008264166.
+Eleven RED-to-GREEN tests; host suite 1592 passed, 47 skipped. Evidence:
+Models/qwen38-27b/prefill-projection-attribution/.
+
+Next isolate the fused entry N16384/K5120/T256 on L34/P6 and L37/P0, using
+rows from the existing L34/P17 and L37/P7 prefix files. Require byte-exact
+paired-input native controls before a private paired-weight kernel, unchanged
+per-head gates, exact packing and two placements with zero inactive columns.
+No full model residency is needed. Keep L53/P17 out as a follow-up precision
+target; aggregate/isolated PASS cannot replace full-depth or long-prefix gates.
