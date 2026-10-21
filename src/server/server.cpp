@@ -1051,6 +1051,36 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
             };
             send_response(response);
         });
+
+    // Metrics endpoint (JSON)
+    server->register_handler("GET", "/metrics",
+        [&server](const http::request<http::string_body>& req,
+           std::function<void(const json&)> send_response,
+           std::function<void(const json&, bool)> send_streaming_response,
+           std::shared_ptr<HttpSession> session,
+           std::shared_ptr<CancellationToken> cancellation_token) {
+            json response = {
+                {"active_connections", server->get_active_connections()},
+                {"active_requests", server->get_active_requests()},
+                {"npu_available", NPUAccessManager::is_npu_available()},
+                {"npu_active_requests", NPUAccessManager::get_active_npu_requests()}
+            };
+            send_response(response);
+        });
+    server->register_handler("GET", "/api/metrics",
+        [&server](const http::request<http::string_body>& req,
+           std::function<void(const json&)> send_response,
+           std::function<void(const json&, bool)> send_streaming_response,
+           std::shared_ptr<HttpSession> session,
+           std::shared_ptr<CancellationToken> cancellation_token) {
+            json response = {
+                {"active_connections", server->get_active_connections()},
+                {"active_requests", server->get_active_requests()},
+                {"npu_available", NPUAccessManager::is_npu_available()},
+                {"npu_active_requests", NPUAccessManager::get_active_npu_requests()}
+            };
+            send_response(response);
+        });
     
     // Add other endpoints...
     server->register_handler("POST", "/api/pull",
