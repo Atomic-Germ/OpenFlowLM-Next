@@ -293,8 +293,10 @@ else
   bad "the model's own pmode override was hidden:"; echo "$out"
 fi
 # The count in the model list must agree with what is shown.
+# The JSON view also carries a "paths" block (where each path points now),
+# which is not a setting -- only count the entries that have a source.
 n_custom=$("$OFLM" config show --json --config-model "$MODEL" 2>/dev/null \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for v in d.values() if v['source']=='(custom)'))")
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for v in d.values() if isinstance(v,dict) and v.get('source')=='(custom)'))")
 out=$(printf '2\n0\n' | "$OFLM" config 2>/dev/null | grep "$MODEL")
 if echo "$out" | grep -q "($n_custom custom)"; then
   ok "the model list counts $n_custom custom settings, which is what is shown"
