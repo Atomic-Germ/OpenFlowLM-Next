@@ -7,6 +7,7 @@
  *  \version 0.9.24
  */
 #include "rest_handler.hpp"
+#include "server/metrics.hpp"
 #include "wstream_buf.hpp"
 #include "streaming_ostream.hpp"
 #include "streaming_ostream_openai.hpp"
@@ -903,6 +904,10 @@ void RestHandler::handle_generate(const json& request,
                 header_print("❌ ", "Request cancelled; clearing its context");
                 this->auto_chat_engine->clear_context();
             }
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             ostream.finalize_generate(meta_info, history.second);
         } else {
             // Non-streaming response
@@ -961,6 +966,10 @@ void RestHandler::handle_generate(const json& request,
                 header_print("❌ ", "Request cancelled; clearing its context");
                 this->auto_chat_engine->clear_context();
             }
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             // std::cout << "history: " << history.first << std::endl;
             send_response(response);
         }
@@ -1064,6 +1073,10 @@ void RestHandler::handle_chat(const json& request,
             }
             auto total_end_time = time_utils::now();
             meta_info.total_duration = (uint64_t)time_utils::duration_ns(total_start_time, total_end_time).first;
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             
             ostream.finalize_chat(meta_info);
             // auto history = this->chat_engine->get_history();
@@ -1091,6 +1104,10 @@ void RestHandler::handle_chat(const json& request,
             //std::string response_text = chat_engine->generate_with_prompt(meta_info, prompts, length_limit, std::cout, payload);
             auto total_end_time = time_utils::now();
             meta_info.total_duration = (uint64_t)time_utils::duration_ns(total_start_time, total_end_time).first;
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             
             json response = {
                 {"model", model},
@@ -1427,6 +1444,8 @@ void RestHandler::handle_embeddings(const json& request,
                     {"total_tokens",  prompt_tokens < 0 ? 0 : prompt_tokens}
                 }}
             };
+            oflm::metrics::Collector::instance().record_embeddings(
+                response_model, static_cast<uint64_t>(prompt_tokens < 0 ? 0 : prompt_tokens));
         }
         else {
             header_print("Warning", "No embedding model loaded");
@@ -1758,6 +1777,10 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 header_print("❌ ", "Generation Cancelled!");
                 this->prompt_cache.reset();
             }
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
                         
             ostream.finalize(meta_info);
         }
@@ -1832,6 +1855,10 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 header_print("❌ ", "Generation Cancelled!");
                 this->prompt_cache.reset();
             }
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             send_response(response);
         }
 
@@ -2030,6 +2057,10 @@ void RestHandler::handle_openai_completion(const json& request,
             if (meta_info.stop_reason == CANCEL_DETECTED) {
                 header_print("❌ ", "Generation Cancelled!");
             }
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             ostream.finalize(meta_info);
 
             this->auto_chat_engine->clear_context();
@@ -2097,6 +2128,10 @@ void RestHandler::handle_openai_completion(const json& request,
                 header_print("❌ ", "Request cancelled; clearing its context");
                 this->auto_chat_engine->clear_context();
             }
+            oflm::metrics::Collector::instance().record_generation(
+                model, meta_info.prompt_tokens, meta_info.generated_tokens,
+                meta_info.prefill_duration, meta_info.decoding_duration,
+                meta_info.load_duration, meta_info.total_duration);
             send_response(response);
         }
     }
