@@ -23,7 +23,52 @@ Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
       system clang/clang++. It can be found in:
       ./ironvenv/lib/python3.12/site-packages/llvm-aie/bin
 
-Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setup.sh also *if needed*
+The whole toolchain is assembled by one script, found at run time (no path is
+hardcoded in it):
+
+```bash
+source utilities/env.sh      # XRT, ROCm/HIP, MLIR-AIE + Peano, the tree's config
+source utilities/env.fish    # same, for fish
+```
+
+It sets XRT (`xrt-smi`, `xclbinutil`, `aiebu-asm`), ROCm/HIP (`hipcc`),
+MLIR-AIE + Peano (`aiecc`, `aie-opt`, the `aie` python package) and the
+project's own paths (`OFLM_CONFIG_PATH`, `OFLM_XCLBIN_PATH`, `OFLM_MODEL_PATH`,
+`OFLM_SETTINGS_PATH`), so `oflm` run from the tree reads the tree. Run
+`utilities/env.sh --check` to see what it found. Peano stays out of PATH: its
+clang would shadow the system one, and `aiecc` is handed it through
+`PEANO_INSTALL_DIR`. `source third_party/mlir-aie/utils/env_setup.sh` is still
+there for a from-source mlir-aie build.
+
+`OFLM_MODEL_PATH` holds the directory that CONTAINS the models, not the
+models: the registry names the subdirectory (`model_path`: `models`), so the
+models are in `$OFLM_MODEL_PATH/models`, and `oflm-add` resolves it the same
+way. `oflm config show` prints where each of these paths points right now.
+
+A model in the models directory is only visible when the registry knows it:
+the shipped `model_list.json` for the official ones, and the `models` section
+of `settings.json` for the ones `oflm add` installed. A directory that is
+there but not in either is invisible to `oflm list`. Register it again with
+`oflm add` on the local directory — it takes one, and it does not copy the
+weights that are already there:
+
+```bash
+source utilities/env.sh
+oflm add src/models/Ornith-1.0-35B-A3B-NPU2 --family qwen3.6-moe \
+             --xclbin-from Ornith-1.0-35B-A3B-NPU2
+```
+
+`--family` and `--xclbin-from` are not optional in practice: without them the
+tool matches the closest official entry by name, and a 35B-A3B MoE ends up
+with the kernels of an 8B model. A model whose directory is a symlink to
+another one is the same weights under a second name — registering it would
+replace the official entry of that tag in the merged registry, so leave it
+alone.
+
+`env.fish` is only a front end: it runs `env.sh` under bash and imports the
+variables it exported, so the discovery stays in one place. The two stay in
+step through `OFLM_ENV_DUMP=1`, which makes `env.sh` print its variables as
+`KEY=VALUE` lines instead of its report.
 
 ## Git rules for agents
 
