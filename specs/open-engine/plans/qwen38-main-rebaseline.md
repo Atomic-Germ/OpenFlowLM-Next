@@ -1,6 +1,38 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — paired-weight GEMM candidate, 2026-10-20
+## Latest checkpoint — composed FFN replay, 2026-10-20
+
+Added a private CPU bridge extracting current host RMSNorm and activation,
+then composed the retained paired-weight up/gate result with unchanged native
+down GEMM at L63/P7. Production sources, recipes and binaries are unchanged.
+No full-model residency or new XCLBIN is required.
+
+**8/8 down dispatches complete.** Norm, control activation, down and final
+residual reproduce the retained native bytes. Candidate slots 7/135 are
+byte-identical; each high/low dispatch has zero inactive columns. Down packing
+matches the production pool bytewise and effective source weights elementwise.
+
+| Independent gate | Control maxrel | Candidate maxrel | Candidate rel_fro |
+|---|---:|---:|---:|
+| Conditioned FFN | 0.0005411159 | 0.0002390673 | 0.0010533278 |
+| Final layer output | 0.0058400461 | 0.0045267063 | 0.0023137023 |
+
+The candidate passes both gates at maxrel <0.005 and rel_fro <=0.005. The
+original output maxrel bound is unchanged; the Frobenius gate is additional.
+This verifies an actual recomputed down result, including changed cancellation,
+not an estimate with the previous down error frozen. It establishes accuracy
+for this composed FFN on one retained causal row. It does not replay attention
+or propagate the correction through a new model run. Long-prefix model
+accuracy remains unresolved (**558/774 retained logit gates** passing).
+
+TDD: **9 new RED-to-GREEN tests; 1531 passed, 47 skipped** overall. GCC 15.2.0
+builds the bridge with **105 pinned compiler dependencies**; source, generated
+code, binary and fixture hashes are recorded. See the
+[composed replay runbook](../../../utilities/prefill-ffn-replay/README.md).
+Next expand the isolated correction to the other selected causal rows, then
+validate propagation before production integration or model acceptance.
+
+## Paired-weight GEMM candidate checkpoint — 2026-10-20
 
 Added private control and low-weight GEMM builds with unchanged Q4NX packing
 and DMA layout. The low kernel emits the BF16 residual of the dequantized
