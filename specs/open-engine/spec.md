@@ -1268,9 +1268,18 @@ is installed for its model, and honours `OFLM_QWEN35_ENGINE=open|closed`: `Qwen3
 (`model_list.json` family `qwen3.5`, e.g. `qwen3.5:4b`). Verify with `oflm serve <tag>` on a
 model that has `open_kernels/` installed: the load logs
 `Qwen3.5 on the open kernels (<dir>)`, and `OFLM_QWEN35_ENGINE=closed` restores the
-`qwen3_5vl_npu` DLL. Images always need the closed engine -- the open one has no vision
+`qwen3_5vl_npu` DLL. Without a kernel set the load logs
+`Qwen3.5 on the closed engine (no open kernels installed for <model>)`, and with the override
+`Qwen3.5 on the closed engine (OFLM_QWEN35_ENGINE=closed)`. Images always need the closed engine -- the open one has no vision
 path, and an image payload is refused with
 `images need the closed Qwen3.5 engine (OFLM_QWEN35_ENGINE=closed)`.
+
+**Shipped sizes:** every published size has a checked-in spec under `recipes/specs/`
+(`qwen35-0.8b`, `qwen35-2b`, `qwen35-4b`, `qwen35-9b`, and `qwen35-27b` for the Qwen3.8-27B),
+so a release builds and ships its kernel set. Each is the `--model-dir` derivation of the
+`Atomic-Germ` container at `"quant": "q4_1"`, the format every size passed below. Until
+2026-10-21 only the 9B and 27B were checked in, so a packaged install ran `qwen3.5:0.8b`,
+`:2b` and `:4b` on the closed DLL (#215).
 
 **Result 2026-09-06 (Qwen3.8-Distilled-4B-NPU2, HID 2560 / 32 layers / FFN 9216): PASS.**
 Slice (8 layers, 3 tokens from `[248045]`, six linear and two full): logits corr **0.999999 /

@@ -43,8 +43,13 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     const bool use_open = !sel.empty() ? sel == "open" : !kernels.empty();
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
-    if (!use_open)
+    if (!use_open) {
+        // Name the engine: a closed-engine crash otherwise reads as an open-kernel bug (#215).
+        header_print("OFLM", family_label + " on the closed engine ("
+                     + (kernels.empty() ? "no open kernels installed for " + this->lm_config->model_name
+                                        : std::string(env_var) + "=" + sel) + ")");
         return nullptr;
+    }
     header_print("OFLM", family_label + " on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
