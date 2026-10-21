@@ -55,6 +55,19 @@ target_compile_definitions(config_store_test PRIVATE
     OFLM_NO_XRT=1)
 add_test(NAME config_store_test COMMAND config_store_test)
 
+# Config key-parsing tests (host-only, no NPU needed)
+# The parser is a pure function over a byte buffer, so it is tested without
+# a terminal: what a terminal sends for a key, and what the pickers do with
+# it, are two things that can go wrong apart.
+add_executable(config_ui_test config_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/config_keys.cpp)
+target_include_directories(config_ui_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR})
+add_test(NAME config_ui_test COMMAND config_ui_test)
+
 add_subdirectory(npu_platform)
 add_subdirectory(model_backend)
 add_subdirectory(downloader_pinning)

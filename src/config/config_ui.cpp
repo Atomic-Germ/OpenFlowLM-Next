@@ -3,6 +3,8 @@
 #include "config/settings_registry.hpp"
 #include "config/settings_resolver.hpp"
 #include "config/config_cmd.hpp"
+#include "config/config_keys.hpp"
+#include "config/config_paths.hpp"
 #include <iostream>
 #include <cstdlib>
 #include <string>
@@ -17,6 +19,7 @@
 #else
 #include <unistd.h>
 #include <termios.h>
+#include <poll.h>
 #define ISATTY isatty
 #define FILENO fileno
 #endif
@@ -88,6 +91,130 @@ size_t numbered_menu(const std::string& title, const std::vector<PickerItem>& it
     }
 }
 
+namespace {
+
+// The platform side of the key reader: raw mode in, one key event out. The
+// two platforms differ in how the terminal is put in raw mode and how a key
+// is taken from it; what a key MEANS is the same on both, and is handled
+// once, in the picker below.
+#ifdef _WIN32
+class ConsoleKeys {
+public:
+    ConsoleKeys() {
+        hIn_ = GetStdHandle(STD_INPUT_HANDLE);
+        if (GetConsoleMode(hIn_, &orig_)) {
+            SetConsoleMode(hIn_, orig_ & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
+            raw_ = true;
+        }
+    }
+    ~ConsoleKeys() { if (raw_) SetConsoleMode(hIn_, orig_); }
+
+    UiKeyEvent read() {
+        UiKeyEvent ev;
+        for (;;) {
+            INPUT_RECORD rec;
+            DWORD got = 0;
+            if (!ReadConsoleInput(hIn_, &rec, 1, &got) || got == 0) { ev.key = UiKey::None; return ev; }
+            if (rec.EventType != KEY_EVENT) continue;
+            const KEY_EVENT_RECORD& ke = rec.Event.KeyEvent;
+            if (!ke.bKeyDown) continue;
+
+            switch (ke.wVirtualKeyCode) {
+                case VK_UP:     ev.key = UiKey::Up; return ev;
+                case VK_DOWN:   ev.key = UiKey::Down; return ev;
+                case VK_LEFT:   ev.key = UiKey::Left; return ev;
+                case VK_RIGHT:  ev.key = UiKey::Right; return ev;
+                case VK_HOME:   ev.key = UiKey::Home; return ev;
+                case VK_END:    ev.key = UiKey::End; return ev;
+                case VK_PRIOR:  ev.key = UiKey::PageUp; return ev;
+                case VK_NEXT:   ev.key = UiKey::PageDown; return ev;
+                case VK_RETURN: ev.key = UiKey::Enter; return ev;
+                case VK_ESCAPE: ev.key = UiKey::Escape; return ev;
+                default: break;
+            }
+            if (ke.uChar.AsciiChar) {
+                ev.key = UiKey::Char;
+                ev.ch = ke.uChar.AsciiChar;
+                return ev;
+            }
+        }
+    }
+
+private:
+    HANDLE hIn_ = nullptr;
+    DWORD orig_ = 0;
+    bool raw_ = false;
+};
+#else
+class TerminalKeys {
+public:
+    TerminalKeys() {
+        if (tcgetattr(STDIN_FILENO, &orig_) == 0) {
+            struct termios raw = orig_;
+            raw.c_lflag &= ~(ICANON | ECHO);
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+            raw_ = true;
+        }
+    }
+    ~TerminalKeys() { if (raw_) tcsetattr(STDIN_FILENO, TCSANOW, &orig_); }
+
+    UiKeyEvent read() {
+        UiKeyEvent ev;
+        for (;;) {
+            // An escape on its own is not a decision yet: the rest of the
+            // sequence may still be on its way, and a terminal is free to
+            // deliver it in two pieces. So the buffer is only parsed when it
+            // holds more than a lone ESC.
+            if (!pending_.empty() && !(pending_.size() == 1 && pending_[0] == 0x1b)) {
+                size_t n = parse_ui_key(pending_.data(), pending_.size(), &ev);
+                if (n > 0) {
+                    pending_.erase(0, n);
+                    return ev;
+                }
+            }
+            // Nothing complete yet. Wait for the next byte: for the first one
+            // as long as it takes, and for a short while after an escape --
+            // a lone ESC has to be told apart from the start of a sequence,
+            // and the terminal sends the rest of a sequence right away.
+            struct pollfd pfd {};
+            pfd.fd = STDIN_FILENO;
+            pfd.events = POLLIN;
+            int pr = poll(&pfd, 1, pending_.empty() ? -1 : 50);
+            if (pr == 0) {
+                // The wait expired and nothing more came: the escape stands
+                // alone. Whatever followed it stays pending.
+                if (!pending_.empty() && pending_[0] == 0x1b) {
+                    pending_.erase(0, 1);
+                    ev.key = UiKey::Escape;
+                    ev.ch = 0;
+                    return ev;
+                }
+                ev.key = UiKey::None;
+                return ev;
+            }
+            if (pr < 0) { ev.key = UiKey::None; return ev; }
+
+            char buf[64];
+            ssize_t got = ::read(STDIN_FILENO, buf, sizeof(buf));
+            if (got <= 0) { ev.key = UiKey::None; return ev; }
+            pending_.append(buf, static_cast<size_t>(got));
+        }
+    }
+
+private:
+    // The bytes that arrived but do not make a whole event yet: an escape
+    // sequence can be split across two reads, and the tail of what the user
+    // typed while the program was busy must not be lost.
+    std::string pending_;
+    struct termios orig_ {};
+    bool raw_ = false;
+};
+#endif
+
+} // namespace
+
 // Stubs — implemented in Tasks 16-17
 size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& items, size_t current) {
     if (items.empty()) return SIZE_MAX;
@@ -98,108 +225,76 @@ size_t arrow_picker(const std::string& title, const std::vector<PickerItem>& ite
 
     size_t selected = (current != SIZE_MAX && current < items.size()) ? current : 0;
 
+    auto render = [&]() {
+        std::cout << "\033[H\033[2J" << title << "\n";
+        for (size_t i = 0; i < items.size(); i++) {
+            if (i == selected) std::cout << "  > " << items[i].label;
+            else std::cout << "    " << items[i].label;
+            if (!items[i].description.empty()) std::cout << "  " << items[i].description;
+            std::cout << "\n";
+        }
+        std::cout << "\n  ↑/↓ or j/k move   Enter or l select   Esc or h back   q quit\n" << std::flush;
+    };
+
+    // What PageUp and PageDown move by.
+    const size_t page = 10;
+
+    // The terminal is put back the way it was when this scope ends, on every
+    // way out of it -- including an exception.
 #ifdef _WIN32
-    // Windows Console API implementation
-    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD orig_mode;
-    GetConsoleMode(hIn, &orig_mode);
-    SetConsoleMode(hIn, orig_mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
-
-    auto render = [&]() {
-        // Clear screen and render
-        CONSOLE_SCREEN_BUFFER_INFO csbi;
-        GetConsoleScreenBufferInfo(hOut, &csbi);
-        // Simple render: print title and items
-        std::cout << "\033[H\033[2J" << title << "\n";
-        for (size_t i = 0; i < items.size(); i++) {
-            if (i == selected) std::cout << "  > " << items[i].label;
-            else std::cout << "    " << items[i].label;
-            if (!items[i].description.empty()) std::cout << "  " << items[i].description;
-            std::cout << "\n";
-        }
-        std::cout << "\n  ↑/↓ navigate  Enter select  Esc back  q quit\n" << std::flush;
-    };
-
-    render();
-    while (true) {
-        INPUT_RECORD record;
-        DWORD read;
-        ReadConsoleInput(hIn, &record, 1, &read);
-        if (record.EventType != KEY_EVENT) continue;
-        if (!record.Event.KeyEvent.bKeyDown) continue;
-
-        // Up at the top wraps to the bottom, and down at the bottom wraps to
-        // the top: a list that stops dead at the ends makes you look for the
-        // arrow that does nothing.
-        if (record.Event.KeyEvent.wVirtualKeyCode == VK_UP) {
-            selected = (selected + items.size() - 1) % items.size();
-            render();
-        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_DOWN) {
-            selected = (selected + 1) % items.size();
-            render();
-        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) {
-            SetConsoleMode(hIn, orig_mode);
-            return selected;
-        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
-            SetConsoleMode(hIn, orig_mode);
-            return SIZE_MAX;
-        } else if (record.Event.KeyEvent.wVirtualKeyCode == 'Q') {
-            SetConsoleMode(hIn, orig_mode);
-            return SIZE_MAX;
-        }
-    }
+    ConsoleKeys keys;
 #else
-    // POSIX termios implementation
-    struct termios orig, raw;
-    tcgetattr(STDIN_FILENO, &orig);
-    raw = orig;
-    raw.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-
-    auto render = [&]() {
-        std::cout << "\033[H\033[2J" << title << "\n";
-        for (size_t i = 0; i < items.size(); i++) {
-            if (i == selected) std::cout << "  > " << items[i].label;
-            else std::cout << "    " << items[i].label;
-            if (!items[i].description.empty()) std::cout << "  " << items[i].description;
-            std::cout << "\n";
-        }
-        std::cout << "\n  ↑/↓ navigate  Enter select  Esc back  q quit\n" << std::flush;
-    };
+    TerminalKeys keys;
+#endif
 
     render();
-    while (true) {
-        char c;
-        if (read(STDIN_FILENO, &c, 1) != 1) break;
-        if (c == '\n' || c == '\r') {
-            tcsetattr(STDIN_FILENO, TCSANOW, &orig);
-            return selected;
-        } else if (c == 27) { // Esc
-            // Read rest of escape sequence
-            char seq[2];
-            if (read(STDIN_FILENO, &seq[0], 1) == 1 && seq[0] == '[') {
-                if (read(STDIN_FILENO, &seq[1], 1) == 1) {
-                    // Up at the top wraps to the bottom, and down at the
-                    // bottom wraps to the top.
-                    if (seq[1] == 'A') selected = (selected + items.size() - 1) % items.size();      // Up
-                    else if (seq[1] == 'B') selected = (selected + 1) % items.size();                  // Down
-                    else if (seq[1] == 'C' || seq[1] == 'D') { /* left/right — ignore */ }
-                }
-            } else {
-                // Plain Esc
-                tcsetattr(STDIN_FILENO, TCSANOW, &orig);
-                return SIZE_MAX;
-            }
-            render();
-        } else if (c == 'q' || c == 'Q') {
-            tcsetattr(STDIN_FILENO, TCSANOW, &orig);
-            return SIZE_MAX;
+    for (;;) {
+        UiKeyEvent ev = keys.read();
+        UiKey k = ev.key;
+
+        if (k == UiKey::Char) {
+            if (ev.ch == 'q' || ev.ch == 'Q') return SIZE_MAX;
+            // The vim style: j is down, k is up, h is back, l is into.
+            UiKey vim = vim_key_for_char(ev.ch);
+            if (vim != UiKey::None) k = vim;
+        }
+
+        switch (k) {
+            case UiKey::Enter:  return selected;
+            case UiKey::Escape: return SIZE_MAX;
+            case UiKey::Left:   return SIZE_MAX;    // h: back
+            case UiKey::Right:  return selected;    // l: into
+            case UiKey::Up:
+                // Up at the top wraps to the bottom, and down at the bottom
+                // wraps to the top: a list that stops dead at the ends makes
+                // you look for the arrow that does nothing.
+                selected = (selected + items.size() - 1) % items.size();
+                render();
+                break;
+            case UiKey::Down:
+                selected = (selected + 1) % items.size();
+                render();
+                break;
+            case UiKey::Home:
+                selected = 0;
+                render();
+                break;
+            case UiKey::End:
+                selected = items.size() - 1;
+                render();
+                break;
+            case UiKey::PageUp:
+                selected = (selected + items.size() - page % items.size()) % items.size();
+                render();
+                break;
+            case UiKey::PageDown:
+                selected = (selected + page) % items.size();
+                render();
+                break;
+            default:
+                break;   // a key the picker does not use
         }
     }
-    tcsetattr(STDIN_FILENO, TCSANOW, &orig);
-    return SIZE_MAX;
-#endif
 }
 
 // What a setting currently holds, and where that value came from, for the
@@ -306,12 +401,22 @@ int guided_flow() {
                 {"Edit global settings", ""},
                 {"Edit a model's settings", ""},
                 {"Show effective configuration", ""},
+                {"Show the paths in use", ""},
                 {"Exit", ""},
             };
             size_t a = pick("What do you want to do?", actions);
             if (a == SIZE_MAX) return 0;   // nothing above this step
-            if (a == 3) return 0;          // Exit
+            if (a == 4) return 0;          // Exit
             action = a;
+            if (action == 3) {
+                // The paths in use: where the registry, the kernels, the
+                // models and the settings are read from and written to.
+                print_paths(std::cout);
+                std::cout << std::endl;
+                // The next menu redraws the screen; let the user read this.
+                wait_for_ack();
+                break;                      // and stay in this menu
+            }
             if (action == 0) {
                 // The global settings: no model to choose.
                 model_tag.clear();
@@ -516,11 +621,19 @@ int browse_tui() {
         std::cout << "No global settings found\n";
     }
     
-    // Simple input loop
-    char c;
-    while (true) {
-        if (read(STDIN_FILENO, &c, 1) != 1) break;
-        if (c == 'q' || c == 'Q') break;
+    // The screen says "press q to quit", so the key has to arrive on its own:
+    // in canonical mode the read waits for a whole line, and the line editor
+    // eats the arrow keys on the way.
+#ifdef _WIN32
+    ConsoleKeys keys;
+#else
+    TerminalKeys keys;
+#endif
+    for (;;) {
+        UiKeyEvent ev = keys.read();
+        if (ev.key == UiKey::None) break;                       // end of input
+        if (ev.key == UiKey::Escape) break;
+        if (ev.key == UiKey::Char && (ev.ch == 'q' || ev.ch == 'Q')) break;
     }
     std::cout << "\033[2J\033[H"; // Clear on exit
     return 0;
