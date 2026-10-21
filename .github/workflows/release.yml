@@ -226,8 +226,21 @@ jobs:
             echo "::error::could not add ppa:amd-team/xrt; without XRT there is no engine build"
             exit 1
           fi
-          sudo apt-get update
-          sudo apt-get install -y libxrt-dev libxrt2 libxrt-npu2
+          # The PPA is on Launchpad, and Launchpad has outages. A 503 there
+          # fails the release for a reason that has nothing to do with the
+          # code; retry before giving up on it.
+          for attempt in 1 2 3 4 5 6; do
+            if sudo apt-get update && \
+               sudo apt-get install -y libxrt-dev libxrt2 libxrt-npu2; then
+              break
+            fi
+            if [ "$attempt" = "6" ]; then
+              echo "::error::could not install XRT from ppa:amd-team/xrt after 6 attempts; if that PPA is down, the release cannot build"
+              exit 1
+            fi
+            echo "::warning::XRT install failed (attempt ${attempt}/6); the Launchpad PPA is the usual suspect"
+            sleep 30
+          done
           xclbinutil --version
 
       - name: Drop the staged kernels when skip_prebuilts is set
