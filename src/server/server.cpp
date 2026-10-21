@@ -7,6 +7,7 @@
  *  \version 0.9.24
  */
 #include "server/openai_compat.hpp"
+#include "server/metrics.hpp"
 #include "server.hpp"
 #include "rest_handler.hpp"
 #include <sstream>
@@ -201,9 +202,13 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
     return false;
 }
 
-// Health probes should not produce request or connection lifecycle logs.
+// Health probes and metrics scrapes should not produce request or connection lifecycle logs.
 static bool is_healthcheck(const http::request<http::string_body>& req) {
-    return req.method() == http::verb::get && req.target() == "/api/version";
+    if (req.method() != http::verb::get) return false;
+    std::string_view target(req.target().data(), req.target().size());
+    auto qpos = target.find('?');
+    std::string_view path = (qpos == std::string_view::npos) ? target : target.substr(0, qpos);
+    return path == "/api/version" || path == "/metrics" || path == "/api/metrics" || path == "/v1/metrics";
 }
 
 ///@brief HttpSession class implementation
@@ -713,10 +718,14 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         header_print("LOG", "Error parsing request body: " + std::string(e.what()));
     }
 
-    // Route lookup
-    std::string key = std::string(req.method_string()) + " " + std::string(req.target());
+    // Route lookup (strip optional query string so /metrics?format=otlp matches GET /metrics)
+    std::string target_str = std::string(req.target());
+    auto qpos = target_str.find('?');
+    std::string route_path = (qpos == std::string::npos) ? target_str : target_str.substr(0, qpos);
+    std::string key = std::string(req.method_string()) + " " + route_path;
     auto it = routes.find(key);
     if (it == routes.end()) {
+        oflm::metrics::Collector::instance().record_http_request(key, 404);
         // No route: respond 404 synchronously.
         res.result(http::status::not_found);
         res.body() = safe_dump(json{ {"error", "Not Found"} });
@@ -726,7 +735,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
     }
 
     // Decide if this handler needs exclusive NPU access.
-    bool needs_npu = requires_npu_access(std::string(req.method_string()), std::string(req.target()));
+    bool needs_npu = requires_npu_access(std::string(req.method_string()), route_path);
 
     // Store stable pointers for deferred execution to avoid reference lifetime issues.
     auto* req_ptr = &req;
@@ -806,30 +815,41 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         register_active_request(request_id, cancellation_token);
 
         // catch is_deferred 
-        auto send_response = [res_ptr, session, this, request_id, needs_npu, is_deferred, cancellation_token](const json& response_data) {
+        auto send_response = [res_ptr, session, this, request_id, needs_npu, is_deferred, cancellation_token, key](const json& response_data) {
             auto& response_ref = *res_ptr;
             http::status status = http::status::ok;
 
-            // `code` is a STRING in the OpenAI error shape ("model_not_found",
-            // "invalid_value"), and reading it as an int threw
-            // `[json.exception.type_error.302] type must be number, but is string`
-            // out of this lambda. The outer handler then turned that into
-            // {"error": "<exception text>"} with status 200 -- so every
-            // OpenAI-shaped error this server built was swallowed and answered OK,
-            // including the embeddings handler's own "this server has X loaded,
-            // not Y". Accept both spellings, and treat the type as authoritative
-            // when the code is not numeric.
-            // openai_compat::status_for is the whole rule, and it is unit-tested --
-            // this block previously recognised a numeric 400 and let a handler's own
-            // 500 out as HTTP 200.
-            status = static_cast<http::status>(
-                openai_compat::status_for(response_data, static_cast<int>(status)));
+            if (response_data.is_object() &&
+                response_data.contains("__raw_body__") &&
+                response_data.contains("__content_type__")) {
+                response_ref.result(status);
+                response_ref.body() = response_data["__raw_body__"].get<std::string>();
+                response_ref.set(http::field::content_type, response_data["__content_type__"].get<std::string>());
+            } else {
+                // `code` is a STRING in the OpenAI error shape ("model_not_found",
+                // "invalid_value"), and reading it as an int threw
+                // `[json.exception.type_error.302] type must be number, but is string`
+                // out of this lambda. The outer handler then turned that into
+                // {"error": "<exception text>"} with status 200 -- so every
+                // OpenAI-shaped error this server built was swallowed and answered OK,
+                // including the embeddings handler's own "this server has X loaded,
+                // not Y". Accept both spellings, and treat the type as authoritative
+                // when the code is not numeric.
+                // openai_compat::status_for is the whole rule, and it is unit-tested --
+                // this block previously recognised a numeric 400 and let a handler's own
+                // 500 out as HTTP 200.
+                status = static_cast<http::status>(
+                    openai_compat::status_for(response_data, static_cast<int>(status)));
 
-            response_ref.result(status);
-            // A body can echo request text (e.g. a model tag), which is not
-            // guaranteed valid UTF-8.
-            response_ref.body() = safe_dump(response_data);
-            response_ref.set(http::field::content_type, "application/json");
+                response_ref.result(status);
+                // A body can echo request text (e.g. a model tag), which is not
+                // guaranteed valid UTF-8.
+                response_ref.body() = safe_dump(response_data);
+                response_ref.set(http::field::content_type, "application/json");
+            }
+            if (key != "GET /metrics" && key != "GET /api/metrics" && key != "GET /v1/metrics") {
+                oflm::metrics::Collector::instance().record_http_request(key, static_cast<int>(status));
+            }
             response_ref.prepare_payload();
             cancellation_token->complete();
             unregister_active_request(request_id);
@@ -843,9 +863,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             }
         };
 
-        auto send_streaming_response = [session, this, request_id, needs_npu, cancellation_token](const json& data, bool is_final) {
+        auto send_streaming_response = [session, this, request_id, needs_npu, cancellation_token, key](const json& data, bool is_final) {
             if (is_final) {
                 cancellation_token->complete();
+                oflm::metrics::Collector::instance().record_http_request(key, 200);
             }
 
             if (session) {
@@ -1052,35 +1073,41 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
             send_response(response);
         });
 
-    // Metrics endpoint (JSON)
-    server->register_handler("GET", "/metrics",
-        [&server](const http::request<http::string_body>& req,
+    // Prometheus/OpenMetrics (/metrics) and OpenTelemetry OTLP/JSON (/api/metrics, /v1/metrics)
+    WebServer* srv = server.get();
+    auto handle_metrics = [srv, rest_handler](const http::request<http::string_body>& req,
            std::function<void(const json&)> send_response,
            std::function<void(const json&, bool)> send_streaming_response,
            std::shared_ptr<HttpSession> session,
            std::shared_ptr<CancellationToken> cancellation_token) {
-            json response = {
-                {"active_connections", server->get_active_connections()},
-                {"active_requests", server->get_active_requests()},
-                {"npu_available", NPUAccessManager::is_npu_available()},
-                {"npu_active_requests", NPUAccessManager::get_active_npu_requests()}
-            };
-            send_response(response);
-        });
-    server->register_handler("GET", "/api/metrics",
-        [&server](const http::request<http::string_body>& req,
-           std::function<void(const json&)> send_response,
-           std::function<void(const json&, bool)> send_streaming_response,
-           std::shared_ptr<HttpSession> session,
-           std::shared_ptr<CancellationToken> cancellation_token) {
-            json response = {
-                {"active_connections", server->get_active_connections()},
-                {"active_requests", server->get_active_requests()},
-                {"npu_available", NPUAccessManager::is_npu_available()},
-                {"npu_active_requests", NPUAccessManager::get_active_npu_requests()}
-            };
-            send_response(response);
-        });
+        // Subtract 1 from active_requests so the /metrics scrape itself is not counted as work.
+        size_t active_reqs = srv->get_active_requests();
+        if (active_reqs > 0) active_reqs -= 1;
+
+        oflm::metrics::LiveState live;
+        live.active_connections = srv->get_active_connections();
+        live.active_requests = active_reqs;
+        live.npu_available = NPUAccessManager::is_npu_available();
+        live.npu_active_requests = NPUAccessManager::get_active_npu_requests();
+        live.npu_queued_requests = srv->get_npu_queued_requests();
+        live.loaded_model = rest_handler->loaded_model_tag();
+
+        auto snap = oflm::metrics::Collector::instance().snapshot(live);
+        std::string_view target(req.target().data(), req.target().size());
+        std::string accept = std::string(req[http::field::accept]);
+
+        if (oflm::metrics::wants_otlp_json(target, accept)) {
+            send_response(oflm::metrics::render_otlp_json(snap));
+        } else {
+            send_response(json{
+                {"__raw_body__", oflm::metrics::render_prometheus(snap)},
+                {"__content_type__", "text/plain; version=0.0.4; charset=utf-8"}
+            });
+        }
+    };
+    server->register_handler("GET", "/metrics", handle_metrics);
+    server->register_handler("GET", "/api/metrics", handle_metrics);
+    server->register_handler("GET", "/v1/metrics", handle_metrics);
     
     // Add other endpoints...
     server->register_handler("POST", "/api/pull",
