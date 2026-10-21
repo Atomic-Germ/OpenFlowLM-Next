@@ -47,3 +47,20 @@ Models/qwen38-27b/prefill-weighted-sublayers/.
 Next scan preceding layers using retained native/independent causal prefixes
 without a new resident NPU run. Keep ideal-history diagnostics explicitly
 separate from primary acceptance and actual native state.
+
+CPU-only prefix follow-up (2026-10-21): use
+[the prefix scanner](../../../utilities/prefill-prefix-scan/README.md) on the
+same retained data. No native rebuild/NPU run. Layers 0–55, P7/P17: 112/112
+independent outputs reconstruct bytewise; 224 cases and signed-vector closure
+validate. Sequential passes 112/112, hybrid 101/112; first hybrid failures
+L40/P17 and L55/P7. Their propagated components already fail (<0.005 bound)
+at 0.0055866730 / 0.0054887081, versus native 0.0059587517 / 0.0062761194.
+The gap from ideal causal state driven by native input includes both history
+and local arithmetic, and must not be labeled a conditioned operation error.
+Save full signed vectors on one reference scale; maxima cannot be added.
+Largest hybrid gap is L53/P17 (0.0009166706), also the largest sequential gap
+(0.0010513228). Earlier growth nominates L34/P17 and L37/P7 alongside L53/P17
+for subsequent causal sublayer captures. Do not infer a unique faulty op.
+Thirteen new tests; full suite 1571 passed, 47 skipped. Full retained residual
+accuracy remains 3974/4032 FAIL. Scan evidence is under
+Models/qwen38-27b/prefill-prefix-scan/.

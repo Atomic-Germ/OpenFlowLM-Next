@@ -1,6 +1,41 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — weighted-candidate sublayer diagnosis, 2026-10-21
+## Latest checkpoint — causal prefix drift scan, 2026-10-21
+
+Added a CPU-only scanner over retained native residuals for layers 0–55 and
+positions 7/17. Each route carries the complete causal prefix in fresh ideal
+conv/recurrent/KV state. Weights are cached one layer at a time. **112/112
+independent CPU outputs reconstruct bytewise; 224 diagnostic cases complete.**
+Build/compiler/kernel/model provenance, 66 baseline logits and 192 residual
+hashes validate; all 64 hybrid/block-major residual pairs are identical.
+
+Sequential passes **112/112** selected output gates (worst **0.0032302929**,
+L53/P17); hybrid passes **101/112**. First hybrid failures are **L40/P17** and
+**L55/P7**. Signed propagated and ideal-history-gap vectors close to the total
+error and use the same output reference scale:
+
+| Hybrid row | Propagated maxrel | Ideal-history gap maxrel | Total maxrel |
+|---|---:|---:|---:|
+| L40/P17 | 0.0055866730 | 0.0003720786 | 0.0059587517 |
+| L51/P17 | 0.0134731971 | 0.0004004110 | 0.0138594086 |
+| L55/P7 | 0.0054887081 | 0.0007874112 | 0.0062761194 |
+
+The propagated component already exceeds the unchanged <0.005 bound at both
+first-failure rows. The largest hybrid ideal-history gap is **L53/P17,
+0.0009166706**, also the largest sequential gap (**0.0010513228**). This gap
+includes accumulated state and local arithmetic; it does not isolate a faulty
+operation. Scalar maxima are not additive and cancellation is preserved in the
+saved vectors. Early growth at L34/P17 and L37/P7, plus the L53/P17 gap, nominate
+three causal sublayer captures for the next precision investigation.
+
+**13 new tests; 1571 passed, 47 skipped** overall. Eleven initial tests failed
+before implementation. No native build or NPU run was needed. Production and
+candidate arithmetic remain unchanged; full retained residual acceptance is
+still **3974/4032, FAIL**. This selected-prefix diagnostic does not establish
+long-prefix or model acceptance. Reproduction and scope are in the
+[CPU scan runbook](../../../utilities/prefill-prefix-scan/README.md).
+
+## Weighted-candidate sublayer diagnosis — 2026-10-21
 
 Instrumented copied weighted-candidate sources at L55/P7 and L51/P17 without
 changing arithmetic. All three full-resident routes complete on the retained
