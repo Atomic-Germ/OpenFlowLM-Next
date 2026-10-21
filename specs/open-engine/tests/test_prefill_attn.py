@@ -43,9 +43,9 @@ def test_the_route_names_the_attention_gemm_streams():
 
 
 def test_a_dense_family_says_which_attention_the_host_half_computes():
-    """The dense route gets the products' streams, but only a family whose attention is the q/k
-    norm then the half-split rotation (no bias, no gate) declares it as `prep`; the engine runs
-    the products for a declared family only and leaves the rest on the dxB route."""
+    """Only a family whose attention the host half computes (the q/k norm then the half-split
+    rotation, or the rotation alone; no bias, no gate) gets the products' streams, with that
+    `prep`; the rest stay on the dxB route and build none of them."""
     from recipes.load import load_spec
     from recipes.manifest import manifest
 
@@ -53,10 +53,16 @@ def test_a_dense_family_says_which_attention_the_host_half_computes():
     ab = manifest(load_spec(specs / "qwen3-4b.json"))["layer_types"]["dense"]["gemm_block"]["attn_block"]
     # 32 query heads over 8 kv heads x 256 tokens = 1024 rows, head dim 128
     assert (ab["m"], ab["hd"], ab["l_max"], ab["prep"]) == (1024, 128, LMAX, "qknorm_rope")
-    # no q/k norm (Llama), the norm after the rotation (HunYuan), a family not yet measured (Phi-3)
-    for name in ("llama31-8b.json", "hy-mt2-7b.json", "phi4-mini-4b.json"):
-        gb = manifest(load_spec(specs / name))["layer_types"]["dense"]["gemm_block"]
-        assert "prep" not in gb.get("attn_block", {}), name
+    # K2 has no q/k norm: the rotation alone
+    for name in ("k2-horizon-7b.json", "k2-horizon-3.7b.json"):
+        ab = manifest(load_spec(specs / name))["layer_types"]["dense"]["gemm_block"]["attn_block"]
+        assert (ab["m"], ab["hd"], ab["prep"]) == (1024, 128, "rope"), name
+    # not yet measured (Llama, Phi-4-mini, Granite), the norm after the rotation (HunYuan); Granite's
+    # 1280 rows (5 blocks of 256) and Phi-4-mini's 768 (3) would not even tile in gemm_pretiled
+    for name in ("llama31-8b.json", "hy-mt2-7b.json", "phi4-mini-4b.json", "granite42-3b.json"):
+        m = manifest(load_spec(specs / name))
+        assert "attn_block" not in m["layer_types"]["dense"]["gemm_block"], name
+        assert not [k for k in m["builds"] if k.startswith("ag_")], name
 
 
 # ---- the kernel and the route: manual, on the NPU
