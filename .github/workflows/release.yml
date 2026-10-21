@@ -211,6 +211,12 @@ jobs:
       - name: Install build dependencies
         run: |
           set -euo pipefail
+          # No translations: they are of no use to a build, and the XRT PPA is
+          # on Launchpad, whose CDN answers 503 at random. A translation index
+          # that fails takes the whole `apt-get update` down with it, and the
+          # package list never lands.
+          echo 'Acquire::Languages "none";' \
+            | sudo tee /etc/apt/apt.conf.d/99disable-translations >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             software-properties-common \

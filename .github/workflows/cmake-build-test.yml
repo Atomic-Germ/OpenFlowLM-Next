@@ -68,6 +68,15 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
+          # The translations are of no use here, and the XRT PPA is on
+          # Launchpad, whose CDN answers 503 at random. A translation index
+          # that fails takes the whole `apt-get update` down with it, and the
+          # package list never lands -- which is how a PPA hiccup turned into
+          # "Unable to locate package libxrt2". Asking apt for no languages
+          # takes those requests out of the picture.
+          echo 'Acquire::Languages "none";' \
+            | sudo tee /etc/apt/apt.conf.d/99disable-translations >/dev/null
+
           # The XRT packages come from a Launchpad PPA, and Launchpad has
           # outages -- a 503 there turns the whole CI red for every pull
           # request, including the ones that changed nothing about the NPU.
