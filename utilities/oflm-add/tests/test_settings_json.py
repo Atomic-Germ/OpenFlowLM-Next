@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from oflm_add import register, user_settings_path, save_json_atomic
+from oflm_add import register, user_settings_path, save_json_atomic, models_root_dir
 
 
 @pytest.fixture
@@ -138,8 +138,20 @@ class TestUserSettingsPath:
         monkeypatch.setenv("OFLM_MODEL_PATH", str(tmp_path))
         monkeypatch.delenv("OFLM_SETTINGS_PATH", raising=False)
         path = user_settings_path()
-        assert path.name == "settings.json"
-        assert str(tmp_path) in str(path)
+        # The models are in <OFLM_MODEL_PATH>/models, and the settings live
+        # NEXT to that directory: the file oflm itself reads.
+        assert path == tmp_path / "settings.json"
+
+    def test_next_to_the_models_directory(self, monkeypatch):
+        # The default store: the models in ~/.config/oflm/models, the
+        # settings in ~/.config/oflm/settings.json. oflm-add used to write
+        # them inside the models directory, where oflm never looked, and a
+        # model registered that way stayed invisible.
+        monkeypatch.delenv("OFLM_MODEL_PATH", raising=False)
+        monkeypatch.delenv("OFLM_SETTINGS_PATH", raising=False)
+        path = user_settings_path()
+        assert path == Path.home() / ".config" / "oflm" / "settings.json"
+        assert path.parent == models_root_dir(None).parent
 
     def test_env_override(self, tmp_path, monkeypatch):
         custom = tmp_path / "custom_settings.json"

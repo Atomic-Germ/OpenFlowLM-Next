@@ -452,15 +452,21 @@ def user_xclbin_dir(arg):
 
 
 def user_settings_path(cli_config: str | None = None) -> Path:
-    """Path to the user's settings.json (overlay file, never overwritten by releases)."""
+    """Path to the user's settings.json (overlay file, never overwritten by releases).
+
+    It is the file oflm itself reads: the settings of a model store live in
+    the store's own directory, NEXT to the models/ directory -- not inside
+    it. oflm-add used to write them inside, where oflm never looked, and a
+    model registered that way stayed invisible to `oflm list`.
+    """
     if cli_config:
         return Path(cli_config)
     env_path = os.environ.get("OFLM_SETTINGS_PATH")
     if env_path:
         return Path(env_path)
-    # Default: sibling of models directory
+    # Next to the models directory: the directory that holds it.
     models_root = models_root_dir(None)
-    return models_root / "settings.json"
+    return models_root.parent / "settings.json"
 
 
 # Backward compat alias
@@ -2053,7 +2059,7 @@ def main():
     ap.add_argument("--tag", help="Registry tag (default: derived from the repo name, e.g. qwen3.5-claude:9b)")
     ap.add_argument("--name", help="Install under a custom tag (e.g. my-finetune:3b). Overrides --tag.")
     ap.add_argument("--family", help="details.family for engine dispatch (default: from matching official entry)")
-    ap.add_argument("--config", help="model_list.json to update (default: $OFLM_CONFIG_PATH or ~/.config/oflm/model_list.json)")
+    ap.add_argument("--config", help="your settings.json to update (default: $OFLM_SETTINGS_PATH, or next to the models directory)")
     ap.add_argument("--models-root", help="models directory (default: $OFLM_MODEL_PATH or ~/.config/oflm/models)")
     ap.add_argument("--xclbin-dir", help="user xclbins directory (default: ~/.config/oflm/xclbins)")
     ap.add_argument("--xclbin-from", help="official model directory name to link xclbins from (default: best match, e.g. Qwen3.6-35B-A3B-NPU2)")

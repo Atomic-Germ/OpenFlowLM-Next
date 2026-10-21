@@ -1108,19 +1108,28 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
     # (q4nx.cli:main defaults argv=None), so "$@" flows through sys.argv.
+    #
+    # The package is found RELATIVE to the launcher, not at the prefix the
+    # tree was configured with: an install into another prefix (a staging
+    # directory, a tarball unpacked somewhere else) then finds its own
+    # package. The configured path stays as the fallback, for a launcher that
+    # was copied out of its tree.
     function(_oflm_install_utility name subdir module)
         set(_oflm_util_dir "${CMAKE_INSTALL_PREFIX}/${OFLM_SHARE_DESTINATION}/utilities")
         set(_oflm_util_tmpl "${CMAKE_BINARY_DIR}/_oflm-utility-launcher.in")
         if(NOT EXISTS "${_oflm_util_tmpl}")
             file(WRITE "${_oflm_util_tmpl}" [==[#!/bin/sh
 # Bundled launcher: runs the @_OFLM_UTIL_NAME@ package installed beside this tool.
-_OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
+# Beside means relative to this script, so the install can be moved.
+_OFLM_UTIL_DIR="$(cd -- "$(dirname -- "$0")/../@_OFLM_SHARE_REL@/utilities" 2>/dev/null && pwd)"
+[ -d "$_OFLM_UTIL_DIR" ] || _OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
 export PYTHONPATH="${_OFLM_UTIL_DIR}/@_OFLM_UTIL_SUBDIR@${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -c 'import sys; from @_OFLM_UTIL_MODULE@ import main; sys.exit(main())' "$@"
 ]==])
         endif()
         set(_OFLM_UTIL_NAME "${name}")
         set(_OFLM_UTIL_DIR "${_oflm_util_dir}")
+        set(_OFLM_SHARE_REL "${OFLM_SHARE_DESTINATION}")
         set(_OFLM_UTIL_SUBDIR "${subdir}")
         set(_OFLM_UTIL_MODULE "${module}")
         configure_file("${_oflm_util_tmpl}" "${CMAKE_BINARY_DIR}/${name}" @ONLY)

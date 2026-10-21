@@ -396,9 +396,10 @@ fi
 # src/models/models and find nothing.
 if [ -d "$OFLM_ROOT/src/models" ]; then
     export OFLM_MODEL_PATH="$OFLM_ROOT/src"
-    # The user settings live next to the models; point at the tree's copy so
+    # The user settings live NEXT to the models directory -- the file oflm
+    # reads, and the file oflm-add writes. Point at the tree's copy so
     # `oflm config set` writes here and not into ~/.config/oflm.
-    export OFLM_SETTINGS_PATH="$OFLM_ROOT/src/models/settings.json"
+    export OFLM_SETTINGS_PATH="$OFLM_ROOT/src/settings.json"
 fi
 # The open-kernel sets of this tree are found through OFLM_XCLBIN_PATH
 # (src/xclbins/<Model>/open_kernels): OFLM_OPEN_KERNELS_DIR is deliberately
