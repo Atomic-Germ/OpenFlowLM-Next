@@ -1,6 +1,44 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — causal prefix drift scan, 2026-10-21
+## Latest checkpoint — early causal sublayer boundaries, 2026-10-21
+
+A private instrumented weighted CLI captures L34/P17, L37/P7 and L53/P17,
+including complete 20-row norm/QKV/Z/DeltaNet prefixes, selected output
+projections, FFN boundaries and actual raw state around the host block.
+All three full-resident routes complete: **66/66 logits and 192/192 residual
+files are byte-exact** to the retained candidate. All **81 captures** validate,
+with **39 identical hybrid pairs**. Three independent causal CPU outputs
+reconstruct retained references bytewise. Conv carry and pre-FFN residual
+reconstruction are exact. Block-end state belongs to **P19**, not the target row.
+
+**54/54 conditioned FFN gates pass** (worst **0.0016358962**) and **732/732
+projection/host boundary gates pass** (worst **0.0022380252**). Both hybrid
+schedules have identical measurements:
+
+| Layer | Worst prefix QKV maxrel | Worst prefix Z maxrel | Worst conditioned DeltaNet output maxrel | Selected out projection maxrel | Block-end state maxrel |
+|---|---:|---:|---:|---:|---:|
+| 34 | 0.0022380252 | 0.0014517693 | 1.0677252e-6 | 0.0009515609 | 9.2116065e-7 |
+| 37 | 0.0009451065 | 0.0013125434 | 8.8183857e-7 | 0.0003931275 | 7.2322780e-7 |
+| 53 | 0.0010144976 | 0.0011105445 | 1.4542305e-6 | 0.0012094501 | 4.8807962e-7 |
+
+QKV/Z gates use actual inputs; captured-norm comparisons are similar. QKV
+uses a whole-vector scale, not separate Q/K/V or per-head acceptance. The
+FP64 host reference carries its own state driven by captured projections;
+this is a conditioned diagnostic, never a replacement model reference.
+The much smaller host-state/output differences direct the next investigation
+toward QKV/Z/out projection rounding. They do not prove a unique faulty op.
+
+Global hybrid output maxrel is **0.0009041704 / 0.0011400684 / 0.0078214144**.
+L53/P17 already fails pre-FFN at **0.0075342533**; ideal FFN on actual inputs
+still fails at **0.0079466232**. Full retained residual acceptance remains
+**3974/4032, FAIL**. No model or long-prefix acceptance is claimed.
+
+GCC 15.2.0, CTest **4/4**, **587 pinned compiler dependencies**. **10 new
+RED-to-GREEN tests; 1581 passed, 47 skipped** overall. Reproduction and exact
+capture scope are in the [early-boundary runbook](../../../utilities/prefill-prefix-sublayers/README.md).
+Production sources, kernels, weights and candidate arithmetic are unchanged.
+
+## Causal prefix drift scan — 2026-10-21
 
 Added a CPU-only scanner over retained native residuals for layers 0–55 and
 positions 7/17. Each route carries the complete causal prefix in fresh ideal
