@@ -1,6 +1,41 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — projection weight-rounding attribution, 2026-10-21
+## Latest checkpoint — isolated paired-weight QKV/Z replay, 2026-10-21
+
+Built private control and low-weight fused entry kernels at N16384/K5120/T256.
+Both preserve production packing and DMA; the low variant converts the BF16
+weight remainder. Four GEMM products combine two weight and two input planes.
+**24/24 NPU dispatches complete**, without full-model residency (~68.5 MiB
+logical buffers per dispatch, excluding runtime overhead).
+
+Fresh production sums reproduce native QKV/Z captures bytewise. Each individual
+new-control product matches production exactly; inactive columns are zero.
+Candidate placements 6/134 and 0/128 match bytewise. All **512/512 head checks**
+pass the unchanged primary bounds (maxrel <0.005, rel_fro <=0.005), with strict
+improvement of both errors in every head. These are 256 distinct heads measured
+at two placements, against original-input/effective-weight FP64 references.
+
+| Previously failing head | Control maxrel | Paired-weight maxrel |
+|---|---:|---:|
+| Q L34/P6/H13 | 0.0050724904 | 2.8237745e-6 |
+| V L37/P0/H46 | 0.0071224278 | 1.4844200e-5 |
+
+Worst candidate maxrel is **1.4844200e-5**; worst rel_fro is **7.8625458e-6**.
+Both builds pass all 32 core budgets: maximum text **4784/5568 bytes**, L1 buffer
+end **61448 bytes**, **801 pinned compiler dependencies per build**. Toolchain:
+mlir-aie 1.4.2 / llvm-aie 21.0.0.2026080301+c9c5ecb7. **12 new RED-to-GREEN
+tests; 1604 passed, 47 skipped** overall.
+
+This validates two isolated input rows, not corrected causal state or full-model
+propagation. Retained full residual acceptance remains **3974/4032, FAIL**.
+Next replay complete captured QKV/Z prefixes and measure their causal effect
+through host DeltaNet and the original output projection, retaining exact native
+controls and independent references. L53/P17 output projection remains another
+target. Production promotion and long-prefix acceptance remain open; doubling
+GEMM products has not been benchmarked. Reproduction and scope are in the
+[entry replay runbook](../../../utilities/prefill-entry-replay/README.md).
+
+## Projection weight-rounding attribution — 2026-10-21
 
 Added a CPU-only analysis of captured QKV/Z prefixes and selected out
 projections. Nine manifest-packed/source effective-weight comparisons are exact.

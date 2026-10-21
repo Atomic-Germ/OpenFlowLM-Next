@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-entry-replay</name>
+    <description>Build and validate isolated paired-weight QKV/Z entry replay with exact native controls and unchanged per-head gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-entry-replay/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-prefix-sublayers</name>
     <description>Capture early causal prefill projections and block state with exact weighted native controls at L34/P17, L37/P7 and L53/P17.</description>
     <location>.agents/skills/open-qwen38-prefill-prefix-sublayers/SKILL.md</location>
