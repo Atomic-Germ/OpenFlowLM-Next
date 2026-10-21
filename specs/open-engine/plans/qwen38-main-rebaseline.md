@@ -1,6 +1,44 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — selected-row FFN expansion, 2026-10-21
+## Latest checkpoint — private causal paired-weight FFN, 2026-10-21
+
+Built private paired-input control and paired-weight candidate CLIs with
+synchronized residual capture. The candidate adds the verified low-weight
+kernel only for unsplit dense FFN up/gate N34816/K5120/T256, preserving the
+single-dispatch body, packing and FP32 sum order. Stage-major is rejected.
+Production sources, manifests and kernel binaries remain unchanged.
+
+Six full-resident requests complete on the retained **20-token prompt + one
+NPU continuation** through 64 layers. Control reproduces **66/66 historical
+paired-input logits bytewise**. Candidate sequential logits, continuation
+scratch and residuals are exact (**87/87 checks**). Both hybrid schedules agree
+in **22 logit files and 64 layer residual files** per variant.
+
+| Hybrid metric | Control | Candidate |
+|---|---:|---:|
+| Minimum logit correlation | 0.9999488108 | 0.9999742814 |
+| L63 continuation residual maxrel | 0.0011956505 | 0.0004262400 |
+| Passing layer/position residuals per route | 1299/1344 | 1315/1344 |
+| First failing residual, L55/P7 | 0.0088329705 | 0.0062761194 |
+| Worst residual, L51/P17 | 0.0183013326 | 0.0138594086 |
+
+**Accuracy remains FAIL.** Both variants pass 63/63 logits; candidate residuals
+pass **3974/4032**, versus control **3942/4032**. Sequential residuals pass
+1344/1344 unchanged (worst 0.0048820188), but **29 residual failures per hybrid
+route remain** against the unchanged <0.005 gate. The aggregate audit correctly
+returns numerical failure with valid captures. Improvement in final logits and
+continuation does not override intermediate-layer failures or establish
+long-prefix accuracy. Next capture conditioned sublayers at L55/P7 and L51/P17
+before longer runs or production integration.
+
+GCC 15.2.0; both fresh v2 builds pass CTest **4/4**, with **585/586 compiler
+dependencies** pinned. The first candidate build failed on an ambiguous XRT
+constructor; an explicit std::string fixes it, and the failed attempt is
+retained. **5 new RED-to-GREEN tests; 1550 passed, 47 skipped** overall.
+Commands, hashes and constraints are in the
+[private CLI runbook](../../../utilities/prefill-weighted-cli/README.md).
+
+## Selected-row FFN expansion checkpoint — 2026-10-21
 
 Extended the composed FFN checker to retained hybrid L60/P38 and L35/P80.
 Linear and attention pool offsets are selected independently from the manifest;
