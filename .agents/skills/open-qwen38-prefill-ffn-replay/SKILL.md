@@ -30,6 +30,19 @@ Both also pass the additional rel_fro <=0.005 gate. Control norm/H/down/output
 are exact; candidate slots 7/135 agree bytewise and inactive columns are zero.
 Bridge: GCC 15.2.0, 105 compiler dependencies; 1531 host tests pass, 47 skipped.
 Artifacts: Models/qwen38-27b/prefill-ffn-replay/{bridge,run}; reproduction and
-bridge hash are in the runbook. Production kernels remain unchanged. Expand
-to L60/P38 and L35/P80 before broader causal testing; upstream input drift
-may keep their global outputs failing despite a local FFN correction.
+bridge hash are in the runbook. Production kernels remain unchanged.
+
+The 2026-10-21 expansion uses `sweep.py` on L60/P38 and L35/P80. Select linear
+and attention pool offsets independently; geometry alone cannot select offsets.
+Run fresh production and private-control up/gate and compare each high/low
+product before interpreting the low-weight candidate. Slots 38/166 and 80/208
+must agree at up/gate, H, down and output. Forty dispatches pass exact control,
+packing, inactive-column and numerical gates. Candidate up/gate maxrel is at
+most 2.241e-6; conditioned FFN improves on both rows. Final-output maxrel grows
+slightly to 0.0014800810 / 0.0001962610 while rel_fro improves; both pass fixed
+bounds. These hybrid rows already passed; sequential failures are unresolved.
+
+All binaries are reused. Fourteen new RED-to-GREEN tests, 1545 passed and
+47 skipped overall. Evidence: Models/qwen38-27b/prefill-ffn-sweep/. Next validate
+fresh causal propagation in a private native candidate with exact controls;
+never infer model acceptance from selected-row local accuracy.

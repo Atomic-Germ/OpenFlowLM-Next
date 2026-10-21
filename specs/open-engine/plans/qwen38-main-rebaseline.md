@@ -1,6 +1,38 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — composed FFN replay, 2026-10-20
+## Latest checkpoint — selected-row FFN expansion, 2026-10-21
+
+Extended the composed FFN checker to retained hybrid L60/P38 and L35/P80.
+Linear and attention pool offsets are selected independently from the manifest;
+packed bytes and effective source weights match exactly for up/gate and down.
+All existing bridge, harness and kernel binaries are reused unchanged.
+
+**40/40 serial NPU dispatches complete.** Fresh production/private-control
+high and low up/gate products agree individually. Control norm, activation,
+down and output match the retained native captures bytewise. Candidate
+up/gate/activation/down/output agree across T256 slots 38/166 and 80/208;
+every individual output is finite, complete and zero in inactive columns.
+
+| Retained hybrid row | Candidate up/gate maxrel | Control → candidate FFN maxrel | Control → candidate output maxrel |
+|---|---|---|---|
+| L60/P38 | 1.7964e-6 / 1.6948e-6 | 0.0009571130 → 0.0008939331 | 0.0014798680 → 0.0014800810 |
+| L35/P80 | 2.2408e-6 / 1.8304e-6 | 0.0016492574 → 0.0005499310 | 0.0001922195 → 0.0001962610 |
+
+All separate projection, conditioned FFN and global layer-output gates pass
+with unchanged bounds. Output rel_fro improves to **0.0046959671 / 0.0025036066**,
+but output maxrel slightly increases on both rows. Local arithmetic improvement
+therefore does not imply monotonic global improvement. These hybrid outputs
+already passed; the sequential route's failures at these positions remain open.
+No new causal model run or production correction is claimed. The retained
+long-prefix logit result remains **558/774 passing**.
+
+TDD: **14 new RED-to-GREEN tests; 1545 passed, 47 skipped** overall. Reports
+reject incomplete coverage and invalid controls and retain local/global gates
+separately. The [replay runbook](../../../utilities/prefill-ffn-replay/README.md)
+records commands and results. Next validate fresh causal propagation in a
+private native candidate with byte-exact controls before production integration.
+
+## Composed FFN replay checkpoint — 2026-10-20
 
 Added a private CPU bridge extracting current host RMSNorm and activation,
 then composed the retained paired-weight up/gate result with unchanged native

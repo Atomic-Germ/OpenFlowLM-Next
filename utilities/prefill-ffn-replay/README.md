@@ -73,3 +73,55 @@ Evidence lives under `Models/qwen38-27b/prefill-ffn-replay/` (ignored).
 TDD: 9 new tests initially fail (including missing-module fixture errors),
 then pass. Full host suite: **1531 passed, 47 skipped**. No new XCLBIN or
 production arithmetic change; only one projection's weights are dispatched.
+
+## Selected-row expansion
+
+`sweep.py` reuses the same bridge, harness and private GEMM builds. It selects
+linear (L60/P38) and attention (L35/P80) manifest pool offsets independently.
+Preparation verifies captured host arithmetic, packed bytes and effective
+weights for both projections. Exact-weight FP64 up/gate references retain the
+original FP32 norm; the independent conditioned FFN and global layer references
+remain separate. No new build or full-model residency is required.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-ffn-replay/sweep.py prepare \
+  --out Models/qwen38-27b/prefill-ffn-sweep/run
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 \
+ironvenv/bin/python utilities/prefill-ffn-replay/sweep.py run \
+  --out Models/qwen38-27b/prefill-ffn-sweep/run
+```
+
+Use exclusive NPU access. Forty serial dispatches test each original slot and
+its counterpart in the other T256 half (38/166 and 80/208). Fresh production
+and private-control up/gate high/low products must agree individually, and
+control norm/H/down/output must match the native captures bytewise. Candidate
+up/gate/H/down/output must be byte-identical across placements. Each raw dump
+must be complete, finite and zero outside the selected column. Reports retain
+per-row local and global failures; a numerically failing completed experiment
+returns 1. Execution/provenance/identity failures invalidate the entire control.
+The sweep does not substitute ideal state or claim causal propagation.
+
+### Selected-row results (2026-10-21)
+
+All **40/40 dispatches** complete. Both production/private high and low
+controls agree individually. Norm, H, down and output match retained native
+captures; all candidate boundaries agree across slots, with zero inactive
+columns. Both linear and attention pool/source-weight checks pass.
+
+| Row | Candidate up/gate maxrel | Control → candidate FFN maxrel | Control → candidate output maxrel |
+|---|---|---|---|
+| L60/P38 | 1.7964e-6 / 1.6948e-6 | 0.0009571130 → 0.0008939331 | 0.0014798680 → 0.0014800810 |
+| L35/P80 | 2.2408e-6 / 1.8304e-6 | 0.0016492574 → 0.0005499310 | 0.0001922195 → 0.0001962610 |
+
+Both local and final-output gates pass (maxrel <0.005 and rel_fro <=0.005).
+Final-output Frobenius errors improve to 0.0046959671 / 0.0025036066, but
+maximum errors increase slightly. Thus improved FFN math does not guarantee
+monotonic final-output improvement. These hybrid rows already passed globally;
+this does not fix the sequential route's failures at those positions.
+
+TDD: **14 new tests fail before implementation, then pass; 1545 passed,
+47 skipped** overall. Artifacts and provenance are in
+`Models/qwen38-27b/prefill-ffn-sweep/`. All builds are reused unchanged.
+Next use a private native candidate to test fresh causal propagation with
+exact controls before considering production integration. Full-model
+long-prefix acceptance remains unresolved.
