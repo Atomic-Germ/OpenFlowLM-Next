@@ -11,6 +11,7 @@
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
 #include "AutoEmbeddingModel/all_embedding_model.hpp"
 #endif
+#include "config/settings_resolver.hpp"
 #include <iostream>
 #include <sstream>
 #include <filesystem>
@@ -39,15 +40,25 @@ std::map<std::string, runner_cmd_t> cmd_map = {
 /// \param downloader - the downloader for the models
 /// \param tag - the tag of the model to load
 Runner::Runner(model_list& supported_models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption) {
+    : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption), args(args) {
 
     this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
         this->ctx_length = args.ctx_length >= 512 ? args.ctx_length : 512;
-    } 
+    }
     else {
         this->ctx_length = -1;
+    }
+
+    // Initialize from the CLI before apply_model_settings() runs: that
+    // helper reads this->prefill_chunk_len, and an indeterminate value
+    // could skip the model's own setting or poison the env delivery.
+    if (args.prefill_chunk_len != -1) {
+        this->prefill_chunk_len = args.prefill_chunk_len >= 512 ? args.prefill_chunk_len : 512;
+    }
+    else {
+        this->prefill_chunk_len = -1;
     }
 
     if (this->auto_chat_engine != nullptr) {
@@ -77,6 +88,7 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
     this->asr_supported = model_info.contains("asr") && model_info["asr"];
     // header_print("ASR", asr_supported);
     this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
+    apply_model_settings(new_tag, model_info);
     try {
         this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
     }
@@ -89,8 +101,11 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
         if (args.prefill_chunk_len != -1) {
             this->prefill_chunk_len = args.prefill_chunk_len >= 512 ? args.prefill_chunk_len : 512;
         }
+        else if (oflm::config::g_resolved_settings && oflm::config::g_resolved_settings->contains("prefill_chunk_len")) {
+            this->prefill_chunk_len = (*oflm::config::g_resolved_settings)["prefill_chunk_len"].get<int>();
+        }
         else {
-            this->prefill_chunk_len = model_info["max_prefill_len"].get<int>();;
+            this->prefill_chunk_len = model_info.value("max_prefill_len", 4096);
         }
     }
     catch (const std::exception& e) {
@@ -156,11 +171,38 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
 
 
 /// \brief Run the runner
+/// \brief Resolve the settings of a model about to be loaded and put them in effect.
+/// \param model_tag the model being loaded
+/// \param model_info its registry entry
+/// \note The settings resolved at startup belong to the model named on the command
+///       line. `/load` can swap the model at run time, and the context length,
+///       the prefill chunk length and the prefill mode of the new model are its
+///       own -- the ones in effect for the previous model would be wrong.
+void Runner::apply_model_settings(const std::string& model_tag, const nlohmann::json& model_info) {
+    nlohmann::json model_settings;
+    if (oflm::config::g_effective_config) {
+        model_settings = oflm::config::resolve_settings(*oflm::config::g_effective_config, model_tag, this->args);
+        // The engine reads the env-var-delivered settings, so they have to be
+        // in the environment before it is constructed.
+        oflm::config::apply_settings(model_settings);
+    }
+
+    // The command line wins; otherwise the model's own setting; otherwise the
+    // registry's.
+    if (this->ctx_length == -1 && model_settings.contains("ctx_len")) {
+        this->ctx_length = model_settings["ctx_len"].get<int>();
+    }
+    if (this->prefill_chunk_len == -1 && model_settings.contains("prefill_chunk_len")) {
+        this->prefill_chunk_len = model_settings["prefill_chunk_len"].get<int>();
+    } else if (this->prefill_chunk_len == -1) {
+        this->prefill_chunk_len = model_info.value("max_prefill_len", 4096);
+    }
+}
+
 void Runner::run() {
     bool verbose = false;
     this->system_prompt = "";
     this->auto_chat_engine->configure_parameter("system_prompt", this->system_prompt);
-    std::wstring_convert<std::codecvt_utf8<wchar_t>> utf8conv;
     wstream_buf obuf(std::cout);
     std::ostream base_ostream(&obuf);
     header_print("OFLM", "Type /? for help");
@@ -180,7 +222,7 @@ void Runner::run() {
         }
 
         // Convert line (UTF-8 bytes) → wide string (Unicode codepoints)
-        std::wstring winput = utf8conv.from_bytes(input);
+        std::wstring winput = utf8_to_wstring(input);
 
         // Split on *any* Unicode whitespace
         std::wistringstream wiss(winput);
@@ -190,7 +232,7 @@ void Runner::run() {
 
         while (wiss >> wtoken) {
             // Convert each token back → UTF-8 bytes
-            input_list.push_back(utf8conv.to_bytes(wtoken));
+            input_list.push_back(wstring_to_utf8(wtoken));
         }
 
         // now input_list contains your UTF-8 tokens
@@ -342,7 +384,7 @@ void Runner::run() {
                     }
                     file.imbue(std::locale(file.getloc(), new std::codecvt_utf8<wchar_t>));  // treat file content as UTF-8
                     std::wstring file_content_original((std::istreambuf_iterator<wchar_t>(file)), std::istreambuf_iterator<wchar_t>());
-                    std::string file_content = utf8conv.to_bytes(file_content_original);
+                    std::string file_content = wstring_to_utf8(file_content_original);
                     file.close();
 #else
                     std::ifstream file(filename);
@@ -435,50 +477,84 @@ void Runner::cmd_status(std::vector<std::string>& input_list) {
 void Runner::cmd_load(std::vector<std::string>& input_list) {
     std::string model_name = input_list[1];
 
-    std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(model_name, this->supported_models, &this->npu_device_inst);
-    if (auto_model.second == nullptr) {
-        header_print("ERROR", "cannot load '" + model_name + "': it is either unknown to this "
-                              "build or not a chat model -- keeping '" + this->tag +
-                              "'. `oflm list` shows what this build can run.");
+    if (model_name == this->tag) {
+        header_print("OFLM", "Model already loaded: " << model_name);
         return;
     }
-    model_name = auto_model.first;
 
-    if (model_name != this->tag) {
-        this->tag = model_name;
-
-        switch (this->downloader.is_model_downloaded(this->tag)) {
-            case ModelDownloader::ModelStatus::Ready:
-                break;
-            case ModelDownloader::ModelStatus::Outdated:
-            case ModelDownloader::ModelStatus::Missing:
-                this->downloader.pull_model(this->tag, this->modelscope);
-                break;
-            case ModelDownloader::ModelStatus::Incompatible:
-                header_print("ERROR", "Model is incompatible with this version of OpenFlowLM: " + this->tag);
-                exit(EXIT_FAILURE);
-        }
-        auto_chat_engine.reset();
-        if(model_name=="gpt-oss:20b")
-            std::this_thread::sleep_for(std::chrono::milliseconds(2800));
-        this->auto_chat_engine = std::move(auto_model.second);
-
-        auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
-        this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
-        try {
-            this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
-        }
-        catch (const std::exception& e) {
-            header_print("ERROR", "Failed to load model: " + std::string(e.what()));
+    switch (this->downloader.is_model_downloaded(model_name)) {
+        case ModelDownloader::ModelStatus::Ready:
+            break;
+        case ModelDownloader::ModelStatus::Outdated:
+        case ModelDownloader::ModelStatus::Missing:
+            this->downloader.pull_model(model_name, this->modelscope);
+            break;
+        case ModelDownloader::ModelStatus::Incompatible:
+            header_print("ERROR", "Model is incompatible with this version of OpenFlowLM: " + model_name);
             exit(EXIT_FAILURE);
-        }
-
-        this->auto_chat_engine->configure_parameter("system_prompt", this->system_prompt);
-
     }
-    else
-        header_print("OFLM", "Model already loaded: " << model_name);
+    if(model_name=="gpt-oss:20b")
+        std::this_thread::sleep_for(std::chrono::milliseconds(2800));
 
+    // The model changed, so its settings are not the ones in effect: the
+    // context length and the prefill chunk length were the previous
+    // model's, and the prefill mode is in the environment from them. The
+    // new model's settings have to be in the environment BEFORE the
+    // engine is built -- the engine reads the env-var-delivered ones in
+    // its constructor.
+    //
+    // The previous model's state is saved first: if the new tag turns out
+    // to be one this build cannot run, everything is restored and the
+    // previous model stays loaded -- which is what the error below
+    // promises. The old engine is not unloaded until the new one exists.
+    const std::string previous_tag = this->tag;
+    const int previous_ctx_length = this->ctx_length;
+    const int previous_prefill_chunk_len = this->prefill_chunk_len;
+
+    this->tag = model_name;
+    this->ctx_length = (this->args.ctx_length != -1)
+        ? (this->args.ctx_length >= 512 ? this->args.ctx_length : 512) : -1;
+    this->prefill_chunk_len = (this->args.prefill_chunk_len != -1)
+        ? (this->args.prefill_chunk_len >= 512 ? this->args.prefill_chunk_len : 512) : -1;
+    {
+        auto [tag_for_settings, info_for_settings] = this->supported_models.get_model_info(this->tag);
+        apply_model_settings(tag_for_settings, info_for_settings);
+    }
+
+    // The engine is built here, not above: it reads the env-var-delivered
+    // settings in its constructor, so they have to be in the environment
+    // first.
+    std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(this->tag, this->supported_models, &this->npu_device_inst);
+    if (auto_model.second == nullptr) {
+        // The new model cannot run in this build. Put the previous model's
+        // settings back in effect -- its engine is still loaded.
+        this->tag = previous_tag;
+        this->ctx_length = previous_ctx_length;
+        this->prefill_chunk_len = previous_prefill_chunk_len;
+        {
+            auto [tag_for_settings, info_for_settings] = this->supported_models.get_model_info(this->tag);
+            apply_model_settings(tag_for_settings, info_for_settings);
+        }
+        header_print("ERROR", "cannot load '" + model_name + "': it is either unknown to this "
+                              "build or not a chat model -- keeping the previous one. "
+                              "`oflm list` shows what this build can run.");
+        return;
+    }
+    // Only now is the old engine released: the new one exists.
+    this->tag = auto_model.first;
+    this->auto_chat_engine = std::move(auto_model.second);
+
+    auto [new_tag, model_info] = this->supported_models.get_model_info(this->tag);
+    this->auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
+    try {
+        this->auto_chat_engine->load_model(this->supported_models.get_model_path(new_tag), model_info, this->ctx_length, this->preemption);
+    }
+    catch (const std::exception& e) {
+        header_print("ERROR", "Failed to load model: " + std::string(e.what()));
+        exit(EXIT_FAILURE);
+    }
+
+    this->auto_chat_engine->configure_parameter("system_prompt", this->system_prompt);
 }
 
 /// \brief Save the history

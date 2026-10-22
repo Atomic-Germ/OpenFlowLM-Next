@@ -181,7 +181,8 @@ protected:
 
 
 
-	void _shared_load_model(std::string model_path, json model_info, int default_context_length = -1, bool enable_preemption = false);
+	void _shared_load_model(std::string model_path, json model_info, int default_context_length = -1, bool enable_preemption = false,
+					const nlohmann::json& resolved_settings = nlohmann::json::object());
 	nlohmann::json _shared_setup_tokenizer(std::string model_path);
 
 	/// \brief Pick the engine for this model: the open one (open_qwen36/, the

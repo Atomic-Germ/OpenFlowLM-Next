@@ -46,6 +46,16 @@ CLAUDE.md
 # and `build*/` alone let 1552 files into a `git add -A` (2026-09-13). Ignore the
 # artifacts too, so a directory named anything at all cannot carry them in.
 open_kernels/designs/*/build*/
+open_kernels/designs/.locks/
+open_kernels/.staging_*/
+
+# The user's settings file. It belongs in the config directory, but a test or
+# a stray relative OFLM_SETTINGS_PATH can put one next to the sources; either
+# way it is the user's data and must not be committed.
+settings.json
+settings.json.lock
+src/settings.json
+src/settings.json.lock
 open_kernels/designs/**/final.xclbin
 open_kernels/designs/**/final.prj/
 open_kernels/designs/**/insts.bin

@@ -766,9 +766,14 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         noise_high_ = 0;
         lora_none_ = alloc(4096);
         const fs::path lf = fs::path(cfg_.model_dir) / man_.rows.lora_file;
-        if (!man_.rows.lora_kernel.empty() && fs::exists(lf) && !cfg_.draft)
+        const bool has_draft = !man_.rows.lora_kernel.empty() && fs::exists(lf);
+        if (has_draft && !cfg_.draft)
             log("draft pass: " + man_.rows.lora_file + " is present but off; OFLM_SPECULATIVE=1 turns it on");
-        if (cfg_.draft && !man_.rows.lora_kernel.empty() && fs::exists(lf)) {
+        if (cfg_.draft && !has_draft)
+            // Asked for, and there is none: say so. A switch that turns on
+            // nothing, silently, reads like a switch that did not take.
+            log("draft pass: asked for, but " + man_.rows.lora_file + " is not there; the model runs without it");
+        if (cfg_.draft && has_draft) {
             Q4nxFile uno(lf.string());
             if (const std::string nh = uno.metadata("uno_noise_high"); !nh.empty()) {
                 const unsigned long long v = std::stoull(nh);

@@ -7,14 +7,17 @@
 
 
 #include "AutoModel/modeling_qwen3_5vl.hpp"
+#include "config/settings_resolver.hpp"
 #include "metrices.hpp"
+#include "config/settings_resolver.hpp"
 
 
 /************              Qwen3_5VL family            **************/
 Qwen3_5VL::Qwen3_5VL(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen3_5VL") {}
 
 void Qwen3_5VL::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
     // The engine: the open kernels when installed for this model, the closed
     // qwen3_5vl_npu DLL otherwise. See AutoModel::_shared_select_open_engine.

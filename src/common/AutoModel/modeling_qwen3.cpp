@@ -7,13 +7,15 @@
 
 
 #include "AutoModel/modeling_qwen3.hpp"
+#include "config/settings_resolver.hpp"
 
 
 /************              Qwen3 family            **************/
 Qwen3::Qwen3(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen3") {}
 
 void Qwen3::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // The engine: the open kernels when installed for this model, the closed
     // qwen3_npu DLL otherwise (AutoModel::_shared_select_open_engine).
@@ -315,7 +317,8 @@ StreamResult Qwen3::parse_stream_content(const std::string content) {
 Qwen3_IT::Qwen3_IT(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void Qwen3_IT::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // Qwen3 dense, same as Qwen3: the open kernels when installed for this
     // model, the closed qwen3_npu DLL otherwise
@@ -471,7 +474,8 @@ StreamResult Qwen3_IT::parse_stream_content(const std::string content) {
 Qwen3_TK::Qwen3_TK(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void Qwen3_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // Qwen3 dense, same as Qwen3: the open kernels when installed for this
     // model, the closed qwen3_npu DLL otherwise
@@ -698,7 +702,8 @@ StreamResult Qwen3_TK::parse_stream_content(const std::string content) {
 DeepSeek_r1_0528_8b::DeepSeek_r1_0528_8b(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void DeepSeek_r1_0528_8b::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // A Qwen3 dense distill, so the same choice as Qwen3: the open kernels when
     // installed for this model, the closed qwen3_npu DLL otherwise

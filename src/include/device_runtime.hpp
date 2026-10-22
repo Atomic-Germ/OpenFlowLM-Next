@@ -12,13 +12,34 @@
 ///        source tree building against either runtime.
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
+// Forward declarations for unit test builds where we don't need the real runtime
 #if defined(OFLM_USE_HRX)
 #include "hrx_cpp/hrx_cpp.hpp"
 namespace oflm_rt = hrx;
-#else
+#elif !defined(OFLM_NO_XRT)
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_kernel.h"
 #include "xrt/xrt_device.h"
 #include "xrt/experimental/xrt_ext.h"
 namespace oflm_rt = xrt;
+#else
+// Dummy types for unit testing without XRT/HRX
+namespace oflm_rt {
+    struct device {};
+    struct bo {};
+    struct kernel {};
+    struct hw_context {};
+    struct run {};
+    struct runlist {};
+    struct xclbin {};
+    namespace ext {
+        struct bo {};
+    }
+    namespace info {
+        struct device {};
+    }
+}
 #endif

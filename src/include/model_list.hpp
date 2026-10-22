@@ -52,6 +52,28 @@ class model_list {
             }
         }
 
+        /// \brief constructor from pre-loaded JSON (for merged config)
+        /// \param config_json the pre-loaded (and possibly merged) registry JSON
+        /// \param exe_dir the executable directory for resolving relative paths
+        model_list(const nlohmann::json& config_json, std::string& exe_dir) {
+            this->config = config_json;
+            // Resolve model_root_path relative to executable directory
+            std::string relative_model_path = this->config.value("model_path", "models");
+            std::filesystem::path root_path = std::filesystem::path(exe_dir) / relative_model_path;
+            this->model_root_path = root_path.string();
+            this->resolve_hf_owner();
+
+            // Populate all_tags set
+            if (this->config.contains("models")) {
+                for (const auto& [model_type, sizes] : this->config["models"].items()) {
+                    all_tags.insert(model_type);
+                    for (const auto& [size, model_info] : sizes.items()) {
+                        all_tags.insert(model_type + ":" + size);
+                    }
+                }
+            }
+        }
+
         /// \brief get the model info
         /// \param tag the tag of the model
         /// \return the model info

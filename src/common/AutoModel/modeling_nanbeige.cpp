@@ -6,12 +6,14 @@
 /// \note This is a source file for the nanbeige class
 
 #include "AutoModel/modeling_nanbeige.hpp"
+#include "config/settings_resolver.hpp"
 
 /************              Nanbeige family            **************/
 Nanbeige::Nanbeige(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Nanbeige") {}
 
 void Nanbeige::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
     // The engine: the open kernels when installed for this model, the closed
     // DLL otherwise (AutoModel::_shared_select_open_engine).
