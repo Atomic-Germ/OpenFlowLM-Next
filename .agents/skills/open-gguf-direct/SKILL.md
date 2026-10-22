@@ -235,6 +235,52 @@ records (`ATTN_QKV_BIAS` / `ATTN_PTAB_SPLIT`), and `lfm2.py` re-exports
 GGUF twins export in the same build, so a Qwen2.5-3B or LFM2 container shipped
 as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
 
+## Fine-tunes of a supported model (2026-10-21)
+
+The GGUF-direct path is for FINE-TUNES as much as for the base models, and
+the steps that used to stand between them are gone (branch `feat/fedora-docker`):
+
+- **The gate is the manifest, not a family-name list.** The list of
+  "GGUF-capable families" was generated from the recipes and compared with
+  the WRONG names: the recipes say `qwen35` / `qwen36moe`, the registry (and
+  every `details.family`) says `qwen3.5` / `qwen3.6-moe`. So the gate
+  refused exactly the families it was written for. The capability is a
+  property of the kernel set (its manifest carries the f32-scale `gguf`
+  section), so the gate reads the manifest of the set the install links.
+  `utilities/generate-gguf-families.py` is gone; the check that replaced it
+  is `specs/open-engine/tests/test_gguf_twin.py` (the section may only name
+  kernels the manifest's builds make).
+- **The family of a fine-tune is derived from what the model IS.** Two
+  routes, both from what is on disk: the *geometry* (the installed kernel
+  set whose `ModelSpec.kernel_hash()` matches -- the depth and the
+  tokenizer's id count are the manifest's business, the kernels' are not --
+  names the official model, and the registry says that model's family) and
+  the *base chain* (the README's base model, when it is an official model).
+  "Ornith-1.5-9B" says nothing; it is a Qwen3.5-9B and the installed set
+  says so.
+- **The f32 twin is the recipes' business, in one place**
+  (`open_kernels/recipes/gguf.py`): the section and the `*_f32` builds
+  cannot disagree any more.
+- **What a GGUF of the hybrid (qwen35) family needs** (the dense families
+  were already there): llama.cpp's names for the linear attention
+  (`ssm_*`, `attn_qkv`, `attn_gate`) and `post_attention_norm` for the
+  pre-FFN norm; the SSM parameters f32 (or quantized) where the container
+  keeps them bf16 (the consts ops decode and convert); the config.json may
+  be the VLM's form (the text tower's fields under `text_config`); the
+  eos ids come from the config.json when the chain has no
+  generation_config.json.
+
+### Still open: the hybrid family's f32 numerics
+
+A GGUF of the qwen35 family (the Ornith-1.5-9B-i1 install) LOADS and
+prefills, but the residual after the layers is NaN: the f32-scale pool of
+the linear (Gated DeltaNet) layer is wrong somewhere. Suspects, in order:
+the linear layer's own pool slots (the qkv is 8192 rows and the plan reads
+it in pieces), the SSM parameters' scale (the GGUF quantizes the alpha and
+beta to Q4_K where the container keeps bf16 -- the *values* are coarse but
+finite), and the conv state's init. The dense path is unaffected (the
+Qwen3-8B-i1 GGUF still answers "Paris").
+
 ## Gotchas learned here
 
 - **designs/dense/gen_kernels.py regenerates gemv_q4_gy.cc / gemv_q4_gms.cc
