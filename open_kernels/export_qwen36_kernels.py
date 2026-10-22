@@ -94,6 +94,14 @@ def build_content_key(design: Path, out: Path, env: dict) -> str:
     Covers the design's source files (excluding build outputs and caches) and
     the compile-time knobs. Two builds with the same key produce the same
     xclbin, so the second one can reuse the first one's output.
+
+    The RECIPES are part of it: a design's compiled output depends on the
+    recipe it reads (its constants -- the pool's chunk size, the tile stride
+    -- are compiled in), so a recipe change must rebuild the designs that read
+    it. The design's own srchash covers the same set (it hashes the recipes
+    too), and a design whose srchash moved has a different output -- so the
+    cache key has to move with it, or the export reuses a stale xclbin whose
+    recipe no longer matches.
     """
     h = hashlib.sha256()
     h.update(str(out.relative_to(DESIGNS)).encode())
@@ -108,6 +116,11 @@ def build_content_key(design: Path, out: Path, env: dict) -> str:
         if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
             continue
         h.update(rel.as_posix().encode())
+        h.update(b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    for f in sorted((HERE / "recipes").glob("*.py")):
+        h.update(f.name.encode())
         h.update(b"\0")
         h.update(f.read_bytes())
         h.update(b"\0")

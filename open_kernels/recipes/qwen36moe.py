@@ -99,19 +99,27 @@ def q8_chunk_bytes(quant: str) -> int:
     raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
 
 
+def pool_quant(spec: ModelSpec) -> str:
+    """The q4 pool's scale layout: the q4 roles' quant (q4nx bf16, or the
+    GGUF-direct f32). The pool is one pool, so one chunk size."""
+    for role in ("attn", "ffn", "linear", "linear_out", "experts", "shared"):
+        q = spec.quant_of(role)
+        if q != "q8":
+            return q
+    return "q4_1"
+
+
 def pool_chunk(spec: ModelSpec) -> int:
     """The q4 pool chunk bytes this spec's pool uses.
 
     The pool's q4 roles carry the scale layout of their own format: the q4nx
     container's bf16 scales (5120 B a chunk) or the GGUF-direct f32 scales
     (6144 B). The manifest states it, and the engine lays the pool out by it --
-    so a GGUF-direct twin must state the f32 chunk, not the bf16 one.
+    so a GGUF-direct twin must state the f32 chunk, not the bf16 one. The
+    designs' own tile size (TILE) is the same number: a stream that reads a
+    chunk at the bf16 stride reads the wrong bytes out of an f32 pool.
     """
-    for role in ("attn", "ffn", "linear", "linear_out", "experts", "shared"):
-        q = spec.quant_of(role)
-        if q != "q8":
-            return chunk_bytes(q)
-    return CHUNK
+    return chunk_bytes(pool_quant(spec))
 
 
 def q4_bytes(rows: int, cols: int, quant: str = "q4_1") -> int:
@@ -571,10 +579,12 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
         return _common_dense(spec)
     n = LIMITS["n_cols"]
     hid, ff, ne = spec.hidden, spec.moe_intermediate, spec.experts_per_tok
-    stripe = q4_bytes(128, hid)                     # 128 rows x HID: one up (or gate) stripe, RS=4
-    half = q4_bytes(BAND_ROWS, hid)                 # 64 rows x HID
-    down_band = q4_bytes(128, ff)                   # 128 rows x FF, RS=4
-    up_bytes = q4_bytes(ff, hid)                    # one expert's up (= gate = down)
+    pq = pool_quant(spec)                           # the pool's scale layout (q4_1 or q4_1_f32)
+    chunk = chunk_bytes(pq)                         # ... and so its chunk size
+    stripe = q4_bytes(128, hid, pq)                 # 128 rows x HID: one up (or gate) stripe, RS=4
+    half = q4_bytes(BAND_ROWS, hid, pq)             # 64 rows x HID
+    down_band = q4_bytes(128, ff, pq)               # 128 rows x FF, RS=4
+    up_bytes = q4_bytes(ff, hid, pq)                # one expert's up (= gate = down)
     rows_pc, hid_pc = hid // n, ff // n
     # ms scratch (floats): rw[32] | xr[rows_pc] | acc[rows_pc] | u[hid_pc] | g[hid_pc] | yd[rows_pc]
     ms_rw, ms_xr = 0, 32
@@ -611,14 +621,14 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
             f"{DN_SCRATCH_FLOATS * 4} B of ds. Program memory only aiecc can measure, but "
             f"L1 is arithmetic, and until now nothing computed it for this tail.")
     dn_dim = spec.lin_value_dim if spec.has_linear else 0
-    dn_rows = CALL_BYTES // (dn_dim * 4) if dn_dim else 0      # S rows per streamed 10 KB element
+    dn_rows = (PER_CALL * chunk) // (dn_dim * 4) if dn_dim else 0   # S rows per streamed element
     dn_slices = roundup(dn_dim, dn_rows) // dn_rows if dn_dim else 0
     return Common(
         N_CORES=n, HID=hid, FF=ff, NE=ne, NX=ne + 1,
-        TILE=CHUNK, PER_CALL=PER_CALL, CALL_BYTES=CALL_BYTES,
-        STRIPE=stripe, HALF=half, PAIR=2 * CHUNK, DOWN_BAND=down_band, UP_BYTES=up_bytes,
+        TILE=chunk, PER_CALL=PER_CALL, CALL_BYTES=PER_CALL * chunk,
+        STRIPE=stripe, HALF=half, PAIR=2 * chunk, DOWN_BAND=down_band, UP_BYTES=up_bytes,
         DOWN_PER_CORE=rows_pc // 128,
-        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=3,
+        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid, pq), BAND32=band_bytes(2 * hid, pq), N_HDR=3,
         MS_FLOATS=ms_floats, DS_FLOATS=1280, TAB_BYTES=tab, H_TAB_OFF=h_tab, KWIDE=wide,
         MS_RW=ms_rw, MS_XR=ms_xr, MS_ACC=ms_acc, MS_U=ms_u, MS_G=ms_g, MS_YD=ms_yd,
         ROWS_PC=rows_pc, HID_PC=hid_pc,
@@ -648,15 +658,17 @@ def _common_dense(spec: ModelSpec) -> Common:
     DeltaNet field is `common()`'s law at this element size; the MoE-only fields are zero."""
     n = LIMITS["n_cols"]
     hid, ff = spec.hidden, spec.intermediate
+    pq = pool_quant(spec)                           # the pool's scale layout (q4_1 or q4_1_f32)
+    chunk = chunk_bytes(pq)                         # ... and so its chunk size
     pc = per_call(spec, "dense")
-    call_bytes = pc * CHUNK
+    call_bytes = pc * chunk
     wide = kwide(spec, "dense")
     dn_rows, dn_slices, dn_pad, dn_heads_pc, dn_dim = _dn_geometry(spec, call_bytes, n)
     return Common(
         N_CORES=n, HID=hid, FF=ff, NE=0, NX=0,
-        TILE=CHUNK, PER_CALL=pc, CALL_BYTES=call_bytes,
-        STRIPE=0, HALF=0, PAIR=2 * CHUNK, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
-        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=0,
+        TILE=chunk, PER_CALL=pc, CALL_BYTES=call_bytes,
+        STRIPE=0, HALF=0, PAIR=2 * chunk, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
+        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid, pq), BAND32=band_bytes(2 * hid, pq), N_HDR=0,
         MS_FLOATS=FFN_MS_FLOATS, DS_FLOATS=DN_SCRATCH_FLOATS if dn_dim else 0,
         TAB_BYTES=tab_bytes(wide), H_TAB_OFF=0, KWIDE=wide,
         MS_RW=0, MS_XR=0, MS_ACC=0, MS_U=0, MS_G=BAND_ROWS, MS_YD=0,

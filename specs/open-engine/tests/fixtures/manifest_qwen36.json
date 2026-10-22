@@ -1842,7 +1842,7 @@
    "vocab": 248320,
    "real_vocab": 248070,
    "chunk_bytes": 6144,
-   "pool_bytes": 536870912,
+   "pool_bytes": 627048448,
    "lmhead_pool_bytes": 542113792,
    "lmhead_chunk_bytes": 8704,
    "kv_row": 2048,
@@ -1887,13 +1887,13 @@
    "moe": {
     "experts": 256,
     "topk": 8,
-    "stripe": 163840,
-    "up_bytes": 655360,
-    "down_core": 81920,
-    "pool_down": 335544320,
-    "share_up": 503316480,
-    "share_gate": 503971840,
-    "share_down": 504627200
+    "stripe": 196608,
+    "up_bytes": 786432,
+    "down_core": 98304,
+    "pool_down": 402653184,
+    "share_up": 603979776,
+    "share_gate": 604766208,
+    "share_down": 605552640
    }
   },
   "layers": [
@@ -1987,7 +1987,7 @@
      "act": 190464,
      "state": {
       "kind": "linear",
-      "bytes": 2342912
+      "bytes": 2408448
      }
     },
     "program": [
@@ -2028,48 +2028,48 @@
        "dst": 0,
        "experts": 256,
        "stripes": 4,
-       "stripe_bytes": 163840,
+       "stripe_bytes": 196608,
        "in_dim": 2048
       },
       {
        "op": "expert_down",
        "tensor": "model.layer.{l}.mlp.down_exps_proj.weight",
-       "dst": 335544320,
+       "dst": 402653184,
        "experts": 256,
-       "expert_bytes": 655360
+       "expert_bytes": 786432
       },
       {
        "op": "std_perm",
        "tensor": "model.layer.{l}.mlp.share_up_exps_proj.weight",
-       "dst": 503316480,
+       "dst": 603979776,
        "nch": 128,
        "in_dim": 2048
       },
       {
        "op": "std_perm",
        "tensor": "model.layer.{l}.mlp.share_gate_exps_proj.weight",
-       "dst": 503971840,
+       "dst": 604766208,
        "nch": 128,
        "in_dim": 2048
       },
       {
        "op": "std_perm",
        "tensor": "model.layer.{l}.mlp.share_down_exps_proj.weight",
-       "dst": 504627200,
+       "dst": 605552640,
        "nch": 128,
        "in_dim": 512
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.linear_attn.qkv_proj.weight",
-       "dst": 505282560,
+       "dst": 606339072,
        "nch": 2048,
        "in_dim": 2048
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.self_attn.gate_proj.weight",
-       "dst": 517865472,
+       "dst": 618921984,
        "nch": 1024,
        "in_dim": 2048
       }
@@ -2196,41 +2196,41 @@
        "dst": 0,
        "experts": 256,
        "stripes": 4,
-       "stripe_bytes": 163840,
+       "stripe_bytes": 196608,
        "in_dim": 2048
       },
       {
        "op": "expert_down",
        "tensor": "model.layer.{l}.mlp.down_exps_proj.weight",
-       "dst": 335544320,
+       "dst": 402653184,
        "experts": 256,
-       "expert_bytes": 655360
+       "expert_bytes": 786432
       },
       {
        "op": "std_perm",
        "tensor": "model.layer.{l}.mlp.share_up_exps_proj.weight",
-       "dst": 503316480,
+       "dst": 603979776,
        "nch": 128,
        "in_dim": 2048
       },
       {
        "op": "std_perm",
        "tensor": "model.layer.{l}.mlp.share_gate_exps_proj.weight",
-       "dst": 503971840,
+       "dst": 604766208,
        "nch": 128,
        "in_dim": 2048
       },
       {
        "op": "std_perm",
        "tensor": "model.layer.{l}.mlp.share_down_exps_proj.weight",
-       "dst": 504627200,
+       "dst": 605552640,
        "nch": 128,
        "in_dim": 512
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.self_attn.q_proj.weight",
-       "dst": 505282560,
+       "dst": 606339072,
        "chunk0": 0,
        "nch": 1024,
        "in_dim": 2048
@@ -2238,21 +2238,21 @@
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.self_attn.k_proj.weight",
-       "dst": 511574016,
+       "dst": 612630528,
        "nch": 128,
        "in_dim": 2048
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.self_attn.v_proj.weight",
-       "dst": 512360448,
+       "dst": 613416960,
        "nch": 128,
        "in_dim": 2048
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.self_attn.q_proj.weight",
-       "dst": 513146880,
+       "dst": 614203392,
        "chunk0": 1024,
        "nch": 1024,
        "in_dim": 2048
@@ -2260,7 +2260,7 @@
       {
        "op": "std_perm_gguf",
        "tensor": "model.layer.{l}.self_attn.o_proj.weight",
-       "dst": 519438336,
+       "dst": 620494848,
        "nch": 1024,
        "in_dim": 4096
       }
@@ -2385,7 +2385,7 @@
    }
   },
   "pack": {
-   "pool_bytes": 536870912,
+   "pool_bytes": 627048448,
    "chunk_bytes": 6144,
    "lm_head": {
     "pool_bytes": 542113792,
