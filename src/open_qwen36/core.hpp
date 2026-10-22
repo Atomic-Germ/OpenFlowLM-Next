@@ -350,6 +350,11 @@ private:
     /// OFLM_OPEN_SUBMIT_AHEAD sets it.
     int submit_ahead_ = 0;
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
+    bool layer_nan_ = false;                   ///< OFLM_OPEN_LAYER_NAN: after each layer, count NaN / maxabs in xres
+    bool dump_pools_ = false;                  ///< OFLM_OPEN_DUMP_POOLS (<dir>): dump layer 0's packed pool + consts
+    bool merged_q41_ = false;                  ///< the OFLM_GGUF_POOL_Q41 bisect rewrote the gguf section
+    void layer_nan_check(xrt::bo& xres, int layer);
+    std::string law_tag() const;
     /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
     /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
     /// this box's NPU clock down through the shared package budget.

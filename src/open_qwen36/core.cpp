@@ -337,6 +337,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             m.contexts[bt->second.context] = b.contexts.at(bt->second.context);
             kt->second = bt->second;             // the base's context and instruction stream
         }
+        merged_q41_ = true;
         log("OFLM_GGUF_POOL_Q41: GGUF weights on the q4_1 twin (chunk " +
             std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
             "for the f32-numerics bisect");
@@ -552,6 +553,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_READ_FENCE")) g_read_fence = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_STEP_TRACE")) step_trace_ = std::atoi(env);
+    if (const char* env = std::getenv("OFLM_OPEN_LAYER_NAN")) layer_nan_ = std::atoi(env) != 0;
+    dump_pools_ = std::getenv("OFLM_OPEN_DUMP_POOLS") != nullptr;
     if (const char* env = std::getenv("OFLM_OPEN_SPIN_US")) spin_us_ = std::atoi(env);
     // OPEN-DECODE-PIPELINE. Level 1 keeps the next layer's first dispatch in flight behind
     // this layer's last one only when the two share a hardware context; level 2 crosses
@@ -730,11 +733,29 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
+        if (dump_pools_ && l == 0) {
+            const char* d = std::getenv("OFLM_OPEN_DUMP_POOLS");
+            const std::string dir = d && *d ? d : "/tmp/opencode";
+            fs::path out(dir);
+            out /= law_tag() + std::string("_pool0.bin");
+            std::ofstream f(out, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(pool_host), w_->pool_bytes);
+            log("dumped layer-0 pool, " + std::to_string((w_->pool_bytes >> 20)) + " MB -> " + out.string());
+        }
         xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(*w_, lt, *file_, l, c_host);
         build_weights(lt, l, "consts", c_host);
+        if (dump_pools_ && l == 0) {
+            const char* d = std::getenv("OFLM_OPEN_DUMP_POOLS");
+            const std::string dir = d && *d ? d : "/tmp/opencode";
+            fs::path out(dir);
+            out /= law_tag() + std::string("_consts0.bin");
+            std::ofstream f(out, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(c_host), lt.consts_bytes);
+            log("dumped layer-0 consts, " + std::to_string(lt.consts_bytes) + " B -> " + out.string());
+        }
         build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
             if (lt.gemm_block.kind == "dense") {
@@ -1963,6 +1984,26 @@ void Core::write_record(size_t row, const double pos[3]) {
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
 }
 
+std::string Core::law_tag() const {
+    if (!gguf_) return "q4nx";
+    return merged_q41_ ? "q41" : "f32";
+}
+
+void Core::layer_nan_check(xrt::bo& xres, int layer) {
+    xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+    const float* x = xres.map<float*>();
+    int nnan = 0;
+    float mx = 0.f;
+    for (size_t i = 0; i < w_->hidden; ++i) {
+        if (!std::isfinite(x[i])) ++nnan;
+        else mx = std::max(mx, std::fabs(x[i]));
+    }
+    char detail[24] = "";
+    if (nnan == 0 && mx < 1.f) std::snprintf(detail, sizeof detail, " (small)");
+    log("layer " + std::to_string(layer) + " (" + types_[layer]->name + ") xres nan=" +
+        std::to_string(nnan) + " maxabs=" + std::to_string(mx) + detail);
+}
+
 void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                      const float* deepstack, int n_deepstack) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
@@ -2054,7 +2095,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !deepstack;
+    const bool pipe = submit_ahead_ > 0 && !deepstack && !layer_nan_;
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
@@ -2084,6 +2125,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
+            if (layer_nan_) layer_nan_check(xres, l);
             continue;
         }
         // (1) the previous layer's last dispatch, so its instruction BO is free to patch and
