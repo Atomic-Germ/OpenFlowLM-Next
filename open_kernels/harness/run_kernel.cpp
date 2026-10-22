@@ -106,7 +106,8 @@ struct Kernel {
     std::vector<uint32_t> words;
     std::vector<MoePatch> moe, moe2;
     std::vector<AttnPatch> attn;
-    bool moe_built = false, moe2_built = false, attn_built = false;
+    std::vector<stream_patch::AttnRowPatch> attn_rows;
+    bool moe_built = false, moe2_built = false, attn_built = false, attn_rows_built = false;
 
     uint32_t* instr_words() { return instr->map<uint32_t*>(); }
 };
@@ -376,6 +377,21 @@ struct Host {
             k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             std::printf("attnpos %s pos %zu (%.3f ms)\n", kn.c_str(), pos, ms);
+        } else if (cmd == "attnrows") {
+            // attnrows <kernel> <pos0> <rows>: a dxl stream built for positions 1 .. rows, moved to pos0 .. pos0 + rows - 1.
+            auto kn = need(it, "attnrows kernel");
+            size_t pos0 = num(need(it, "attnrows pos0"), "attnrows pos0");
+            uint32_t rows = static_cast<uint32_t>(num(need(it, "attnrows rows"), "attnrows rows"));
+            if (Buf* pt = bufs.count("ptab") ? &buf("ptab") : nullptr; pt && (pos0 + rows) * ag.ptab_row > pt->size)
+                throw std::runtime_error("attnrows: rows past the ptab buffer");
+            Kernel& k = kernel(kn);
+            if (!k.attn_rows_built) {
+                k.attn_rows = stream_patch::attn_rows_table(k.words, kn, rows, ag);
+                k.attn_rows_built = true;
+            }
+            stream_patch::attn_rows_apply(k.instr_words(), k.attn_rows, pos0, ag);
+            k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            std::printf("attnrows %s pos0 %zu rows %u\n", kn.c_str(), pos0, rows);
         } else {
             throw std::runtime_error("unknown directive: " + cmd);
         }

@@ -21,6 +21,8 @@ sys.path.insert(0, str(HERE.parents[1]))
 import fixture_paths as FX  # noqa: E402
 
 N = int(os.environ.get("LN_N", 2048))
+EPS = float(os.environ.get("LN_EPS", "1e-6"))
+GROUPS = int(os.environ.get("LN_GROUPS", "1"))   # K2's GroupRMSNorm: one RMS per contiguous group
 BUILD = os.environ.get("LN_BUILD", "build")
 
 
@@ -37,10 +39,14 @@ def main() -> int:
         w = np.fromfile(pack, np.uint8)[:N * 2].view(bfloat16).copy()
     else:
         w = (1.0 + rng.standard_normal(N) * 0.1).astype(np.float32).astype(bfloat16)
-    x = (rng.standard_normal(N) * 0.5).astype(np.float32)
-    add = (rng.standard_normal(N) * 0.5).astype(np.float32)
+    # a different scale per group, so a kernel that pooled the groups' statistics fails
+    gscale = np.repeat(1.0 + np.arange(GROUPS), N // GROUPS)
+    x = (rng.standard_normal(N) * 0.5 * gscale).astype(np.float32)
+    add = (rng.standard_normal(N) * 0.5 * gscale).astype(np.float32)
     y = x.astype(np.float64) + add.astype(np.float64)
-    xn = (y / np.sqrt((y ** 2).mean() + 1e-6) * w.astype(np.float64)).astype(np.float32).astype(bfloat16)
+    yg = y.reshape(GROUPS, -1)
+    yn = (yg / np.sqrt((yg ** 2).mean(-1, keepdims=True) + EPS)).reshape(-1)
+    xn = (yn * w.astype(np.float64)).astype(np.float32).astype(bfloat16)
     (HERE / "x.bin").write_bytes(x.tobytes())
     (HERE / "add.bin").write_bytes(add.tobytes())
     (HERE / "w.bin").write_bytes(w.tobytes())

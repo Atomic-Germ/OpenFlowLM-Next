@@ -50,7 +50,7 @@ public:
     GgufFile(const GgufFile&) = delete;
     GgufFile& operator=(const GgufFile&) = delete;
 
-    bool has(const std::string& name) const override { return tensors_.count(gguf_name(name)) != 0; }
+    bool has(const std::string& name) const override { return tensors_.count(gguf_name(name, sandwich_)) != 0; }
     /// Raw bytes of a tensor (the GGUF's own block layout; a view into the mapping).
     const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const override;
     /// One embedding row as f32, dequantized from whatever type stores it.
@@ -70,7 +70,8 @@ public:
     const TensorInfo& tensor(const std::string& name) const;
     /// HF-style name -> GGUF name (the manifest speaks the q4nx/HF convention;
     /// a GGUF speaks llama.cpp's blk.N.attn_q one). Unknown names pass through.
-    static std::string gguf_name(const std::string& name);
+    /// `sandwich`: the GGUF has Gemma's post_ffw_norm, which changes one norm's meaning.
+    static std::string gguf_name(const std::string& name, bool sandwich = false);
     /// GGUF metadata: string / u64 accessors (the config derivation's source).
     bool kv_has(const std::string& key) const { return meta_.count(key) != 0; }
     std::string kv_str(const std::string& key) const;
@@ -85,6 +86,7 @@ private:
     size_t map_size_ = 0;
     size_t data_base_ = 0;
     std::map<std::string, TensorInfo> tensors_;
+    bool sandwich_ = false;
     mutable std::map<std::string, TensorMeta> meta_cache_;  // row-major shapes, built on demand
     std::map<std::string, std::string> meta_;       // everything as strings (the derivation's view)
 #ifdef _WIN32

@@ -412,8 +412,8 @@ int Sampler::sample_greedy(buffer<bf16>& x) {
         _mm256_store_ps(lane_max, vmax);
         _mm256_store_si256((__m256i*)lane_idx, vidx);
         for (int j = 0; j < simd_width; j++) {
-            // strictly greater keeps the lowest index on a tie, in both loops
-            if (lane_max[j] > best) {
+            // lanes are not in id order, so a tie across lanes goes to the lower id
+            if (lane_max[j] > best || (lane_max[j] == best && lane_idx[j] < best_id)) {
                 best = lane_max[j];
                 best_id = lane_idx[j];
             }

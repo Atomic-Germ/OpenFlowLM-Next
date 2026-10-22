@@ -28,9 +28,10 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
                                  ". Granite runs on the open kernels only: build them with "
                                  "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
                                  "OFLM_OPEN_KERNELS_DIR at a built set.");
-    header_print("OFLM", "Granite on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
+    header_print("OFLM", "Granite on the open kernels (" + kernels + ")" +
+                             (eng->uno_ok() ? "; greedy requests (top_k 1, no penalty) decode by Uno's draft pass" : ""));
     this->lm_engine = std::move(eng);
 #else
     throw std::runtime_error("Granite needs the open engine, which this build does not have "
@@ -101,7 +102,8 @@ bool Granite::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
 
 std::string Granite::generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os,
                               std::function<bool()> is_cancelled) {
-    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
+    return this->_uno_applies() ? this->_shared_generate_uno(meta_info, length_limit, os, is_cancelled)
+                               : this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 std::string Granite::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
@@ -109,5 +111,5 @@ std::string Granite::generate_with_prompt(chat_meta_info_t& meta_info, lm_unifor
     if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }

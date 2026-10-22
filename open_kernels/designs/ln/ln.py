@@ -27,18 +27,18 @@ from ironutil import Pipeline, include_dirs  # noqa: E402
 
 N = int(os.environ.get("LN_N", 2048))     # the width; elements are N*2 bytes (ln.cc LN_N)
 EPS = float(os.environ.get("LN_EPS", "1e-6"))
-GROUPS = int(os.environ.get("LN_GROUPS", "1"))  # K2's GroupRMSNorm(2): one RMS per contiguous half
+GROUPS = int(os.environ.get("LN_GROUPS", "1"))  # K2's GroupRMSNorm(G): one RMS per contiguous group
 ELEM = N * 2
 # Five inputs and one output held at once, over the 0x1800 stack, must fit the core's 64 KB:
 # true through N = 4096 (55 296 B), false at the 27B's 5120 (67 584 B). Past it the residual
 # streams half by half and the norm reads the sum back (recipes/qwen36moe.py norm_split).
 SPLIT = 6 * ELEM + 0x1800 > 64 * 1024
-if GROUPS not in (1, 2):
-    raise SystemExit(f"LN_GROUPS={GROUPS}: only 1 (plain RMSNorm) or 2 (K2 halves) supported")
-if GROUPS == 2 and N <= 2048:
+if GROUPS not in (1, 2, 4):
+    raise SystemExit(f"LN_GROUPS={GROUPS}: only 1 (plain RMSNorm), 2 or 4 (K2's groups) supported")
+if GROUPS > 1 and N <= 2048:
     # the fused ln_fn below has no grouped reduction; a grouped model must take the
     # split path (K2 hidden 2560 does) -- refuse loudly instead of silently wrong math
-    raise SystemExit(f"LN_GROUPS=2 with N={N}: the fused (N<=2048) kernel is single-group")
+    raise SystemExit(f"LN_GROUPS={GROUPS} with N={N}: the fused (N<=2048) kernel is single-group")
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
