@@ -86,6 +86,7 @@ uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
         case 8: return values / 32 * 34;                  // q8_0
         case 12: return values / 256 * 144;               // q4_k
         case 14: return values / 256 * 210;               // q6_k
+        case 13: return values / 256 * 176;               // q5_k
         case 20: return values / 32 * 18;                 // iq4_nl
         case 23: return values / 256 * 136;               // iq4_xs
         default: return 0;                                // unsupported
@@ -448,6 +449,44 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             }
             break;
         }
+        case Type::Q5_K: {
+            // super-block of 256: fp16 d, fp16 dmin, 12 B of 6-bit scales (eight
+            // scale/min pairs over eight blocks of 32), 32 B of the FIFTH bit (one
+            // per value), then 128 B of 4-bit codes. The value is
+            // d*scale*(nibble | fifth<<4) - dmin*min.
+            const uint8_t* p = base + row * (dim / 256) * 176;
+            for (size_t sb = 0; sb < dim / 256; ++sb, p += 176) {
+                uint16_t ud, um;
+                std::memcpy(&ud, p, 2);
+                std::memcpy(&um, p + 2, 2);
+                const float d = fp16_to_f32(ud), min = fp16_to_f32(um);
+                const uint8_t* scales = p + 4;
+                const uint8_t* qh = p + 16;                 // the fifth bit, one per value
+                const uint8_t* qs = p + 48;                 // the 4-bit codes
+                float* y = out + sb * 256;
+                int is = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    uint8_t sc, m;
+                    get_scale_min_k4(is + 0, scales, &sc, &m);
+                    const float d1 = d * sc, m1 = min * m;
+                    get_scale_min_k4(is + 1, scales, &sc, &m);
+                    const float d2 = d * sc, m2 = min * m;
+                    for (int l = 0; l < 32; ++l) {
+                        const int v0 = j + l, v1 = j + 32 + l;
+                        const uint8_t byte = qs[j / 2 + l];
+                        const uint8_t n0 = byte & 0xF, n1 = byte >> 4;
+                        // the fifth bit: byte (v % 32) holds the bits of the values
+                        // v, v+32, v+64, ... -- bit (v / 32) of it
+                        const uint8_t h0 = (qh[v0 % 32] >> (v0 / 32)) & 1;
+                        const uint8_t h1 = (qh[v1 % 32] >> (v1 / 32)) & 1;
+                        y[v0] = d1 * static_cast<float>(n0 | (h0 << 4)) - m1;
+                        y[v1] = d2 * static_cast<float>(n1 | (h1 << 4)) - m2;
+                    }
+                    is += 2;
+                }
+            }
+            break;
+        }
         case Type::Q6_K: {
             // super-block of 256: 128 B lower nibbles, 64 B upper 2 bits,
             // 16 int8 scales (per 16 values), fp16 super-block scale
@@ -526,7 +565,8 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
         }
         default:
             fail(std::string("the embedding is ") + type_name(t.type) +
-                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K/IQ4_NL/IQ4_XS rows "
+                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K/"
+                 "IQ4_NL/IQ4_XS rows "
                  "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
     }
 }

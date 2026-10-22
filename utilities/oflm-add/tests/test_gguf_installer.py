@@ -535,3 +535,28 @@ def test_extract_tokenizer_refuses_mergeless_spm(tmp_path):
         assert "no merges" in str(ex)
     else:
         raise AssertionError("mergeless vocab must raise")
+
+
+def test_a_quant_can_be_named_at_the_repo():
+    """`repo:QUANT` picks that file out of a repo that carries one per quant."""
+    assert oflm_add.split_quant_request("mradermacher/Qwen3.5-9B-i1-GGUF:IQ4_NL") == (
+        "mradermacher/Qwen3.5-9B-i1-GGUF", "IQ4_NL")
+    # a URL's port is not a quant request
+    assert oflm_add.split_quant_request("https://example.com:8080/x") == (
+        "https://example.com:8080/x", None)
+    assert oflm_add.split_quant_request("Org/Name") == ("Org/Name", None)
+
+
+def test_the_named_quant_wins_over_the_preference_order():
+    names = ["M-IQ4_XS.gguf", "M-IQ4_NL.gguf", "M-Q5_K_S.gguf", "M-Q4_1.gguf"]
+    # without a request the preference order decides (Q4_1 is byte-exact for the pool)
+    assert oflm_add.choose_gguf_file(names)[0] == "M-Q4_1.gguf"
+    # with one, the exact suffix wins
+    assert oflm_add.choose_gguf_file(names, "IQ4_NL")[0] == "M-IQ4_NL.gguf"
+    assert oflm_add.choose_gguf_file(names, "IQ4_XS")[0] == "M-IQ4_XS.gguf"
+    # a family name takes the first file of that family
+    assert oflm_add.choose_gguf_file(names, "IQ4")[0] in ("M-IQ4_NL.gguf", "M-IQ4_XS.gguf")
+    # a quant the repo does not carry is refused, with what it does carry
+    chosen, refused = oflm_add.choose_gguf_file(names, "Q6_K")
+    assert chosen is None
+    assert "no Q6_K GGUF" in refused["M-Q4_1.gguf"]

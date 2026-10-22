@@ -533,11 +533,11 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // conversion q4nx-build does offline. The matmul body of the repo stays
         // untouched (Q4_1 etc. go through the byte-exact path below).
         const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
-                        t.type == GgufFile::Type::Q6_K || t.type == GgufFile::Type::IQ4_NL ||
-                        t.type == GgufFile::Type::IQ4_XS;
+                        t.type == GgufFile::Type::Q5_K || t.type == GgufFile::Type::Q6_K ||
+                        t.type == GgufFile::Type::IQ4_NL || t.type == GgufFile::Type::IQ4_XS;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
             fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-                 "requantizes Q8_0/Q4_K/Q6_K/IQ4_NL/IQ4_XS (convert the others with q4nx-build)");
+                 "requantizes Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS (convert the others with q4nx-build)");
         const bool has_min = t.type == GgufFile::Type::Q4_1 || kq;
         const size_t blk = has_min ? 20 : 18;
         const size_t nb = op.in_dim / 32;                        // k blocks per row

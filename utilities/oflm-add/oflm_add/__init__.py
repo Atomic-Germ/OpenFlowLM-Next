@@ -67,7 +67,7 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # end for Q6_K on gemma3-4b). Order is install preference: exact first,
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0", "IQ4"]
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4"]
 # Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
@@ -121,9 +121,31 @@ def gguf_quant_of(name):
     unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
     return gguf_quant_family(gguf_quant_suffix(name))
 
-def choose_gguf_file(names):
+def split_quant_request(repo_arg: str):
+    """`repo:QUANT` -- name the quant to take from a GGUF repo.
+
+    "mradermacher/Qwen3.5-9B-i1-GGUF:IQ4_NL" asks for that file's quant; the
+    suffix must LOOK like a quant (letters, digits, underscores) or the argument
+    is a repo id or a URL as it stands -- a URL's port would otherwise be read
+    as a quant request.
+    """
+    if ":" not in repo_arg:
+        return repo_arg, None
+    head, _, tail = repo_arg.rpartition(":")
+    if not head or not re.fullmatch(r"[A-Za-z0-9_]+", tail):
+        return repo_arg, None
+    return head, tail.upper()
+
+
+def choose_gguf_file(names, want=None):
     """Pick the best compatible *.gguf from a repo's root file names.
-    Returns (chosen, refused) -- refused maps every other gguf to why."""
+    Returns (chosen, refused) -- refused maps every other gguf to why.
+
+    `want` names the quant the user asked for ("IQ4_NL"): the files whose quant
+    SUFFIX matches it exactly win, and the ones whose FAMILY matches are the
+    fallback. Without it the preference order decides (Q4_1 first -- it is the
+    one the pool takes byte-exactly).
+    """
     refused = {}
     cands = []
     for n in names:
@@ -137,11 +159,23 @@ def choose_gguf_file(names):
         if q not in GGUF_QUANT_PREFERENCE:
             refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
             continue
-        cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
+        cands.append((GGUF_QUANT_PREFERENCE.index(q), q, suffix, n))
     cands.sort()
     if not cands:
         return None, refused
-    return cands[0][1], refused
+    if want:
+        exact = [c for c in cands if c[2].upper() == want]
+        if exact:
+            return exact[0][3], refused
+        fam = gguf_quant_family(want)
+        same = [c for c in cands if c[1] == fam]
+        if not same:
+            have = ", ".join(sorted({c[2] for c in cands})) or "none"
+            for c in cands:
+                refused[c[3]] = f"the repo has no {want} GGUF (it has: {have})"
+            return None, refused
+        return same[0][3], refused
+    return cands[0][3], refused
 
 
 def root_file_names(tree):
@@ -1475,7 +1509,7 @@ GGML_TYPE_NAMES = {
 }
 # Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
 # quants, put/pack_norm for the small float weights).
-GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K",
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K",
                      "IQ4_NL", "IQ4_XS"}
 
 
@@ -1853,6 +1887,10 @@ def main():
     # modelscope.ai/.cn URL implies it on its own.
     modelscope = args.modelscope
     repo_arg = args.repo
+    # `repo:QUANT` names the quant to take from a GGUF repo (mradermacher's
+    # catalogues carry one file per quant). Without it the preference order
+    # decides -- Q4_1 first, the one the pool takes byte-exactly.
+    repo_arg, gguf_want = split_quant_request(repo_arg)
     local_dir = Path(repo_arg) if os.path.isdir(repo_arg) else None
     if local_dir:
         repo, dir_name = repo_arg, local_dir.name
@@ -1880,7 +1918,10 @@ def main():
             gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want)
+    if gguf_want and gguf_name is None:
+        have = ", ".join(sorted({gguf_quant_of(n) or n for n in gguf_names if n.endswith(".gguf")})) or "none"
+        raise SystemExit(f"{repo_arg}: no {gguf_want} GGUF in that repo (it has: {have})")
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()

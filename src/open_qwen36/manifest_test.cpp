@@ -808,14 +808,18 @@ int main(int argc, char** argv) {
             check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
                   "host attention: " + f.family + " is refused by name");
             if (f.family == "qwen3") {
-                Manifest k = f;
+                // A Manifest holds a unique_ptr (the GGUF-direct twin), so it is not
+                // copyable: each variant is a fresh load of the same file.
+                Manifest k = Manifest::load(argv[i]);
                 k.family = "k2";
                 check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
-                Manifest half = k;
+                Manifest half = Manifest::load(argv[i]);
+                half.family = "k2";
                 half.rotary_dim = half.rotary_dim / 2;
                 check(half.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with a partial rotation is refused on geometry");
-                Manifest odd = k;
+                Manifest odd = Manifest::load(argv[i]);
+                odd.family = "k2";
                 const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
                 odd.hf_config_check["head_dim"] = hd;
                 odd.rotary_dim = hd;
@@ -826,7 +830,8 @@ int main(int argc, char** argv) {
                 }
                 check(odd.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with an odd head_dim is refused on geometry");
-                Manifest wide = k;
+                Manifest wide = Manifest::load(argv[i]);
+                wide.family = "k2";
                 wide.layer_types.begin()->second.gemm_block.qw += 1;
                 check(wide.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");

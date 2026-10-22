@@ -108,6 +108,39 @@ def random_iq4_xs_blocks(n: int, k: int, rng: np.random.Generator, scale: float 
     return blocks
 
 
+def random_q5_k_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 0.02) -> np.ndarray:
+    """GGUF Q5_K raw blocks uint8[n, k//256, 176] (fp16 d, fp16 dmin, 12 B of 6-bit
+    scales, 32 B of the fifth bit, 128 B of 4-bit codes)."""
+    assert k % 256 == 0
+    nb = k // 256
+    d = (rng.random((n, nb), np.float32) * scale + 1e-3).astype(np.float16)
+    dm = (rng.random((n, nb), np.float32) * scale * 0.1).astype(np.float16)
+    sc = rng.integers(0, 64, (n, nb, 8), dtype=np.int16)
+    mn = rng.integers(0, 64, (n, nb, 8), dtype=np.int16)
+    q = rng.integers(0, 16, (n, nb, 4, 64), dtype=np.uint8)
+    fifth = rng.integers(0, 2, (n, nb, 256), dtype=np.uint8)
+    blocks = np.zeros((n, nb, 176), np.uint8)
+    blocks[..., 0:2] = d.view(np.uint8).reshape(n, nb, 2)
+    blocks[..., 2:4] = dm.view(np.uint8).reshape(n, nb, 2)
+    # the scales array (bytes 4..15): the first four scale/min pairs in the low six
+    # bits of bytes 0..3 and 4..7, the last four split across the shared bytes 8..11
+    s = np.zeros((n, nb, 12), np.uint8)
+    s[..., 0:4] = (sc[..., 0:4] & 0x3F).astype(np.uint8)
+    s[..., 4:8] = (mn[..., 0:4] & 0x3F).astype(np.uint8)
+    s[..., 8:12] |= (sc[..., 4:8] & 0x0F).astype(np.uint8)
+    s[..., 0:4] |= ((sc[..., 4:8] >> 4) & 0x03).astype(np.uint8) << 6
+    s[..., 4:8] |= ((mn[..., 4:8] >> 4) & 0x03).astype(np.uint8) << 6
+    s[..., 8:12] |= ((mn[..., 4:8] & 0x0F) << 4).astype(np.uint8)
+    blocks[..., 4:16] = s
+    # the fourth-bit codes: per 64-value half, the low nibbles of 32 bytes then the high
+    for h in range(4):
+        blocks[..., 48 + h * 32:48 + h * 32 + 32] = (q[..., h, 0:32] | (q[..., h, 32:64] << 4))
+    # the fifth bit: byte (v % 32) holds the bits of the values v, v+32, v+64, ...
+    for v in range(256):
+        blocks[..., 16 + v % 32] |= (fifth[..., v] << (v // 32)).astype(np.uint8)
+    return blocks
+
+
 def unpack_q4(raw: np.ndarray, gguf_type: str = "Q4_1"):
     """Raw block bytes uint8[n, nb, B] -> (d f32[n, nb], m f32[n, nb], q uint8[n, nb*32])."""
     n, nb, b = raw.shape
@@ -147,6 +180,56 @@ IQ4_NL_VALUES = np.array([-127, -104, -83, -65, -49, -35, -22, -10,
                            1, 13, 25, 38, 53, 69, 89, 113], dtype=np.int8)
 IQ4_NL_BYTES = 18        # fp16 d, 16 nibble bytes
 IQ4_XS_BYTES = 136      # fp16 d, 2 B of 2-bit scale highs, 4 B of 4-bit scale lows, 128 code bytes
+
+
+def get_scale_min_k4(scales: np.ndarray):
+    """The eight 6-bit scale/min pairs of a k-quant super-block: [..., 12] -> ([..., 8], [..., 8]).
+
+    The same law as the reader's get_scale_min_k4: the first four pairs are the
+    low six bits of bytes 0..3 (scale) and 4..7 (min); the last four split a
+    byte's high two bits (scale) and high two bits (min) with the top bits of
+    the earlier bytes.
+    """
+    q = scales.astype(np.uint16)
+    out_d = np.empty(q.shape[:-1] + (8,), np.int32)
+    out_m = np.empty_like(out_d)
+    for j in range(8):
+        if j < 4:
+            out_d[..., j] = q[..., j] & 63
+            out_m[..., j] = q[..., j + 4] & 63
+        else:
+            out_d[..., j] = (q[..., j + 4] & 0xF) | ((q[..., j - 4] >> 6) << 4)
+            out_m[..., j] = (q[..., j + 4] >> 4) | ((q[..., j] >> 6) << 4)
+    return out_d, out_m
+
+
+def dequant_q5_k(raw: np.ndarray) -> np.ndarray:
+    """GGUF Q5_K blocks uint8[n, nb, 176] -> f32[n, nb*256].
+
+    A super-block of 256 values: fp16 d, fp16 dmin, 12 bytes of 6-bit scales
+    (eight scale/min pairs over eight groups of 32 values), 32 bytes of the
+    FIFTH bit (byte v%32 holds the bits of the values v, v+32, v+64, ...), then
+    128 bytes of 4-bit codes. The value is d*scale*(nibble | fifth<<4) - dmin*min.
+    """
+    n, nb, _ = raw.shape
+    d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16).reshape(n, nb).astype(np.float32)
+    dmin = np.ascontiguousarray(raw[..., 2:4]).view(np.float16).reshape(n, nb).astype(np.float32)
+    sc, m = get_scale_min_k4(raw[..., 4:16])
+    qh = raw[..., 16:48]
+    qs = raw[..., 48:176]
+
+    # the 4-bit codes: per 64-value half, the low nibbles of 32 bytes then the high ones
+    ql = np.empty((n, nb, 256), np.uint8)
+    for h in range(4):
+        ql[..., h * 64:h * 64 + 32] = qs[..., h * 32:h * 32 + 32] & 0xF
+        ql[..., h * 64 + 32:h * 64 + 64] = qs[..., h * 32:h * 32 + 32] >> 4
+    # the fifth bit: byte (v % 32) holds the bits of the values v, v+32, v+64, ...
+    fifth = ((qh[..., :, None] >> np.arange(8, dtype=np.uint8)) & 0x01)            # [n, nb, 32, 8]
+    fifth = fifth.transpose(0, 1, 3, 2).reshape(n, nb, 256)                      # bit-major -> value order
+    q = (ql | (fifth << 4)).astype(np.float32).reshape(n, nb, 8, 32)
+    d = (d[..., None] * sc.astype(np.float32))[..., None]    # [n, nb, 8, 1]: a scale per group of 32
+    dm = (dmin[..., None] * m.astype(np.float32))[..., None]
+    return (d * q - dm).reshape(n, nb * 256)
 
 
 def dequant_iq4_nl(raw: np.ndarray) -> np.ndarray:
@@ -482,6 +565,33 @@ def _selftest() -> int:
                   f"pool={len(pool)} B  pool==gguf(bit-exact): {exact}")
             ok &= exact
         if k % 256 == 0:
+            raw = random_q5_k_blocks(n, k, rng)
+            want = dequant_q5_k(raw).reshape(n, -1)
+            # the reference: the block law, spelled out for the first row
+            blk = raw[0, 0]
+            d = np.float32(np.frombuffer(blk[0:2].tobytes(), np.float16)[0])
+            dmin = np.float32(np.frombuffer(blk[2:4].tobytes(), np.float16)[0])
+            s = blk[4:16]
+            sc = np.empty(8, np.int32)
+            mn = np.empty(8, np.int32)
+            for j in range(8):
+                if j < 4:
+                    sc[j] = s[j] & 63
+                    mn[j] = s[4 + j] & 63
+                else:
+                    j4 = j - 4
+                    sc[j] = (s[8 + j4] & 0x0F) | ((s[j4] >> 6) << 4)
+                    mn[j] = ((s[8 + j4] >> 4) & 0x0F) | ((s[4 + j4] >> 6) << 4)
+            got = np.empty(256, np.float32)
+            for v in range(256):
+                h = (v // 64) * 64
+                byte = blk[48 + h // 2 + (v % 32)]
+                nib = (byte & 0xF) if (v % 64) < 32 else (byte >> 4)
+                bit = (blk[16 + v % 32] >> (v // 32)) & 1
+                got[v] = d * sc[v // 32] * (nib | (bit << 4)) - dmin * mn[v // 32]
+            exact = np.array_equal(got, want[0, :256])
+            print(f"{'PASS' if exact else 'FAIL'} Q5_K n={n} k={k}  dequant==the block law: {exact}")
+            ok &= exact
             raw = random_iq4_xs_blocks(n, k, rng)
             want = dequant_iq4_xs(raw).reshape(n, -1)
             # the reference: the same law, spelled out value by value
