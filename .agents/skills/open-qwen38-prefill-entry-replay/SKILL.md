@@ -41,3 +41,21 @@ commands are in the runbook/build evidence. 12 RED-to-GREEN tests; full suite
 1604 passed / 47 skipped. Model residual acceptance remains 3974/4032 FAIL.
 Next extend to complete captured prefixes and causal host/out composition;
 these two isolated rows cannot establish propagated state or model accuracy.
+
+## Full-prefix follow-up — 2026-10-22
+
+Use [the prefix replay runbook](../../../utilities/prefill-prefix-replay/README.md)
+for composition across all 20 captured rows of L34/L37/L53. Reuse these entry
+kernels, original output kernels and the verified host bridge; no rebuild.
+Derive host alpha/beta lanes from real tensors (48), never padded recipe lanes
+(64), and validate all constant sizes before the C ABI. Require full native
+host output/conv/state byte identity before interpreting candidate precision.
+
+`Models/qwen38-27b/prefill-prefix-replay/v2/`: 60 dispatches, 15360 entry checks,
+6048 conditioned host checks and 240 output projection checks pass. All controls,
+slot placements and block/sequential host calls agree bytewise. Candidate
+pre-FFN residual maxrel L34/P17 0.0006256207, L37/P7 0.0008810181,
+L53/P17 0.0074347548: the last still FAILS. 14 new RED-to-GREEN tests;
+1618 passed / 47 skipped overall. Initial wrong-stride attempt was rejected
+before NPU dispatch and remains recorded under `run/`. Next isolate paired-weight
+output projection; do not equate local prefix improvements with model acceptance.
