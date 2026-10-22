@@ -225,9 +225,11 @@ class PureLogicTests(unittest.TestCase):
 
     def test_dtype_allowlist_matches_runtime(self):
         # pools.cpp's std_perm_gguf accepts exactly these; the rest are refused.
-        for ok in ("Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"):
+        # Q4_0/Q4_1 go in byte-exactly; the K- and i-quants are dequantized and
+        # requantized into the pool's q4_1 law.
+        for ok in ("Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS"):
             self.assertIn(ok, _inspect._RUNTIME_QUANT_TYPES)
-        for bad in ("Q2_K", "Q3_K", "Q5_K", "Q8_K", "IQ4_NL", "Q5_0", "Q5_1"):
+        for bad in ("Q2_K", "Q3_K", "Q8_K", "Q5_0", "Q5_1", "IQ2_XXS", "IQ3_S"):
             self.assertNotIn(bad, _inspect._RUNTIME_QUANT_TYPES)
             self.assertNotIn(bad, _inspect._RUNTIME_TYPES)
 

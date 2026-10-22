@@ -218,7 +218,10 @@ def _inspect_tokenizer(gf: GgufFile, rep: GGUFReport) -> None:
 # and accepted Q2_K/Q3_K/Q5_K (refused), so install planning accepted files that
 # could never load and rejected valid ones.
 _RUNTIME_FLOAT_TYPES = frozenset({"BF16", "F16", "F32"})
-_RUNTIME_QUANT_TYPES = frozenset({"Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"})
+# The dtypes the engine's packer ingests (src/open_qwen36/pools.cpp's std_perm_gguf
+# guard): the q4nx layouts byte-exactly, the rest requantized into the pool's q4_1 law.
+_RUNTIME_QUANT_TYPES = frozenset({"Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K",
+                                  "IQ4_NL", "IQ4_XS"})
 _RUNTIME_TYPES = _RUNTIME_FLOAT_TYPES | _RUNTIME_QUANT_TYPES
 
 
