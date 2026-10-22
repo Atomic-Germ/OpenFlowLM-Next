@@ -39,6 +39,7 @@ path, so a request carrying one routes to the closed engine.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
@@ -294,6 +295,15 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+    if spec.quant == "q4_1":
+        # The GGUF-direct twin: the same layer designs against the f32-scale pool
+        # layout (the q4_1 codes with f32 block scales). The engine swaps this whole
+        # section in when the model ships a model.gguf, and the f32-scale kernel sets
+        # are the *_f32 builds the export makes.
+        f32 = programs(replace(spec, quant="q4_1_f32"), max_ctx)
+        out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
+                       "layer_types": f32["layer_types"], "tail": f32["tail"],
+                       "globals": f32["globals"]}
     return out
 
 
@@ -338,6 +348,17 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                        "build_dir": f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(n)}}
+    if spec.quant == "q4_1":
+        # The GGUF-direct twins: the same layer designs against the f32-scale pool
+        # layout (the q4_1 codes with f32 block scales). The env says which variant
+        # to build (designs/layer_x/layout.py reads it); the q4_1 builds above are
+        # untouched, so a shipped model keeps the kernels it has.
+        for name, b0 in list(b.items()):
+            if name in ("ln", "lm_head_q8"):
+                continue
+            f32 = {**b0, "build_dir": b0["build_dir"] + "_f32",
+                   "env": {**b0.get("env", {}), "GEMV_SCALES_F32": "1"}}
+            b[name + "_f32"] = f32
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

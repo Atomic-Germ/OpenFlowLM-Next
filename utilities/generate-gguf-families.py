@@ -49,7 +49,10 @@ def capable_families() -> dict[str, str]:
             # The section is not enough: the f32-scale KERNEL SET has to be built
             # too, or the engine would swap in a manifest whose kernels are not
             # there. The f32 builds carry the scales flag in their env.
-            twins = [b for b in m["gguf"].get("builds", {}).values()
+            # The twins are listed in the Q4_1 manifest's builds (the f32 manifest is
+            # the one that uses them); the env carries the flag that says which pool
+            # layout the build compiles for.
+            twins = [b for b in m.get("builds", {}).values()
                      if any("SCALES_F32" in k for k in b.get("env", {}))]
             if twins:
                 out.setdefault(spec.family, f"the {spec.family} recipe emits the f32-scale twin")

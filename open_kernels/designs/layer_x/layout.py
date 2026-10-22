@@ -27,15 +27,24 @@ pool offsets (recipes/qwen36moe.py, manifest.json `layout.moe` for the driver): 
 layers; q, k, v, gate, o for attention layers; the expert stripes / down slices / shared expert for
 both (the routed slots are patched by the driver's moeroute2).
 """
+import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))     # open_kernels/
+from recipes.families import for_spec  # noqa: E402
 from recipes.load import current_recipe  # noqa: E402
 
 R = current_recipe()
 SPEC = R.spec
-_L = R.layout
+# The GGUF-direct twin: the same layer design against the f32-scale pool layout
+# (the q4_1 codes with f32 block scales, a 6144 B chunk instead of 5120). The
+# export builds this design twice -- the q4nx chunks and the GGUF-direct ones --
+# and the env says which (designs/dense/dx.py does the same for the dense tail).
+if int(os.environ.get("GEMV_SCALES_F32", 0)) and SPEC.quant != "q4_1_f32":
+    SPEC = replace(SPEC, quant="q4_1_f32")
+_L = for_spec(SPEC).layout(SPEC)
 
 C_LNW, C_SIDE, C_NW, C_POSTLN, C_RW, C_SGW, C_WOUT = (_L.C_LNW, _L.C_SIDE, _L.C_NW, _L.C_POSTLN, _L.C_RW, _L.C_SGW,
                                                      _L.C_WOUT)

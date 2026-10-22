@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from .attnknobs import knobs as attn_knobs, probe_env as _attn_probe_env
@@ -1465,6 +1465,15 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         for name, types in r.get("variants", {}).items():
             for lt, gb in types.items():
                 out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
+    if spec.quant == "q4_1":
+        # The GGUF-direct twin: the same layer designs against the f32-scale pool
+        # layout (the q4_1 codes with f32 block scales). The engine swaps this whole
+        # section in when the model ships a model.gguf, and the f32-scale kernel sets
+        # are the *_f32 builds the export makes.
+        f32 = programs(replace(spec, quant="q4_1_f32"), max_ctx)
+        out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
+                       "layer_types": f32["layer_types"], "tail": f32["tail"],
+                       "globals": f32["globals"]}
     return out
 
 
@@ -1520,6 +1529,17 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(LIMITS["n_cols"])}}
+    if spec.quant == "q4_1":
+        # The GGUF-direct twins: the same layer designs against the f32-scale pool
+        # layout (the q4_1 codes with f32 block scales). The env says which variant
+        # to build (designs/layer_x/layout.py reads it); the q4_1 builds above are
+        # untouched, so a shipped model keeps the kernels it has.
+        for name, b0 in list(b.items()):
+            if name in ("ln", "lm_head_q8"):
+                continue
+            f32 = {**b0, "build_dir": b0["build_dir"] + "_f32",
+                   "env": {**b0.get("env", {}), "GEMV_SCALES_F32": "1"}}
+            b[name + "_f32"] = f32
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

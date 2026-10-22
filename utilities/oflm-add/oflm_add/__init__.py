@@ -85,6 +85,8 @@ GGUF_CAPABLE_FAMILIES = {
     "phi3",
     "qwen2",
     "qwen3",
+    "qwen35",
+    "qwen36moe",
 }
 # --- end of the generated list ---
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
