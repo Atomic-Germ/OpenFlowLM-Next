@@ -284,6 +284,15 @@ sane), the state (zeroed per request), the design's tile size (fixed: it
 read an f32 pool at the bf16 stride) and the export's build cache (fixed:
 a recipe change reused a stale xclbin).
 
+**The bisect has narrowed it to the f32 chunk handling itself**
+(`OFLM_GGUF_POOL_Q41=1`, commit 5182da0): with the very same GGUF file
+run through the *q4_1* twin -- the builds every shipped q4nx model
+answers on -- the residual after the layers is finite (nan=0, maxabs
+70): not the packing (gguf_pack_test proves that against the Python
+reference), not the family geometry, not the engine. The fault is in how
+the layer_x f32 builds read the 6144-B f32-scale chunk. Use the knob on
+any hybrid GGUF model to reproduce; unset it to return to the f32 twin.
+
 **The next step is the compare harness, not more guessing**: the layer_x
 has `make_test.py` + `compare.py` (the whole-layer chain against the
 fp64 replica), and it takes the spec from the environment
