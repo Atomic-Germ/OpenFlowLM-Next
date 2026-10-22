@@ -50,6 +50,7 @@ import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -133,28 +134,52 @@ def spec_list(names: str) -> list[Path]:
 
 
 def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> int:
-    """open_qwen36 + dense families (compile-only, no NPU). Returns 0 on success."""
+    """open_qwen36 + dense families (compile-only, no NPU). Returns 0 on success.
+
+    Specs are independent, so they run in parallel. The inner --jobs is divided
+    among the concurrent specs so the total process count stays near `jobs`.
+    """
     failed: list[str] = []
-    for spec in specs:
+
+    def build_spec(spec: Path) -> tuple[str, bool]:
         name = spec.stem
         print(f"-- export {name}", flush=True)
-        cmd = [str(py), str(EXPORT), "--spec", str(spec), "--jobs", str(jobs)]
+        inner_jobs = max(1, jobs // max(1, len(specs)))
+        cmd = [str(py), str(EXPORT), "--spec", str(spec), "--jobs", str(inner_jobs)]
         if force:
             cmd.append("--force")
-        if subprocess.run(cmd).returncode != 0:
-            failed.append(name)
-            print(f"   FAILED: {name}", flush=True)
-        else:
-            print(f"   ok: {name}", flush=True)
+        rc = subprocess.run(cmd).returncode
+        return name, rc == 0
+
+    if jobs > 1 and len(specs) > 1:
+        with ThreadPoolExecutor(max_workers=min(jobs, len(specs))) as ex:
+            futures = {ex.submit(build_spec, spec): spec for spec in specs}
+            for fut in as_completed(futures):
+                name, ok = fut.result()
+                if ok:
+                    print(f"   ok: {name}", flush=True)
+                else:
+                    failed.append(name)
+                    print(f"   FAILED: {name}", flush=True)
+    else:
+        for spec in specs:
+            name, ok = build_spec(spec)
+            if ok:
+                print(f"   ok: {name}", flush=True)
+            else:
+                failed.append(name)
+                print(f"   FAILED: {name}", flush=True)
+
     return len(failed)
 
 
-def export_bert_sets(py: Path, force: bool) -> int:
+def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
     """open_npue BERT design sets (needs pyxrt + NPU). Returns 0 on success."""
     spec = json.loads(BERT_SPEC.read_text(encoding="utf-8"))
     common = spec["common"]
     failed: list[str] = []
-    for fam in spec["families"]:
+
+    def build_family(fam: dict) -> tuple[str, bool]:
         name = fam["name"]
         out = XCLBINS / name
         # Skip only when the actual kernel artifacts are present, not just the
@@ -163,14 +188,52 @@ def export_bert_sets(py: Path, force: bool) -> int:
         xclbins_present = any((out / "gemm_rtp").glob("*.xclbin")) if (out / "gemm_rtp").is_dir() else False
         if xclbins_present and not force:
             print(f"-- bert {name}: already built (use --force to rebuild)", flush=True)
-            continue
+            return name, True
         print(f"-- bert {name} ({', '.join(fam['serves'])})", flush=True)
         cmd = [str(py), str(BERT_EXPORT), *fam["args"], *common, "--out", str(out)]
-        if subprocess.run(cmd).returncode != 0:
-            failed.append(name)
-            print(f"   FAILED: {name}", flush=True)
-        else:
-            print(f"   ok: {name}", flush=True)
+        rc = subprocess.run(cmd).returncode
+        return name, rc == 0
+
+    families = spec["families"]
+    # families.json: "qkv and attn_out here are IDENTICAL to BERT-h768-bfp16's
+    # -- neither depends on --gated-ffn or --intermediate -- so these two
+    # families share 8 of their 16 cache markers and must never be built
+    # concurrently." Each family purges matching directories in the same
+    # ~/.npu/cache, so two families sharing design geometry (same --hidden)
+    # would delete each other's in-progress or retained artifacts if built at
+    # the same time. Serialize families within one hidden size; different
+    # hidden sizes still build in parallel.
+    def hidden_of(fam: dict) -> str:
+        args = fam["args"]
+        return str(args[args.index("--hidden") + 1]) if "--hidden" in args else str(fam["name"])
+
+    groups: dict[str, list[dict]] = {}
+    for fam in families:
+        groups.setdefault(hidden_of(fam), []).append(fam)
+
+    def build_group(group: list[dict]) -> list[tuple[str, bool]]:
+        results = []
+        for fam in group:
+            name, ok = build_family(fam)
+            results.append((name, ok))
+            if ok:
+                print(f"   ok: {name}", flush=True)
+            else:
+                failed.append(name)
+                print(f"   FAILED: {name}", flush=True)
+        return results
+
+    if jobs > 1 and len(groups) > 1:
+        with ThreadPoolExecutor(max_workers=min(jobs, len(groups))) as ex:
+            # one worker per hidden size; families inside a group build
+            # sequentially
+            futures = {ex.submit(build_group, group): gname
+                       for gname, group in groups.items()}
+            for fut in as_completed(futures):
+                fut.result()
+    else:
+        for group in groups.values():
+            build_group(group)
 
     # The built sets and the spec they were built from must agree.
     rc = subprocess.run([str(py), str(BERT_CHECK), "--xclbins", str(XCLBINS)]).returncode
@@ -190,9 +253,12 @@ def main() -> int:
                     help="skip open_npue BERT embedding sets (they need an NPU at build time)")
     ap.add_argument("--bert-only", action="store_true",
                     help="only build open_npue BERT embedding sets, skip open_kernels dense specs")
-    ap.add_argument("-j", "--jobs", type=int, default=1,
-                   help="kernel-set builds to run in parallel within each spec (default: 1)")
+    ap.add_argument("-j", "--jobs", type=int, default=0,
+                   help="parallel kernel builds (default: 0 = auto-detect CPU count)")
     a = ap.parse_args()
+
+    if a.jobs <= 0:
+        a.jobs = max(1, os.cpu_count() or 4)
 
     if a.skip_bert and a.bert_only:
         print("FATAL: --skip-bert and --bert-only are mutually exclusive", file=sys.stderr)
@@ -242,7 +308,7 @@ def main() -> int:
         n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
     if not a.skip_bert:
-        n_failed += export_bert_sets(py, a.force)
+        n_failed += export_bert_sets(py, a.force, a.jobs)
 
     print(flush=True)
     if n_failed:

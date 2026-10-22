@@ -370,13 +370,20 @@ def test_user_install_never_touches_curated_list_or_kernels(tmp_path, monkeypatc
     blobs = [p for p in (tmp_path / "xclbins").rglob("*")
              if p.is_file() and not p.is_symlink()]
     assert blobs == []
-    # ... and the model lives under its own tag: the user list is a full
-    # overlay seeded from the curated one, so the curated qwen3:4b entry must
-    # be untouched while qwen3-custom:4b carries the install.
+    # ... and the model lives under its own tag. The user file is an OVERLAY
+    # now, not a copy of the curated one: it holds what the user added and
+    # nothing else, so the curated qwen3:4b entry is not in it at all -- the
+    # shipped registry is read from its own place and the overlay is merged
+    # on top. The install carries the derived tag, so it cannot collide with
+    # the shipped qwen3:4b.
     registry = json.loads((tmp_path / "user_list.json").read_text())
     system = json.loads(before.decode())
-    assert registry["models"]["qwen3"]["4b"] == system["models"]["qwen3"]["4b"]
+    assert "qwen3" not in registry["models"], \
+        "the user file must not carry a copy of the shipped registry"
     assert registry["models"]["qwen3-custom"]["4b"]["name"] == "Qwen3-4B-Custom-NPU2"
+    # The curated list is still what ships the model, untouched.
+    assert json.loads(curated.read_text())["models"]["qwen3"]["4b"] == \
+        system["models"]["qwen3"]["4b"]
 
 
 def test_chaotic_local_gguf_dry_run_detects_family_and_size(tmp_path, capsys,

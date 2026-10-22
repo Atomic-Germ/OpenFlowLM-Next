@@ -46,6 +46,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -319,6 +320,101 @@ def save_json(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def save_json_atomic(path: Path, data: dict) -> None:
+    """Save JSON atomically (temp file + rename)."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except:
+        try:
+            os.unlink(tmp)
+        except:
+            pass
+        raise
+
+
+try:
+    import fcntl as _fcntl  # POSIX record locks (fcntl/F_SETLK)
+except ImportError:  # Windows
+    _fcntl = None
+    import msvcrt as _msvcrt
+
+
+class _settings_lock:
+    """File lock on <settings.json>.lock, compatible with the C++ SettingsLock.
+
+    The C++ side takes a fcntl record lock (LockFileEx on Windows) on the
+    same "<path>.lock" file and holds it for its whole load-modify-save
+    cycle. Registration must hold the same lock across read-modify-replace,
+    or a concurrent `config set` (C++) and `oflm add` (Python) can lose each
+    other's writes: atomic rename only prevents partial JSON, not lost
+    updates. Waits up to 2 seconds, like the C++ side; past the deadline it
+    proceeds unlocked rather than failing the install.
+    """
+
+    def __init__(self, path):
+        self.lock_path = Path(str(path) + ".lock")
+        self.fd = None
+        self.handle = None
+
+    def __enter__(self):
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return self
+        try:
+            if _fcntl is not None:
+                self.fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        _fcntl.lockf(self.fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                        return self
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            os.close(self.fd)
+                            self.fd = None
+                            return self  # proceed unlocked, like C++ locked()==false
+                        time.sleep(0.1)
+            else:
+                self.handle = open(str(self.lock_path), "a+b")
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        self.handle.seek(0)
+                        _msvcrt.locking(self.handle.fileno(), _msvcrt.LK_NBLCK, 1)
+                        return self
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            self.handle.close()
+                            self.handle = None
+                            return self
+                        time.sleep(0.1)
+        except OSError:
+            # Locking is best-effort: an unmanageable lock file must not
+            # block an install.
+            self.fd = None
+            self.handle = None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self.fd is not None:
+                _fcntl.lockf(self.fd, _fcntl.LOCK_UN)
+                os.close(self.fd)
+            elif self.handle is not None:
+                self.handle.seek(0)
+                _msvcrt.locking(self.handle.fileno(), _msvcrt.LK_UNLCK, 1)
+                self.handle.close()
+        except OSError:
+            pass
+        self.fd = None
+        self.handle = None
+
+
 def _engine_dirs():
     """Directories holding an installed engine. An explicit OFLM_EXECUTABLE
     goes before `oflm` on PATH, so a checkout build stays ahead of a release
@@ -339,6 +435,13 @@ def find_system_model_list(explicit=None):
             raise SystemExit(f"--system-list {p} is not a file")
         return p
     candidates = []
+    # The registry oflm itself reads comes first: when it is pointed at
+    # another file, that file is the one the tool has to use as well --
+    # otherwise a dev tree registers models against a different registry
+    # than the one it reads.
+    env_registry = os.environ.get("OFLM_CONFIG_PATH")
+    if env_registry:
+        candidates.append(Path(env_registry))
     for d in _engine_dirs():
         candidates.append(d / "model_list.json")
         candidates.append((d / ".." / "share" / "oflm" / "model_list.json").resolve())
@@ -356,6 +459,11 @@ def find_system_model_list(explicit=None):
 def find_system_xclbin_root():
     """Directory whose <root>/xclbins/ holds the per-model kernel folders."""
     candidates = []
+    # The xclbin root oflm itself searches comes first: when it is pointed
+    # somewhere else, the kernels are there, and a dev tree has its own.
+    env_xcl = os.environ.get("OFLM_XCLBIN_PATH")
+    if env_xcl:
+        candidates.append(Path(env_xcl))
     for d in _engine_dirs():
         candidates.append(d)
         candidates.append((d / ".." / "share" / "oflm").resolve())
@@ -377,13 +485,28 @@ def user_xclbin_dir(arg):
     return base if base.name == "xclbins" else base / "xclbins"
 
 
-def user_registry_path(arg):
-    if arg:
-        return Path(arg)
-    env = os.environ.get("OFLM_CONFIG_PATH")
-    if env:
-        return Path(env)
-    return Path.home() / ".config" / "oflm" / "model_list.json"
+def user_settings_path(cli_config: str | None = None) -> Path:
+    """Path to the user's settings.json (overlay file, never overwritten by releases).
+
+    It is the file oflm itself reads: the settings of a model store live in
+    the store's own directory, NEXT to the models/ directory -- not inside
+    it. oflm-add used to write them inside, where oflm never looked, and a
+    model registered that way stayed invisible to `oflm list`.
+    """
+    if cli_config:
+        return Path(cli_config)
+    env_path = os.environ.get("OFLM_SETTINGS_PATH")
+    if env_path:
+        return Path(env_path)
+    # Next to the models directory: the directory that holds it.
+    models_root = models_root_dir(None)
+    return models_root.parent / "settings.json"
+
+
+# Backward compat alias
+def user_registry_path(cli_config: str | None = None) -> Path:
+    """Deprecated alias for user_settings_path()."""
+    return user_settings_path(cli_config)
 
 
 def models_root_dir(arg):
@@ -1181,15 +1304,91 @@ def build_entry(base_entry, dir_name, files, size):
     return entry
 
 
-def register(user_list_path, tag, entry, system_registry):
-    if user_list_path.is_file():
-        registry = load_json(user_list_path)
-    else:
-        registry = json.loads(json.dumps(system_registry))
-    registry.setdefault("model_path", "models")
-    model_type, size = tag.split(":", 1)
-    registry.setdefault("models", {}).setdefault(model_type, {})[size] = entry
-    save_json(user_list_path, registry)
+def register(
+    entry: dict,
+    settings_path: Path,
+    system_registry: dict,
+    force: bool = False,
+    name_override: str | None = None,
+    tag: str | None = None,
+) -> str:
+    """Register a model in the user's settings.json (not model_list.json).
+
+    Returns the tag the model was registered under.
+    Raises SystemExit on collision (without force/name_override).
+
+    ``tag`` is the tag derived in main() from the repo name (including
+    --tag); it is used as-is. Reconstructing a tag from the entry metadata
+    would be wrong: build_entry() carries no ``type`` and its ``size`` is a
+    numeric byte count, not the tag suffix -- such an entry would register
+    as ``unknown:3000000000``.
+    """
+    # Hold the same lock the C++ SettingsLock takes, for the whole
+    # read-modify-write: two concurrent `oflm add`s (or an add racing a
+    # `config set`) would otherwise both read the old document and the
+    # second atomic rename would silently drop the first one's changes.
+    with _settings_lock(settings_path):
+        # Load user settings (create if missing)
+        if settings_path.exists():
+            with open(settings_path) as f:
+                settings = json.load(f)
+        else:
+            settings = {
+                "version": 1,
+                "defaults": {},
+                "settings": {},
+                "models": {},
+            }
+
+        # Determine tag: --name wins, then the tag derived in main();
+        # the entry-metadata fallback exists for callers without a derived
+        # tag (the tests).
+        model_type = entry.get("type", "unknown")
+        size = entry.get("size", "unknown")
+        final_tag = name_override or tag or f"{model_type}:{size}"
+
+        if ":" in final_tag:
+            model_type, size = final_tag.split(":", 1)
+
+        # Collision check: shipped registry -- on the FINAL destination tag,
+        # and unconditionally. Checking only when --name was absent let
+        # `--name qwen3.8:27b` write a user entry that shadows the shipped
+        # one through the merged overlay. Exception: the NPU-embedding flow
+        # deliberately re-installs the official design under its shipped tag
+        # (the engine routes by that exact tag); a same-design re-install
+        # is not a takeover of the name.
+        shipped_entry = (system_registry.get("models", {})
+                         .get(model_type, {}).get(size))
+        if shipped_entry is not None:
+            same_npue_design = (
+                entry.get("npue_design_family")
+                and shipped_entry.get("npue_design_family")
+                and entry["npue_design_family"] == shipped_entry["npue_design_family"]
+            )
+            if not same_npue_design:
+                raise SystemExit(
+                    f"Model {final_tag} already exists in the shipped registry. "
+                    f"Use --name to install under a different name."
+                )
+
+        # Collision check: user settings
+        if (model_type in settings.get("models", {}) and
+            size in settings["models"][model_type]):
+            if not force:
+                raise SystemExit(
+                    f"Model {final_tag} is already installed. Use --force to overwrite."
+                )
+
+        # Write complete entry to settings.models
+        settings.setdefault("models", {}).setdefault(model_type, {})[size] = entry
+
+        # Ensure parent directory exists
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save atomically
+        save_json_atomic(settings_path, settings)
+
+    return final_tag
 
 
 # ------------------------------------------------------------------- xclbins
@@ -1353,6 +1552,30 @@ def _make_dir_link(link, target):
         return False
 
 
+def _link_target(link, target):
+    """What the link should point at: a relative path when the two live in
+    the same tree, the absolute path otherwise.
+
+    A link from a model directory to a kernel set is inside one tree (a dev
+    checkout, or an install), and a relative one survives the tree being
+    moved or copied -- an absolute one does not, and a link that points at
+    the machine the tree came from is a link to nowhere. When the two are
+    in different trees (a user directory and an install prefix), the
+    absolute path is the honest one.
+    """
+    target = Path(target).resolve()
+    try:
+        common = Path(os.path.commonpath([Path(link).parent.resolve(), target]))
+    except ValueError:          # different drives on Windows
+        return target
+    if str(common) == common.anchor:  # the root: nothing in common but "/"
+        return target
+    try:
+        return Path(os.path.relpath(target, Path(link).parent.resolve()))
+    except ValueError:
+        return target
+
+
 def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     """Put the chosen kernel set where find_kernels looks for this model.
 
@@ -1377,11 +1600,12 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
         except OSError as e:
             log(f"[WARN] could not replace {link}: {e}")
             return False
-    if _make_dir_link(link, kernel_dir):
+    target = _link_target(link, kernel_dir)
+    if _make_dir_link(link, target):
         if not quiet:
-            log(f"[INFO] Linked open kernels: {link} -> {kernel_dir}")
+            log(f"[INFO] Linked open kernels: {link} -> {target}")
         return True
-    log(f"[WARN] Could not link {link} -> {kernel_dir} (a Windows symlink needs "
+    log(f"[WARN] Could not link {link} -> {target} (a Windows symlink needs "
         "developer mode or admin). Run oflm with:")
     log(f'           OFLM_OPEN_KERNELS_DIR="{kernel_dir}"')
     return False
@@ -1868,8 +2092,9 @@ def main():
     )
     ap.add_argument("repo", help="Hugging Face repo id (Org/Name), ModelScope id (with --modelscope), URL, or local directory")
     ap.add_argument("--tag", help="Registry tag (default: derived from the repo name, e.g. qwen3.5-claude:9b)")
+    ap.add_argument("--name", help="Install under a custom tag (e.g. my-finetune:3b). Overrides --tag.")
     ap.add_argument("--family", help="details.family for engine dispatch (default: from matching official entry)")
-    ap.add_argument("--config", help="model_list.json to update (default: $OFLM_CONFIG_PATH or ~/.config/oflm/model_list.json)")
+    ap.add_argument("--config", help="your settings.json to update (default: $OFLM_SETTINGS_PATH, or next to the models directory)")
     ap.add_argument("--models-root", help="models directory (default: $OFLM_MODEL_PATH or ~/.config/oflm/models)")
     ap.add_argument("--xclbin-dir", help="user xclbins directory (default: ~/.config/oflm/xclbins)")
     ap.add_argument("--xclbin-from", help="official model directory name to link xclbins from (default: best match, e.g. Qwen3.6-35B-A3B-NPU2)")
@@ -2249,8 +2474,18 @@ def main():
         # weights to their source repository (a licensing statement, not optional).
         entry["url"] = base_entry.get("url") or f"https://huggingface.co/{repo}"
 
-    register(user_list, tag, entry, system_registry)
-    log(f"[INFO] Registered tag '{tag}' in {user_list}")
+    settings_path = user_settings_path(args.config)
+    # Pass the tag derived in main() (repo name + --tag); register() must not
+    # reconstruct it from the entry, whose `size` is a byte count.
+    tag = register(
+        entry,
+        settings_path,
+        system_registry,
+        force=args.force,
+        name_override=args.name,
+        tag=tag,
+    )
+    log(f"[INFO] Registered tag '{tag}' in {settings_path}")
 
     system_root = find_system_xclbin_root()
     if not args.no_xclbin:

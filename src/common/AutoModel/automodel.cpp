@@ -163,7 +163,8 @@ nlohmann::json AutoModel::_shared_setup_tokenizer(std::string model_path) {
 }
 
 
-void AutoModel::_shared_load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
+void AutoModel::_shared_load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption,
+					const nlohmann::json& resolved_settings) {
     if (this->is_model_loaded && this->model_path == model_path) {
         header_print("OFLM", "Model already loaded: " << this->model_path);
         return;
@@ -179,8 +180,10 @@ void AutoModel::_shared_load_model(std::string model_path, json model_info, int 
     }
     this->npu = std::make_unique<npu_xclbin_manager>(npu_device::device_npu2, this->npu_device_inst, enable_preemption);
     this->enable_preemption = enable_preemption;
-    // Set context length: use provided value if not -1, otherwise use model default
-    if (default_context_length != -1) {
+    // Context length: resolved settings override CLI override registry
+    if (resolved_settings.contains("ctx_len")) {
+        this->MAX_L = resolved_settings["ctx_len"].get<int>();
+    } else if (default_context_length != -1) {
         this->MAX_L = default_context_length;
     } else {
         this->MAX_L = model_info["default_context_length"];
