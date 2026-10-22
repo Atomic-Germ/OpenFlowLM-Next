@@ -100,6 +100,7 @@ const uint8_t* raw(const WeightFile& m, const std::string& name, size_t need, si
 
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
+constexpr size_t GGUF_CHUNK = 6144;  // the GGUF-direct twin's f32-scale law: 1024 B d, 1024 B m, codes
 constexpr size_t Q4_HALF = 2560;     // GPT-OSS's chunk: the same layout over 32 rows x 128 columns
 constexpr size_t Q4K_CHUNK = 4736;   // 256 uint8 scales, 256 uint8 mins, 4096 B of nibbles, 32 bf16 S, 32 bf16 M
 constexpr size_t Q8H_SCALES = 256;   // a half-tile's 128 bf16 scales
@@ -565,6 +566,19 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                  "requantizes Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS (convert the others with q4nx-build)");
         const bool has_min = t.type == GgufFile::Type::Q4_1 || kq;
         const size_t blk = has_min ? 20 : 18;
+        // Which chunk law the POOL wants (m.chunk_bytes): the GGUF-direct twin
+        // widens the block scales exactly to f32 (planes of 1024 B, codes at
+        // 2048), and the q4_1 twin this file also serves for the f32-numerics
+        // bisect keeps the q4nx law -- the same codes with the scales rounded
+        // to bf16 (planes of 512 B, codes at 1024). The GGUF scale was fp16 to
+        // begin with, so the bf16 rounding is the only quality step, and the
+        // twin that reads it is the one every shipped q4nx model runs on.
+        if (ch != Q4_CHUNK && ch != GGUF_CHUNK)
+            fail("std_perm_gguf " + name + ": pool chunk " + std::to_string(ch) +
+                 " is neither the q4_1 law nor the GGUF-direct twin's f32 one");
+        const bool f32_law = ch == GGUF_CHUNK;
+        const size_t M_OFF = f32_law ? 1024 : 512, CODES = f32_law ? 2048 : 1024,
+                     SD = f32_law ? 4 : 2;
         const size_t nb = op.in_dim / 32;                        // k blocks per row
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
@@ -611,8 +625,14 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                         um = f32_to_fp16(mraw);
                         const float df = fp16_to_f32(ud), mf = fp16_to_f32(um);
                         const float inv = df > 0.f ? 1.f / df : 0.f;
-                        std::memcpy(d + 4 * (kb * 32 + r), &df, 4);
-                        std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
+                        if (f32_law) {
+                            std::memcpy(d + SD * (kb * 32 + r), &df, 4);
+                            std::memcpy(d + M_OFF + SD * (kb * 32 + r), &mf, 4);
+                        } else {
+                            const uint16_t db = f32_to_bf16(df), mb = f32_to_bf16(mf);
+                            std::memcpy(d + SD * (kb * 32 + r), &db, 2);
+                            std::memcpy(d + M_OFF + SD * (kb * 32 + r), &mb, 2);
+                        }
                         // codes: value i at nibble (kb*32+i, r), i+16 at (p0+256)
                         uint8_t nib[16];
                         for (size_t i = 0; i < 16; ++i) {
@@ -623,10 +643,10 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                         }
                         for (size_t i = 0; i < 16; ++i) {
                             const size_t p0 = rb * 4096 + (kb * 32 + i) * 16 + rl;
-                            d[2048 + (p0 >> 1)] |= (p0 & 1) ? static_cast<uint8_t>(nib[i] << 4)
-                                                            : (nib[i] & 0xF);
+                            d[CODES + (p0 >> 1)] |= (p0 & 1) ? static_cast<uint8_t>(nib[i] << 4)
+                                                             : (nib[i] & 0xF);
                             const size_t p1 = p0 + 256;              // i + 16: the block's high half
-                            d[2048 + (p1 >> 1)] |= (p1 & 1) ? (nib[i] & 0xF0) : (nib[i] >> 4);
+                            d[CODES + (p1 >> 1)] |= (p1 & 1) ? (nib[i] & 0xF0) : (nib[i] >> 4);
                         }
                         continue;
                     }
@@ -634,16 +654,22 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                     if (has_min) std::memcpy(&um, b + 2, 2);
                     const float df = fp16_to_f32(ud);
                     const float mf = has_min ? fp16_to_f32(um) : -8.f * df;
-                    std::memcpy(d + 4 * (kb * 32 + r), &df, 4);
-                    std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
+                    if (f32_law) {
+                        std::memcpy(d + SD * (kb * 32 + r), &df, 4);
+                        std::memcpy(d + M_OFF + SD * (kb * 32 + r), &mf, 4);
+                    } else {
+                        const uint16_t db = f32_to_bf16(df), mb = f32_to_bf16(mf);
+                        std::memcpy(d + SD * (kb * 32 + r), &db, 2);
+                        std::memcpy(d + M_OFF + SD * (kb * 32 + r), &mb, 2);
+                    }
                     // codes: block nibbles (two K per byte) -> two rows per byte at one K
                     for (size_t i = 0; i < 16; ++i) {
                         const uint8_t byte = b[(has_min ? 4 : 2) + i];
                         const uint8_t lo = byte & 0xF, hi = byte >> 4;   // GGUF: value i | value i+16
                         const size_t p0 = rb * 4096 + (kb * 32 + i) * 16 + rl;
-                        d[2048 + (p0 >> 1)] |= (p0 & 1) ? lo << 4 : lo;   // value j = lo
+                        d[CODES + (p0 >> 1)] |= (p0 & 1) ? lo << 4 : lo;   // value j = lo
                         const size_t p1 = p0 + 256;              // i + 16: the block's high half
-                        d[2048 + (p1 >> 1)] |= (p1 & 1) ? hi << 4 : hi;   // value j + 16 = hi
+                        d[CODES + (p1 >> 1)] |= (p1 & 1) ? hi << 4 : hi;   // value j + 16 = hi
                     }
                 }
             }

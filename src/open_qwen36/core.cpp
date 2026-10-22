@@ -264,6 +264,75 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
                                  "(manifest.json has no gguf section; re-export the kernels)");
+    // ---- OFLM_GGUF_POOL_Q41: run the GGUF-sourced weights through the q4_1
+    // twin instead of the f32-scale one. Every shipped q4nx model runs on the
+    // q4_1 builds, so this separates the f32-scale CHUNK handling in the
+    // layer_x builds from everything else: same source file, same family
+    // geometry, the same kernels the q4nx model answers on. The two sections'
+    // pack ops pair one to one (the same tensors, the same chunk counts --
+    // only the byte offsets move with the chunk law), so each op takes the
+    // base section's geometry under the GGUF packing kind, and the base
+    // section's chunk / pool / lx / ax: the packed slots land where the q4_1
+    // designs read them. Whatever still misbehaves is then not the f32 chunk.
+    if (const char* q = std::getenv("OFLM_GGUF_POOL_Q41"); gguf_ && w_ && q && *q && *q != '0') {
+        Manifest& m = *man_.gguf;
+        const Manifest& b = man_;
+        auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
+                        const std::string& lt) {
+            if (go.size() != bo.size())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt +
+                                         ": the sections' pack ops do not pair (" +
+                                         std::to_string(go.size()) + " vs " + std::to_string(bo.size()) + ")");
+            for (size_t i = 0; i < go.size(); ++i) {
+                if (go[i].tensor != bo[i].tensor)
+                    throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " op " + std::to_string(i) +
+                                             ": tensors differ (" + go[i].tensor + " vs " + bo[i].tensor + ")");
+                // Only the projection pairs move: the base's std_perm becomes the
+                // GGUF-reading kind under the base's geometry. The ops whose kind
+                // is NOT a chunk law question (put, conv, lm head...) stay exactly
+                // as the GGUF section has them -- they work there today.
+                if (bo[i].op != "std_perm" || go[i].op != "std_perm_gguf") continue;
+                go[i].nch = bo[i].nch;
+                go[i].in_dim = bo[i].in_dim;
+                go[i].chunk0 = bo[i].chunk0;
+                go[i].dst = bo[i].dst;
+                go[i].split.clear();
+                go[i].via.clear();
+            }
+        };
+        for (auto& [lt, g] : m.layer_types) {
+            const auto it = b.layer_types.find(lt);
+            if (it == b.layer_types.end())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " is not in the base section");
+            const LayerType& bl = it->second;
+            merge(g.pool, bl.pool, lt);
+            merge(g.consts, bl.consts, lt);
+            g.consts_bytes = bl.consts_bytes;
+            g.act_bytes = bl.act_bytes;
+            g.state_kind = bl.state_kind;
+            g.state_bytes = bl.state_bytes;
+            g.state_row = bl.state_row;
+            g.program = bl.program;                  // the base builds' step
+            g.gemm_block = GemmBlockProgram{};       // the q4nx prefill route stays off for a GGUF
+        }
+        m.chunk_bytes = b.chunk_bytes;
+        m.pool_bytes = b.pool_bytes;
+        // the decode builds: name lx / ax through the base section's kernels;
+        // the head (lm) and the norm (ln) stay the GGUF section's f32 ones
+        for (const char* nm : {"lx", "ax"}) {
+            const std::string n = nm;
+            if (auto kt = m.kernels.find(n); kt != m.kernels.end()) {
+                const auto bt = b.kernels.find(n);
+                if (bt != b.kernels.end() && kt->second.context != bt->second.context) {
+                    m.contexts[n] = b.contexts.at(bt->second.context);
+                    kt->second = bt->second;
+                }
+            }
+        }
+        log("OFLM_GGUF_POOL_Q41: GGUF weights on the q4_1 twin (chunk " +
+            std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
+            "for the f32-numerics bisect");
+    }
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
     // there); anything GGUF does not carry is refused with its name.
