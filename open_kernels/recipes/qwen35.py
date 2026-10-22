@@ -276,11 +276,14 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                     "lmpool": L.LMHEAD_POOL_BYTES,
                     "ptab": {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq()}},
     }
+    f32 = spec.quant == "q4_1_f32"
+    lx_set = "lx_f32" if f32 else "lx"
+    ax_set = "ax_f32" if f32 else "ax"
     if spec.has_linear:
         args = ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx/final.xclbin"
-        out["kernels"]["lx"] = {"context": "lx", "insts": "lx/insts.bin", "build": "lx"}
+        out["contexts"]["lx"] = f"{lx_set}/final.xclbin"
+        out["kernels"]["lx"] = {"context": "lx", "insts": f"{lx_set}/insts.bin", "build": lx_set}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
@@ -289,8 +292,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax/final.xclbin"
-        out["kernels"]["ax"] = {"context": "ax", "insts": "ax/insts.bin", "patch": "attnpos", "build": "ax"}
+        out["contexts"]["ax"] = f"{ax_set}/final.xclbin"
+        out["kernels"]["ax"] = {"context": "ax", "insts": f"{ax_set}/insts.bin", "patch": "attnpos", "build": ax_set}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES,
                         "state": {"kind": "kv", "row": L.KV_ROW}},

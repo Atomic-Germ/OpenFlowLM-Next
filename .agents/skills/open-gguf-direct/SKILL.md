@@ -358,8 +358,71 @@ run.
 - harness taplib rejects a tap whose offset == tensor size (zero-band cores
   at tiny N): test with >= 1 band per core.
 
+## GGUF-direct on the qwen35 family: the shipped-manifest bug (found 2026-10-22)
+
+Every qwen3.5-family set (0.8/2/4/9/27B) shipped with its `gguf` section naming
+`lx/final.xclbin` and `ax/final.xclbin` — the **q4_1-law** builds — while a
+GGUF model's pool is packed at the **f32 law**. The q4_1 kernels consumed
+f32-law chunks (scale planes read as bf16 code words -> `~3.4e38` finite
+garbage + uniform `±NaN(1)` `0x7F81`), which is the full NaN signature. The
+dense sets got this right (`Qwen3-8B-NPU2` names `dx_f32/`), so a 3-minute
+shipshape check is: **list `gguf.contexts` across `src/xclbins/*/manifest.json`
+and expect the projection contexts to carry `_f32`** — any set naming `lx/` or
+`ax/` in its gguf section will run bf16 kernels on f32 pools.
+
+- Fix: `recipes/qwen35.py programs()` now derives `lx_set = "lx_f32" if f32
+  else "lx"` / same for `ax_set`, mirroring `dense.py`'s `dx_set` switch
+  (`programs(replace(spec, quant=q4_1_f32))` is what the gguf section runs, so
+  the context paths must follow the quant). `recipes/dense.py` programs()
+  ~line 697 is the reference pattern.
+- Re-export is enough (`--no-build`): all five sets re-exported 2026-10-22,
+  manifests regenerated, no rebuild needed (the twins were already built and
+  correct — they were just orphaned by the stale names). The 9B repro build is
+  byte-identical to the shipped `lx_f32/insts.bin` (`cmp` = OK).
+- A misread that cost time: a dumped `XN` region full of NaN is NOT the norm's
+  output — `lx.py` `(d)` dense_sequence stage 9 overwrites the spent A_XN
+  region with a "junk xn" at layer end; the first norm's xn is invisible in
+  end-of-run act dumps.
+
+### The lx_f32 wedge (still open, the NEXT bug)
+
+With the manifest fixed, the real f32 twins actually run — and the **genuine
+`lx_f32` build deadlocks at its first dispatch** (ERT state 8 timeout), while
+the byte-adjacent q4_1 twin runs fine. Reproduced WITHOUT the engine:
+`utilities/lx-probe.cpp` dispatches one context with the engine's exact call
+sequence against file fixtures (the dumped `/tmp/opencode/f32_pool0.bin`,
+`f32_consts0.bin`; missing or `-` files start as zeros — the wedge does not
+need valid data). q4_1 completes in ~150 ms; lx_f32 times out. The defect is
+in the f32-law instruction stream itself (hypotheses: shim/memtile BD budget
+at law-scaled piece sizes — f32 chunks are 6144 B vs bf16 5120; compare with
+the `dx_f32` dense stream that DOES complete at the same law). Not staleness:
+a warm rebuild is `cmp`-identical.
+
+- `utilities/lx-probe.cpp`: usage + fixture sizes in its header comment
+  (manifest `gguf.layer_types.linear_attention.buffers` gives consts/state
+  bytes; `globals.xres` etc.). Compiles with the XRT C headers from
+  `$XILINX_XRT` (the dual-mode headers give the `xrt::` classes; there are no
+  `.hpp` wrappers in this install).
+- `utilities/act-region-report.py`: region census of a `--dump-act` file
+  against the design's layout (XN/QKV/Z/VEC/O/OG/OUT/RES/XM nan + maxabs).
+  Pass the model's spec json; `GEMV_SCALES_F32=1` (default) reads the f32 law.
+- `OFLM_OPEN_DUMP_POOLS=<dir>` dumps layer 0's packed pool+consts per law
+  (`{f32,q41}_pool0/consts0.bin`), `OFLM_OPEN_LAYER_NAN=1` does the per-layer
+  xres NaN/maxabs census. Both are bring-up knobs, classified in
+  `generate-registry.py` `NON_SETTING_ENV_VARS` (the registry check fails
+  otherwise). `OFLM_GGUF_POOL_Q41=1` is the older law bisect; it now swaps
+  kernel contexts through `std_perm_gguf`->`std_perm` pairing in core.cpp.
+- **The LX_STOP truncation shim is a dead end**: `LX_STOP=1` (truncate part 0
+  after the glue, in `lx.py` dense_sequence) wedges at BOTH laws — a truncated
+  stream leaves the workers' fifo-acquire counts unsatisfied, so the run never
+  completes without core-body cooperation. Stage isolation by stream
+  truncation does NOT work here.
+
 ## Still open (Phase-MoE / later)
 
+- **the lx_f32 / ax_f32 stream wedge above** — the f32-law lx stream deadlocks
+  on the NPU while its q4_1 twin (and the dense recipe's dx_f32) completes;
+  bisect inside the instruction stream (probe: `utilities/lx-probe.cpp`).
 - qwen36moe recipe: f32 twin builds (lx/ax/dx/lm_head_q8 *_f32), the
   expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors), the
   singular/plural `model.layer(s)` name mismatch, q8 f32 numerics bug above.
