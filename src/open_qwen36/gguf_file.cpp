@@ -325,6 +325,13 @@ const uint8_t* GgufFile::raw(const std::string& name, size_t* nbytes) const {
     return map_ + data_base_ + t.offset;
 }
 
+std::vector<std::string> GgufFile::tensor_names() const {
+    std::vector<std::string> out;
+    out.reserve(tensors_.size());
+    for (const auto& [name, info] : tensors_) out.push_back(name);
+    return out;
+}
+
 const TensorMeta& GgufFile::meta(const std::string& name) const {
     auto cached = meta_cache_.find(name);
     if (cached != meta_cache_.end()) return cached->second;

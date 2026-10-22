@@ -185,12 +185,11 @@ int main(int argc, char** argv) {
           m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
           m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    // the q4_1 set (8 xclbin + 51 insts: the route adds one GEMM context whatever K, the MoE
+    // the q4_1 set: 8 xclbin + 51 insts (the route adds one GEMM context whatever K, the MoE
     // one, seven streams, the token-batched expert kernel one context and six streams, and
-    // the attention GEMM one context and 32 streams) and the GGUF-direct twin's (the
-    // f32-scale layer designs and the head: 4 xclbin + 6 insts -- no block-prefill route,
-    // whose GEMM reads the bf16 chunk law by a hardcoded constant).
-    check(m.files().size() == 69, "69 files named (the q4_1 set's 59 and the GGUF-direct twin's 10)");
+    // the attention GEMM one context and 32 streams). The MoE family ships no GGUF-direct
+    // twin (its expert pack ops have no GGUF form yet), so the count is the set's own.
+    check(m.files().size() == 59, "59 files named (8 xclbin + 51 insts)");
     // the attention products on the NPU (OPEN-PREFILL-ATTN): a stream per 256 rows of window, both
     // products, on one xclbin; full attention only
     const auto& ab = fg.attn_block;

@@ -312,12 +312,19 @@ class ModelSpec:
         return HF_FAMILIES[mt](cfg, real_vocab)
 
     @classmethod
-    def from_gguf_metadata(cls, md: Mapping[str, Any]) -> "ModelSpec":
-        """From a GGUF's key/value metadata (llama.cpp's key names)."""
+    def from_gguf_metadata(cls, md: Mapping[str, Any], tensors=None) -> "ModelSpec":
+        """From a GGUF's key/value metadata (llama.cpp's key names).
+
+        `tensors` is the file's tensor names, when the caller has them: the
+        depth and the layer types are read off the weights, because a fine-tune
+        can differ from the pattern the header's interval describes (the
+        Qwen3.8-9B distill has two full attention layers at the end where the
+        interval says one).
+        """
         arch = md.get("general.architecture")
         if arch not in GGUF_FAMILIES:
             raise SpecError(f"general.architecture {arch!r} has no recipe (known: {sorted(GGUF_FAMILIES)})")
-        return GGUF_FAMILIES[arch](md)
+        return GGUF_FAMILIES[arch](md, tensors)
 
 
 def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
@@ -357,6 +364,38 @@ def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, An
         extrap = 1.0 - ramp
         out.append(f / factor * (1.0 - extrap) + f * extrap)
     return out
+
+
+def _layer_types_gguf(tensors, n: int, interval: int) -> tuple[str, ...]:
+    """The per-layer types, read off the FILE's tensors.
+
+    The header's full_attention_interval describes the pattern llama.cpp
+    assumed; a fine-tune can differ -- the Qwen3.8-9B distill ends in two
+    full attention layers where the interval says one -- and the tensors are
+    the truth: a linear layer carries the fused attn_qkv, a full one the
+    separate attn_q / attn_k / attn_v. The interval is the fallback for a
+    file whose tensor names are not in llama.cpp's convention.
+    """
+    if not tensors:
+        return tuple(FULL if (l + 1) % interval == 0 else LINEAR for l in range(n))
+    linear: set[int] = set()
+    full: set[int] = set()
+    for name in tensors:
+        m = re.match(r"blk\.(\d+)\.(attn_qkv|attn_q)\.", str(name))
+        if not m:
+            continue
+        (linear if m.group(2) == "attn_qkv" else full).add(int(m.group(1)))
+    if not linear and not full:
+        return tuple(FULL if (l + 1) % interval == 0 else LINEAR for l in range(n))
+    out = []
+    for l in range(n):
+        if l in linear:
+            out.append(LINEAR)
+        elif l in full:
+            out.append(FULL)
+        else:
+            out.append(FULL if (l + 1) % interval == 0 else LINEAR)
+    return tuple(out)
 
 
 def _layer_types_hf(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
@@ -412,13 +451,20 @@ def _qwen36moe_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _qwen36moe_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
     n = k("block_count")
+    if tensors:
+        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
+        # header says (and the header is what the interval pattern describes)
+        blocks = [int(m.group(1)) for m in
+                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
+        if blocks:
+            n = max(blocks) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -439,7 +485,7 @@ def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
         family="qwen36moe",
         hidden=k("embedding_length"),
         num_layers=n,
-        layer_types=tuple(FULL if (l + 1) % interval == 0 else LINEAR for l in range(n)),
+        layer_types=_layer_types_gguf(tensors, n, interval),
         vocab=vocab,
         real_vocab=vocab,
         num_heads=k("attention.head_count"),
@@ -490,7 +536,7 @@ def _qwen35_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     return spec
 
 
-def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _qwen35_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     """arch `qwen35` (the dense line; the MoE is `qwen35moe`). llama.cpp writes the same
     ssm.* / full_attention_interval keys as the MoE plus `feed_forward_length`, and no
     expert keys -- read off Qwen3.8-9B-Distill-Q8_0.gguf, 2026-09-06."""
@@ -503,7 +549,7 @@ def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:
         if md.get(f"{a}.{bad}"):
             raise SpecError(f"{a}: {bad} says this is the MoE variant (architecture qwen35moe)")
     base = _qwen36moe_gguf({**md, f"{a}.expert_count": 0, f"{a}.expert_used_count": 0,
-                            f"{a}.expert_feed_forward_length": 0})
+                            f"{a}.expert_feed_forward_length": 0}, tensors)
     d = base.to_dict()
     d.update(family="qwen35", intermediate=k("feed_forward_length"))
     return ModelSpec.from_dict(d)
@@ -841,13 +887,20 @@ def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _qwen3_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _qwen3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
     n = k("block_count")
+    if tensors:
+        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
+        # header says (and the header is what the interval pattern describes)
+        blocks = [int(m.group(1)) for m in
+                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
+        if blocks:
+            n = max(blocks) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -920,7 +973,7 @@ def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _llama3_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _llama3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
@@ -1083,7 +1136,7 @@ def _hunyuan_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _hunyuan_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _hunyuan_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
@@ -1186,13 +1239,20 @@ def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _gemma3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
     n = k("block_count")
+    if tensors:
+        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
+        # header says (and the header is what the interval pattern describes)
+        blocks = [int(m.group(1)) for m in
+                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
+        if blocks:
+            n = max(blocks) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -1328,7 +1388,7 @@ def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _granite_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _granite_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
@@ -1436,13 +1496,20 @@ def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
+def _gemma3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
     n = k("block_count")
+    if tensors:
+        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
+        # header says (and the header is what the interval pattern describes)
+        blocks = [int(m.group(1)) for m in
+                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
+        if blocks:
+            n = max(blocks) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:

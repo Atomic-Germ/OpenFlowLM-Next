@@ -39,6 +39,7 @@ model's directory -- so no environment variables are required.
 import argparse
 import copy
 import hashlib
+import dataclasses
 import json
 import os
 import re
@@ -1659,29 +1660,16 @@ def open_kernels_checkout():
 def model_spec_hash(model_dir):
     """(spec_hash, note) for an installed model directory; (None, why) on failure.
 
-    Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
-    config.json, the tokenizer's real vocab, and the per-role weight format off
-    the model.q4nx safetensors header (no weight byte is read).
+    The spec is derived the way the recipes do it: from the model's own
+    weights where it has them (a GGUF's own metadata) and from config.json
+    plus the tokenizer's real vocab otherwise (the model.q4nx safetensors
+    header gives the per-role weight format; no weight byte is read).
     """
-    root = open_kernels_checkout()
-    if root is None:
-        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
-    added = str(root)
-    inserted = added not in sys.path
-    if inserted:
-        sys.path.insert(0, added)
-    try:
-        from recipes.load import spec_from_model_dir
-        spec = spec_from_model_dir(Path(model_dir))
-        return spec.spec_hash(), f"spec from {root}"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-    finally:
-        if inserted:
-            try:
-                sys.path.remove(added)
-            except ValueError:
-                pass
+    spec = model_spec(model_dir)
+    if spec is None:
+        return None, ("no spec for this model (no open_kernels/recipes checkout, "
+                      "or a shape they do not know)")
+    return spec.spec_hash(), "spec from the model's own metadata"
 
 
 def kernel_set_spec_hash(kernel_dir):
@@ -1792,7 +1780,127 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     return False
 
 
-def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
+def model_spec(model_dir):
+    """The ModelSpec for an installed model directory, or None (no recipes
+    checkout, or a shape they do not know).
+
+    A GGUF-direct model is described by ITS OWN weights. The repo's
+    config.json is a claim about the model the repo was built from, and for a
+    fine-tune that is often the BASE: empero-ai/Qwen3.8-9B-Distill-GGUF
+    ships no config.json at all, and the one its README names (the base's)
+    says 32 layers where the file has 33. The geometry that decides which
+    kernels serve the model is the file's; the config.json is the fallback for
+    a model that has no GGUF.
+    """
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.load import spec_from_model_dir
+        from recipes.spec import ModelSpec
+        gguf = Path(model_dir) / "model.gguf"
+        if gguf.is_file():
+            try:
+                inv = read_gguf_inventory(str(gguf))
+                if inv:
+                    names = [x[0] if isinstance(x, (list, tuple)) else x for x in inv[1]]
+                    spec = ModelSpec.from_gguf_metadata(inv[0], names)
+                    # the tokenizer's id count (the logits above it are undefined)
+                    try:
+                        spec = dataclasses.replace(spec, real_vocab=spec_from_model_dir(Path(model_dir)).real_vocab)
+                    except Exception:
+                        pass
+                    return spec
+            except Exception:
+                pass
+        return spec_from_model_dir(Path(model_dir))
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
+    """A kernel set for this model built from the kernels of an installed set
+    that serves the same GEOMETRY, with this model's own manifest.
+
+    The kernels are width-keyed: the depth is the manifest's business (the
+    layer loop it drives), so a fine-tune of a different depth runs on the base
+    model's kernels -- only the manifest differs. A model whose shape no
+    installed set covers needs a build; a model whose DEPTH differs does not,
+    and asking for a rebuild here would put a kernel build between the user and
+    a model that runs today.
+
+    The sibling set is a directory of the base's kernel files (hard-linked
+    where the filesystem allows it) plus this model's manifest, and it is what
+    the model links to. Returns the directory, or None.
+    """
+    spec = model_spec(model_dir)
+    if spec is None:
+        return None
+    want = spec.kernel_hash()
+    # The preferred base first: the set the GGUF gate picked (the freshest one
+    # with the f32-scale twins), so the sibling carries them too.
+    manifests = []
+    if prefer:
+        manifests.append(Path(prefer) / "manifest.json")
+    for root in roots:
+        if not root:
+            continue
+        manifests += sorted(Path(root).glob("*/open_kernels/manifest.json"))
+    for m in manifests:
+        try:
+            d = json.loads(m.read_text(encoding="utf-8"))
+            s = d.get("spec")
+            if not s:
+                continue
+            ModelSpec = _model_spec_class()
+            if ModelSpec is None or ModelSpec.from_dict(s).kernel_hash() != want:
+                continue
+        except Exception:
+            continue
+        base = m.parent
+        out = Path(model_dir) / "open_kernels"
+        try:
+            if out.exists() and not out.is_symlink():
+                shutil.rmtree(out)
+            out.mkdir(parents=True, exist_ok=True)
+            for f in base.rglob("*"):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(base)
+                dst = out / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    dst.unlink()
+                try:
+                    os.link(f, dst)                    # the same bytes, no copy
+                except OSError:
+                    shutil.copy2(f, dst)
+            from recipes.manifest import manifest
+            (out / "manifest.json").write_text(json.dumps(manifest(spec), indent=1) + "\n",
+                                               encoding="utf-8")
+        except Exception as exc:
+            if not quiet:
+                log(f"[WARN] could not build the sibling kernel set: {exc}")
+            return None
+        if not quiet:
+            log(f"[INFO] open kernels: {out} (the kernels of {base.parent.name}, "
+                f"with this model's own manifest -- same geometry, "
+                f"{spec.num_layers} layers)")
+        return out
+    return None
+
+
+def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False, prefer=None):
     """Find and link the open kernel set for this model; say which and why."""
     if override:
         kernel_dir = Path(override)
@@ -1811,6 +1919,13 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+    # No set was built for this shape exactly. The kernels are width-keyed, so
+    # a set that serves the same geometry does: only the manifest (the layer
+    # loop) differs, and it is written here -- no build, no kernel set to
+    # export, nothing for the user to run.
+    sibling = sibling_open_kernels(model_dir, roots, quiet=quiet, prefer=prefer)
+    if sibling:
+        return True
     checkout = open_kernels_checkout()
     script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
     log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
@@ -2578,6 +2693,14 @@ def main():
                               want=NPU_EMBED_FILES if npue_embed else None)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
+        # A cache that holds the repo but not the file we want is no use: the
+        # GGUF-direct path asks for ONE file by name, and a snapshot with only
+        # the config (or with a different quant) is not it. Fall through to the
+        # download then, rather than copying a cache that cannot serve.
+        if snapshot and gguf_mode and not (Path(snapshot) / gguf_name).is_file():
+            if not args.quiet:
+                log(f"[INFO] The local cache has no {gguf_name}; downloading it.")
+            snapshot = None
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
@@ -2722,7 +2845,8 @@ def main():
             target,
             dir_name,
             kernel_roots,
-            override=str(gguf_kernel_dir) if gguf_kernel_dir else args.open_kernels,
+            override=args.open_kernels,
+            prefer=str(gguf_kernel_dir) if gguf_kernel_dir else None,
             force=args.force,
             quiet=args.quiet,
         )

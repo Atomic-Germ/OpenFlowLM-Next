@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <functional>
 #include <limits>
 #include <map>
@@ -179,6 +180,42 @@ nlohmann::json derive_config(const GgufFile& g) {
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
         c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
+    // The layer types (the hybrid families): the manifest names the per-layer
+    // list, and the FILE's tensors are what decide it -- a linear layer
+    // carries the fused attn_qkv, a full one the separate attn_q / attn_k /
+    // attn_v. The header's full_attention_interval describes the pattern
+    // llama.cpp assumed, and a fine-tune can differ (the Qwen3.8-9B distill
+    // ends in two full attention layers where the interval says one).
+    {
+        std::set<int> linear, full;
+        for (const auto& name : g.tensor_names()) {
+            const size_t d = name.find(".attn_qkv.");
+            const size_t q = name.find(".attn_q.");
+            size_t dot = name.find('.');
+            if (dot == std::string::npos || name.rfind("blk.", 0) != 0) continue;
+            const int l = std::atoi(name.c_str() + 4);
+            if (d != std::string::npos) linear.insert(l);
+            else if (q != std::string::npos) full.insert(l);
+        }
+        if (!linear.empty() || !full.empty()) {
+            int n = 0;
+            for (int l : linear) n = std::max(n, l + 1);
+            for (int l : full) n = std::max(n, l + 1);
+            nlohmann::json lt = nlohmann::json::array();
+            for (int l = 0; l < n; ++l)
+                lt.push_back(linear.count(l) ? "linear_attention"
+                                              : (full.count(l) ? "full_attention" : "full_attention"));
+            c["layer_types"] = lt;
+            c["num_hidden_layers"] = n;
+        } else if (g.kv_has(arch + ".full_attention_interval")) {
+            const int iv = static_cast<int>(g.kv_u64(arch + ".full_attention_interval"));
+            const int n = static_cast<int>(g.kv_u64(arch + ".block_count"));
+            nlohmann::json lt = nlohmann::json::array();
+            for (int l = 0; l < n; ++l)
+                lt.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+            c["layer_types"] = lt;
+        }
+    }
     return c;
 }
 
@@ -232,9 +269,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
         if (gguf_) {
+            // The GGUF is the model: its OWN metadata is the geometry the
+            // manifest must match. The config.json beside it is a claim about
+            // the model the repo was built from, and for a fine-tune that is
+            // often the BASE (a distill's repo ships no config.json at all,
+            // and the one its README names says 32 layers where the file has
+            // 33). So the file's geometry wins over the config's.
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())
-                if (!j.contains(key)) j[key] = value;
+                if (key != "model_type") j[key] = value;
         }
     } else if (gguf_) {
         j = derive_config(*static_cast<GgufFile*>(file_.get()));
@@ -242,7 +285,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
-    w_->check_model(j, md.filename().string());
+    // A GGUF's architecture is not an HF model_type (the manifest was built
+    // for a family, and the file's arch is what named that family), so the
+    // model_type comparison is for the q4nx container's config.json only.
+    w_->check_model(j, md.filename().string(), !gguf_);
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);

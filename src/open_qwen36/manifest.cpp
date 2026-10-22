@@ -717,7 +717,7 @@ std::string Manifest::host_attention_refusal() const {
     return "";
 }
 
-void Manifest::check_model(const json& config, const std::string& where) const {
+void Manifest::check_model(const json& config, const std::string& where, bool model_type) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
     auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };
     // A VLM config nests the text tower's fields under "text_config" (Qwen3.5's
@@ -734,6 +734,7 @@ void Manifest::check_model(const json& config, const std::string& where) const {
     for (const auto& [key, want] : hf_config_check.items()) {
         const json* got_ptr = find(key);
         if (key == "model_type") {
+            if (!model_type) continue;                 // a GGUF's arch is not a model_type
             if (!got_ptr) lacks(key);
             bool ok = false;
             for (const auto& t : want) ok |= (*got_ptr == t);

@@ -60,6 +60,8 @@ public:
     std::vector<float> f32(const std::string& name) const override;
     /// The tensor's row-major [rows, cols] shape (GGUF stores it fastest-first).
     const TensorMeta& meta(const std::string& name) const override;
+    /// The file's tensor names (llama.cpp's conventions).
+    std::vector<std::string> tensor_names() const;
     /// One row of a [rows, dim] tensor as f32 (alias of embed_row).
     void bf16_row(const std::string& name, size_t row, size_t dim, float* out) const override {
         embed_row(name, row, dim, out);
