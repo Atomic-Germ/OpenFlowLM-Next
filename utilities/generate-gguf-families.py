@@ -26,8 +26,12 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "open_kernels"))
 os.environ.setdefault("OPEN_KERNELS_UNVALIDATED", "1")   # the geometry is not the question here
 
-from recipes.manifest import manifest  # noqa: E402
-from recipes.load import load_spec  # noqa: E402
+try:
+    from recipes.manifest import manifest  # noqa: E402
+    from recipes.load import load_spec  # noqa: E402
+except ImportError as exc:          # the recipes need numpy; say so, do not traceback
+    raise SystemExit(f"generate-gguf-families: the recipes need numpy ({exc}); "
+                     "run this with a python that has it (the ironvenv, or a venv with numpy)")
 
 SPECS = REPO / "open_kernels" / "recipes" / "specs"
 OF_ADD = REPO / "utilities" / "oflm-add" / "oflm_add" / "__init__.py"

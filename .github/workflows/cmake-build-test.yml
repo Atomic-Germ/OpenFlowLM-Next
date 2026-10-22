@@ -45,6 +45,19 @@ jobs:
           git diff --exit-code src/config/settings.json \
                          src/config/settings_registry_generated.hpp
 
+      # The families that can load a GGUF are DERIVED from the recipes (a recipe
+      # that emits the manifest's f32-scale twin), and oflm-add's list is
+      # generated from that. A family that gains the section belongs in the
+      # list, and the list is what oflm-add installs from. It belongs in THIS
+      # job: the derivation builds each family's manifest, so it needs numpy,
+      # and it must fail in seconds rather than after the whole build.
+      - name: Verify the GGUF-capable families list is up to date
+        run: |
+          python3 -m venv /tmp/gguf-check
+          /tmp/gguf-check/bin/pip install --quiet --upgrade pip
+          /tmp/gguf-check/bin/pip install --quiet numpy
+          /tmp/gguf-check/bin/python utilities/generate-gguf-families.py --check
+
   config-build-test:
     runs-on: ubuntu-latest
     env:
@@ -144,14 +157,6 @@ jobs:
           cmake --build build --target generate-settings
           git diff --exit-code src/config/settings.json src/config/settings_registry_generated.hpp
 
-      # The families that can load a GGUF are DERIVED from the recipes (a recipe
-      # that emits the manifest's f32-scale twin), and oflm-add's list is
-      # generated from that. A family that gains the section belongs in the
-      # list, and the list is what oflm-add installs from.
-      - name: Verify the GGUF-capable families list is up to date
-        run: |
-          python3 utilities/generate-gguf-families.py --check
-
       # gguf-inspect's tests need the GGUF reader. The in-tree vendored copy
       # (third_party/Guanaco/llama.cpp) is not a submodule of this repository,
       # so install the reader from upstream llama.cpp instead. It goes in a
@@ -176,3 +181,13 @@ jobs:
           /tmp/gguf-tools/bin/pip install pytest
           /tmp/gguf-tools/bin/python -m pytest \
             utilities/gguf-utils/gguf-inspect/tests/ -v
+
+      # The families that can load a GGUF are DERIVED from the recipes (a recipe
+      # that emits the manifest's f32-scale twin), and oflm-add's list is
+      # generated from that. A family that gains the section belongs in the
+      # list, and the list is what oflm-add installs from. It runs here, in the
+      # venv that has numpy, because the derivation builds each family's
+      # manifest.
+      - name: Verify the GGUF-capable families list is up to date
+        run: |
+          /tmp/gguf-tools/bin/python utilities/generate-gguf-families.py --check
