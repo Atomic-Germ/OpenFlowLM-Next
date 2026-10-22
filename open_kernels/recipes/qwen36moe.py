@@ -99,6 +99,15 @@ def q8_chunk_bytes(quant: str) -> int:
     raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
 
 
+# The MoE family's GGUF-direct twin: the expert weights are 3D tensors
+# ([experts, n, k]), and the pack ops that lay them out (expert_stripes,
+# expert_down) have no GGUF form yet -- a GGUF's expert tensors are
+# quantized, and the packer would have to requantize and re-stripe them.
+# Until those ops exist the family ships no twin: a manifest that advertises
+# the section would send the engine to kernels whose experts it cannot pack.
+GGUF_EXPERT_OPS_READY = False
+
+
 def pool_quant(spec: ModelSpec) -> str:
     """The q4 pool's scale layout: the q4 roles' quant (q4nx bf16, or the
     GGUF-direct f32). The pool is one pool, so one chunk size."""
@@ -1499,7 +1508,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         for name, types in r.get("variants", {}).items():
             for lt, gb in types.items():
                 out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
-    sec = GGUF.section(spec, max_ctx, programs)
+    sec = GGUF.section(spec, max_ctx, programs, twins_built=GGUF_EXPERT_OPS_READY)
     if sec:
         # The GGUF-direct twin: the same layer designs against the f32-scale pool
         # layout (the q4_1 codes with f32 block scales). The engine swaps this whole
@@ -1566,7 +1575,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
         # layout (the q4_1 codes with f32 block scales). The env says which variant
         # to build (designs/layer_x/layout.py reads it); the q4_1 builds above are
         # untouched, so a shipped model keeps the kernels it has.
-        b.update(GGUF.twin_builds(b, skip=("ln", "lm_head_q8")))
+        if GGUF_EXPERT_OPS_READY:
+            b.update(GGUF.twin_builds(b, skip=("ln", "lm_head_q8")))
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
