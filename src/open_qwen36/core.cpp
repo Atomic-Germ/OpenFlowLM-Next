@@ -319,15 +319,23 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         m.pool_bytes = b.pool_bytes;
         // the decode builds: name lx / ax through the base section's kernels;
         // the head (lm) and the norm (ln) stay the GGUF section's f32 ones
-        for (const char* nm : {"lx", "ax"}) {
-            const std::string n = nm;
-            if (auto kt = m.kernels.find(n); kt != m.kernels.end()) {
-                const auto bt = b.kernels.find(n);
-                if (bt != b.kernels.end() && kt->second.context != bt->second.context) {
-                    m.contexts[n] = b.contexts.at(bt->second.context);
-                    kt->second = bt->second;
-                }
-            }
+        // the kernels to swap are whatever the LAYER programs name -- derived,
+        // not a list: the steps' kernels pair one to one across the sections,
+        // and anything else (the tail's norm and head, the prefill GEMM route
+        // this section does not have) stays what the GGUF section names. When a
+        // name exists in both sections and its context differs, it drives the
+        // pool slot law, so it takes the base section's build.
+        std::set<std::string> swap_names;
+        for (const auto& name_step : m.layer_types)
+            for (const auto& s : name_step.second.program)
+                swap_names.insert(s.kernel);
+        for (const std::string& n : swap_names) {
+            const auto kt = m.kernels.find(n);
+            if (kt == m.kernels.end()) continue;
+            const auto bt = b.kernels.find(n);
+            if (bt == b.kernels.end()) continue;
+            m.contexts[bt->second.context] = b.contexts.at(bt->second.context);
+            kt->second = bt->second;             // the base's context and instruction stream
         }
         log("OFLM_GGUF_POOL_Q41: GGUF weights on the q4_1 twin (chunk " +
             std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
