@@ -1,6 +1,45 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — isolated paired-weight QKV/Z replay, 2026-10-21
+## Latest checkpoint — causal QKV/Z prefix replay, 2026-10-22
+
+Composed paired-weight entry projections for complete 20-token prefixes at
+L34, L37 and L53 with production host DeltaNet and original NPU out projection.
+**60/60 dispatches complete** using verified existing binaries and one layer's
+weights at a time. Production entry sums, individual control products, captured
+host output/state and selected out/residual controls all match bytewise.
+Block versus sequential host calls and both NPU placements are byte-identical;
+inactive columns and host/state padding are zero.
+
+All **15360/15360 primary entry head checks** pass and strictly improve both
+errors (7680 distinct heads at two placements). Worst candidate maxrel/rel_fro:
+**1.4844200e-5 / 9.4852176e-6**. All **6048/6048 conditioned host head/state
+checks** pass, worst **6.0081719e-6**. All **240/240 conditioned output projection
+rows** pass, worst maxrel **0.0022730411**. Independent residual acceptance is
+still **FAIL**:
+
+| Pre-FFN residual | Native control maxrel | Candidate maxrel | Candidate gate |
+|---|---:|---:|---|
+| L34/P17 | 0.0007177295 | 0.0006256207 | PASS |
+| L37/P7 | 0.0010862168 | 0.0008810181 | PASS |
+| L53/P17 | 0.0075342533 | 0.0074347548 | FAIL |
+
+Each selected result agrees at both placements. This confirms a causal local
+improvement while leaving L53 above the unchanged 0.005 bound. Incoming norm
+and residual remain captured native values; no corrected cross-layer FFN or
+logits are produced. Retained full-model residual acceptance stays
+**3974/4032 FAIL**. Next evaluate paired-weight out projection against these
+retained prefixes, keeping the independent residual gate and inherited drift
+visible. Full-model and long-prefix acceptance remain open.
+
+The replay derives alpha/beta stride from real tensor shapes (48), matching
+native core, and rejects invalid constant extents before calling C++. The first
+attempt used synthetic padded lanes (64); exact host control rejected it before
+any NPU dispatch. Its evidence is preserved. **14 new RED-to-GREEN tests;
+1618 passed, 47 skipped** overall. No binary rebuild or production arithmetic
+change. Commands, evidence and limitations are in the
+[causal prefix replay runbook](../../../utilities/prefill-prefix-replay/README.md).
+
+## Isolated paired-weight QKV/Z replay — 2026-10-21
 
 Built private control and low-weight fused entry kernels at N16384/K5120/T256.
 Both preserve production packing and DMA; the low variant converts the BF16
