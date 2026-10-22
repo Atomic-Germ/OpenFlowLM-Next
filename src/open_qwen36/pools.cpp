@@ -787,9 +787,9 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             // chunk raster -- 32-row x 256-column chunks, 256 bf16 scales then
             // 8192 int8 codes, in the supertile order mapped underneath. Only a
             // q4nx-build conversion bakes that into the head (the wrapper's
-            // Q8NX layout). A raw llama.cpp GGUF stores the head row-major in
-            // its own quant (Q8_0 on whole-file re-quants, Q6_K on the i1-style
-            // trimmings): the byte count can even pass the bounds() check, but
+            // Q8NX layout). A GGUF holds the head row-major in its own quant
+            // (Q8_0 on whole-file sets, Q6_K and friends on reduced-size ones):
+            // the byte count can even pass the bounds() check, but
             // the q6 blocks misread as bf16 scales and int8 codes decant NaN
             // rows into the pool (ornith-gguf: 47,695 of 248,320 logit rows
             // NaN, zeros past chunk 95,864, no row periodicity) and the

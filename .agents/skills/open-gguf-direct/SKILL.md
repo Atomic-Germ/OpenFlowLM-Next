@@ -419,8 +419,8 @@ BLOCKWRITE `len` must be `k ×` its fifo element; per law
 ### The sampler zero-vocab crash (fixed 2026-10-22)
 
 `oflm run ornith-gguf:9b-i1` segfaulted in `Sampler::sampler_topk_apply`
-after a clean prefill: a Qwen3.5 GGUF pulled straight from HF carries the
-vendor's **nested config** (`text_config` holds the LM hyperparams
+after a clean prefill: a Qwen3.5 GGUF pulled straight from HF keeps the
+model's **nested config** (`text_config` holds the LM hyperparams
 including `vocab_size`; only `hidden_size`/`eos_token_id` sit at the top).
 `LM_Config` reads top-level only, so `AutoModel::set_sampler` built the
 sampler over **zero features** — the `sample()` copy loop no-ops and
@@ -428,7 +428,7 @@ sampler over **zero features** — the `sample()` copy loop no-ops and
 `std::partial_sort(begin, begin+20, begin)` on an empty vector (middle
 beyond last) → UB → segfault on the first decode token. The q4nx converter
 (`inject_oflm_keys` in utilities/q4nx-build) flattens `text_config` at
-conversion time, but a pulled GGUF ships the vendor's raw config.
+conversion time, but a pulled GGUF ships the model's raw config.
 Fix: `LM_Config::from_pretrained` now lifts `text_config` into the canonical
 top-level key set with the same semantics as the converter (`model_type`
 always follows the text model; every other key only fills a missing top-level
@@ -502,14 +502,16 @@ std_perm_gguf's kq path for the q8 law. Q8_0 needs no arithmetic at all (its
 per-32-block fp16 d IS the group scale — remap into the bf16 scale plane
 with RNE and apply the supertile permutation); Q6_K/Q4_K need
 dequant-row → per-32-group requant of int8 code + bf16 scale, matching
-`bf16_rne` semantics used elsewhere in this file. Until then, hybrid
-GGUF-direct needs a converted container.
+`bf16_rne` semantics used elsewhere in this file. The head requant is our
+open item on the hybrid family's GGUF path; while it is open, the packer
+refuses and a hybrid GGUF needs a q4nx-build-converted container.
 
 ## Still open (Phase-MoE / later)
 
 - The raw-GGUF q8 head requant above (Q8_0 remap is mechanical; Q6_K/Q4_K
-  dequant+requant to int8/bf16 groups) — until it lands, hybrid GGUF-direct
-  refuses with the type name and needs a converted container.
+  dequant+requant to int8/bf16 groups) — the Q8_0 case makes every
+  whole-file q8 GGUF decodable the day it is written, so it is the next
+  hybrid-GGUF feature.
 - qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
   and lm_head law-combos where the family ships them, plus the
   expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors) and the
