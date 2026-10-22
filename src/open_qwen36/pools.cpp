@@ -568,7 +568,11 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const size_t nb = op.in_dim / 32;                        // k blocks per row
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
-        const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
+        // The tensor's rows: the file holds the whole projection, and the plan
+        // may read a piece of it (the qwen35 family's gated q is two halves of
+        // one tensor, the second op's chunk0 pointing at the second half).
+        const uint64_t rows = t.dims.size() > 1 ? t.dims[1] : (t.dims.empty() ? 0 : t.dims[0]);
+        const uint64_t out_dim = op.chunk0 ? rows : (op.nch / (op.in_dim / 256) * 32);
         if (!kq && n < static_cast<size_t>(out_dim) * nb * blk)
             fail(name + " is " + std::to_string(n) + " B, the plan needs " +
                  std::to_string(static_cast<uint64_t>(out_dim) * nb * blk));
@@ -578,11 +582,14 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         std::vector<float> rd(kq ? op.in_dim : 0);
         for (size_t c = 0; c < op.nch; ++c) {
             uint8_t* d = dst + op.dst + c * ch;
-            const size_t row0 = 32 * (perm[c] / ncol);           // rows
-            const size_t blk0 = (perm[c] % ncol) * 8;            // k blocks (32 values each)
+            // the file's chunk this pool chunk reads: the op's range (chunk0)
+            // and the permutation inside it
+            const size_t fc = op.chunk0 + perm[c];
+            const size_t row0 = 32 * (fc / ncol);                 // rows
+            const size_t blk0 = (fc % ncol) * 8;                  // k blocks (32 values each)
             for (size_t r = 0; r < 32; ++r) {
                 const uint64_t row = row0 + r;
-                if (row >= out_dim) break;                       // padded rows: zeroed scales/codes
+                if (row >= rows) break;                           // padded rows: zeroed scales/codes
                 const uint8_t* srow = src + row * nb * blk;
                 const uint8_t rb = static_cast<uint8_t>(r / 16), rl = static_cast<uint8_t>(r % 16);
                 if (kq) g.embed_row(name, row, op.in_dim, rd.data());   // exact f32 row, once
