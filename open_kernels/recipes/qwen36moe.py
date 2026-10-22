@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, replace, field
+from dataclasses import dataclass, field
 
+from . import gguf as GGUF
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from .attnknobs import knobs as attn_knobs, probe_env as _attn_probe_env
 from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
@@ -96,6 +97,21 @@ def q8_chunk_bytes(quant: str) -> int:
     if quant == "q8_0_f32":
         return Q8_CHUNK_F32
     raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
+
+
+def pool_chunk(spec: ModelSpec) -> int:
+    """The q4 pool chunk bytes this spec's pool uses.
+
+    The pool's q4 roles carry the scale layout of their own format: the q4nx
+    container's bf16 scales (5120 B a chunk) or the GGUF-direct f32 scales
+    (6144 B). The manifest states it, and the engine lays the pool out by it --
+    so a GGUF-direct twin must state the f32 chunk, not the bf16 one.
+    """
+    for role in ("attn", "ffn", "linear", "linear_out", "experts", "shared"):
+        q = spec.quant_of(role)
+        if q != "q8":
+            return chunk_bytes(q)
+    return CHUNK
 
 
 def q4_bytes(rows: int, cols: int, quant: str = "q4_1") -> int:
@@ -1017,7 +1033,7 @@ def pack_plan(spec: ModelSpec) -> dict:
         {"op": "std_perm", "tensor": pre + "mlp.share_down_exps_proj.weight", "dst": L.POOL_SHARE_DOWN,
          "nch": q4_chunks(hid, ff), "in_dim": ff},
     ]
-    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK, "layer_types": {},
+    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": pool_chunk(spec), "layer_types": {},
                   "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
                               "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight", "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]},
                   "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
@@ -1183,6 +1199,12 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
     `layer_types`, since the op indices the weight buffers name are its own. `q8_split` builds an
     all-q8 route as the exact q4_1 split, which the bf16 route carries as `variants.lean` (OPEN-PREFILL-MODE)."""
     dense = ffn == "dense"
+    if spec.quant == "q4_1_f32":
+        # The GGUF-direct twin's pool is the f32-scale one (6144 B a chunk); the
+        # block-prefill GEMM reads the bf16 chunk law by a hardcoded constant,
+        # so a f32-scale set must not advertise the route -- the engine then
+        # prefills through step() (decode-as-prefill), which is exact.
+        return None
     if not dense and spec.quant_of("shared") == "q8":
         return None
     L, T = layout(spec, ffn=ffn), GEMM_T
@@ -1465,15 +1487,13 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         for name, types in r.get("variants", {}).items():
             for lt, gb in types.items():
                 out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
-    if spec.quant == "q4_1":
+    sec = GGUF.section(spec, max_ctx, programs)
+    if sec:
         # The GGUF-direct twin: the same layer designs against the f32-scale pool
         # layout (the q4_1 codes with f32 block scales). The engine swaps this whole
         # section in when the model ships a model.gguf, and the f32-scale kernel sets
         # are the *_f32 builds the export makes.
-        f32 = programs(replace(spec, quant="q4_1_f32"), max_ctx)
-        out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
-                       "layer_types": f32["layer_types"], "tail": f32["tail"],
-                       "globals": f32["globals"]}
+        out["gguf"] = sec
     return out
 
 
@@ -1491,7 +1511,7 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L, C = R.layout, R.common
     return {
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
-        "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
+        "chunk_bytes": pool_chunk(spec), "pool_bytes": L.POOL_BYTES,
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
         "rope_inv_freq": spec.rope_inv_freq(),
@@ -1534,12 +1554,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
         # layout (the q4_1 codes with f32 block scales). The env says which variant
         # to build (designs/layer_x/layout.py reads it); the q4_1 builds above are
         # untouched, so a shipped model keeps the kernels it has.
-        for name, b0 in list(b.items()):
-            if name in ("ln", "lm_head_q8"):
-                continue
-            f32 = {**b0, "build_dir": b0["build_dir"] + "_f32",
-                   "env": {**b0.get("env", {}), "GEMV_SCALES_F32": "1"}}
-            b[name + "_f32"] = f32
+        b.update(GGUF.twin_builds(b, skip=("ln", "lm_head_q8")))
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

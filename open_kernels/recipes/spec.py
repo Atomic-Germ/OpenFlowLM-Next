@@ -269,6 +269,35 @@ class ModelSpec:
         d.pop("extra", None)
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
+    # The spec fields that do NOT change the compiled kernels: the depth (the
+    # manifest drives the layer loop; the kernel is the same for any depth),
+    # the layer sequence (WHICH designs a model needs is what matters, not how
+    # many of each it stacks), the tokenizer's id count (the head is built for
+    # `vocab` rows; the real count only masks the logits at runtime) and the
+    # informational extras.
+    _KERNEL_INDEPENDENT = ("num_layers", "real_vocab", "extra", "layer_types")
+
+    def kernel_hash(self) -> str:
+        """The hash of the geometry the KERNELS depend on.
+
+        Two specs with the same kernel hash need the same compiled xclbins. The
+        depth is the manifest's business (the loop it drives), not the
+        kernels': so a fine-tune of a model -- a different depth, the same
+        width -- runs on the base model's kernels, and this hash is how it
+        finds them. The full spec_hash stays the manifest's identity (it names
+        the layer loop), so a set of kernels is still matched to a model
+        exactly; this is the coarser key that says "these kernels serve you".
+        """
+        d = self.to_dict()
+        for k in self._KERNEL_INDEPENDENT:
+            d.pop(k, None)
+        d["layer_types"] = sorted(set(self.layer_types))   # which designs, not how many
+        # The eps rides in the norm design's env as f"{eps:g}", so the two
+        # spellings of it ("1e-06" and the f32-rounded "9.999999974752427e-07")
+        # compile the same kernel -- the hash must not tell them apart.
+        d["norm_eps"] = float(f"{self.norm_eps:g}")
+        return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
     # ---- sources
     @classmethod
     def from_hf_config(cls, cfg: Mapping[str, Any], real_vocab: int | None = None) -> "ModelSpec":
