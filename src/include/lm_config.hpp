@@ -71,6 +71,7 @@ class LM_Config{
         void from_pretrained(std::string model_name){
             this->_resolve_paths(model_name);
             this->_load_json();
+            this->_normalize_text_config();
             this->_normalize_multi_modal();
             JSON_GET(this->oflm_version, this->_json_config, "oflm_version", "0.0.0", std::string);
         }
@@ -141,6 +142,40 @@ class LM_Config{
                 this->_json_config["processor_config"] = nlohmann::json::parse(json_str);
             } catch (const nlohmann::json::exception& e){
                 std::cerr << "Failed to parse " << path << ": " << e.what() << std::endl;
+            }
+        }
+
+        /// \brief lift a nested text_config into the canonical top-level key set
+        /// \note The two origins of an HF-style wrapper config: converted models
+        ///       are flattened at conversion time (inject_oflm_keys in
+        ///       utilities/q4nx-build), but a pulled GGUF ships the vendor's raw
+        ///       config -- a Qwen3.5 GGUF carries vocab_size ONLY inside
+        ///       text_config. Without this lift AutoModel::set_sampler builds
+        ///       the sampler over zero features: the copy loop in sample() is a
+        ///       no-op and sampler_topk_apply() then partial_sorts a range whose
+        ///       middle (begin + top_k) sits past the end of the empty pairs
+        ///       vector -- undefined behaviour, observed as a segfault right
+        ///       after the last prefill layer (ornith-gguf:9b-i1).
+        ///       Same semantics as the converter: model_type always follows the
+        ///       text model, every other key only fills a hole at the top level,
+        ///       so flat shipped configs (no text_config) are untouched and the
+        ///       nested object stays in place for its direct readers.
+        void _normalize_text_config(){
+            if (!(this->_json_config.contains("text_config")
+                  && this->_json_config["text_config"].is_object())){
+                return;
+            }
+            const nlohmann::json& text = this->_json_config["text_config"];
+            for (auto it = text.begin(); it != text.end(); ++it){
+                if (it.value().is_null()){
+                    continue;
+                }
+                const bool have = this->_json_config.contains(it.key())
+                                  && !this->_json_config[it.key()].is_null()
+                                  && this->_json_config[it.key()] != "";
+                if (!have || it.key() == "model_type"){
+                    this->_json_config[it.key()] = it.value();
+                }
             }
         }
 

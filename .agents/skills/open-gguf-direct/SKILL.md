@@ -384,19 +384,80 @@ and expect the projection contexts to carry `_f32`** — any set naming `lx/` or
   region with a "junk xn" at layer end; the first norm's xn is invisible in
   end-of-run act dumps.
 
-### The lx_f32 wedge (still open, the NEXT bug)
+### The lx_f32 wedge (FIXED 2026-10-22 — the mixed-law build)
+
+The genuine `lx_f32` build deadlocked at its first dispatch (ERT state 8
+timeout) while the byte-adjacent q4_1 twin ran fine. Root cause: **the f32
+build was mixed-law**. `designs/layer_x/layout.py` loaded the recipe
+(`R = current_recipe()`) BEFORE the `GEMV_SCALES_F32` flip of
+`SPEC.quant -> q4_1_f32`, so the layout constants (`_L`, `S_HEAD_BYTES` …)
+were f32-law but every other recipe-derived law stayed q4_1: `xcommon`'s
+`C = R.common` kept `CALL_BYTES/TILE = 5120`, so the `@w0..@w7` object fifos
+compiled as `memref<5120xui8>` while the DeltaNet state piece is f32-law
+67,584 B (= 11×6144, but 13.2×5120 — not an integral multiple). A piece that
+is not a multiple of its object fifo's element can never complete its shim
+acquire counts → deterministic deadlock at the first state piece. Forensics
+that nailed it: `aiebu-dump -d insts.bin` on a fresh build — every shim
+BLOCKWRITE `len` must be `k ×` its fifo element; per law
+`67,584 / 6,144 = 11` ✓ vs `67,584 / 5,120 = 13.2` ✗.
+
+- **Fix** (`designs/layer_x/layout.py`, one site): after the flip,
+  re-derive the recipe — `SPEC = replace(SPEC, quant="q4_1_f32"); R =
+  for_spec(SPEC).recipe(SPEC)` — exactly what `designs/dense/dx.py` (the
+  working f32-law dense tail) already did; layer_x just never picked the
+  pattern up. All recipe consumers (`C = R.common` in xcommon, `D =
+  R.linear`/`R.attn` in lx/ax/ux) then agree with the layout.
+- **Now verified on the NPU at every size**, all ten f32 twins
+  (`lx_f32` + `ax_f32` of 0.8B/2B/4B/9B/27B) complete (probe state 4) and the
+  fresh q4_1 builds are byte-identical (`cmp` ✓) to the shipped streams — the
+  flip is inert without the env, so nothing else moved. The generated kernel
+  TUs are law-stable (`PER_CALL = 2` is a module constant and the baked band
+  quotients survive the ×6/5 chunk scaling), so the exporter's single
+  law-blind `generate()` stays correct.
+- `aiebu-dump`-how-to: 8-word shim descriptors `[len, addr_lo, 0, 0, ctrl,
+  colbase, 0, colbase]`; per-column BD tables at `0x1d000 + bd*0x20`, column
+  prefixes step 0x2000000. `txn2mlir.py` core-dumps on these streams; use
+  `aiebu-dump -d` + the build's `final.prj/aie.mlir` instead.
+- `utilities/lx-probe.cpp` gained a **generic N-buffer mode**: `lx-probe -g
+  <xclbin> <insts.bin> <out_path> <wait_s> <in_bytes...>` — all-zeros inputs,
+  the last buffer is dumped out on completion (`paths` empty ⇒ `n_in = 0`; an
+  earlier version read past the vector and segfaulted). The ax stream's run
+  arguments are `pool, xres, consts, KV, act, ptab` (manifest
+  `full_attention.program[0].args` — passing KV/act/ptab in any other order
+  segfaults the probe on a 24 MB-writing BD aimed at a small BO).
+- End-to-end: prefill on `ornith-gguf:9b-i1` ran with `OFLM_OPEN_LAYER_NAN=1`
+  — all 32 layers `xres nan=0`, decode began, and the engine then segfaulted
+  in the host sampler (`Sampler::sampler_topk_apply`) — fixed separately, see
+  "the sampler zero-vocab crash" below.
+
+### The sampler zero-vocab crash (fixed 2026-10-22)
+
+`oflm run ornith-gguf:9b-i1` segfaulted in `Sampler::sampler_topk_apply`
+after a clean prefill: a Qwen3.5 GGUF pulled straight from HF carries the
+vendor's **nested config** (`text_config` holds the LM hyperparams
+including `vocab_size`; only `hidden_size`/`eos_token_id` sit at the top).
+`LM_Config` reads top-level only, so `AutoModel::set_sampler` built the
+sampler over **zero features** — the `sample()` copy loop no-ops and
+`sampler_topk_apply(top_k=20)` then calls
+`std::partial_sort(begin, begin+20, begin)` on an empty vector (middle
+beyond last) → UB → segfault on the first decode token. The q4nx converter
+(`inject_oflm_keys` in utilities/q4nx-build) flattens `text_config` at
+conversion time, but a pulled GGUF ships the vendor's raw config.
+Fix: `LM_Config::from_pretrained` now lifts `text_config` into the canonical
+top-level key set with the same semantics as the converter (`model_type`
+always follows the text model; every other key only fills a missing top-level
+hole; flat configs without `text_config` are untouched).
+
+### The lx_f32 wedge (historical, superseded above)
 
 With the manifest fixed, the real f32 twins actually run — and the **genuine
-`lx_f32` build deadlocks at its first dispatch** (ERT state 8 timeout), while
-the byte-adjacent q4_1 twin runs fine. Reproduced WITHOUT the engine:
+`lx_f32` build deadlocked at its first dispatch** (ERT state 8 timeout), while
+the byte-adjacent q4_1 twin ran fine. Reproduced WITHOUT the engine:
 `utilities/lx-probe.cpp` dispatches one context with the engine's exact call
 sequence against file fixtures (the dumped `/tmp/opencode/f32_pool0.bin`,
 `f32_consts0.bin`; missing or `-` files start as zeros — the wedge does not
-need valid data). q4_1 completes in ~150 ms; lx_f32 times out. The defect is
-in the f32-law instruction stream itself (hypotheses: shim/memtile BD budget
-at law-scaled piece sizes — f32 chunks are 6144 B vs bf16 5120; compare with
-the `dx_f32` dense stream that DOES complete at the same law). Not staleness:
-a warm rebuild is `cmp`-identical.
+need valid data). q4_1 completes in ~150 ms; lx_f32 timed out. Not staleness:
+a warm rebuild was `cmp`-identical. Root cause and fix above.
 
 - `utilities/lx-probe.cpp`: usage + fixture sizes in its header comment
   (manifest `gguf.layer_types.linear_attention.buffers` gives consts/state
@@ -420,13 +481,14 @@ a warm rebuild is `cmp`-identical.
 
 ## Still open (Phase-MoE / later)
 
-- **the lx_f32 / ax_f32 stream wedge above** — the f32-law lx stream deadlocks
-  on the NPU while its q4_1 twin (and the dense recipe's dx_f32) completes;
-  bisect inside the instruction stream (probe: `utilities/lx-probe.cpp`).
-- qwen36moe recipe: f32 twin builds (lx/ax/dx/lm_head_q8 *_f32), the
-  expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors), the
-  singular/plural `model.layer(s)` name mismatch, q8 f32 numerics bug above.
+- qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
+  and lm_head law-combos where the family ships them, plus the
+  expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors) and the
+  singular/plural `model.layer(s)` name mismatch.
+- The ornith-gguf decode answer quality still to be confirmed to completion
+  (prefill + decode step census is clean; generation runs, the sampler crash
+  is fixed) — a full coherent-answer screenshot is the last e2e box to tick.
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
-- End-to-end `flm serve` with a real GGUF (needs a dense-family GGUF matching
-  a shipped spec's vocab exactly; none in the HF cache qualifies today —
-  Peach is llama-arch with vocab 64000 vs the llama31-8b spec's 128256).
+- End-to-end `flm serve` with a dense-family GGUF (vocab must match a shipped
+  spec exactly; none in the HF cache qualifies today — Peach is llama-arch
+  with vocab 64000 vs the llama31-8b spec's 128256).

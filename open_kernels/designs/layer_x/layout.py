@@ -44,6 +44,14 @@ SPEC = R.spec
 # and the env says which (designs/dense/dx.py does the same for the dense tail).
 if int(os.environ.get("GEMV_SCALES_F32", 0)) and SPEC.quant != "q4_1_f32":
     SPEC = replace(SPEC, quant="q4_1_f32")
+    # The recipe follows the flip: every recipe-derived law the designs read
+    # must agree with the layout's, or the compiled object fifos (the 5120-B
+    # w elements of the q4_1 chunk) no longer divide the f32 law's piece
+    # lengths -- the state piece at f32 is 67,584 B = 11 x 6144 but only
+    # 13.2 x 5120, so its shim task never completes against a 5120-B object
+    # and the stream hangs at the first DeltaNet piece. designs/dense/dx.py
+    # re-derives its recipe after the same flip.
+    R = for_spec(SPEC).recipe(SPEC)
 _L = for_spec(SPEC).layout(SPEC)
 
 C_LNW, C_SIDE, C_NW, C_POSTLN, C_RW, C_SGW, C_WOUT = (_L.C_LNW, _L.C_SIDE, _L.C_NW, _L.C_POSTLN, _L.C_RW, _L.C_SGW,
