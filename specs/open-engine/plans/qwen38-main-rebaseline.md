@@ -1,6 +1,26 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — causal QKV/Z prefix replay, 2026-10-22
+## Latest checkpoint — main integration, 2026-10-22
+
+Integrated main at `cb03fad`. Resolved the attention-route diagnostic to retain
+paired-KV host fallback and the dense single-token route message. Preserved the
+manifest route tests and their independently parsed move-only instances, with
+all new manifest coverage retained. FP32 boundaries, paired-KV storage,
+compensated DeltaNet and consistent Q4 activation sums remain intact.
+
+Validation: **1651 passed / 47 skipped** in the open-engine Python suite;
+converter **136 passed / 42 subtests passed** in a separate CPU environment;
+standalone CLI builds, CTest **4/4**, host prefill fixture **PASS**, K2 chat
+**1/1** and greedy sampler **1/1**. No model-resident NPU run or kernel rebuild
+was performed. Evidence: `Models/qwen38-27b/main-merge-cb03fad/`.
+
+Shared host/harness and recipe sources changed. Retained binary/capture evidence
+still describes its original revision; do not rewrite those hashes or treat it
+as validation of this merge. Before further hardware replay, verify or rebuild
+the affected artifacts with fresh provenance. Full prefill accuracy remains
+open; the prior L53/P17 residual failure is not resolved by this merge.
+
+## Causal QKV/Z prefix replay — 2026-10-22
 
 Composed paired-weight entry projections for complete 20-token prefixes at
 L34, L37 and L53 with production host DeltaNet and original NPU out projection.

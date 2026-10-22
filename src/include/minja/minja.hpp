@@ -1319,6 +1319,27 @@ static bool in(const Value & value, const Value & container) {
         container.to_str().find(value.to_str()) != std::string::npos));
 };                                    
 
+// Jinja's `is sameas`: same type and value, so `1 is sameas true` is false; a mapping or sequence never is.
+class SameAsExpr : public Expression {
+    std::shared_ptr<Expression> left;
+    std::shared_ptr<Expression> right;
+    bool negated;
+public:
+    SameAsExpr(const Location & loc, std::shared_ptr<Expression> && l, std::shared_ptr<Expression> && r, bool n)
+        : Expression(loc), left(std::move(l)), right(std::move(r)), negated(n) {}
+    Value do_evaluate(const std::shared_ptr<Context> & context) const override {
+        if (!left || !right) throw std::runtime_error("SameAsExpr: missing operand");
+        auto l = left->evaluate(context);
+        auto r = right->evaluate(context);
+        const bool same = (l.is_null() && r.is_null()) ||
+                          (l.is_boolean() && r.is_boolean() && l.to_bool() == r.to_bool()) ||
+                          (l.is_number_integer() && r.is_number_integer() && l == r) ||
+                          (l.is_number_float() && r.is_number_float() && l == r) ||
+                          (l.is_string() && r.is_string() && l == r);
+        return Value(negated ? !same : same);
+    }
+};
+
 class BinaryOpExpr : public Expression {
 public:
     enum class Op { StrConcat, Add, Sub, Mul, MulMul, Div, DivDiv, Mod, Eq, Ne, Lt, Gt, Le, Ge, And, Or, In, NotIn, Is, IsNot };
@@ -1560,10 +1581,17 @@ public:
             auto chars = vargs.args.empty() ? "" : vargs.args[0].get<std::string>();
             return Value(strip(str, chars, /* left= */ false, /* right= */ true));
           } else if (method->get_name() == "split") {
-            vargs.expectArgs("split method", {1, 1}, {0, 0});
+            vargs.expectArgs("split method", {0, 1}, {0, 0});
+            Value result = Value::array();
+            if (vargs.args.empty() || vargs.args[0].is_null()) {
+              // Python's sep=None: split on whitespace runs, drop empty parts.
+              std::istringstream words(str);
+              std::string word;
+              while (words >> word) result.push_back(Value(word));
+              return result;
+            }
             auto sep = vargs.args[0].get<std::string>();
             auto parts = split(str, sep);
-            Value result = Value::array();
             for (const auto& part : parts) {
               result.push_back(Value(part));
             }
@@ -1985,6 +2013,11 @@ private:
 
               auto identifier = parseIdentifier();
               if (!identifier) throw std::runtime_error("Expected identifier after 'is' keyword");
+              if (identifier->get_name() == "sameas") {
+                auto other = parseStringConcat();
+                if (!other) throw std::runtime_error("Expected a value after 'is sameas'");
+                return std::make_shared<SameAsExpr>(left->location, std::move(left), std::move(other), negated);
+              }
 
               return std::make_shared<BinaryOpExpr>(
                   left->location,
@@ -2768,6 +2801,20 @@ inline std::shared_ptr<Context> Context::builtins() {
     auto & text = args.at("text");
     return text.is_null() ? text : Value(strip(text.get<std::string>()));
   }));
+  globals.set("replace", simple_function("replace", { "s", "old", "new", "count" }, [](const std::shared_ptr<Context> &, Value & args) {
+    auto str = args.at("s").to_str();
+    auto before = args.at("old").to_str();
+    auto after = args.at("new").to_str();
+    auto count = args.contains("count") && !args.at("count").is_null() ? args.at("count").get<int64_t>() : -1;
+    if (before.empty()) return Value(str);
+    size_t pos = 0;
+    while (count != 0 && (pos = str.find(before, pos)) != std::string::npos) {
+      str.replace(pos, before.length(), after);
+      pos += after.length();
+      if (count > 0) --count;
+    }
+    return Value(str);
+  }));
   auto char_transform_function = [](const std::string & name, const std::function<char(char)> & fn) {
     return simple_function(name, { "text" }, [=](const std::shared_ptr<Context> &, Value & args) {
       auto text = args.at("text");
@@ -2858,7 +2905,29 @@ inline std::shared_ptr<Context> Context::builtins() {
     }
     return ns;
   }));
-  auto equalto = simple_function("equalto", { "expected", "actual" }, [](const std::shared_ptr<Context> &, Value & args) -> Value {
+  globals.set("dict", Value::callable([=](const std::shared_ptr<Context> &, ArgumentsValue & args) {
+    auto d = Value::object();
+    args.expectArgs("dict", {0, 1}, {0, (std::numeric_limits<size_t>::max)()});
+    if (!args.args.empty()) {
+      auto & src = args.args[0];
+      if (src.is_object()) {
+        for (auto & key : src.keys()) d.set(key, src.at(key));
+      } else if (src.is_array()) {
+        for (size_t i = 0, n = src.size(); i < n; i++) {
+          auto & pair = src.at(i);
+          if (!pair.is_array() || pair.size() != 2) throw std::runtime_error("dict() expects (key, value) pairs, got: " + pair.dump());
+          d.set(pair.at((size_t) 0), pair.at((size_t) 1));
+        }
+      } else if (!src.is_null()) {
+        throw std::runtime_error("dict() expects a mapping or (key, value) pairs, got: " + src.dump());
+      }
+    }
+    for (auto & [name, value] : args.kwargs) {
+      d.set(name, value);
+    }
+    return d;
+  }));
+  auto equalto =simple_function("equalto", { "expected", "actual" }, [](const std::shared_ptr<Context> &, Value & args) -> Value {
       return args.at("actual") == args.at("expected");
   });
   globals.set("equalto", equalto);
@@ -3014,10 +3083,12 @@ inline std::shared_ptr<Context> Context::builtins() {
         test_args.kwargs = args.kwargs;
       }
 
+      // Jinja reads a digit attribute as an index, so rejectattr('0', ...) works on (key, value) pairs.
+      const bool index_attr = !attr_name.empty() && attr_name.find_first_not_of("0123456789") == std::string::npos;
       auto res = Value::array();
       for (size_t i = 0, n = items.size(); i < n; i++) {
         auto & item = items.at(i);
-        auto attr = item.get(attr_name);
+        auto attr = index_attr && item.is_array() ? item.get(Value((int64_t) std::stoll(attr_name))) : item.get(attr_name);
         if (has_test) {
           test_args.args[0] = attr;
           if (test_fn.call(context, test_args).to_bool() == (is_select ? true : false)) {
