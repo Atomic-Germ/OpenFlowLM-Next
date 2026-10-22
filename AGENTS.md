@@ -27,6 +27,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-out-replay</name>
+    <description>Build paired-weight output replay with historical fixture provenance, fresh controls and independent residual gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-out-replay/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-entry-replay</name>
     <description>Build and validate isolated paired-weight QKV/Z entry replay with exact native controls and unchanged per-head gates.</description>
     <location>.agents/skills/open-qwen38-prefill-entry-replay/SKILL.md</location>

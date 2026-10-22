@@ -1,6 +1,41 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — main integration, 2026-10-22
+## Latest checkpoint — paired-weight output replay, 2026-10-22
+
+Built private N5120/K6144/T256 control/low output kernels and a fresh harness.
+Validated retained prefixes as historical inputs using **2075 files / 25 evidence
+records**; 23 changed tracked sources match the fixture revision in Git and
+current HEAD separately. Artifact and historical build hashes were preserved.
+
+All **72/72 NPU dispatches** complete. Individual production products match
+retained outputs bytewise; new-control products match production. Inactive
+columns are zero and candidate placements are byte-identical. All **240/240
+projection checks** pass and strictly improve maxrel/rel_fro. Worst candidate
+maxrel/rel_fro: **1.1842201e-5 / 4.8705972e-6**, versus worst control maxrel
+**0.0022730411**. Independent pre-FFN residual results are:
+
+| Row | Native | Entry correction only | Out correction only | Entry + out correction |
+|---|---:|---:|---:|---:|
+| L34/P17 | 0.0007177295 | 0.0006256207 | 0.0007008094 | 0.0006087006 |
+| L37/P7 | 0.0010862168 | 0.0008810181 | 0.0010534831 | 0.0008481152 |
+| L53/P17 | 0.0075342533 | 0.0074347548 | 0.0067071677 | 0.0066072119 |
+
+L53 still fails the unchanged **0.005** bound. Correcting local projections
+reduces error but leaves inherited drift. Native and entry-only values come
+from the retained prefix measurement; both out-corrected variants use fresh
+NPU dispatches on those gated prefixes. This does not establish corrected
+cross-layer execution. Retained full residual acceptance remains **3974/4032
+FAIL**. Next evaluate combined entry/out/up-gate precision in a private CLI
+with a fresh post-merge control and independent full-depth references.
+
+All 32 core budgets pass: text **4784/5568 bytes**, L1 buffer end **61448 bytes**,
+801 compiler dependencies per kernel build; fresh harness has 326 dependencies.
+**14 new RED-to-GREEN tests; 1665 passed / 47 skipped** overall. No full-model
+residency or production arithmetic change; logical buffers **26.75 MiB** per
+call excluding runtime overhead. Reproduction, provenance rules and hashes:
+[output replay runbook](../../../utilities/prefill-out-replay/README.md).
+
+## Main integration — 2026-10-22
 
 Integrated main at `cb03fad`. Resolved the attention-route diagnostic to retain
 paired-KV host fallback and the dense single-token route message. Preserved the
