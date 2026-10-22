@@ -1,5 +1,37 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — combined prefill CLI preparation, 2026-10-23
+
+Built three private CLIs from the merged source: paired-input control,
+weighted-FFN control and combined linear QKV/Z/output + FFN up/gate candidate.
+The original single-dispatch body and both control wrappers are preserved.
+The candidate selects corrections by manifest role, arguments and geometry:
+full-attention output has the same GEMM shape as linear output but retains its
+existing arithmetic. Stage-major, split weights and incompatible roles fail.
+The low-weight contexts reuse three verified kernel builds; no new XCLBIN or
+production arithmetic/ABI change is introduced.
+
+All three native builds pass **CTest 4/4 each**, with **589 / 590 / 591** compiler
+dependencies pinned. Six new RED-to-GREEN tests include a compiled policy check
+against the current 27B manifest, rejected roles/geometry, exact control
+wrappers, preserved dispatch, kernel preflight and incomplete preparation.
+Full host suite: **1672 passed / 47 skipped**.
+
+Preparation verifies both historical control builds and capture inventories,
+including **192 weighted-control residual files**. It copies **149 independent
+reference arrays plus IDs and original metadata** unchanged, records **652
+input hashes**, and confirms the retained export equals the complete current
+model-derived manifest. Historical source differences are recorded separately
+from current sources; artifact hashes are not relaxed. Evidence and all three
+CLI hashes: `Models/qwen38-27b/prefill-combined-cli/`.
+
+Preparation only, as requested: no model residency, fresh native captures or
+accuracy result. `native_validated=false` and `model_acceptance=false` remain
+explicit. Next require fresh paired/weighted baseline identity, combined
+full-depth residual/logit gates and repeated-request/reset support. The existing
+tracer accepts one request, so repeated-request/reset instrumentation remains
+unfinished. Prior full-depth and long-prefix failures are not closed by builds.
+
 ## Main integration check — 2026-10-23
 
 Merged main `1407484` while preserving the Qwen3.8 precision kernels, paired
