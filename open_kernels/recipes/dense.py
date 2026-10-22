@@ -37,8 +37,6 @@ the 27B these rules give the sizes ax.py uses (4096 / 4096 / 1024).
 from __future__ import annotations
 
 import os
-
-import os
 from dataclasses import dataclass, replace
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require

@@ -494,9 +494,17 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     q4k.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("n", 0, [8])]))
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_K")
     assert ok, note
-    # Same bytes, wrong claim: refuse rather than pack the wrong layout.
+    # Same bytes, wrong claim: refuse rather than pack the wrong layout. The
+    # name is a HINT, not a contract (llama.cpp mixes types by importance), so
+    # what must hold is that no tensor is of the claimed family.
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_0")
-    assert not ok and "claims Q4_0" in note
+    assert not ok and "Q4_0" in note and "refusing" in note
+    # A file that MIXES types (a Q4_1 body with a Q6_K output) is fine: the
+    # claimed family is present.
+    mixed = tmp_path / "mix.gguf"
+    mixed.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("o", 14, [8, 8])]))
+    ok, note = oflm_add.verify_gguf_choice(str(mixed), "mix.gguf", "Q4_K")
+    assert ok, note
     # A Q4_0_4_4 tensor (type 31) is refused even when the name said Q4_0.
     trap = tmp_path / "t.gguf"
     trap.write_bytes(_gguf_bytes(_llama_kv(), [("w", 31, [8, 8])]))
