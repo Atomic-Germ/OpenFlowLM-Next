@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-combined-cli</name>
+    <description>Build paired-input, weighted-FFN and combined linear QKV/Z/out CLIs with exact role guards and pinned preparation.</description>
+    <location>.agents/skills/open-qwen38-prefill-combined-cli/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-out-replay</name>
     <description>Build paired-weight output replay with historical fixture provenance, fresh controls and independent residual gates.</description>
     <location>.agents/skills/open-qwen38-prefill-out-replay/SKILL.md</location>
