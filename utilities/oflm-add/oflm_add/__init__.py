@@ -1932,14 +1932,17 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
                        "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
-    # The output projection is routinely a coarser quant than the body
-    # (Q8_0 over Q4_*); anything else must be the claimed family.
+    # llama.cpp's quantizers MIX types by importance: the body at the named quant,
+    # the output projection and the attention V at a finer one (a Q4_1 file holds
+    # Q6_K beside its Q4_1; an IQ4_XS file holds Q5_K). So the name is a hint, not
+    # a contract: what must hold is that SOME tensor is of the claimed family --
+    # otherwise the name is a lie and the file is not what was asked for.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
-    if others:
-        return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
-                       f"{claimed_family}; refusing rather than packing the wrong layout")
+    fams = {gguf_quant_family(q) for q in quants}
+    if claimed_family and claimed_family not in fams:
+        return False, (f"the file's tensors are {'/'.join(sorted(quants))} -- none of them is the "
+                       f"{claimed_family} its name claims; refusing rather than packing the wrong layout")
     arch = kv.get("general.architecture", "?")
     return True, f"{len(tensors)} tensors ({arch}), quant {sorted(quants)}"
 
