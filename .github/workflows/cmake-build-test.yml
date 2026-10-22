@@ -45,18 +45,20 @@ jobs:
           git diff --exit-code src/config/settings.json \
                          src/config/settings_registry_generated.hpp
 
-      # The families that can load a GGUF are DERIVED from the recipes (a recipe
-      # that emits the manifest's f32-scale twin), and oflm-add's list is
-      # generated from that. A family that gains the section belongs in the
-      # list, and the list is what oflm-add installs from. It belongs in THIS
-      # job: the derivation builds each family's manifest, so it needs numpy,
-      # and it must fail in seconds rather than after the whole build.
-      - name: Verify the GGUF-capable families list is up to date
+      # Whether a GGUF can be used is derived from the recipes, not kept in a
+      # list: the manifest's "gguf" section may only name kernels the export
+      # builds, and the section and the builds are one recipe's decision. The
+      # check is a recipe-level test over every shipped spec's manifest. It
+      # belongs in THIS job: the derivation builds each family's manifest, so
+      # it needs numpy, and it must fail in seconds rather than after the
+      # whole build.
+      - name: Verify the GGUF-direct twins agree with the builds
         run: |
           python3 -m venv /tmp/gguf-check
           /tmp/gguf-check/bin/pip install --quiet --upgrade pip
-          /tmp/gguf-check/bin/pip install --quiet numpy
-          /tmp/gguf-check/bin/python utilities/generate-gguf-families.py --check
+          /tmp/gguf-check/bin/pip install --quiet numpy pytest
+          /tmp/gguf-check/bin/python -m pytest \
+            specs/open-engine/tests/test_gguf_twin.py -q
 
   config-build-test:
     runs-on: ubuntu-latest
@@ -182,12 +184,6 @@ jobs:
           /tmp/gguf-tools/bin/python -m pytest \
             utilities/gguf-utils/gguf-inspect/tests/ -v
 
-      # The families that can load a GGUF are DERIVED from the recipes (a recipe
-      # that emits the manifest's f32-scale twin), and oflm-add's list is
-      # generated from that. A family that gains the section belongs in the
-      # list, and the list is what oflm-add installs from. It runs here, in the
-      # venv that has numpy, because the derivation builds each family's
-      # manifest.
-      - name: Verify the GGUF-capable families list is up to date
-        run: |
-          /tmp/gguf-tools/bin/python utilities/generate-gguf-families.py --check
+      # The families that can load a GGUF are derived from the recipes (the
+      # manifest's "gguf" section and the f32-scale builds it names), and the
+      # check that keeps them honest runs in the fast job above.
