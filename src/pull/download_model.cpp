@@ -97,7 +97,11 @@ size_t write_data_to_string(void* ptr, size_t size, size_t nmemb, std::string* u
 /// \param ultotal the total upload size
 /// \param ulnow the current upload size
 /// \return the progress
-int progress_callback(void* clientp, double dltotal, double dlnow, double ultotal, double ulnow) {
+// CURLOPT_XFERINFOFUNCTION's callback. The older CURLOPT_PROGRESSFUNCTION
+// took doubles and is deprecated since libcurl 7.32; this one takes
+// curl_off_t, which is what curl actually counts in bytes.
+int progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
+                      curl_off_t ultotal, curl_off_t ulnow) {
     if (dltotal > 0) {
         using Clock = std::chrono::steady_clock;
         static Clock::time_point last_print_time = Clock::now();
@@ -105,12 +109,12 @@ int progress_callback(void* clientp, double dltotal, double dlnow, double ultota
         auto now = Clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print_time);
 
-        double percentage = (dlnow / dltotal) * 100.0;
+        double percentage = (static_cast<double>(dlnow) / static_cast<double>(dltotal)) * 100.0;
 
         if (elapsed.count() >= 1000) {
             utils::enable_ansi_on_windows_once();
 
-            double percentage = (dlnow / dltotal) * 100.0;
+            double percentage = (static_cast<double>(dlnow) / static_cast<double>(dltotal)) * 100.0;
             double mb_now = dlnow / 1024.0 / 1024.0;
             double mb_total = dltotal / 1024.0 / 1024.0;
 
@@ -168,7 +172,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     // Set progress callback if provided
     if (progress_cb) {
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progress_callback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
     }
 
     CURLcode res = curl_easy_perform(curl);
@@ -509,7 +513,7 @@ bool download_file_atomic(const DownloadRequest& request,
         }
         if (progress_cb) {
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-            curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progress_callback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
         }
 
         const CURLcode result = curl_easy_perform(curl);

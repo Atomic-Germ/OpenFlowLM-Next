@@ -1,5 +1,28 @@
 # Qwen3.8-27B validation report
 
+## Main integration check — 2026-10-23
+
+Merged main `1407484` while preserving the Qwen3.8 precision kernels, paired
+KV/state ABI, replay tools and private `--build-root` export option. The exporter
+now combines private workspaces with per-directory locks, source/knob caching,
+per-spec staging and disambiguated default build directories. A regression test
+first reproduced the external-workspace path failure, then passed after the
+cache and lock paths were corrected. It also checks cache hits, source/knob
+invalidation and rebuilding when an artifact is missing.
+
+Regenerated the Qwen3-4B manifest fixture for the attention build directory's
+`_m1024` suffix; its numerical geometry and binary layout are unchanged.
+Validation: **1666 passed / 47 skipped** in the open-engine suite; converter
+**136 passed / 42 subtests passed**; installer **55 passed / 1 skipped**.
+The standalone native CLI builds, native CTest is **4/4**, and the host prefill/
+rollback fixture passes. New settings registry/resolver/store/key-parser tests
+pass **77/77** with assertions enabled; the generated settings registry matches
+the merged source scan. Logs: `Models/qwen38-27b/main-merge-1407484/`.
+
+This is host/build regression validation. No kernel set was rebuilt and no
+full-model NPU or serving run was performed; retained numerical measurements
+below remain tied to their original sources and artifacts.
+
 ## Latest checkpoint — paired-weight output replay, 2026-10-22
 
 Built private N5120/K6144/T256 control/low output kernels and a fresh harness.

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -65,6 +66,100 @@ from recipes.manifest import dumps, manifest  # noqa: E402
 # knobs that must NOT leak in from the caller's shell
 CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
 FILES = ("final.xclbin", "insts.bin")
+
+
+# ————————————————————————————————————————————————————————————————
+# Content-addressed build cache
+# ————————————————————————————————————————————————————————————————
+# 50 build_dir paths are shared between specs: attn_block/build_s256 is wanted
+# by 7 specs, and the last full export ran 340 builds for 130 unique designs.
+# The shared designs (attn_block, gemm_q4_prefill, lm_head_q4, ln) have no
+# gen_kernels.py and do not read OPEN_KERNELS_SPEC, so their output is a
+# function of (design sources, compile-time knobs) alone -- the build_dir name
+# already encodes the spec-dependent parts. Hash those, write the hash next to
+# the output, and the next spec to want the design reuses it instead of
+# rebuilding an identical xclbin.
+#
+# The key covers the design's source files, so a design that DOES generate
+# per-spec sources (dense, layer_x) changes its key when the spec changes and
+# is rebuilt -- which is correct, and is also why Task 30 isolates those
+# sources per spec in the first place.
+
+KEY_FILE = ".build_key"
+
+
+def build_content_key(design: Path, out: Path, env: dict) -> str:
+    """Hash of everything that determines the build's output.
+
+    Covers the design's source files (excluding build outputs and caches) and
+    the compile-time knobs. Two builds with the same key produce the same
+    xclbin, so the second one can reuse the first one's output.
+    """
+    h = hashlib.sha256()
+    h.update(os.path.relpath(out.resolve(), DESIGNS.resolve()).encode())
+    h.update(b"\0")
+    for f in sorted(design.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(design)
+        top = rel.parts[0] if rel.parts else ""
+        if top.startswith("build") or top in ("__pycache__", ".staging", ".locks"):
+            continue
+        if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
+            continue
+        h.update(rel.as_posix().encode())
+        h.update(b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    for k in sorted(env):
+        h.update(f"{k}={env[k]}".encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+# ————————————————————————————————————————————————————————————————
+# Per-design build lock
+# ————————————————————————————————————————————————————————————————
+# 50 build_dir paths are shared between specs (e.g. lm_head_q4/build_151936 is
+# wanted by qwen25-3b, qwen3-4b and qwen3-8b). build_design.py wipes its work
+# dir (final.prj) before compiling, so two specs building the same design at
+# the same time delete each other's objects and fail with "unable to rename
+# temporary ... .o.tmp". The export runs specs in parallel, so the collision is
+# the default, not the exception. One lock per build_dir makes the shared
+# designs serialize while everything else stays parallel.
+
+LOCKS = DESIGNS / ".locks"
+
+
+@contextlib.contextmanager
+def design_lock(out: Path):
+    """Hold an exclusive cross-process lock for one build directory."""
+    LOCKS.mkdir(parents=True, exist_ok=True)
+    # Private --build-root workspaces may be outside designs/. Hash the
+    # canonical path so aliases share a lock and long paths stay valid names.
+    key = hashlib.sha256(str(out.resolve()).encode()).hexdigest()
+    lock_path = LOCKS / f"{key}.lock"
+    fh = open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
 
 
 def sha256(p: Path) -> str:
@@ -158,9 +253,71 @@ def fullest_core(bdir: Path) -> int | None:
         return None
 
 
-def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
-    """Build one kernel set. Worker for the parallel build; returns (name, bdir)."""
-    src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
+def disambiguate_build_dirs(sets: dict) -> dict:
+    """Give every kernel set a build directory of its own.
+
+    Two specs can name the same build_dir for sets whose knobs differ, because
+    a dir name does not always spell every knob out: dense.py's attn_block dir
+    left out the head dim and the column count, and lm_head_q4's left out
+    LMHEAD_K and LMHEAD_CORES. Those specs then built into one directory and
+    one overwrote the other's xclbin, and the copy that followed could pick up
+    the wrong one -- silently, because the build itself succeeded. The knobs
+    decide the kernel, so they decide the directory: append their hash.
+
+    Specs that agree on the knobs still share the directory, which is what
+    lets the content-addressed cache skip the rebuild.
+    """
+    out = {}
+    for name, s in sets.items():
+        s = dict(s)
+        env = s.get("env") or {}
+        if env:
+            blob = "|".join(f"{k}={env[k]}" for k in sorted(env)).encode()
+            s["build_dir"] = f"{s['build_dir']}_{hashlib.sha256(blob).hexdigest()[:8]}"
+        out[name] = s
+    return out
+
+
+def stage_design_tree(stage_root: Path) -> None:
+    """Copy the design sources into a per-spec stage.
+
+    The stage replaces the designs/ directory: a design's HERE.parent is the
+    designs dir (its siblings -- gemv_q4, attn, ln), HERE.parent.parent is
+    open_kernels (include/), and HERE.parent.parent.parent is the repo
+    (npu_offload/). The stage therefore has to sit one level under
+    open_kernels/ for those to resolve the same way, and it holds the whole
+    tree because the designs read each other.
+    """
+    def _ignore(dirpath, names):
+        skipped = set()
+        for n in names:
+            p = Path(dirpath) / n
+            if n == "__pycache__" or n.startswith(".staging"):
+                skipped.add(n)
+            elif p.is_dir() and n.startswith("build"):
+                skipped.add(n)
+        return skipped
+
+    if stage_root.exists():
+        shutil.rmtree(stage_root)
+    stage_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(DESIGNS, stage_root, ignore=_ignore, dirs_exist_ok=True)
+
+
+def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> tuple[str, Path]:
+    """Build one kernel set. Worker for the parallel build; returns (name, bdir).
+
+    stage_root, when given, is a per-spec mirror of the design tree: the design
+    sources and the generated kernel TUs are copied into it, so this spec
+    compiles its own sources and no other spec can change them mid-build. The
+    mirror keeps design_path relative to the stage root, so the staged path has
+    the same shape as the real one.
+    """
+    design_path = sets[name]["design"]
+    src = (stage_root / design_path) if stage_root else (DESIGNS / design_path)
+
+    out = DESIGNS / sets[name]["build_dir"]
+    knobs = sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
     env["OPEN_KERNELS_SPEC"] = str(spec_file)
@@ -168,26 +325,40 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
           f"{os.path.relpath(out, HERE)}", flush=True)
-    # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
-    # reports a core whose program does not fit only as an invalid ELF.
-    p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
-                         cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    tail, overflow = b"", False
-    for chunk in iter(lambda: p.stdout.read1(4096), b""):
-        sys.stdout.buffer.write(chunk)
-        sys.stdout.flush()
-        tail = (tail + chunk)[-4096:]
-        overflow = overflow or b"Overflow of program memory" in tail
-    if p.wait() != 0:
-        if overflow:
-            raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
-                               "program memory. This is a bug in the kernels for this model, not in your setup; "
-                               "please report it with this log.")
-        # Repeat the final compiler output in the exception: the outer exporter
-        # continues with other models, and parallel workers can interleave logs.
-        detail = tail.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
-                           f"Last build output:\n{detail or '(no output)'}")
+    # The lock keeps two specs out of the same build dir at once: the designs
+    # are shared, and build_design.py wipes its work dir before compiling.
+    with design_lock(out):
+        # The cache lives next to the output, so it is covered by the same lock
+        # as the build: a spec that finds a current key reuses the xclbin
+        # instead of rebuilding an identical one.
+        key = build_content_key(src.parent, out, knobs)
+        marker = out / KEY_FILE
+        have = all((out / f).is_file() for f in FILES)
+        if have and marker.is_file() and marker.read_text(encoding="utf-8").strip() == key:
+            print(f"[{name}] up to date (build key {key[:19]}), reusing", flush=True)
+            return name, out
+
+        # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
+        # reports a core whose program does not fit only as an invalid ELF.
+        p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
+                             cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        tail, overflow = b"", False
+        for chunk in iter(lambda: p.stdout.read1(4096), b""):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.flush()
+            tail = (tail + chunk)[-4096:]
+            overflow = overflow or b"Overflow of program memory" in tail
+        if p.wait() != 0:
+            if overflow:
+                raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
+                                   "program memory. This is a bug in the kernels for this model, not in your setup; "
+                                   "please report it with this log.")
+            # Repeat the final compiler output in the exception: the outer exporter
+            # continues with other models, and parallel workers can interleave logs.
+            detail = tail.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
+                               f"Last build output:\n{detail or '(no output)'}")
+        marker.write_text(key + "\n", encoding="utf-8")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
@@ -195,9 +366,9 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
     return name, out
 
 
-def build(name: str, sets: dict, spec_file: Path) -> Path:
+def build(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> Path:
     """Sequential build of a single set (kept for callers that want it)."""
-    _, out = _build_one(name, sets, spec_file)
+    _, out = _build_one(name, sets, spec_file, stage_root)
     return out
 
 
@@ -249,7 +420,7 @@ def main() -> int:
                 f"catalogue) once its fixture passes."
             )
         raise
-    sets = F.builds(spec)
+    sets = disambiguate_build_dirs(F.builds(spec))
     if a.build_root:
         sets = {n: dict(v, build_dir=str(a.build_root.resolve() / n)) for n, v in sets.items()}
     names = [n.strip() for n in a.only.split(",") if n.strip()] if a.only else list(sets)
@@ -282,7 +453,23 @@ def main() -> int:
             print(f"up to date: {mj} already has build key {key[:19]} and every file; --force rebuilds")
             a.no_build = True
 
+    # ---- invalidate per-design cache when --force is used
+    if a.force:
+        for n in names:
+            bdir = DESIGNS / sets[n]["build_dir"]
+            marker = bdir / KEY_FILE
+            if marker.is_file():
+                marker.unlink()
+
     # ---- the whole-layer designs' kernel TUs for this spec, then the builds
+    # The generated kernel TUs differ per spec (dense/gen_kernels.py and
+    # layer_x/gen_kernels.py read the spec), and they land in a design dir
+    # that 12 and 3 specs respectively share. Writing them there meant one
+    # spec's gen could overwrite the sources another spec was compiling, and
+    # the xclbin that came out was silently wrong. So each spec stages its
+    # own copy of the design tree and compiles from that.
+    stage_root = HERE / f".staging_{spec.spec_hash()[7:26]}"  # strip "sha256:", keep 19 chars
+
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)
         gen_dir = HERE / F.GEN_KERNELS
@@ -290,7 +477,15 @@ def main() -> int:
         gspec = importlib.util.spec_from_file_location("gen_kernels", gen_dir)
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
-        gen.generate(F.recipe(spec))
+        # Stage the design tree once, before the parallel builds: the workers
+        # would otherwise copy the same file over each other and one could
+        # read a half-written source.
+        stage_design_tree(stage_root)
+        # Generate into the staged copy of the design dir the generator targets.
+        gen_design_dir = gen_dir.parent.relative_to(DESIGNS)
+        (stage_root / gen_design_dir).mkdir(parents=True, exist_ok=True)
+        gen.generate(F.recipe(spec), out=stage_root / gen_design_dir)
+
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
     if a.no_build:
@@ -299,7 +494,7 @@ def main() -> int:
     else:
         workers = max(1, min(a.jobs, len(names)))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(_build_one, n, sets, spec_file) for n in names]
+            futures = [ex.submit(_build_one, n, sets, spec_file, stage_root) for n in names]
             for future in concurrent.futures.as_completed(futures):
                 n, bdir = future.result()
                 bdirs[n] = bdir
