@@ -274,12 +274,54 @@ the steps that used to stand between them are gone (branch `feat/fedora-docker`)
 
 A GGUF of the qwen35 family (the Ornith-1.5-9B-i1 install) LOADS and
 prefills, but the residual after the layers is NaN: the f32-scale pool of
-the linear (Gated DeltaNet) layer is wrong somewhere. Suspects, in order:
-the linear layer's own pool slots (the qkv is 8192 rows and the plan reads
-it in pieces), the SSM parameters' scale (the GGUF quantizes the alpha and
-beta to Q4_K where the container keeps bf16 -- the *values* are coarse but
-finite), and the conv state's init. The dense path is unaffected (the
-Qwen3-8B-i1 GGUF still answers "Paris").
+the linear (Gated DeltaNet) layer is wrong somewhere. The dense path is
+unaffected (the Qwen3-8B-i1 GGUF still answers "Paris") and the dense
+family's f32 twin works, so the fault is in the **layer_x** f32 path
+(the dense recipe's one design for the whole layer, the layer_x's two
+designs per layer type). Ruled out so far: the pool's chunk 0 (sane
+scales and codes), the consts (the alpha, beta, conv and norms all
+sane), the state (zeroed per request), the design's tile size (fixed: it
+read an f32 pool at the bf16 stride) and the export's build cache (fixed:
+a recipe change reused a stale xclbin).
+
+**The next step is the compare harness, not more guessing**: the layer_x
+has `make_test.py` + `compare.py` (the whole-layer chain against the
+fp64 replica), and it takes the spec from the environment
+(`OPEN_KERNELS_SPEC`), so it can be run against a *f32* spec. That
+localises the fault to a stage (qkv, xres, xm, S, out) instead of
+leaving it to the engine.
+
+### The geometry comes from the weights
+
+A fine-tune's repo rarely carries its own config.json: the one the
+installer fetches is the BASE's. The Qwen3.8-9B-Distill's GGUF says 33
+blocks where the stack is 32 -- the extra block is the **MTP head**
+(next-token prediction), whose tensors carry `nextn.eh_proj / enorm /
+hnorm` and whose *regular* tensors look exactly like a full attention
+layer's. llama.cpp's block_count counts it; the stack does not. So the
+depth and the layer types are read off the file's tensors, with every
+block that carries a `nextn` tensor excluded:
+
+- the recipes' GGUF spec reads the depth and the layer types off the
+  file's tensor names (a linear layer carries the fused `attn_qkv`, a
+  full one the separate `attn_q` / `attn_k` / `attn_v`), minus the MTP
+  block;
+- the engine's derived config does the same (whole `nextn` blocks
+  excluded), and for a GGUF the file's geometry wins over the
+  config.json's claims (the model_type comparison is for the q4nx
+  container's config only);
+- oflm-add derives the model's spec from the GGUF too.
+
+### A new depth is a new manifest, not a new build
+
+The kernels are width-keyed; the depth is the manifest's business (the
+layer loop it drives). So oflm-add, when no installed set was built for
+the model's shape exactly, looks for a set that serves the same
+*geometry* (`ModelSpec.kernel_hash()`) and writes the **sibling set**:
+the base's kernel files (hard-linked) with this model's own manifest.
+The Qwen3.8-9B-Distill (33 layers) runs on the Qwen3.5-9B's kernels
+with its own manifest -- no export, no build, nothing for the user to
+run.
 
 ## Gotchas learned here
 

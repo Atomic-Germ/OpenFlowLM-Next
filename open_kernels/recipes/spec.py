@@ -370,19 +370,23 @@ def _layer_types_gguf(tensors, n: int, interval: int) -> tuple[str, ...]:
     """The per-layer types, read off the FILE's tensors.
 
     The header's full_attention_interval describes the pattern llama.cpp
-    assumed; a fine-tune can differ -- the Qwen3.8-9B distill ends in two
-    full attention layers where the interval says one -- and the tensors are
-    the truth: a linear layer carries the fused attn_qkv, a full one the
-    separate attn_q / attn_k / attn_v. The interval is the fallback for a
-    file whose tensor names are not in llama.cpp's convention.
+    assumed; a file can differ from it, and the tensors are the truth: a
+    linear layer carries the fused attn_qkv, a full one the separate
+    attn_q / attn_k / attn_v. The interval is the fallback for a file whose
+    tensor names are not in llama.cpp's convention.
     """
     if not tensors:
         return tuple(FULL if (l + 1) % interval == 0 else LINEAR for l in range(n))
+    # the MTP head is a whole extra block whose regular tensors look like a full
+    # attention layer's, so whole blocks carrying a nextn tensor are excluded
+    nextn = {int(m.group(1)) for nm in tensors
+             if ".nextn." in str(nm)
+             for m in [re.match(r"blk\.(\d+)\.", str(nm))] if m}
     linear: set[int] = set()
     full: set[int] = set()
     for name in tensors:
         m = re.match(r"blk\.(\d+)\.(attn_qkv|attn_q)\.", str(name))
-        if not m:
+        if not m or int(m.group(1)) in nextn:
             continue
         (linear if m.group(2) == "attn_qkv" else full).add(int(m.group(1)))
     if not linear and not full:
@@ -459,12 +463,18 @@ def _qwen36moe_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
 
     n = k("block_count")
     if tensors:
-        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
-        # header says (and the header is what the interval pattern describes)
-        blocks = [int(m.group(1)) for m in
-                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
-        if blocks:
-            n = max(blocks) + 1
+        # the depth the WEIGHTS have -- minus the MTP head. A file can carry one
+        # more block than the stack (Qwen3.5's nextn prediction layer: a blk.N
+        # whose tensors include nextn.eh_proj / enorm / hnorm), and llama.cpp's
+        # block_count counts it. It is repack material, not a stack layer, so
+        # the depth and the layer types below read only the real ones.
+        nextn = {int(m.group(1)) for nm in tensors
+                 if ".nextn." in str(nm)
+                 for m in [re.match(r"blk\.(\d+)\.", str(nm))] if m}
+        stack = {int(m.group(1)) for m in
+                 (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m} - nextn
+        if stack:
+            n = max(stack) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -895,12 +905,18 @@ def _qwen3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
 
     n = k("block_count")
     if tensors:
-        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
-        # header says (and the header is what the interval pattern describes)
-        blocks = [int(m.group(1)) for m in
-                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
-        if blocks:
-            n = max(blocks) + 1
+        # the depth the WEIGHTS have -- minus the MTP head. A file can carry one
+        # more block than the stack (Qwen3.5's nextn prediction layer: a blk.N
+        # whose tensors include nextn.eh_proj / enorm / hnorm), and llama.cpp's
+        # block_count counts it. It is repack material, not a stack layer, so
+        # the depth and the layer types below read only the real ones.
+        nextn = {int(m.group(1)) for nm in tensors
+                 if ".nextn." in str(nm)
+                 for m in [re.match(r"blk\.(\d+)\.", str(nm))] if m}
+        stack = {int(m.group(1)) for m in
+                 (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m} - nextn
+        if stack:
+            n = max(stack) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -1247,12 +1263,18 @@ def _gemma3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
 
     n = k("block_count")
     if tensors:
-        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
-        # header says (and the header is what the interval pattern describes)
-        blocks = [int(m.group(1)) for m in
-                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
-        if blocks:
-            n = max(blocks) + 1
+        # the depth the WEIGHTS have -- minus the MTP head. A file can carry one
+        # more block than the stack (Qwen3.5's nextn prediction layer: a blk.N
+        # whose tensors include nextn.eh_proj / enorm / hnorm), and llama.cpp's
+        # block_count counts it. It is repack material, not a stack layer, so
+        # the depth and the layer types below read only the real ones.
+        nextn = {int(m.group(1)) for nm in tensors
+                 if ".nextn." in str(nm)
+                 for m in [re.match(r"blk\.(\d+)\.", str(nm))] if m}
+        stack = {int(m.group(1)) for m in
+                 (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m} - nextn
+        if stack:
+            n = max(stack) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -1504,12 +1526,18 @@ def _gemma3_gguf(md: Mapping[str, Any], tensors=None) -> ModelSpec:
 
     n = k("block_count")
     if tensors:
-        # the depth the WEIGHTS have: a fine-tune can have more blocks than the
-        # header says (and the header is what the interval pattern describes)
-        blocks = [int(m.group(1)) for m in
-                  (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m]
-        if blocks:
-            n = max(blocks) + 1
+        # the depth the WEIGHTS have -- minus the MTP head. A file can carry one
+        # more block than the stack (Qwen3.5's nextn prediction layer: a blk.N
+        # whose tensors include nextn.eh_proj / enorm / hnorm), and llama.cpp's
+        # block_count counts it. It is repack material, not a stack layer, so
+        # the depth and the layer types below read only the real ones.
+        nextn = {int(m.group(1)) for nm in tensors
+                 if ".nextn." in str(nm)
+                 for m in [re.match(r"blk\.(\d+)\.", str(nm))] if m}
+        stack = {int(m.group(1)) for m in
+                 (re.match(r"blk\.(\d+)\.", str(nm)) for nm in tensors) if m} - nextn
+        if stack:
+            n = max(stack) + 1
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:

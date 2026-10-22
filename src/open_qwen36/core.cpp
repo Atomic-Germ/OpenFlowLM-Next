@@ -187,13 +187,20 @@ nlohmann::json derive_config(const GgufFile& g) {
     // llama.cpp assumed, and a fine-tune can differ (the Qwen3.8-9B distill
     // ends in two full attention layers where the interval says one).
     {
+        // The MTP head is a whole extra block whose regular tensors look like a
+        // full attention layer's: exclude every block that carries a nextn
+        // tensor before classifying the rest.
+        std::set<int> nextn;
+        for (const auto& name : g.tensor_names())
+            if (name.find(".nextn.") != std::string::npos && name.rfind("blk.", 0) == 0)
+                nextn.insert(std::atoi(name.c_str() + 4));
         std::set<int> linear, full;
         for (const auto& name : g.tensor_names()) {
+            if (name.rfind("blk.", 0) != 0) continue;
+            const int l = std::atoi(name.c_str() + 4);
+            if (nextn.count(l)) continue;
             const size_t d = name.find(".attn_qkv.");
             const size_t q = name.find(".attn_q.");
-            size_t dot = name.find('.');
-            if (dot == std::string::npos || name.rfind("blk.", 0) != 0) continue;
-            const int l = std::atoi(name.c_str() + 4);
             if (d != std::string::npos) linear.insert(l);
             else if (q != std::string::npos) full.insert(l);
         }
