@@ -270,35 +270,21 @@ the steps that used to stand between them are gone (branch `feat/fedora-docker`)
   eos ids come from the config.json when the chain has no
   generation_config.json.
 
-### Still open: the hybrid family's f32 numerics
+### Still open: the hybrid family's f32 numerics (RESOLVED — see below)
 
-A GGUF of the qwen35 family (the Ornith-1.5-9B-i1 install) LOADS and
-prefills, but the residual after the layers is NaN: the f32-scale pool of
-the linear (Gated DeltaNet) layer is wrong somewhere. The dense path is
-unaffected (the Qwen3-8B-i1 GGUF still answers "Paris") and the dense
-family's f32 twin works, so the fault is in the **layer_x** f32 path
-(the dense recipe's one design for the whole layer, the layer_x's two
-designs per layer type). Ruled out so far: the pool's chunk 0 (sane
-scales and codes), the consts (the alpha, beta, conv and norms all
-sane), the state (zeroed per request), the design's tile size (fixed: it
-read an f32 pool at the bf16 stride) and the export's build cache (fixed:
-a recipe change reused a stale xclbin).
-
-**The bisect has narrowed it to the f32 chunk handling itself**
-(`OFLM_GGUF_POOL_Q41=1`, commit 5182da0): with the very same GGUF file
-run through the *q4_1* twin -- the builds every shipped q4nx model
-answers on -- the residual after the layers is finite (nan=0, maxabs
-70): not the packing (gguf_pack_test proves that against the Python
-reference), not the family geometry, not the engine. The fault is in how
-the layer_x f32 builds read the 6144-B f32-scale chunk. Use the knob on
-any hybrid GGUF model to reproduce; unset it to return to the f32 twin.
-
-**The next step is the compare harness, not more guessing**: the layer_x
-has `make_test.py` + `compare.py` (the whole-layer chain against the
-fp64 replica), and it takes the spec from the environment
-(`OPEN_KERNELS_SPEC`), so it can be run against a *f32* spec. That
-localises the fault to a stage (qkv, xres, xm, S, out) instead of
-leaving it to the engine.
+**Superseded by "The lx_f32 wedge (FIXED 2026-10-22 — the mixed-law build)"**
+and the sections after it: the NaN residual was the mixed-law build (recipe
+not re-derived after the `GEMV_SCALES_F32` flip), the deadlock the same f32
+build's non-integral state pieces, and the "reply garbage" the host sampler
+zero-vocab crash plus the lm-head container gap below. The bisect knob
+`OFLM_GGUF_POOL_Q41=1` (commit 5182da0) remains the law bisect for any new
+hybrid-GGUF math question: with the same GGUF run through the *q4_1* twin —
+the builds every shipped q4nx model answers on — the residual after the
+layers is finite (nan=0; the packing is proven against the Python reference
+by `gguf_pack_test`, so math questions narrow to the f32 chunk handling
+itself). The layer_x's `make_test.py` + `compare.py` chain (fp64 replica,
+spec from `OPEN_KERNELS_SPEC`) is still the tool of record for localising
+any f32-law math fault to a stage (qkv, xres, xm, S, out).
 
 ### The geometry comes from the weights
 
@@ -479,16 +465,57 @@ a warm rebuild was `cmp`-identical. Root cause and fix above.
   completes without core-body cooperation. Stage isolation by stream
   truncation does NOT work here.
 
+### The lm-head container gap (found + gated 2026-10-22)
+
+With the sampler fixed, decode ran — and produced ~4.8 tok/s of garbage: ids
+248068/271/248069/271 (the think template, correct) then a fixed cycling
+of ascii-range ids 22–37 (`'7' ':' '<' '=' '>' '?' '@' 'A' …`). The dumped
+logits (the CLI's `--dump-logits`) explained it: **47,695 of 248,320 logit
+rows are NaN**, all within the first 191,736 ids, ~25% of them, no row
+periodicity (mod 2/3/4/5/8 flat) — a garbage scale read, not a per-group
+bug. Everything past file coverage recovers the memset zeros.
+
+Root cause: pool pack for the hybrid family. The pool's projection tensors
+go through `std_perm_gguf` (which dequantizes/requantizes Q4_K/Q6_K/etc.
+into the pool law), but the head op is `lmhead_q8` (`src/open_qwen36/
+pools.cpp` ~773), a **plain memcpy in the kernel's supertile order** — it
+assumes `lm_head.weight` (= gguf `output.weight`) already holds the engine's
+q8 chunk raster: 32-row × 256-column chunks, 256 bf16 scales then 8192 int8
+codes, at pool chunk k ← file `(4*(k/per_band) + k%4)*nk + k%per_band/4`,
+`per_band = 4*nk` (nk = in_dim/256). Only a q4nx-build conversion writes
+that (Q8NX layout). A raw llama.cpp GGUF stores the head row-major in its
+own quant; Ornith-1.5's `output.weight` is **Q6_K** (4096 × 248320),
+`Qwen3.8-9B-Distill-GGUF`'s is whole-file **Q8_0** (byte count even lands
+exactly on the chunk grid — 1,080,688,640 = 124,160 × 8,704 — but row-major
+raster + fp16 scales, still wrong). The op's `bounds()` silently passed a
+short count and filled the pool with misread bytes.
+
+Gate (now in `lmhead_q8`): a `GgufFile` source is refused by name + type
+("convert with q4nx-build"); also `n % CH8 != 0` refuses non-chunk-aligned
+survivors. Verified: ornith (Q6_K) and qwen3.8-distill (Q8_0) both fail
+cleanly at load; the q4nx path (`qwen35-npu2:0.8b` → full coherent
+"**Paris**." turn) is untouched. `gguf_pack_test` + the registered ctest
+(GGUF-PACK, OPEN-MANIFEST) pass.
+
+**Still missing**: the raw-GGUF q8 head requant — the analogue of
+std_perm_gguf's kq path for the q8 law. Q8_0 needs no arithmetic at all (its
+per-32-block fp16 d IS the group scale — remap into the bf16 scale plane
+with RNE and apply the supertile permutation); Q6_K/Q4_K need
+dequant-row → per-32-group requant of int8 code + bf16 scale, matching
+`bf16_rne` semantics used elsewhere in this file. Until then, hybrid
+GGUF-direct needs a converted container.
+
 ## Still open (Phase-MoE / later)
 
+- The raw-GGUF q8 head requant above (Q8_0 remap is mechanical; Q6_K/Q4_K
+  dequant+requant to int8/bf16 groups) — until it lands, hybrid GGUF-direct
+  refuses with the type name and needs a converted container.
 - qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
   and lm_head law-combos where the family ships them, plus the
   expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors) and the
   singular/plural `model.layer(s)` name mismatch.
-- The ornith-gguf decode answer quality still to be confirmed to completion
-  (prefill + decode step census is clean; generation runs, the sampler crash
-  is fixed) — a full coherent-answer screenshot is the last e2e box to tick.
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
 - End-to-end `flm serve` with a dense-family GGUF (vocab must match a shipped
   spec exactly; none in the HF cache qualifies today — Peach is llama-arch
   with vocab 64000 vs the llama31-8b spec's 128256).
+

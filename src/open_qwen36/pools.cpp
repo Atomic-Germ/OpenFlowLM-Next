@@ -782,7 +782,31 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (!nk) fail("lmhead_q8 " + name + ": in_dim " + std::to_string(op.in_dim) + " is under one 256-wide k-tile");
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
+        if (const auto* g = dynamic_cast<const GgufFile*>(&m)) {
+            // The memcpy below assumes the file already holds the engine's q8
+            // chunk raster -- 32-row x 256-column chunks, 256 bf16 scales then
+            // 8192 int8 codes, in the supertile order mapped underneath. Only a
+            // q4nx-build conversion bakes that into the head (the wrapper's
+            // Q8NX layout). A raw llama.cpp GGUF stores the head row-major in
+            // its own quant (Q8_0 on whole-file re-quants, Q6_K on the i1-style
+            // trimmings): the byte count can even pass the bounds() check, but
+            // the q6 blocks misread as bf16 scales and int8 codes decant NaN
+            // rows into the pool (ornith-gguf: 47,695 of 248,320 logit rows
+            // NaN, zeros past chunk 95,864, no row periodicity) and the
+            // decode's argmax lands fixed low-id junk. The pool ops handle
+            // raw quants through std_perm_gguf's kq path; the q8 head has no
+            // equivalent requant yet -- refuse with the type instead of
+            // producing silent garbage.
+            fail(name + " is " + GgufFile::type_name(g->tensor(name).type) +
+                 "; the q8 lm-head pack reads a pre-chunked supertile raster "
+                 "that a raw llama.cpp GGUF does not store (the raw-GGUF head "
+                 "requant is not implemented -- convert with q4nx-build, which "
+                 "bakes the chunked q8 head into its container)");
+        }
         size_t nch = n / CH8;
+        if (n % CH8)
+            fail(name + " is " + std::to_string(n) + " B, not a whole number of " +
+                 std::to_string(CH8) + "-byte q8 chunks");
         bounds(op, nch * CH8, dst_bytes);
         for (size_t k = 0; k < nch; ++k) {
             size_t s = k / per_band, r = k % per_band;
