@@ -40,8 +40,12 @@ size_t write_data_to_file(void* ptr, size_t size, size_t nmemb, FILE* stream);
 // Callback function for libcurl to write data to a string
 size_t write_data_to_string(void* ptr, size_t size, size_t nmemb, std::string* userdata);
 
-// Progress callback function
-int progress_callback(void* clientp, double dltotal, double dlnow, double ultotal, double ulnow);
+// Progress callback function.
+// CURLOPT_XFERINFOFUNCTION's callback: the older CURLOPT_PROGRESSFUNCTION took
+// doubles and is deprecated since libcurl 7.32. This one takes curl_off_t,
+// which is what curl counts in bytes.
+int progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
+                      curl_off_t ultotal, curl_off_t ulnow);
 
 // Download a file from URL to a local file
 bool download_file(const std::string& url, const std::string& local_path, bool is_lfs, std::string remote_oid,

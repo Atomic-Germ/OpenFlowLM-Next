@@ -184,12 +184,21 @@ private:
     // Empty means embed-gemma:300m, so an existing command line keeps
     // its behaviour exactly.
     std::string embedding_model_tag;
+    // The command line's --prefill-chunk-len, or -1 when it was not given.
+    // The value in effect for the model being served is resolved per model
+    // from the settings, not from here: a request may name a model other
+    // than the one on the command line, and that model has its own.
     int prefill_chunk_len;
     int generate_context_id;
     int chat_context_id;
+    // The command line's --ctx-len, or -1 when it was not given. Same
+    // per-model resolution as prefill_chunk_len.
     int ctx_length;
     int img_pre_resize;
     std::string last_question;
     bool preemption;
     PromptCache prompt_cache;
+    // The command line, kept so the settings can be resolved again for
+    // whichever model a request asks for.
+    program_args_t args;
 };

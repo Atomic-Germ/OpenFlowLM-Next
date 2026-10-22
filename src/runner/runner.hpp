@@ -47,8 +47,15 @@ class Runner {
         Runner(model_list& supported_models, ModelDownloader& downloader, program_args_t& args);
         void run();
     private:
+        // Resolve the settings for a model about to be loaded and put them in
+        // effect: its context length, its prefill chunk length and its prefill
+        // mode are its own. `/load` can swap the model at run time, so the
+        // ones resolved at startup are not the ones in effect.
+        void apply_model_settings(const std::string& model_tag, const nlohmann::json& model_info);
+
         std::string tag;
         bool modelscope;
+        // The command line's --prefill-chunk-len, or -1 when it was not given.
         int prefill_chunk_len;
         bool asr;
         std::string asr_model_tag;
@@ -62,10 +69,14 @@ class Runner {
         std::unique_ptr<AutoEmbeddingModel> auto_embedding_engine;
 #endif
         int generate_limit;
+        // The command line's --ctx-len, or -1 when it was not given.
         int ctx_length;
         std::string system_prompt;
         bool preemption;
         int img_pre_resize;
+        // The command line, kept so the settings can be resolved again for
+        // whichever model is loaded.
+        program_args_t args;
         // CLI instance for interactive input
         CLIWide cli;
         oflm_rt::device npu_device_inst;
