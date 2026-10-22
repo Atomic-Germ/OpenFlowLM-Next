@@ -644,10 +644,9 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 // file, by the names the consts plan carries (no consts layout knowledge here)
                 const GemmBlockProgram& gb = lt.gemm_block;
                 HostConsts& h = hc_[l];
-                auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
-                if (!qf)
-                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
-                auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
+                // The file may be a q4nx container or a GGUF: both decode these small
+                // tensors to f32 (the container's bf16, the GGUF's f32 or quantized).
+                auto bf = [&](const char* suffix) { return file_->bf16(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + what + " has " +

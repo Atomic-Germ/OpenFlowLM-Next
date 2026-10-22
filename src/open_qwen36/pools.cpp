@@ -252,9 +252,29 @@ void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst) {
     }
 }
 
+/// A consts tensor's values as bf16, decoded from whatever the file holds.
+///
+/// The q4nx container stores these weights bf16 (the kernel's layout), so the
+/// bytes are read in place. A GGUF stores them f32 -- or, for the SSM
+/// projections, quantized (llama.cpp quantizes what it quantizes) -- so they
+/// are decoded and converted to the same bf16 values the container holds.
+/// Returns false when the file's bytes are already the wanted ones.
+bool consts_as_bf16(const WeightFile& f, const std::string& name, size_t count, std::vector<uint8_t>& out) {
+    size_t n = 0;
+    f.raw(name, &n);                                  // the file's own bytes: a quantized
+    if (n == count * 2) return false;                // tensor is shorter than its bf16 form
+    const std::vector<float> v = f.f32(name);
+    if (v.size() != count)
+        fail(name + " is " + std::to_string(v.size()) + " values, not " + std::to_string(count));
+    out.resize(count * 2);
+    for (size_t i = 0; i < count; ++i) {
+        const uint16_t b = f32_to_bf16(v[i]);
+        std::memcpy(out.data() + 2 * i, &b, 2);
+    }
+    return true;
+}
+
 void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst) {
-    // A small weight (a layernorm) as bf16: the q4nx container stores it bf16;
-    // a GGUF may store it f32 / f16 / bf16 -- convert exactly as the container does.
     size_t n = 0;
     const uint8_t* src = raw(f, name, 0, &n);
     auto* g = dynamic_cast<const GgufFile*>(&f);
@@ -281,6 +301,11 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
             break;
         }
         case GgufFile::Type::F32: {
+            if (n == bytes) {
+                // The slot holds f32 values (the SSM's per-head scalars): copy them.
+                std::memcpy(dst, src, n);
+                break;
+            }
             if (n != 2 * bytes) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
             for (size_t i = 0; i < bytes / 2; ++i) {
                 float v;
@@ -758,10 +783,15 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (dr < rows) fail("transpose " + name + ": dst_rows " + std::to_string(dr) +
                             " is narrower than rows " + std::to_string(rows));
         size_t n = 0;
-        const uint8_t* src = raw(m, name, rows * cols * elem, &n);
-        if (n != rows * cols * elem)
-            fail(name + " is " + std::to_string(n) + " B, not a [" + std::to_string(rows) + ", " +
-                 std::to_string(cols) + "] tensor of " + std::to_string(elem) + "-byte values");
+        const uint8_t* src = nullptr;
+        std::vector<uint8_t> tmp;
+        if (elem == 2 && consts_as_bf16(m, name, rows * cols, tmp)) src = tmp.data();
+        if (!src) {
+            src = raw(m, name, rows * cols * elem, &n);
+            if (n != rows * cols * elem)
+                fail(name + " is " + std::to_string(n) + " B, not a [" + std::to_string(rows) + ", " +
+                     std::to_string(cols) + "] tensor of " + std::to_string(elem) + "-byte values");
+        }
         bounds(op, cols * dr * elem, dst_bytes);
         transpose_bytes(src, rows, cols, elem, dr, dst + op.dst);
     } else if (op.op == "conv_transpose") {
@@ -770,9 +800,14 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const uint64_t taps = op.taps, groups = op.groups, width = op.width;
         if (!taps || !groups || !width) fail("conv_transpose without taps / groups / width");
         size_t n = 0;
-        const uint8_t* src = raw(m, name, taps * groups * width * 2, &n);
-        if (n != taps * groups * width * 2) fail(name + " is not bf16[" + std::to_string(taps) + ", " + std::to_string(groups * width) + "]");
-        bounds(op, n, dst_bytes);
+        const uint8_t* src = nullptr;
+        std::vector<uint8_t> tmp;
+        if (consts_as_bf16(m, name, taps * groups * width, tmp)) src = tmp.data();
+        if (!src) {
+            src = raw(m, name, taps * groups * width * 2, &n);
+            if (n != taps * groups * width * 2) fail(name + " is not bf16[" + std::to_string(taps) + ", " + std::to_string(groups * width) + "]");
+        }
+        bounds(op, taps * groups * width * 2, dst_bytes);
         for (uint64_t g = 0; g < groups; ++g)
             for (uint64_t t = 0; t < taps; ++t)
                 std::memcpy(dst + op.dst + (g * taps + t) * width * 2, src + (t * groups * width + g * width) * 2, width * 2);

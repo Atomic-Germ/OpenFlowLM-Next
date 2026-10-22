@@ -194,6 +194,9 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
             tensors_.emplace(name, std::move(t));
         }
         sandwich_ = tensors_.count("blk.0.post_ffw_norm.weight") != 0;
+        // The pre-FFN norm: llama.cpp calls it ffn_norm (llama, qwen3) or
+        // post_attention_norm (gemma, qwen35) -- the file says which.
+        post_norm_ = tensors_.count("blk.0.post_attention_norm.weight") != 0;
         // Alignment is not stored in the header for either version: GGUF v2 and
         // v3 both take it from the optional `general.alignment` metadata key and
         // default to 32. (Only v1 carried a trailing alignment word.) Validate
@@ -251,7 +254,7 @@ void GgufFile::drop_pages() {
 #endif
 }
 
-std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
+std::string GgufFile::gguf_name(const std::string& name, bool sandwich, bool post_norm) {
     // The manifest's packing plan names tensors the q4nx/HF way; a GGUF uses
     // llama.cpp's conventions (utilities/q4nx-build/configs/*.json hold the
     // same map on the conversion side).
@@ -274,8 +277,25 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
         dot("self_attn.q_norm", ".attn_q_norm");
         dot("self_attn.k_norm", ".attn_k_norm");
         dot("input_layernorm", ".attn_norm");
-        // HF's post_attention_layernorm is the pre-FFN norm in Llama but the real post-attention norm in Gemma
-        dot("post_attention_layernorm", sandwich ? ".post_attention_norm" : ".ffn_norm");
+        // The qwen35 family's linear attention (Gated DeltaNet), which llama.cpp
+        // names ssm_*/attn_qkv (the map the conversion side holds in
+        // utilities/q4nx-build/configs/qwen3.5_*.json). The .bf16 spelling is
+        // the container's own (the tensor is bf16 there), so it is mapped first.
+        dot("linear_attn.qkv_proj", ".attn_qkv");
+        dot("self_attn.gate_proj", ".attn_gate");
+        dot("linear_attn.ssm_alpha_proj.bf16", ".ssm_alpha");
+        dot("linear_attn.ssm_alpha_proj", ".ssm_alpha");
+        dot("linear_attn.ssm_beta_proj.bf16", ".ssm_beta");
+        dot("linear_attn.ssm_beta_proj", ".ssm_beta");
+        dot("linear_attn.ssm_a", ".ssm_a");
+        dot("linear_attn.ssm_dt.bias", ".ssm_dt.bias");
+        dot("linear_attn.ssm_conv1d.weight", ".ssm_conv1d.weight");
+        dot("linear_attn.ssm_norm.weight", ".ssm_norm.weight");
+        dot("linear_attn.ssm_out_proj.weight", ".ssm_out.weight");
+        // HF's post_attention_layernorm is the pre-FFN norm in Llama, but the
+        // real post-attention norm in Gemma and in qwen35 -- the file says
+        // which (it has one name or the other, never both).
+        dot("post_attention_layernorm", (post_norm || sandwich) ? ".post_attention_norm" : ".ffn_norm");
         dot("pre_feedforward_layernorm", ".ffn_norm");
         dot("post_feedforward_layernorm", ".post_ffw_norm");
         dot("mlp.gate_proj", ".ffn_gate");
@@ -286,7 +306,7 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
 }
 
 const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
-    std::string n = gguf_name(name, sandwich_);
+    std::string n = gguf_name(name, sandwich_, post_norm_);
     auto it = tensors_.find(n);
     if (it == tensors_.end() && n == "output.weight") {
         // tied embeddings: the GGUF has no output.weight; the (untied) rows
