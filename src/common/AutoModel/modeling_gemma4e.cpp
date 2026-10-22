@@ -7,15 +7,19 @@
 
 
 #include "AutoModel/modeling_gemma4e.hpp"
+#include "config/settings_resolver.hpp"
 #include "AutoModel/gemma4_tool_parser.hpp"
+#include "config/settings_resolver.hpp"
 #include "metrices.hpp"
+#include "config/settings_resolver.hpp"
 
 /************              Gemma4e family            **************/
 Gemma4e::Gemma4e(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4e") {}
 
 void Gemma4e::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
     this->q4nx = std::make_unique<Q4NX>(this->model_path);
     this->lm_engine = std::make_unique<gemma4e_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
