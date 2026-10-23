@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-combined-sublayers</name>
+    <description>Capture combined attention/DeltaNet prefixes with exact native identity and independent conditioned sublayer gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-combined-sublayers/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-combined-validation</name>
     <description>Validate fresh paired/weighted controls, combined all-layer prefill precision and repeated resident requests after reset.</description>
     <location>.agents/skills/open-qwen38-prefill-combined-validation/SKILL.md</location>
