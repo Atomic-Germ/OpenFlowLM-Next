@@ -782,37 +782,123 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (!nk) fail("lmhead_q8 " + name + ": in_dim " + std::to_string(op.in_dim) + " is under one 256-wide k-tile");
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
-        if (const auto* g = dynamic_cast<const GgufFile*>(&m)) {
-            // The memcpy below assumes the file already holds the engine's q8
-            // chunk raster -- 32-row x 256-column chunks, 256 bf16 scales then
-            // 8192 int8 codes, in the supertile order mapped underneath. Only a
-            // q4nx-build conversion bakes that into the head (the wrapper's
-            // Q8NX layout). A GGUF holds the head row-major in its own quant
-            // (Q8_0 on whole-file sets, Q6_K and friends on reduced-size ones):
-            // the byte count can even pass the bounds() check, but
-            // the q6 blocks misread as bf16 scales and int8 codes decant NaN
-            // rows into the pool (ornith-gguf: 47,695 of 248,320 logit rows
-            // NaN, zeros past chunk 95,864, no row periodicity) and the
-            // decode's argmax lands fixed low-id junk. The pool ops handle
-            // raw quants through std_perm_gguf's kq path; the q8 head has no
-            // equivalent requant yet -- refuse with the type instead of
-            // producing silent garbage.
-            fail(name + " is " + GgufFile::type_name(g->tensor(name).type) +
-                 "; the q8 lm-head pack reads a pre-chunked supertile raster "
-                 "that a raw llama.cpp GGUF does not store (the raw-GGUF head "
-                 "requant is not implemented -- convert with q4nx-build, which "
-                 "bakes the chunked q8 head into its container)");
+        if (const auto* q = dynamic_cast<const Q4nxFile*>(&m)) {
+            // A q4nx container stores the head already in the engine's q8 chunk
+            // raster (Q8NX layout: 256 bf16 scales then 8192 int8 codes, in the
+            // supertile order mapped below) -- a straight copy with the supertile
+            // permutation is all that is needed.
+            size_t nch = n / CH8;
+            if (n % CH8)
+                fail(name + " is " + std::to_string(n) + " B, not a whole number of " +
+                     std::to_string(CH8) + "-byte q8 chunks");
+            bounds(op, nch * CH8, dst_bytes);
+            for (size_t k = 0; k < nch; ++k) {
+                size_t s = k / per_band, r = k % per_band;
+                size_t fch = (4 * s + r % 4) * nk + r / 4;
+                std::memcpy(dst + op.dst + k * CH8, src + fch * CH8, CH8);
+            }
+        } else {
+            // A raw GGUF stores the head row-major in its own quant. Two cases:
+            //   - Q8_0: the source already carries per-32-block int8 codes and an
+            //     fp16 scale, so this is a pure remap -- widen the scale to bf16
+            //     (the cast the converter does) and permute into the supertile
+            //     raster. No requantization, so the head is bit-identical to a
+            //     q4nx-build conversion of the same Q8_0 tensor.
+            //   - anything else (Q6_K, Q4_K, Q4_0, ...): dequantize each row to
+            //     f32 and requantize to int8 + bf16 scale per 32-value group,
+            //     matching the pool ops' kq path.
+            const GgufFile& g = dynamic_cast<const GgufFile&>(m);
+            const GgufFile::TensorInfo& t = g.tensor(name);
+            const uint64_t rows = t.dims.size() > 1 ? t.dims[1]
+                                : (t.dims.empty() ? 0 : t.dims[0]);
+            const size_t ncol = op.in_dim / 256;   // ktiles per row
+            if (rows == 0 || ncol == 0) fail(name + " has no rows / ktiles");
+            const bool q8_0 = (t.type == GgufFile::Type::Q8_0);
+            std::vector<float> rowbuf(op.in_dim);
+            // Q8_0 raw block size: 2 B fp16 d + 32 B int8 codes = 34 B per 32 values.
+            const size_t q8blk = 34, blocks_per_row = op.in_dim / 32;
+            for (uint64_t row = 0; row < rows; ++row) {
+                if (q8_0) {
+                    // read the raw Q8_0 blocks directly (embed_row would discard codes)
+                    const uint8_t* base = g.raw(name, nullptr);
+                    // offset into the tensor's data: row * blocks_per_row * 34
+                    const uint8_t* rp = base + row * blocks_per_row * q8blk;
+                    for (size_t kt = 0; kt < ncol; ++kt) {
+                        // raw GGUF is row-major: the pool reads chunks in plain
+                        // raster order, so no supertile permutation is applied
+                        // (the memcpy path above permutes because the q4nx
+                        // container stores the head in supertile order).
+                        const size_t k = (row / 32) * ncol + kt;
+                        if (k * CH8 + CH8 > dst_bytes) continue;
+                        const size_t base_col = kt * 256;
+                        const unsigned rr = static_cast<unsigned>(row % 32);
+                        for (unsigned b = 0; b < 8; ++b) {
+                            const uint8_t* blk = rp + (base_col / 32 + b) * q8blk;
+                            uint16_t d16;
+                            std::memcpy(&d16, blk, 2);
+                            // widen fp16 -> bf16 via RNE (the converter's cast)
+                            const float dval = [&](){ uint32_t u = d16; u = (u & 0x7FFFu) << 13; // approximate
+                                // use proper fp16->f32 then bf16_rne
+                                float f; uint32_t fu;
+                                // fp16 to f32
+                                uint32_t sign = (d16 & 0x8000u) << 16;
+                                uint32_t exp = (d16 >> 10) & 0x1Fu;
+                                uint32_t mant = d16 & 0x3FFu;
+                                if (exp == 0) { if (mant) { exp = 1; while (!(mant & 0x400u)) { mant <<= 1; exp--; } mant &= 0x3FFu; } }
+                                else if (exp == 31) { exp = 255; }
+                                else exp += 112;
+                                fu = sign | (exp << 23) | (mant << 13);
+                                memcpy(&f, &fu, 4);
+                                return f;
+                            }();
+                            uint16_t scale = bf16_rne(dval);
+                            std::memcpy(dst + op.dst + k * CH8 + 2 * (b * 32 + rr), &scale, 2);
+                            for (unsigned i = 0; i < 32; ++i) {
+                                int code = static_cast<int8_t>(blk[2 + i]);
+                                const unsigned ci = code_index(rr, b, i);
+                                dst[op.dst + k * CH8 + 512 + ci] = static_cast<uint8_t>(code);
+                            }
+                        }
+                    }
+                } else {
+                    g.embed_row(name, row, op.in_dim, rowbuf.data());
+                    for (size_t kt = 0; kt < ncol; ++kt) {
+                        // raw GGUF is row-major: the pool reads chunks in plain
+                        // raster order, so no supertile permutation is applied
+                        // (the memcpy path above permutes because the q4nx
+                        // container stores the head in supertile order).
+                        const size_t k = (row / 32) * ncol + kt;
+                        if (k * CH8 + CH8 > dst_bytes) continue;
+                        const size_t base_col = kt * 256;
+                        const unsigned rr = static_cast<unsigned>(row % 32);
+                        for (unsigned b = 0; b < 8; ++b) {
+                            float vals[32];
+                            float mx = 0.f;
+                            bool finite = true;
+                            for (unsigned i = 0; i < 32; ++i) {
+                                vals[i] = rowbuf[base_col + b * 32 + i];
+                                if (!std::isfinite(vals[i])) { finite = false; break; }
+                                const float a = vals[i] < 0.f ? -vals[i] : vals[i];
+                                if (a > mx) mx = a;
+                            }
+                            if (!finite) continue;
+                            uint16_t scale = (mx > 0.f) ? bf16_rne(mx / 127.f) : 0;
+                            const float sf = bf16_to_f32(scale);
+                            const float inv = (sf > 0.f) ? 1.f / sf : 0.f;
+                            std::memcpy(dst + op.dst + k * CH8 + 2 * (b * 32 + rr), &scale, 2);
+                            for (unsigned i = 0; i < 32; ++i) {
+                                int q = (int)std::lround(vals[i] * inv);
+                                if (q < -127) q = -127;
+                                if (q > 127) q = 127;
+                                const unsigned ci = code_index(rr, b, i);
+                                dst[op.dst + k * CH8 + 512 + ci] = static_cast<uint8_t>(q);
+                            }
+                        }
+                    }
+                }
+            }
         }
-        size_t nch = n / CH8;
-        if (n % CH8)
-            fail(name + " is " + std::to_string(n) + " B, not a whole number of " +
-                 std::to_string(CH8) + "-byte q8 chunks");
-        bounds(op, nch * CH8, dst_bytes);
-        for (size_t k = 0; k < nch; ++k) {
-            size_t s = k / per_band, r = k % per_band;
-            size_t fch = (4 * s + r % 4) * nk + r / 4;
-            std::memcpy(dst + op.dst + k * CH8, src + fch * CH8, CH8);
-        }
+
     } else if (op.op == "transpose_banked") {
         const std::string name = with_layer(op.tensor, layer);
         const uint64_t rows = op.rows, cols = op.cols, elem = op.elem;
