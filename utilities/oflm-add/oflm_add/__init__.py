@@ -1344,6 +1344,8 @@ def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
                 obtained.append(fname)
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.is_file() or dest.is_symlink():
+                dest.unlink()
             shutil.copy2(src, dest)
             obtained.append(fname)
     return obtained
@@ -2444,14 +2446,32 @@ def main():
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
     gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want)
     if gguf_want and gguf_name is None:
-        have = ", ".join(sorted({gguf_quant_of(n) or n for n in gguf_names if n.endswith(".gguf")})) or "none"
-        raise SystemExit(f"{repo_arg}: no {gguf_want} GGUF in that repo (it has: {have})")
+        if not gguf_names:
+            all_files = sorted(e.name for e in local_dir.iterdir() if e.is_file()) if local_dir else sorted(root_file_names(tree))
+            raise SystemExit(
+                f"{repo_arg}: ':QUANT' is for GGUF repositories, and this repository has no .gguf files "
+                f"(files present: {', '.join(all_files) or 'none'})")
+        compat = sorted({gguf_quant_suffix(n).upper() for n in gguf_names
+                         if gguf_quant_of(n) in GGUF_QUANT_PREFERENCE and not re.search(r"-\d+-of-\d+\.gguf$", n)})
+        files = ", ".join(sorted(gguf_names))
+        raise SystemExit(
+            f"{repo_arg}: no compatible '{gguf_want}' GGUF in that repository.\n"
+            f"  supported quants present : {', '.join(compat) or 'none'} "
+            f"(open kernels accept {'/'.join(GGUF_QUANT_PREFERENCE)})\n"
+            f"  .gguf files in repo      : {files}")
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
     else:
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
+    gguf_only = bool(gguf_names) and not have_q4nx
+    if gguf_only and gguf_name is None:
+        files = ", ".join(sorted(gguf_names))
+        raise SystemExit(
+            f"{repo_arg}: repository carries only .gguf files, and none uses a quant supported "
+            f"by the open kernels (accept {'/'.join(GGUF_QUANT_PREFERENCE)}).\n"
+            f"  .gguf files in repo: {files}")
     gguf_mode = gguf_name is not None and not have_q4nx
     if gguf_mode:
         # The tensors must be what the name claims, in types the NPU packers
@@ -2473,9 +2493,7 @@ def main():
         if ok:
             log(f"[INFO] {gguf_name}: {note}")
         else:
-            log(f"[WARN] refusing {gguf_name}: {note}")
-            gguf_refused[gguf_name] = note
-            gguf_name, gguf_mode = None, False
+            raise SystemExit(f"{repo_arg}: refusing {gguf_name}: {note}")
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
@@ -2605,15 +2623,16 @@ def main():
     # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
     # xclbins must actually carry the GGUF-direct kernel builds (the nested
     # "gguf" manifest section, produced by the *_f32 sets in utilities/
-    # build-all.sh). Otherwise fall back to the normal safetensors install.
-    gguf_skip = None
+    # build-all.sh). A GGUF repository never carries model.q4nx, so a missing
+    # kernel set stops here with a direct error rather than falling back to the
+    # q4nx file list.
     gguf_kernel_dir = None
     if gguf_mode:
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
             # open_kernels manifest. Just confirm the family is recognized.
-            pass
+            xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
         else:
             # The set that carries the section: the one the install links, or a
             # fresher one with the same name (a rebuild adds the f32-scale
@@ -2624,22 +2643,16 @@ def main():
             else:
                 kdir = gguf_kernel_set(xclbin_source, kernel_roots)
             if kdir is None:
-                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
-                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
-                             "rebuild them with utilities/build-all.sh -- "
-                             "installing the safetensors weights instead")
-            else:
-                gguf_kernel_dir = kdir
-                if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
-                    log(f"[INFO] GGUF-direct kernels: {kdir}")
-        if gguf_skip:
-            gguf_refused[gguf_name] = gguf_skip
-            log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
-            gguf_name, gguf_mode = None, False
-        elif family in EMBEDDING_FAMILIES and gguf_mode:
-            # Embedding GGUF loads the existing bf16 matmul kernels, whose
-            # directory is fixed by the engine; point the xclbin link there.
-            xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
+                bases = get_base_chain()
+                base_hint = f" --repo {bases[0]}" if bases else ""
+                raise SystemExit(
+                    f"{repo_arg}: no GGUF-direct open kernel set found for "
+                    f"{xclbin_source or dir_name} (family '{family}').\n"
+                    f"Build the kernel set for this model size with:\n"
+                    f"  python utilities/build-new-spec.py{base_hint}")
+            gguf_kernel_dir = kdir
+            if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
+                log(f"[INFO] GGUF-direct kernels: {kdir}")
 
     if not args.dry_run:
         if official:
@@ -2664,10 +2677,6 @@ def main():
             print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
         elif npue_embed:
             print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
-        elif gguf_refused:
-            print(f"weights        : safetensors (GGUF present but not usable: "
-                  + "; ".join(sorted(set(gguf_refused.values()))) + ")")
-        probe = args.open_kernels or (local_dir if local_dir else None)
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
@@ -2780,14 +2789,10 @@ def main():
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []
-        if missing and not gguf_mode and gguf_refused and "model.q4nx" in missing:
-            raise SystemExit(
-                f"Model is missing required files: {missing}\n"
-                "The repo carries only GGUF weights and they cannot be used directly: "
-                + "; ".join(sorted(set(gguf_refused.values())))
-                + "\nConvert one to model.q4nx with q4nx-build, or pick a GGUF-capable family (--family).")
         if missing:
-            raise SystemExit(f"Model is missing required files: {missing}")
+            present = sorted(e.name for e in target.iterdir() if e.is_file())
+            raise SystemExit(
+                f"Model is missing required files: {missing} (files present: {', '.join(present) or 'none'})")
     if gguf_mode and not (target / "config.json").is_file():
         log("[WARN] No config.json in the repo; the engine will derive the config from the GGUF "
             "metadata (llama-family shapes only -- Granite etc. need a config.json).")

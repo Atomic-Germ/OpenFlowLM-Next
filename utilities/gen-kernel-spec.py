@@ -149,7 +149,8 @@ def main():
     spec["num_heads"] = cfg.get("num_attention_heads", spec.get("num_heads"))
     spec["num_kv_heads"] = cfg.get("num_key_value_heads", spec.get("num_kv_heads"))
     spec["vocab"] = cfg.get("vocab_size", spec.get("vocab"))
-    spec["rope_theta"] = cfg.get("rope_theta", spec.get("rope_theta"))
+    rope_theta = cfg.get("rope_theta", spec.get("rope_theta"))
+    spec["rope_theta"] = float(rope_theta) if rope_theta is not None else rope_theta
     head_dim = cfg.get("hidden_size", 0) // max(cfg.get("num_attention_heads", 1), 1)
     spec["head_dim"] = head_dim or spec.get("head_dim")
     spec["rotary_dim"] = head_dim or spec.get("rotary_dim")
