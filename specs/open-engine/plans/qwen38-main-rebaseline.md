@@ -1,5 +1,46 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — isolated paired-weight FFN down, 2026-10-23
+
+Built private N5120/K17408/T256 control and low-weight kernels from copied
+production sources. All **36/36 final NPU dispatches** complete on captured H
+from L63/P1, L42/P17 and L52/P17, each in two slots. Individual control products
+match production bytewise; their FP32 sum matches captured native down, and
+residual addition reconstructs native layer output exactly. Candidate placements
+are byte-identical and all inactive columns are zero.
+
+| Target | Control down maxrel | Candidate down maxrel | Composed residual maxrel |
+|---|---:|---:|---:|
+| L63/P1 | 0.0039805268 | 3.8361005e-6 | 0.0070247892 |
+| L42/P17 | 0.0020657191 | 2.0427415e-6 | 0.0052110173 |
+| L52/P17 | 0.0012303268 | 3.4903344e-6 | 0.0123485917 |
+
+All six primary projection gates pass, with both maxrel and rel_fro strictly
+improved. **All six composed residual gates still fail** the unchanged 0.005
+bound. L52's residual worsens from **0.0121972127** despite local improvement,
+confirming that local error partly cancelled incoming drift. The independent
+CPU re-audit preserves projection PASS and residual FAIL, with
+`model_acceptance=false`. No fresh full-depth result or production promotion.
+
+Both builds pass all 32-core resource checks: max text **4784/5568 bytes**,
+max L1 buffer end **61448 bytes**, configured stacks **4096 bytes**, **801
+compiler dependencies each**. The existing harness is verified against 326
+dependencies. No full-model residency, production source/kernel/manifest or
+model-packing change. Four products replace two; no throughput claim.
+
+The first preparation stored an FP32 oracle output in a file named `.f64`.
+Its 36 dispatches finished, but scoring correctly rejected the extent. That
+failed experiment is retained. An explicit FP64 writer and regression test
+fix the issue; fresh v2 preparation/replay and re-audit complete. Ten new
+RED-to-GREEN tests; full host suite **1709 passed / 47 skipped**.
+
+Workflow: `utilities/prefill-down-replay/`. Evidence:
+`Models/qwen38-27b/prefill-down-replay/`, validated `prepared-v2/` and
+`native-v2/`. Next replay full-attention fused entry/output with causal L63
+prefixes and exact native controls, then compose with the down correction
+before private CLI policy expansion. Retained full-depth acceptance remains
+**4000/4032 FAIL**, with long-prefix and production acceptance still open.
+
 ## Latest checkpoint — combined weight-rounding attribution, 2026-10-23
 
 CPU-only attribution on retained combined captures verifies **8/8 manifest-packed
