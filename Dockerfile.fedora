@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+
+FROM fedora:latest AS builder
+
+# Update package cache and install system dependencies
+RUN dnf update -y
+
+RUN dnf install -y \
+    uv git cmake ninja-build ccache mold pkg-config doxygen cargo rustc clang \
+    lld uuid-devel libdrm-devel ocl-icd-devel boost-devel systemtap-sdt-devel \
+    uuid-c++-devel libuuid-devel openssl-devel rapidjson-devel glibc-static \
+    libstdc++-static rpmbuild python3-pybind11 curl libcurl-devel fftw-devel \
+    libavformat-free-devel libavcodec-free-devel libavutil-free-devel \
+    libswscale-free-devel libswresample-free-devel readline-devel \
+ && dnf clean all
+
+WORKDIR /code
+
+COPY ironvenv-requirements.txt /code/ironvenv-requirements.txt
+
+# Set up Xilinx XRT
+RUN git clone https://github.com/Xilinx/XRT --recursive \
+    && cd XRT/build \
+    && ./build.sh -noinit -npu -noctest -opt -j $(nproc) \
+    && dnf install Release/*.rpm -y \
+    && cmake --install Release/python
+
+# /code is bind-mounted at build time. Keep the image's toolchain outside it
+# so a host venv cannot hide or replace the environment validated below.
+RUN uv python install 3.11 \
+ && uv venv --python 3.11 --system-site-packages /opt/ironvenv \
+ && /opt/ironvenv/bin/python -m pip install --upgrade pip setuptools wheel \
+ && /opt/ironvenv/bin/python -m pip install -r /code/ironvenv-requirements.txt
+
+# Set environment variables
+ENV VIRTUAL_ENV=/opt/ironvenv
+ENV OFLM_VENV_DIR=/opt/ironvenv
+ENV PATH="/opt/xilinx/xrt/bin:/opt/ironvenv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
+ENV PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+ENV NPU_CACHE_HOME=/root/.npu/cache
+ENV CCACHE_DIR=/var/cache/oflm-ccache
+ENV CCACHE_MAXSIZE=2G
+ENV XILINX_XRT="/opt/xilinx/xrt"
+ENV LD_LIBRARY_PATH="/opt/xilinx/xrt/lib"
+ENV PYTHONPATH="/opt/xilinx/xrt/python"
+
+WORKDIR /code
+CMD ["bash"]

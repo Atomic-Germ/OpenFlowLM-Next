@@ -20,6 +20,9 @@ SPECS = Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "spec
 # HEAD COUNT that fits the columns (attnknobs.attn_cores); a core owns kOGH = min(NHL, HPO)
 # heads of an og element, and a block is 8 / 16 / 32 score lanes -- attn.h's two constraints.
 FAST_GEOMETRY = {
+    "qwen3-0.6b.json": (4, 4, 4),      # 16 heads / 8 kv at hd 64: four cores of four heads (the
+                                      # gate's geometry, designs/attn/probe_dense.py)
+    "qwen3-14b.json": (5, 8, 4),       # 40 heads / 8 kv at hd 128: five cores of eight heads
     "qwen3-4b.json": (4, 8, 4),       # 32 heads / 8 kv at hd 128: NHL == HPO, unchanged by the og split
     "llama31-8b.json": (4, 8, 4),     # same shape, no qk norm
     "hy-mt2-7b.json": (4, 8, 4),      # same shape, norm after RoPE
@@ -71,8 +74,9 @@ def test_unmeasured_family_keeps_the_shipped_kernel(name, unvalidated, monkeypat
     assert (G.VEXP, G.ACORES, G.NHL, G.RB, G.MLS) == (0, 1, G.NH, 1, G.NH), name
 
 
-@pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-4b.json", "llama31-8b.json", "hy-mt2-7b.json",
-                                  "gemma3-4b.json", "phi4-mini-4b.json", "gemma3-12b.json",
+@pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-0.6b.json", "qwen3-14b.json",
+                                  "qwen3-4b.json", "llama31-8b.json",
+                                  "hy-mt2-7b.json", "gemma3-4b.json", "phi4-mini-4b.json", "gemma3-12b.json",
                                   "qwen25-3b.json", "lfm2-1.2b.json"])
 def test_measured_family_is_on_the_path_without_the_probe(name, unvalidated, monkeypatch):
     """Granite (2026-09-07), Qwen3 (2026-09-08, the first HD-128 point: 5050 -> 258 ms at

@@ -179,14 +179,14 @@ cmake --install build
 **One command for engine, kernels, tests, and packages:**
 
 ```bash
-cmake --workflow --preset linux-package
+cmake --preset linux-package
 ```
 
 This configures, builds, tests, and emits the `.rpm` and portable `.tar.gz` into
 `build/packages/`. Note that `linux-package-deb` and `linux-package-tgz` are
 *package* presets, not workflow presets -- drive them with
 `cmake --build --preset linux-package-deb && cpack --preset linux-package-deb`,
-not with `cmake --workflow`. Packages depend on the system XRT (`xrt-base`
+not with `cmake `. Packages depend on the system XRT (`xrt-base`
 on Fedora, `libxrt-npu2` on Ubuntu), matching the runtime-prerequisite flow.
 
 `.deb` is intentionally **not** part of this preset: a DEB is only valid when

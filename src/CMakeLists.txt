@@ -1356,8 +1356,13 @@ install(FILES model_info.json DESTINATION "${OFLM_SHARE_DESTINATION}")
 # relative to the executable, so we install them relative to the binary.
 # Only present when the kernel export ran (OFLM_BUILD_KERNELS=ON, or a manual
 # export); skip silently for engine-only builds.
+option(OFLM_STRICT_XCLBINS "Fail configure if src/xclbins is missing when packaging" OFF)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
     install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}")
+elseif(OFLM_STRICT_XCLBINS)
+    message(FATAL_ERROR "src/xclbins not found; kernels must be exported (or pulled from staging) before packaging.")
+else()
+    message(WARNING "src/xclbins not found; package will omit NPU kernels.")
 endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3

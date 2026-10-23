@@ -39,6 +39,7 @@ model's directory -- so no environment variables are required.
 import argparse
 import copy
 import hashlib
+import dataclasses
 import json
 import os
 import re
@@ -68,12 +69,16 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # end for Q6_K on gemma3-4b). Order is install preference: exact first,
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
-# Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
-# manifest section + f32-scale kernel sets only ship for these). qwen3.5
-# (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
-# installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4"]
+# Whether a GGUF can be used is NOT a property of the family NAME: it is a
+# property of the kernel set the install links. The recipe emits the manifest's
+# f32-scale twin ("gguf" section) and the export builds its kernel set; the
+# engine swaps that section in when the model ships a model.gguf. So the gate
+# is the manifest itself (manifest_supports_gguf), read from the xclbins the
+# install links -- one check, no list to keep in step with the recipes, and no
+# name namespaces to confuse: the registry's family ("qwen3.5") and the
+# recipe's ("qwen35") are different strings for the same model, and a list
+# written in one of them silently refuses the other.
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -122,9 +127,31 @@ def gguf_quant_of(name):
     unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
     return gguf_quant_family(gguf_quant_suffix(name))
 
-def choose_gguf_file(names):
+def split_quant_request(repo_arg: str):
+    """`repo:QUANT` -- name the quant to take from a GGUF repo.
+
+    "mradermacher/Qwen3.5-9B-i1-GGUF:IQ4_NL" asks for that file's quant; the
+    suffix must LOOK like a quant (letters, digits, underscores) or the argument
+    is a repo id or a URL as it stands -- a URL's port would otherwise be read
+    as a quant request.
+    """
+    if ":" not in repo_arg:
+        return repo_arg, None
+    head, _, tail = repo_arg.rpartition(":")
+    if not head or not re.fullmatch(r"[A-Za-z0-9_]+", tail):
+        return repo_arg, None
+    return head, tail.upper()
+
+
+def choose_gguf_file(names, want=None):
     """Pick the best compatible *.gguf from a repo's root file names.
-    Returns (chosen, refused) -- refused maps every other gguf to why."""
+    Returns (chosen, refused) -- refused maps every other gguf to why.
+
+    `want` names the quant the user asked for ("IQ4_NL"): the files whose quant
+    SUFFIX matches it exactly win, and the ones whose FAMILY matches are the
+    fallback. Without it the preference order decides (Q4_1 first -- it is the
+    one the pool takes byte-exactly).
+    """
     refused = {}
     cands = []
     for n in names:
@@ -138,11 +165,23 @@ def choose_gguf_file(names):
         if q not in GGUF_QUANT_PREFERENCE:
             refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
             continue
-        cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
+        cands.append((GGUF_QUANT_PREFERENCE.index(q), q, suffix, n))
     cands.sort()
     if not cands:
         return None, refused
-    return cands[0][1], refused
+    if want:
+        exact = [c for c in cands if c[2].upper() == want]
+        if exact:
+            return exact[0][3], refused
+        fam = gguf_quant_family(want)
+        same = [c for c in cands if c[1] == fam]
+        if not same:
+            have = ", ".join(sorted({c[2] for c in cands})) or "none"
+            for c in cands:
+                refused[c[3]] = f"the repo has no {want} GGUF (it has: {have})"
+            return None, refused
+        return same[0][3], refused
+    return cands[0][3], refused
 
 
 def root_file_names(tree):
@@ -162,6 +201,37 @@ def manifest_supports_gguf(path):
         return "gguf" in json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+
+
+def tree_xclbins():
+    """The repo's own kernel sets (src/xclbins), when oflm-add runs from a
+    checkout: a freshly exported set lives there, and it may be newer than the
+    installed one (a rebuild adds the f32-scale twins the GGUF path needs)."""
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    repo = Path(root).parent
+    for d in (repo / "src" / "xclbins", repo / "xclbins"):
+        if d.is_dir():
+            return d
+    return None
+
+
+def gguf_kernel_set(name, roots):
+    """The kernel set for an official model that carries the GGUF-direct build.
+
+    The roots are searched in order (the user's, the system's, the tree's), and
+    the first set whose manifest has the "gguf" section wins. The system's set
+    may predate the f32-scale twins, so this is how a fresh set is found rather
+    than refusing the GGUF.
+    """
+    for root in roots:
+        if not root:
+            continue
+        mj = Path(root) / name / "open_kernels" / "manifest.json"
+        if manifest_supports_gguf(mj):
+            return mj.parent
+    return None
 
 SYSTEM_LIST_CANDIDATES = [
     "/opt/openflowlm/share/oflm/model_list.json",
@@ -640,11 +710,23 @@ def resolve_official(system_registry, dir_name, family, size):
     return None, None
 
 
-def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
+def derive_family(system_registry, dir_name, explicit=None, base_entry=None,
+                  content_families=()):
+    """details.family for this install.
+
+    The explicit --family wins; then the official entry's own family; then
+    what the model IS (the content routes: the kernels it needs, the base
+    model it was built on); and last the name, which is the weakest signal --
+    a fine-tune's name usually says nothing about its family ("Ornith-1.5-9B"
+    is a Qwen3.5-9B).
+    """
     if explicit:
         return explicit
     if base_entry:
         fam = base_entry.get("details", {}).get("family")
+        if fam:
+            return fam
+    for fam in content_families:
         if fam:
             return fam
     lower = dir_name.lower()
@@ -655,6 +737,115 @@ def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
         f"Could not determine details.family for '{dir_name}'. "
         "Pass --family (e.g. qwen3.5, qwen3.6-moe, nanbeige, llama3, ...)."
     )
+
+
+def family_of_official(system_registry, name):
+    """The registry's details.family for an official model's name, or None."""
+    if not name:
+        return None
+    for sizes in system_registry.get("models", {}).values():
+        for info in sizes.values():
+            if info.get("name") == name:
+                return (info.get("details") or {}).get("family")
+    return None
+
+
+def _model_key(name):
+    """The comparable name of a model: the registry's container name and the
+    HF repo slug name the same model ("Qwen3.5-9B-NPU2" / "Qwen3.5-9B")."""
+    n = (name or "").split("/")[-1].lower()
+    for suf in ("-opennpu2", "-npu2"):
+        if n.endswith(suf):
+            n = n[: -len(suf)]
+    return n
+
+
+def family_from_base_chain(system_registry, bases):
+    """The family of the official model a fine-tune is built on.
+
+    A fine-tune's README names its base model, and the official registry says
+    that base's family. The fine-tune needs the base's kernels (the same
+    shape, the same engine), so this is where its family comes from when its
+    own name says nothing. Returns (family, official name).
+    """
+    for b in bases or ():
+        key = _model_key(b)
+        for sizes in system_registry.get("models", {}).values():
+            for info in sizes.values():
+                name = info.get("name") or ""
+                if _model_key(name) != key:
+                    continue
+                fam = (info.get("details") or {}).get("family")
+                if fam:
+                    return fam, name
+    return None, None
+
+
+def _model_spec_class():
+    """The recipes' ModelSpec, or None when there is no open_kernels checkout."""
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.spec import ModelSpec
+        return ModelSpec
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def family_from_kernels(system_registry, spec, roots):
+    """The family of the installed kernel set whose GEOMETRY this model needs.
+
+    The kernels decide the engine, and so the family: a fine-tune of a
+    supported model runs on the base model's kernels -- the depth is the
+    manifest's business, not the kernels' -- and the installed set's directory
+    is named after the official model, which the registry ties to a family.
+    The match is the kernel geometry (the recipes' kernel_hash), so it is the
+    kernels that decide, not the depth or the tokenizer's id count.
+    Returns (family, set name).
+    """
+    ModelSpec = _model_spec_class()
+    if spec is None or ModelSpec is None:
+        return None, None
+    want = spec.kernel_hash()
+    for root in roots:
+        if not root:
+            continue
+        for m in sorted(Path(root).glob("*/open_kernels/manifest.json")):
+            try:
+                d = json.loads(m.read_text(encoding="utf-8"))
+                s = d.get("spec")
+                if not s or ModelSpec.from_dict(s).kernel_hash() != want:
+                    continue
+            except Exception:
+                continue
+            name = m.parents[1].name
+            fam = family_of_official(system_registry, name)
+            if fam:
+                return fam, name
+    return None, None
+
+
+def spec_from_config_dict(cfg):
+    """The ModelSpec a config.json describes, or None (no recipes, or a shape
+    they do not know)."""
+    ModelSpec = _model_spec_class()
+    if ModelSpec is None or not isinstance(cfg, dict):
+        return None
+    try:
+        return ModelSpec.from_hf_config(cfg)
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------- asset fetch
@@ -833,10 +1024,35 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
             if g and (need_eos and isinstance(g.get("eos_token_id"), list) or
                       need_bos and isinstance(g.get("bos_token_id"), int)):
                 break
+    source = "generation_config.json"
     if not g:
-        log("[WARN] no generation_config.json; the model may fail at load if the engine "
-            "needs eos_token_id in tokenizer_config.json")
-        return
+        g = {}
+        source = "config.json"
+        # No generation_config.json anywhere in the chain (the Qwen3.5 line ships
+        # none). The config.json names the same ids: the model's own eos and the
+        # text tower's -- the engine reads them as an array, so give it one.
+        cfg_path = target / "config.json"
+        if cfg_path.is_file():
+            try:
+                mcfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except Exception:
+                mcfg = {}
+            ids: list[int] = []
+            for c in (mcfg, mcfg.get("text_config") or {}):
+                v = c.get("eos_token_id")
+                if isinstance(v, int):
+                    ids.append(v)
+                elif isinstance(v, list):
+                    ids += [x for x in v if isinstance(x, int)]
+            if ids:
+                g["eos_token_id"] = sorted(set(ids))
+            bos = mcfg.get("bos_token_id")
+            if isinstance(bos, int):
+                g["bos_token_id"] = bos
+        if not g:
+            log("[WARN] no generation_config.json; the model may fail at load if the engine "
+                "needs eos_token_id in tokenizer_config.json")
+            return
     changed = False
     if need_eos and isinstance(g.get("eos_token_id"), list):
         cfg["eos_token_id"] = g["eos_token_id"]
@@ -846,7 +1062,7 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
         changed = True
     if changed:
         tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        log("[INFO] merged eos/bos ids from generation_config.json into tokenizer_config.json")
+        log("[INFO] merged eos/bos ids into tokenizer_config.json (from " + source + ")")
 
 
 def _parse_base_model_frontmatter(text):
@@ -1128,6 +1344,8 @@ def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
                 obtained.append(fname)
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.is_file() or dest.is_symlink():
+                dest.unlink()
             shutil.copy2(src, dest)
             obtained.append(fname)
     return obtained
@@ -1444,29 +1662,16 @@ def open_kernels_checkout():
 def model_spec_hash(model_dir):
     """(spec_hash, note) for an installed model directory; (None, why) on failure.
 
-    Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
-    config.json, the tokenizer's real vocab, and the per-role weight format off
-    the model.q4nx safetensors header (no weight byte is read).
+    The spec is derived the way the recipes do it: from the model's own
+    weights where it has them (a GGUF's own metadata) and from config.json
+    plus the tokenizer's real vocab otherwise (the model.q4nx safetensors
+    header gives the per-role weight format; no weight byte is read).
     """
-    root = open_kernels_checkout()
-    if root is None:
-        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
-    added = str(root)
-    inserted = added not in sys.path
-    if inserted:
-        sys.path.insert(0, added)
-    try:
-        from recipes.load import spec_from_model_dir
-        spec = spec_from_model_dir(Path(model_dir))
-        return spec.spec_hash(), f"spec from {root}"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-    finally:
-        if inserted:
-            try:
-                sys.path.remove(added)
-            except ValueError:
-                pass
+    spec = model_spec(model_dir)
+    if spec is None:
+        return None, ("no spec for this model (no open_kernels/recipes checkout, "
+                      "or a shape they do not know)")
+    return spec.spec_hash(), "spec from the model's own metadata"
 
 
 def kernel_set_spec_hash(kernel_dir):
@@ -1577,7 +1782,127 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     return False
 
 
-def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
+def model_spec(model_dir):
+    """The ModelSpec for an installed model directory, or None (no recipes
+    checkout, or a shape they do not know).
+
+    A GGUF-direct model is described by ITS OWN weights. The repo's
+    config.json is a claim about the model the repo was built from, and for a
+    fine-tune that is often the BASE: empero-ai/Qwen3.8-9B-Distill-GGUF
+    ships no config.json at all, and the one its README names (the base's)
+    says 32 layers where the file has 33. The geometry that decides which
+    kernels serve the model is the file's; the config.json is the fallback for
+    a model that has no GGUF.
+    """
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.load import spec_from_model_dir
+        from recipes.spec import ModelSpec
+        gguf = Path(model_dir) / "model.gguf"
+        if gguf.is_file():
+            try:
+                inv = read_gguf_inventory(str(gguf))
+                if inv:
+                    names = [x[0] if isinstance(x, (list, tuple)) else x for x in inv[1]]
+                    spec = ModelSpec.from_gguf_metadata(inv[0], names)
+                    # the tokenizer's id count (the logits above it are undefined)
+                    try:
+                        spec = dataclasses.replace(spec, real_vocab=spec_from_model_dir(Path(model_dir)).real_vocab)
+                    except Exception:
+                        pass
+                    return spec
+            except Exception:
+                pass
+        return spec_from_model_dir(Path(model_dir))
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
+    """A kernel set for this model built from the kernels of an installed set
+    that serves the same GEOMETRY, with this model's own manifest.
+
+    The kernels are width-keyed: the depth is the manifest's business (the
+    layer loop it drives), so a fine-tune of a different depth runs on the base
+    model's kernels -- only the manifest differs. A model whose shape no
+    installed set covers needs a build; a model whose DEPTH differs does not,
+    and asking for a rebuild here would put a kernel build between the user and
+    a model that runs today.
+
+    The sibling set is a directory of the base's kernel files (hard-linked
+    where the filesystem allows it) plus this model's manifest, and it is what
+    the model links to. Returns the directory, or None.
+    """
+    spec = model_spec(model_dir)
+    if spec is None:
+        return None
+    want = spec.kernel_hash()
+    # The preferred base first: the set the GGUF gate picked (the freshest one
+    # with the f32-scale twins), so the sibling carries them too.
+    manifests = []
+    if prefer:
+        manifests.append(Path(prefer) / "manifest.json")
+    for root in roots:
+        if not root:
+            continue
+        manifests += sorted(Path(root).glob("*/open_kernels/manifest.json"))
+    for m in manifests:
+        try:
+            d = json.loads(m.read_text(encoding="utf-8"))
+            s = d.get("spec")
+            if not s:
+                continue
+            ModelSpec = _model_spec_class()
+            if ModelSpec is None or ModelSpec.from_dict(s).kernel_hash() != want:
+                continue
+        except Exception:
+            continue
+        base = m.parent
+        out = Path(model_dir) / "open_kernels"
+        try:
+            if out.exists() and not out.is_symlink():
+                shutil.rmtree(out)
+            out.mkdir(parents=True, exist_ok=True)
+            for f in base.rglob("*"):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(base)
+                dst = out / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    dst.unlink()
+                try:
+                    os.link(f, dst)                    # the same bytes, no copy
+                except OSError:
+                    shutil.copy2(f, dst)
+            from recipes.manifest import manifest
+            (out / "manifest.json").write_text(json.dumps(manifest(spec), indent=1) + "\n",
+                                               encoding="utf-8")
+        except Exception as exc:
+            if not quiet:
+                log(f"[WARN] could not build the sibling kernel set: {exc}")
+            return None
+        if not quiet:
+            log(f"[INFO] open kernels: {out} (the kernels of {base.parent.name}, "
+                f"with this model's own manifest -- same geometry, "
+                f"{spec.num_layers} layers)")
+        return out
+    return None
+
+
+def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False, prefer=None):
     """Find and link the open kernel set for this model; say which and why."""
     if override:
         kernel_dir = Path(override)
@@ -1596,6 +1921,13 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+    # No set was built for this shape exactly. The kernels are width-keyed, so
+    # a set that serves the same geometry does: only the manifest (the layer
+    # loop) differs, and it is written here -- no build, no kernel set to
+    # export, nothing for the user to run.
+    sibling = sibling_open_kernels(model_dir, roots, quiet=quiet, prefer=prefer)
+    if sibling:
+        return True
     checkout = open_kernels_checkout()
     script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
     log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
@@ -1699,7 +2031,8 @@ GGML_TYPE_NAMES = {
 }
 # Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
 # quants, put/pack_norm for the small float weights).
-GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"}
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K",
+                     "IQ4_NL", "IQ4_XS"}
 
 
 class _GgufTruncated(Exception):
@@ -1897,14 +2230,17 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
                        "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
-    # The output projection is routinely a coarser quant than the body
-    # (Q8_0 over Q4_*); anything else must be the claimed family.
+    # llama.cpp's quantizers MIX types by importance: the body at the named quant,
+    # the output projection and the attention V at a finer one (a Q4_1 file holds
+    # Q6_K beside its Q4_1; an IQ4_XS file holds Q5_K). So the name is a hint, not
+    # a contract: what must hold is that SOME tensor is of the claimed family --
+    # otherwise the name is a lie and the file is not what was asked for.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
-    if others:
-        return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
-                       f"{claimed_family}; refusing rather than packing the wrong layout")
+    fams = {gguf_quant_family(q) for q in quants}
+    if claimed_family and claimed_family not in fams:
+        return False, (f"the file's tensors are {'/'.join(sorted(quants))} -- none of them is the "
+                       f"{claimed_family} its name claims; refusing rather than packing the wrong layout")
     arch = kv.get("general.architecture", "?")
     return True, f"{len(tensors)} tensors ({arch}), quant {sorted(quants)}"
 
@@ -2077,6 +2413,10 @@ def main():
     # modelscope.ai/.cn URL implies it on its own.
     modelscope = args.modelscope
     repo_arg = args.repo
+    # `repo:QUANT` names the quant to take from a GGUF repo (mradermacher's
+    # catalogues carry one file per quant). Without it the preference order
+    # decides -- Q4_1 first, the one the pool takes byte-exactly.
+    repo_arg, gguf_want = split_quant_request(repo_arg)
     local_dir = Path(repo_arg) if os.path.isdir(repo_arg) else None
     if local_dir:
         repo, dir_name = repo_arg, local_dir.name
@@ -2104,13 +2444,34 @@ def main():
             gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want)
+    if gguf_want and gguf_name is None:
+        if not gguf_names:
+            all_files = sorted(e.name for e in local_dir.iterdir() if e.is_file()) if local_dir else sorted(root_file_names(tree))
+            raise SystemExit(
+                f"{repo_arg}: ':QUANT' is for GGUF repositories, and this repository has no .gguf files "
+                f"(files present: {', '.join(all_files) or 'none'})")
+        compat = sorted({gguf_quant_suffix(n).upper() for n in gguf_names
+                         if gguf_quant_of(n) in GGUF_QUANT_PREFERENCE and not re.search(r"-\d+-of-\d+\.gguf$", n)})
+        files = ", ".join(sorted(gguf_names))
+        raise SystemExit(
+            f"{repo_arg}: no compatible '{gguf_want}' GGUF in that repository.\n"
+            f"  supported quants present : {', '.join(compat) or 'none'} "
+            f"(open kernels accept {'/'.join(GGUF_QUANT_PREFERENCE)})\n"
+            f"  .gguf files in repo      : {files}")
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
     else:
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
+    gguf_only = bool(gguf_names) and not have_q4nx
+    if gguf_only and gguf_name is None:
+        files = ", ".join(sorted(gguf_names))
+        raise SystemExit(
+            f"{repo_arg}: repository carries only .gguf files, and none uses a quant supported "
+            f"by the open kernels (accept {'/'.join(GGUF_QUANT_PREFERENCE)}).\n"
+            f"  .gguf files in repo: {files}")
     gguf_mode = gguf_name is not None and not have_q4nx
     if gguf_mode:
         # The tensors must be what the name claims, in types the NPU packers
@@ -2132,9 +2493,7 @@ def main():
         if ok:
             log(f"[INFO] {gguf_name}: {note}")
         else:
-            log(f"[WARN] refusing {gguf_name}: {note}")
-            gguf_refused[gguf_name] = note
-            gguf_name, gguf_mode = None, False
+            raise SystemExit(f"{repo_arg}: refusing {gguf_name}: {note}")
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
@@ -2164,8 +2523,30 @@ def main():
                                       local_dirs=[d for d in (local_dir, cache) if d])
         return peeked
 
+    # ---- the family: what the model IS, before what it is CALLED. A fine-tune's
+    # name says nothing ("Ornith-1.5-9B"), but the kernels it needs say who it
+    # is: the installed set whose geometry matches is the base model's, and the
+    # registry ties that base to a family. Then the base chain (the README's
+    # base model), then the content (the GGUF header's architecture, the
+    # config's model_type), and last the name.
+    content_families = []
+    # The roots the open kernel sets live in: the user's, the system's, and the
+    # tree's own (src/xclbins -- a freshly exported set, which may be newer
+    # than the installed copy).
+    kernel_roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root(), tree_xclbins()]
+    if args.family is None:
+        spec = spec_from_config_dict(get_peeked_config())
+        fam, set_name = family_from_kernels(system_registry, spec, kernel_roots)
+        if fam:
+            log(f"[INFO] family '{fam}' from the kernel set '{set_name}' (the same geometry)")
+            content_families.append(fam)
+        fam, base_name = family_from_base_chain(system_registry, get_base_chain())
+        if fam and fam not in content_families:
+            log(f"[INFO] family '{fam}' from the base model '{base_name}'")
+            content_families.append(fam)
     try:
-        family = derive_family(system_registry, dir_name, args.family)
+        family = derive_family(system_registry, dir_name, args.family,
+                               content_families=content_families)
     except SystemExit:
         # No name marker, and no official entry can supply the family yet
         # (that matching happens below). Climb the content instead, cheapest
@@ -2242,38 +2623,36 @@ def main():
     # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
     # xclbins must actually carry the GGUF-direct kernel builds (the nested
     # "gguf" manifest section, produced by the *_f32 sets in utilities/
-    # build-all.sh). Otherwise fall back to the normal safetensors install.
-    gguf_skip = None
+    # build-all.sh). A GGUF repository never carries model.q4nx, so a missing
+    # kernel set stops here with a direct error rather than falling back to the
+    # q4nx file list.
+    gguf_kernel_dir = None
     if gguf_mode:
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
             # open_kernels manifest. Just confirm the family is recognized.
-            pass
-        elif family not in GGUF_CAPABLE_FAMILIES:
-            gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
-                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
-                         + "); installing the safetensors weights instead")
-        else:
-            if args.open_kernels:
-                mj = Path(args.open_kernels) / "manifest.json"
-            else:
-                sys_xcl = find_system_xclbin_root()
-                mj = (sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
-                      if xclbin_source and sys_xcl else Path())
-            if not manifest_supports_gguf(mj):
-                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
-                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
-                             "rebuild them with utilities/build-all.sh -- "
-                             "installing the safetensors weights instead")
-        if gguf_skip:
-            gguf_refused[gguf_name] = gguf_skip
-            log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
-            gguf_name, gguf_mode = None, False
-        elif family in EMBEDDING_FAMILIES and gguf_mode:
-            # Embedding GGUF loads the existing bf16 matmul kernels, whose
-            # directory is fixed by the engine; point the xclbin link there.
             xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
+        else:
+            # The set that carries the section: the one the install links, or a
+            # fresher one with the same name (a rebuild adds the f32-scale
+            # twins; the installed copy may predate it).
+            if args.open_kernels:
+                kdir = Path(args.open_kernels) if manifest_supports_gguf(
+                    Path(args.open_kernels) / "manifest.json") else None
+            else:
+                kdir = gguf_kernel_set(xclbin_source, kernel_roots)
+            if kdir is None:
+                bases = get_base_chain()
+                base_hint = f" --repo {bases[0]}" if bases else ""
+                raise SystemExit(
+                    f"{repo_arg}: no GGUF-direct open kernel set found for "
+                    f"{xclbin_source or dir_name} (family '{family}').\n"
+                    f"Build the kernel set for this model size with:\n"
+                    f"  python utilities/build-new-spec.py{base_hint}")
+            gguf_kernel_dir = kdir
+            if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
+                log(f"[INFO] GGUF-direct kernels: {kdir}")
 
     if not args.dry_run:
         if official:
@@ -2298,16 +2677,11 @@ def main():
             print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
         elif npue_embed:
             print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
-        elif gguf_refused:
-            print(f"weights        : safetensors (GGUF present but not usable: "
-                  + "; ".join(sorted(set(gguf_refused.values()))) + ")")
-        probe = args.open_kernels or (local_dir if local_dir else None)
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
             sh, note = model_spec_hash(local_dir)
-            roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
-            found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
+            found, _ = find_open_kernels(sh, kernel_roots, dir_name) if sh else (None, None)
             print(f"spec hash      : {sh or '(' + note + ')'}")
             print(f"open kernels   : {found or '(none installed)'}")
         print(f"models dir     : {target}")
@@ -2328,6 +2702,14 @@ def main():
                               want=NPU_EMBED_FILES if npue_embed else None)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
+        # A cache that holds the repo but not the file we want is no use: the
+        # GGUF-direct path asks for ONE file by name, and a snapshot with only
+        # the config (or with a different quant) is not it. Fall through to the
+        # download then, rather than copying a cache that cannot serve.
+        if snapshot and gguf_mode and not (Path(snapshot) / gguf_name).is_file():
+            if not args.quiet:
+                log(f"[INFO] The local cache has no {gguf_name}; downloading it.")
+            snapshot = None
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
@@ -2407,14 +2789,10 @@ def main():
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []
-        if missing and not gguf_mode and gguf_refused and "model.q4nx" in missing:
-            raise SystemExit(
-                f"Model is missing required files: {missing}\n"
-                "The repo carries only GGUF weights and they cannot be used directly: "
-                + "; ".join(sorted(set(gguf_refused.values())))
-                + "\nConvert one to model.q4nx with q4nx-build, or pick a GGUF-capable family (--family).")
         if missing:
-            raise SystemExit(f"Model is missing required files: {missing}")
+            present = sorted(e.name for e in target.iterdir() if e.is_file())
+            raise SystemExit(
+                f"Model is missing required files: {missing} (files present: {', '.join(present) or 'none'})")
     if gguf_mode and not (target / "config.json").is_file():
         log("[WARN] No config.json in the repo; the engine will derive the config from the GGUF "
             "metadata (llama-family shapes only -- Granite etc. need a config.json).")
@@ -2467,12 +2845,13 @@ def main():
     # Open kernels: keyed by this model's spec, not by an official model name.
     # NPU-embedding uses the npue_design_family design set (already installed),
     # not the chat-model open-kernel link, so it is skipped here.
-    if (args.open_kernels or not args.no_xclbin) and not npue_embed:
+    if (args.open_kernels or gguf_kernel_dir or not args.no_xclbin) and not npue_embed:
         setup_open_kernels(
             target,
             dir_name,
-            [user_xclbin_dir(args.xclbin_dir), system_root],
+            kernel_roots,
             override=args.open_kernels,
+            prefer=str(gguf_kernel_dir) if gguf_kernel_dir else None,
             force=args.force,
             quiet=args.quiet,
         )

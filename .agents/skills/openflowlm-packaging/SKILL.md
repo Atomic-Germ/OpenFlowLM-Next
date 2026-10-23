@@ -8,7 +8,7 @@ description: Build and ship the OpenFlowLM Linux distribution (engine + open xcl
 One command builds and packages everything:
 
 ```bash
-cmake --workflow --preset linux-package   # configure + build + test + RPM/TGZ
+cmake --preset linux-package   # configure + build + test + RPM/TGZ
 ```
 
 Artifacts land in `build/packages/`. `linux-default` is the "everything" configure
@@ -92,7 +92,7 @@ line should read `Found XRT via pkg-config`).
 
 Inspect: `rpm -qlp`/`dpkg-deb -c` for `/usr/bin/oflm`, `/etc/profile.d/openflowlm.sh`,
 utilities, and **no** `.bak`; `rpm -qpR` for `libxrt_coreutil.so.2`. The full
-`cmake --workflow --preset linux-package` additionally rebuilds the kernels
+`cmake --preset linux-package` additionally rebuilds the kernels
 (cached) and runs the tests in one shot; `git status` should show `src/xclbins`
 manifests only if a recipe actually changed.
 
