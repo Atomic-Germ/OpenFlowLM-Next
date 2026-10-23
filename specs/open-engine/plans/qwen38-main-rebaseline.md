@@ -1,5 +1,58 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — combined full-depth prefill validation, 2026-10-23
+
+Nine full-resident runs complete: fresh paired-input, weighted-FFN and combined
+linear QKV/Z/output + FFN up/gate CLIs, each on sequential, hybrid layer-major
+and hybrid block-major routes. Every run uses the same independent 20-token
+prompt and one continuation across all 64 layers. Historical source metadata
+and reference arrays remain unchanged. The runner checks historical/current
+identities, build dependencies, kernel hashes, available RAM and exclusive NPU
+use before execution. An independent auditor recomputes every numerical gate.
+
+Fresh controls reproduce **69/69 paired logits/scratch files** and **261/261
+weighted logits/scratch/residual files**. Sequential outputs remain byte-exact
+across variants, and hybrid schedules agree in all logits and layer residuals.
+
+| Hybrid metric (each schedule) | Paired input | Weighted FFN | Combined |
+|---|---:|---:|---:|
+| Passing layer/position residuals | 1299/1344 | 1315/1344 | 1328/1344 |
+| Worst normalized residual error | 0.0183013326 | 0.0138594086 | 0.0121972127 |
+| Minimum logit correlation | 0.9999488108 | 0.9999742814 | 0.9999807010 |
+| L63 continuation residual error | 0.0011956505 | 0.0004262400 | 0.0002258117 |
+
+All **63/63 combined logit gates pass**, and sequential residuals pass
+**1344/1344**, unchanged. Combined residual acceptance is **4000/4032**, with
+**16 failures per hybrid schedule** at the unchanged 0.005 threshold. The
+independent audit is complete and correctly returns numerical FAIL.
+
+The improvement is not uniform. Compared with weighted FFN, 16 previously
+failing hybrid rows pass, but three new failures appear per schedule:
+L53/P18 **0.0040623432 → 0.0051799227**, L56/P17 **0.0041391664 → 0.0052288517**,
+and L63/P1 **0.0049026924 → 0.0096485275**. Earliest failing depth is L42/P17
+(**0.0057900192**); worst is L52/P17 (**0.0121972127**). These need conditioned
+sublayer attribution before promotion, especially the new early-position L63
+failure. A lower total failure count does not establish full accuracy.
+
+Evidence: `Models/qwen38-27b/prefill-combined-cli/native-v1/`, including captures,
+complete numerical FAIL report and independent audit. Production sources,
+kernels, model packing and manifest are unchanged.
+
+A separate two-request CLI completes three more resident processes. Across
+sequential and both hybrid routes, **261/261 captures** match the original
+single-request candidate, and **261/261** match again after `Core::reset()` on
+the same resident engine. The independent repeat audit passes and preserves
+the numerical failures: `numerical_passed=false`, `model_acceptance=false`.
+This verifies normal request reset, not full-buffer zeroing or independent
+checkpoint/restore correctness. Evidence: `repeat-native-v1/` alongside the
+single-request run. The repeat build pins 591 compiler dependencies and passes
+**CTest 4/4**. Eight new RED-to-GREEN tests; host suite **1680 passed / 47 skipped**.
+
+Next capture conditioned sublayers at L63/P1 (new regression), L42/P17 (first
+failing depth) and L52/P17 (worst error), requiring exact native baseline
+identity before separating incoming residual drift from local arithmetic.
+Production promotion and full-depth 255/256/257-token acceptance remain open.
+
 ## Latest checkpoint — combined prefill CLI preparation, 2026-10-23
 
 Built three private CLIs from the merged source: paired-input control,
