@@ -49,3 +49,27 @@ Next compare effective/BF16 weight predictions for uncorrected FFN down and
 full-attention projections, keeping per-head and signed error decompositions.
 This is a hypothesis to test, not a proven cause or permission to widen policy.
 Read weights per layer; no resident model needed for that CPU attribution.
+
+## CPU rounding attribution follow-up (2026-10-23)
+
+Use [the attribution runbook](../../../utilities/prefill-combined-attribution/README.md).
+No resident/NPU execution. Verify prior audited captures, references and builds;
+read weights per layer. Check manifest/source identity including chunk0 Q/gate
+slices. Keep paired-input error separate from weight rounding, preserve per-head
+scales and signed component vectors. Counterfactual suffixes are diagnostics.
+
+Validated: 8/8 packed/source identities, 1124 comparisons, three primary CPU
+outputs byte-exact and four signed closures exact. BF16 predictions fit native
+within 3.3603e-6 maxrel; remaining L2 ratio <=0.3126% of native-minus-effective
+projection error. This supports local rounding attribution, not exact replay.
+L63 down rounding adds a 0.0026236663 component on the primary output scale;
+ideal FFN alone still leaves 0.0070258073 FAIL. Joint ideal attention entry/out
+and FFN on actual input gives 0.0040534510. Full-depth remains 4000/4032 FAIL.
+Nine RED-to-GREEN tests; suite 1699 passed / 47 skipped. Evidence under
+`Models/qwen38-27b/prefill-combined-attribution/v1/`.
+
+Next isolate N5120/K17408/T256 paired-weight FFN down on the three captured H
+rows. Require exact native control, two slot placements, zero inactive columns,
+original conditioned and composed residual gates. Then validate full-attention
+entry/output with causal prefixes before expanding the combined policy. No
+full-model residency is required for these isolated replays.

@@ -1,5 +1,45 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — combined weight-rounding attribution, 2026-10-23
+
+CPU-only attribution on retained combined captures verifies **8/8 manifest-packed
+versus source weight identities**, including separate Q/gate slices, and
+**1124 projection/head comparisons**. Three independent causal outputs
+reconstruct primary references bytewise. Four signed error decompositions
+close exactly in saved FP64 vectors. All capture, control, build and reference
+provenance checks remain mandatory; no NPU process or new kernel was used.
+
+BF16-rounded weight predictions fit native outputs within **3.3603e-6 maxrel**.
+The worst remaining L2 error fraction is **0.3126%** of native-minus-effective
+projection error, across the tested heads/positions. This strongly supports
+weight rounding as the dominant local projection error; it is not byte-exact
+native replay or a fraction of full-model error explained.
+
+| Target | Native output error | Ideal FFN on actual residual | Down-weight rounding component |
+|---|---:|---:|---:|
+| L63/P1 | 0.0096485275 | 0.0070258073 | 0.0026236663 |
+| L42/P17 | 0.0057900192 | 0.0052107169 | 0.0005789814 |
+| L52/P17 | 0.0121972127 | 0.0123487787 | 0.0002769049 |
+
+Components use the independent output scale and retain signs; their magnitudes
+must not be added. L63's remaining down implementation component is only
+**2.2129e-6**. Down correction alone cannot close these captured failures.
+Joint ideal attention Q/K/V/gate, output projection and FFN at L63/P1, driven
+by the actual incoming prefix, reduce output error to **0.0040534510**.
+The gate-only entry substitution, with ideal output projection and FFN, gives
+**0.0049558575**; Q/K/V substitutions separately remain above 0.005. These are
+conditioned suffix diagnostics, not fresh full-model propagation.
+
+Next validate isolated paired-weight FFN down N5120/K17408/T256 on the three
+captured activation rows, requiring byte-exact native controls and two slot
+placements. Full-attention entry/output replay follows before any combined
+policy expansion. Production promotion and long-prefix acceptance remain open;
+the unchanged full-depth residual result is **4000/4032 FAIL**.
+
+Nine new RED-to-GREEN tests; host suite **1699 passed / 47 skipped**. Workflow:
+`utilities/prefill-combined-attribution/`. Evidence and prediction/component
+arrays: `Models/qwen38-27b/prefill-combined-attribution/v1/`.
+
 ## Latest checkpoint — combined causal sublayers, 2026-10-23
 
 Built a private read-only tracer from the verified combined CLI for L63/P1
