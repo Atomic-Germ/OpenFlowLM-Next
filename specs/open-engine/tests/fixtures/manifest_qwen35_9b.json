@@ -1566,8 +1566,8 @@
   "contexts": {
    "ln": "ln/final.xclbin",
    "lm": "lm_head_q8/final.xclbin",
-   "lx": "lx/final.xclbin",
-   "ax": "ax/final.xclbin"
+   "lx": "lx_f32/final.xclbin",
+   "ax": "ax_f32/final.xclbin"
   },
   "kernels": {
    "ln": {
@@ -1582,14 +1582,14 @@
    },
    "lx": {
     "context": "lx",
-    "insts": "lx/insts.bin",
-    "build": "lx"
+    "insts": "lx_f32/insts.bin",
+    "build": "lx_f32"
    },
    "ax": {
     "context": "ax",
-    "insts": "ax/insts.bin",
+    "insts": "ax_f32/insts.bin",
     "patch": "attnpos",
-    "build": "ax"
+    "build": "ax_f32"
    }
   },
   "layer_types": {

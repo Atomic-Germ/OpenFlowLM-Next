@@ -25,6 +25,15 @@ except Exception:
     CONFIG_MODEL_FAMILIES = {}
     FAMILY_ALIASES = []
 
+# The real spec machinery: `ModelSpec.from_hf_config` knows the family builders
+# (layer types off full_attn_idxs / layer_types, LFM2's FF adjustment, llama3's
+# rope law), and `kernel_hash()` is the key the engine matches installed kernel
+# sets by -- so BOTH the existing-spec match and the generated candidate must
+# go through it. The hand-rolled family+hidden match linked Llama-3.2-1B to
+# minicpm5-2b (same family+hidden, HEAD DIM 64 vs 128 -- different kernels).
+sys.path.insert(0, str(ROOT / "open_kernels"))
+from recipes.spec import ModelSpec, SpecError  # noqa: E402
+
 
 def fetch_config(repo: str) -> dict:
     from huggingface_hub import hf_hub_download
@@ -80,13 +89,31 @@ def base_model_from_readme(repo: str) -> str | None:
 
 
 def existing_spec_for_family_size(family: str, cfg: dict) -> str | None:
-    # check if any spec already covers this hidden_size
+    """The spec whose KERNELS cover this config, by the same key the engine
+    matches installed sets with (ModelSpec.kernel_hash: family, hidden, FF,
+    heads, head_dim/rotary, rope law, eps, vocab, quant -- NOT the depth).
+
+    A false link would ship a spec whose kernels the model cannot run (the
+    Llama-3.2-1B case again: same family+hidden as minicpm5-2b, head_dim 64
+    vs 128), so the rule is kernel-hash equality or nothing.
+    """
+    try:
+        cand = ModelSpec.from_hf_config(cfg)
+    except SpecError as e:
+        print(f"(no spec match possible: {e})")
+        return None
     for sp in SPECS_DIR.glob("*.json"):
         try:
             d = json.loads(sp.read_text())
         except Exception:
             continue
-        if d.get("family") == family and d.get("hidden") == cfg.get("hidden_size"):
+        if d.get("family") != cand.family:
+            continue
+        try:
+            existing = ModelSpec.from_dict(d)
+        except Exception:
+            continue
+        if existing.kernel_hash() == cand.kernel_hash():
             return sp.name
     return None
 
@@ -126,6 +153,15 @@ def main():
         print(f"Wrote link file to {out}")
         return
 
+    # A real ModelSpec from the family builder when the config's model_type has
+    # one (layer types off full_attn_idxs / layer_types, the family's FF and
+    # rope law); the template derivation stays for unknown model types.
+    cand = None
+    try:
+        cand = ModelSpec.from_hf_config(cfg)
+    except SpecError as e:
+        print(f"(the family builder refuses this config: {e}; using the derivation)")
+
     # Use an existing spec of the same family as a template for schema/routing.
     template = None
     for sp in SPECS_DIR.glob("*.json"):
@@ -151,10 +187,15 @@ def main():
     spec["vocab"] = cfg.get("vocab_size", spec.get("vocab"))
     rope_theta = cfg.get("rope_theta", spec.get("rope_theta"))
     spec["rope_theta"] = float(rope_theta) if rope_theta is not None else rope_theta
-    head_dim = cfg.get("hidden_size", 0) // max(cfg.get("num_attention_heads", 1), 1)
+    head_dim = cfg.get("head_dim") or cfg.get("hidden_size", 0) // max(cfg.get("num_attention_heads", 1), 1)
     spec["head_dim"] = head_dim or spec.get("head_dim")
     spec["rotary_dim"] = head_dim or spec.get("rotary_dim")
     spec["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config", "model": args.repo.split("/")[-1] + "-NPU2"}
+    if cand is not None:
+        built = cand.to_dict()
+        built["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config",
+                          "model": args.repo.split("/")[-1] + "-NPU2"}
+        spec = built
     out = Path(args.out) if args.out else SPECS_DIR / f"{family}-candidate.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(spec, indent=2))

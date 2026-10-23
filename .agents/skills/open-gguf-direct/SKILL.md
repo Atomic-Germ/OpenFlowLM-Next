@@ -565,6 +565,52 @@ Commit: the fixture pair, `recipes/catalogue.py` (the K=5120 point),
 `utilities/catalogue-add-point.py` (--param/--value), and `OP_FIXTURE` in
 `utilities/build-new-spec.py` updated to name the new fixture.
 
+## Filling out the missing sizes (2026-10-23)
+
+`utilities/build-new-spec.py --repo <hf-repo> [--spec-name <stem>]` run over
+the official registry's gaps. What landed:
+
+- **llama32-1b, llama32-3b, lfm2-2.6b** — full chains (spec → gate PASS →
+  catalogue → build → export). Shipped as the canonical set names
+  `Llama-3.2-1B-NPU2` / `Llama-3.2-3B-NPU2` / `LFM2-2.6B-NPU2` (extra.model
+  must be the registry name — the name test enforces it; export writes
+  `src/xclbins/<extra.model>/open_kernels`, so fix extra.model BEFORE the
+  first export, not after).
+- The engine's match key is `ModelSpec.kernel_hash()`
+  (`open_kernels/recipes/spec.py`). `gen-kernel-spec.py` now matches existing
+  specs and generates candidates THROUGH `ModelSpec.from_hf_config` /
+  `kernel_hash()` instead of its old family+hidden shortcut, which produced
+  two false links this session: Llama-3.2-1B ↔ minicpm5-2b (same family+hidden,
+  head_dim 64 vs 128 — different compiled attention) and — the subtle one —
+  LFM2-2.6B ↔ lfm2-1.2b (same family+hidden, FF 10752→adjusted **7168** vs
+  the 1.2B's **8192**). After the fix LFM2-2.6B correctly got its OWN kernels.
+- Geometry links that are genuine (kernel-hash equal, link-only, no artifact —
+  build-new-spec deletes fresh link files): LFM2.5-1.2B → lfm2-1.2b (same
+  conv/full pattern [2,5,8,10,12,14], FF 12288→adjusted 8192, rope 1e6),
+  DeepSeek-R1-0528-Qwen3-8B → qwen3-8b, DeepSeek-R1-Distill-Llama-8B →
+  llama31-8b (its config carries the llama3 rope_scaling).
+- **gemma3-1b is a recipe wall, not a spec**: head_dim 256 with ONE kv head
+  (cos/sin straddle two 512-byte attention elements in the dense design) and
+  hidden 1152 (not a multiple of 256). Candidate parked at
+  `open_kernels/recipes/candidates/gemma3-1b.json` — needs a design change,
+  do not re-attempt without one.
+- LFM2-2.6B numbers worth remembering: hidden 2048, 30 layers (layer_types
+  derive from its config's `layer_types` list, same conv/full mix), FF
+  10752 → **7168** after the swiglu auto-adjust; the registry's "2.6B" is a
+  deeper LFM2-1.2B, NOT a wider one.
+- Tests: the frozen spec_hash map in `specs/open-engine/tests/test_lfm2.py`
+  needs an entry for every new shipped spec (asserts the set of specs.json
+  names first, then each hash); the `manifest_qwen35_9b` fixture was stale
+  from the GGUF-direct switch and regenerated via `make_fixtures.py` (IRON
+  python) — its only diff was the gguf section's f32 build dirs
+  (ax/lx → ax_f32/lx_f32), the expected divergence.
+- `cmake --build build --target export_kernels`: **25 specs + BERT**, ok.
+- Pre-existing environmental failure on this box only:
+  `test_qwen35_wide_glue.py::test_small_bank_pointer_arithmetic_in_compiled_cpp`
+  — the test links with `-fsanitize=undefined,bounds` and Fedora's sanitizer
+  runtime (`/usr/lib64/libubsan.so.1.0.0`) is not installed; test/fixture/
+  dn_glue are byte-identical to origin/main.
+
 ## Still open (Phase-MoE / later)
 
 - qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
