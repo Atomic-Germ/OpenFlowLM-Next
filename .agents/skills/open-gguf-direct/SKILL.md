@@ -465,7 +465,7 @@ a warm rebuild was `cmp`-identical. Root cause and fix above.
   completes without core-body cooperation. Stage isolation by stream
   truncation does NOT work here.
 
-### The lm-head container gap (found + gated 2026-10-22)
+### The lm-head container gap (closed 2026-10-22)
 
 With the sampler fixed, decode ran — and produced ~4.8 tok/s of garbage: ids
 248068/271/248069/271 (the think template, correct) then a fixed cycling
@@ -475,36 +475,42 @@ rows are NaN**, all within the first 191,736 ids, ~25% of them, no row
 periodicity (mod 2/3/4/5/8 flat) — a garbage scale read, not a per-group
 bug. Everything past file coverage recovers the memset zeros.
 
-Root cause: pool pack for the hybrid family. The pool's projection tensors
-go through `std_perm_gguf` (which dequantizes/requantizes Q4_K/Q6_K/etc.
-into the pool law), but the head op is `lmhead_q8` (`src/open_qwen36/
-pools.cpp` ~773), a **plain memcpy in the kernel's supertile order** — it
-assumes `lm_head.weight` (= gguf `output.weight`) already holds the engine's
-q8 chunk raster: 32-row × 256-column chunks, 256 bf16 scales then 8192 int8
-codes, at pool chunk k ← file `(4*(k/per_band) + k%4)*nk + k%per_band/4`,
-`per_band = 4*nk` (nk = in_dim/256). Only a q4nx-build conversion writes
-that (Q8NX layout). A raw llama.cpp GGUF stores the head row-major in its
-own quant; Ornith-1.5's `output.weight` is **Q6_K** (4096 × 248320),
-`Qwen3.8-9B-Distill-GGUF`'s is whole-file **Q8_0** (byte count even lands
-exactly on the chunk grid — 1,080,688,640 = 124,160 × 8,704 — but row-major
-raster + fp16 scales, still wrong). The op's `bounds()` silently passed a
-short count and filled the pool with misread bytes.
+Root cause: the head op `lmhead_q8` (`src/open_qwen36/pools.cpp` ~773) was a
+plain memcpy in the kernel's supertile order — it assumed `lm_head.weight`
+(= gguf `output.weight`) already held the engine's q8 chunk raster: 32-row ×
+256-column chunks, 256 bf16 scales then 8192 int8 codes, at pool chunk
+k ← file `(4*(k/per_band) + k%4)*nk + k%per_band/4`, `per_band = 4*nk`
+(nk = in_dim/256). Only a q4nx-build conversion writes that (Q8NX layout).
+A raw llama.cpp GGUF stores the head row-major in its own quant; Ornith-1.5's
+`output.weight` is **Q6_K** (4096 × 248320), `Qwen3.8-9B-Distill-GGUF`'s
+is whole-file **Q8_0** (byte count even lands exactly on the chunk grid —
+1,080,688,640 = 124,160 × 8,704 — but row-major raster + fp16 scales,
+still wrong). The op's `bounds()` silently passed a short count and filled
+the pool with misread bytes.
 
-Gate (now in `lmhead_q8`): a `GgufFile` source is refused by name + type
-("convert with q4nx-build"); also `n % CH8 != 0` refuses non-chunk-aligned
-survivors. Verified: ornith (Q6_K) and qwen3.8-distill (Q8_0) both fail
-cleanly at load; the q4nx path (`qwen35-npu2:0.8b` → full coherent
-"**Paris**." turn) is untouched. `gguf_pack_test` + the registered ctest
-(GGUF-PACK, OPEN-MANIFEST) pass.
+Implemented (`lmhead_q8`, GGUF branch): the same transcode the pool ops do.
+  - Q8_0: pure remap — the source already carries per-32-block int8 codes
+    and an fp16 scale, so widen fp16→bf16 (RNE, matching the converter's
+    cast) and write into the chunk raster at the plain (row-major) index
+    `(row/32)*ncol + kt` — a raw GGUF is row-major, so no supertile
+    permutation (the memcpy path permutes because the q4nx container stores
+    the head in supertile order). Bit-identical to a q4nx conversion of the
+    same Q8_0 tensor.
+  - anything else (Q6_K, Q4_K, Q4_0, ...): dequant each row to f32 (the
+    same llama.cpp-faithful path `std_perm_gguf` uses for the pool tensors)
+    and requant to int8 code + bf16 scale per 32-value group
+    (`bf16_rne(mx/127)`, clamp to [-127,127]), at the same plain index.
+Verified: a fresh CLI run on ornith-gguf:9b-i1 now reports **0 NaN logit
+rows** (was 47,695) with a real argmax; `gguf_pack_test` + the registered
+ctest (GGUF-PACK, OPEN-MANIFEST) pass; the q4nx path is untouched
+(`qwen35-npu2:0.8b` still answers a full coherent "**Paris**." turn).
 
-**Still missing**: the raw-GGUF q8 head requant — the analogue of
-std_perm_gguf's kq path for the q8 law. Q8_0 needs no arithmetic at all (its
-per-32-block fp16 d IS the group scale — remap into the bf16 scale plane
-with RNE and apply the supertile permutation); Q6_K/Q4_K need
-dequant-row → per-32-group requant of int8 code + bf16 scale, matching
-`bf16_rne` semantics used elsewhere in this file. The head requant is our
-open item on the hybrid family's GGUF path; while it is open, the packer
-refuses and a hybrid GGUF needs a q4nx-build-converted container.
+Open: the 9B hybrid GGUF path **hangs at prefill layer 30 (full_attention)**
+on every run — it reproduces with both the f32 and the q4_1 law, so it is
+not the head and not the law; it is a per-layer slice issue on the 9B hybrid
+path (the 0.8B native and the dense GGUFs run cleanly) that needs its own
+investigation. Until that is resolved, hybrid GGUF-direct does not complete
+a turn on this box.
 
 ## Still open (Phase-MoE / later)
 
