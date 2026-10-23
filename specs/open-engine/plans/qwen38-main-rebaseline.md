@@ -1,5 +1,47 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — combined causal sublayers, 2026-10-23
+
+Built a private read-only tracer from the verified combined CLI for L63/P1
+(full attention), L42/P17 and L52/P17 (DeltaNet). Three resident routes retain
+**261/261** baseline logits/residual/scratch files byte-exact. All **83** selected
+captures validate, with **40/40** exact hybrid pairs. Linear captures include
+complete projection prefixes and state before/after the block; attention captures
+include Q/K/V/gate and paired KV. State-after is P19, not the selected position.
+
+Three selected independent CPU outputs reconstruct the retained references
+bytewise. All **54/54 conditioned FFN gates** and **30654/30654 projection/host
+gates** pass, including **29760 per-head gates**. Worst FFN maxrel is
+**0.0039841551** (L63); worst projection/head maxrel is **0.0023476249** (L63 Q).
+Conv carry and pre-FFN residual reconstruction are exact. The first CPU audit
+exposed a list-to-array conversion error for RoPE frequencies; a regression test
+and corrected auditor pass on the same captures, with the failed audit retained.
+
+| Hybrid target (both schedules) | Incoming residual error | Pre-FFN error | Output error | Ideal FFN on actual pre-FFN input |
+|---|---:|---:|---:|---:|
+| L63/P1 | 0.0017499814 | 0.0026927327 | 0.0096485275 | 0.0070258073 |
+| L42/P17 | 0.0029677911 | 0.0047458357 | 0.0057900192 | 0.0052107169 |
+| L52/P17 | 0.0119563497 | 0.0106894266 | 0.0121972127 | 0.0123487787 |
+
+L52 already receives a failing residual. At all three targets, replacing the
+local FFN with the independent ideal FFN still exceeds 0.005. L63 has an
+additional local FFN output error of **0.0026250996**; its down projection from
+captured activation differs by **0.0039805268**, while up/gate differ by only
+**1.2174e-6 / 2.1872e-6**. These measurements separate propagated drift from
+local arithmetic; they do not yet prove weight rounding is the cause. Next
+compare effective versus BF16-rounded weights for the uncorrected FFN down and
+full-attention projections using these captures, with signed error decomposition.
+
+Full-depth residual acceptance remains **4000/4032 FAIL**; all original bounds
+remain unchanged and `model_acceptance=false`. No production arithmetic,
+manifest, model packing or XCLBIN changed. Build: **CTest 4/4**, **592 compiler
+dependencies**. Ten new tests (including the RoPE adapter regression); full
+host suite **1690 passed / 47 skipped**. Workflow and results are in
+`utilities/prefill-combined-sublayers/`; artifacts are under
+`Models/qwen38-27b/prefill-combined-sublayers/`, final CPU audit
+`native-v1/sublayer-audit-v2.json`. Production promotion and long-prefix
+acceptance remain open.
+
 ## Latest checkpoint — combined full-depth prefill validation, 2026-10-23
 
 Nine full-resident runs complete: fresh paired-input, weighted-FFN and combined
