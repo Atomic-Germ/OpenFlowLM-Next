@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-expanded-cli</name>
+    <description>Build combined control and expanded attention/down prefill CLIs with exact roles, pinned replay evidence and repeat capture support.</description>
+    <location>.agents/skills/open-qwen38-prefill-expanded-cli/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-attention-replay</name>
     <description>Build paired-weight attention entry replay and compose causal paired KV, output and FFN with exact native controls.</description>
     <location>.agents/skills/open-qwen38-prefill-attention-replay/SKILL.md</location>
