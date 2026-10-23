@@ -2608,6 +2608,7 @@ def main():
     # build-all.sh). Otherwise fall back to the normal safetensors install.
     gguf_skip = None
     gguf_kernel_dir = None
+    gguf_kernel_missing = False
     if gguf_mode:
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
@@ -2633,9 +2634,12 @@ def main():
                 if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
                     log(f"[INFO] GGUF-direct kernels: {kdir}")
         if gguf_skip:
+            gguf_kernel_missing = True
             gguf_refused[gguf_name] = gguf_skip
-            log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
-            gguf_name, gguf_mode = None, False
+            log(f"[INFO] installing {gguf_name} without GGUF-direct kernels: {gguf_skip}")
+            log(f"[WARN] kernels lack the GGUF-direct (f32-scale) build; "
+                f"rebuild with utilities/build-all.sh (or pass --open-kernels) "
+                f"to enable GGUF-direct. The model is installed as a GGUF either way.")
         elif family in EMBEDDING_FAMILIES and gguf_mode:
             # Embedding GGUF loads the existing bf16 matmul kernels, whose
             # directory is fixed by the engine; point the xclbin link there.
