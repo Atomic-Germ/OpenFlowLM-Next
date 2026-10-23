@@ -47,6 +47,8 @@ from layout import (A_BYTES, A_O, A_OG, A_OUT, A_QKV, A_RES, A_ROUT, A_VEC, A_XM
                     POOL_BYTES, POOL_GATE, POOL_K, POOL_O, POOL_Q, POOL_QKV, POOL_V, POOL_Z,
                     PTAB_BYTES, PTAB_ROW, STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES, R, SPEC)
 import xcommon as X  # noqa: E402
+import sys
+import linear_fp32 as LF
 
 HERE = Path(__file__).parent
 GLUE = HERE.parent / "dn_glue"
@@ -75,10 +77,10 @@ def ln_fifos(tl):
     return of_lni, of_lno
 
 
-def ln_worker(of_lni, of_lno, tl, L):
+def ln_worker(of_lni, of_lno, tl, L, entry_fp32=False):
     """The norm (+ router) helper at Tile(0, 3)."""
     if DENSE:
-        ln_fn, ln_args = X.ln_dense_worker(of_lni, of_lno, L)
+        ln_fn, ln_args = X.ln_dense_worker(of_lni, of_lno, L, entry_fp32=entry_fp32)
         return Worker(ln_fn, fn_args=ln_args, tile=Tile(0, 3), stack_size=STACK)
     return Worker(X.ln_router_body,
                   fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
@@ -117,7 +119,8 @@ if D is not None:
     # core holds ONE 4 KB half at a time, so the projection is walked half by half). A tile is one
     # 4 KB element -- 64 rows at 32 lanes, 32 at 64 -- a half carries up to 2048 rows, and at HID
     # 2560 the two halves are 32 and 8 tiles.
-    AB_TILES = [min(ELEM // 2, HID - h * (ELEM // 2)) // D.AB_ROWS for h in range(XN_ELEMS)]
+    XN_BLOCK = ELEM // (4 if D.XN_F32 else 2)
+    AB_TILES = [min(XN_BLOCK, HID - h * XN_BLOCK) // D.AB_ROWS for h in range(XN_ELEMS)]
     assert sum(AB_TILES) == AB_ELEMS, (AB_TILES, AB_ELEMS)
     AB_WIDE = D.AB_LANES > 32                               # more than 32 value heads: glue_ab_w.cc's 64-lane tile
     HALF_OUTER = D.GLUE_HALF_OUTER                          # three xn halves: carry each once, for both accumulators
@@ -148,7 +151,8 @@ def glue_post_types():
     # The glue core's private copy of the layer-entry norm output. On the dense path it is
     # ONE 4 KB element (the projection is re-streamed per half): bf16[HID] costs the core
     # 8 192 B at HID 4096, 2 560 B more than it has.
-    g["fxn"] = np.ndarray[(ELEM // 2 if DENSE else HID,), np.dtype[bfloat16]]
+    g["fxn"] = (np.ndarray[(ELEM // 4,), np.dtype[np.float32]] if D.XN_F32 else
+                np.ndarray[(ELEM // 2 if DENSE else HID,), np.dtype[bfloat16]])
     return g
 
 
@@ -176,6 +180,15 @@ def glue_post_kernels(inc, g):
                                   arg_types=[u8_4k, fxn, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
                  ExternalFunction("glue_copy_xn", source_file=str(GLUE / "glue_copy.cc"),
                                   arg_types=[u8_4k, fxn], include_dirs=inc, **GLUE_FLAGS))
+    if D.XN_F32:
+        k["ab"] = ExternalFunction("linear_ab_fp32", source_file=str(GLUE / "glue_ab_fp32.cc"),
+            arg_types=[u8_4k, fxn, facc, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS)
+        k["copy"] = ExternalFunction("linear_copy_fp32", source_file=str(GLUE / "glue_copy_fp32.cc"),
+            arg_types=[u8_4k, fxn, np.int32], include_dirs=inc, **GLUE_FLAGS)
+    if D.CONV_F32:
+        k["conv"] = ExternalFunction("history_conv", source_file=str(GLUE / "glue_conv_fp32.cc"),
+            arg_types=[u8_2k]*4 + [u8_4k]*2 + [u8_2k]*3 + [fqk, fvt, np.int32, np.int32, np.int32],
+            include_dirs=inc, **GLUE_FLAGS)
     k["post"] = ExternalFunction("post_fn", source_file=str(POST / "post.cc"), arg_types=[u8_4k, u8_4k, nw_ty, u8_2k],
                                  include_dirs=inc)
     k["post_copy"] = ExternalFunction("post_copy_nw", source_file=str(POST / "post_copy.cc"), arg_types=[u8_4k, nw_ty],
@@ -193,7 +206,9 @@ def glue_post_fifos(g):
 
 
 def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall, fconv, femit, fcopy):
-    if DENSE and HALF_OUTER:
+    if D.XN_F32:
+        LF.ab_sequence(sin, xn, acc_a, acc_b, fab, fcopy, X.band_range)
+    elif DENSE and HALF_OUTER:
         # Three halves: each is carried once and both accumulators' tiles for it follow,
         # 3 side fills a half instead of 4 (recipes/qwen36moe.py glue_fills). Same sums.
         for h, ntiles in enumerate(AB_TILES):
@@ -231,6 +246,9 @@ def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall
     sm = sin.acquire(1)
     fsmall(sm, acc_a, acc_b, decay, beta)
     sin.release(1)
+    if D.CONV_F32:
+        LF.conv_sequence(sys.modules[__name__], sin, ain, oout, qk, vt, decay, beta, fconv, femit)
+        return
     for base, ntiles in ((0, KEY_TILES), (KEY_TILES, VALUE_TILES)):
         for tt in range_(ntiles):
             ww = sin.acquire(CONVW_ELEMS)
@@ -371,6 +389,8 @@ if A is not None:
     from recipes.attnknobs import probe_env  # noqa: E402
     ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={A.ROT}", "-DATTN_GATE=1",
                   f"-DATTN_VEXP={A.VEXP}", f"-DATTN_NHL={A.NHL}"]
+    if A.KV_PAIR:
+        ATTN_FLAGS.append("-DATTN_KV_PAIR=1")
     if A.RB > 1:                                           # attn.h defaults it to 1; adding the flag
         ATTN_FLAGS.append(f"-DATTN_RB={A.RB}")             # would change every other family's build line
     if A.BLOCK:                                            # the single-row path retired: see attn.h
@@ -400,6 +420,7 @@ def attn_types():
     a["u8_1k"] = np.ndarray[(A.E_A,), np.dtype[np.uint8]]    # one cache-row half: HPE f32 heads in, HPO bf16 og out
     a["b256"] = np.ndarray[(HD,), np.dtype[bfloat16]]
     a["b512"] = np.ndarray[(KVW,), np.dtype[bfloat16]]
+    a["kv"] = np.ndarray[(2 * KVW,), np.dtype[bfloat16]] if A.KV_PAIR else a["b512"]
     a["f64"] = np.ndarray[(A.ROT,), np.dtype[np.float32]]           # cos | sin of the rotated dims
     a["f256"] = np.ndarray[(HD,), np.dtype[np.float32]]
     f4096 = np.ndarray[(QW,), np.dtype[np.float32]]
@@ -422,16 +443,19 @@ def attn_kernels(inc, a):
     h0_arg = [np.int32] if ACORES > 1 else []                  # only a split needs the head offset
     f_meta = af("attn_meta", [u8_1k, u8_1k, b256, b256, f64, pb_ty])
     f_q = af("attn_q", [u8_1k, b256, f64, fq, np.int32])
-    f_k = af("attn_k", [u8_1k, b256, f64, f256, b512, np.int32])
-    f_v = af("attn_v", [u8_1k, b512, np.int32])
+    f_k = af("attn_pair_k" if A.KV_PAIR else "attn_k", [u8_1k, b256, f64, f256, a["kv"], np.int32])
+    f_v = af("attn_pair_v" if A.KV_PAIR else "attn_v", [u8_1k, a["kv"], np.int32])
     f_init = af("attn_init", [foacc, fml])
-    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg) if not BLOCK else None
-    f_stepn = af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg) if not BLOCK else None
+    f_step = af("attn_pair_step" if A.KV_PAIR else "attn_step",
+                [u8_1k] * (4 if A.KV_PAIR else 2) + [fq, foacc, fml, pb_ty] + h0_arg) if not BLOCK else None
+    f_stepn = af("attn_pair_step_new" if A.KV_PAIR else "attn_step_new",
+                 [a["kv"], a["kv"], fq, foacc, fml] + h0_arg) if not BLOCK else None
     f_stepb = af("attn_stepb", [u8_1k] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg) if RB > 1 else None
     # The peeled last block: RB - 1 fifo rows and the new position's k'/v' from core scratch.
     f_stepbn = (af("attn_stepb_new", [u8_1k] * (2 * (RB - 1)) + [b512, b512, fq, foacc, fml, pb_ty] + h0_arg)
                 if BLOCK else None)
-    f_fin = af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32])
+    f_fin = (af("attn_pair_fin", [foacc, fml, u8_1k, b512, np.int32]) if A.KV_PAIR else
+             af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32]))
     return ([f_meta, f_q, f_k, f_v, f_init, f_fin, f_stepb, f_stepbn] if BLOCK else
             [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else []))
 
@@ -445,8 +469,47 @@ def attn_fifos(a):
     return of_ain, of_aout, of_og
 
 
+def _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+               fm, fq, fk, fv, fi, fs, fsn, ff, c):
+    """Four cache planes and FP32 OG travel through the same EA-byte FIFOs."""
+    e = ain.acquire(2)
+    fm(e[0], e[1], qn, kn, cs, pb)
+    ain.release(2)
+    for h in range_(A.Q_AIN_ELEMS):
+        e = ain.acquire(1); fq(e, qn, cs, qs, h); ain.release(1)
+    for h in range_(A.K_AIN_ELEMS):
+        e = ain.acquire(1); fk(e, kn, cs, tmp, kout, h); ain.release(1)
+    for h in range_(A.K_AIN_ELEMS):
+        e = ain.acquire(1); fv(e, vout, h); ain.release(1)
+    if aout is not None:
+        for plane in range_(2):
+            e = aout.acquire(1)
+            for j in range_(KVW): e[j] = kout[plane * KVW + j]
+            aout.release(1)
+        for plane in range_(2):
+            e = aout.acquire(1)
+            for j in range_(KVW): e[j] = vout[plane * KVW + j]
+            aout.release(1)
+    fi(oacc, ml)
+    for _ in range_(pb[1]):
+        e = ain.acquire(4)
+        fs(e[0], e[1], e[2], e[3], qs, oacc, ml, pb, c * NHL)
+        ain.release(4)
+    fsn(kout, vout, qs, oacc, ml, c * NHL)
+    for _ in range(c * N_OG): ain.acquire(1); ain.release(1)
+    for hp in range_(N_OG):
+        g = ain.acquire(1); o = ogout.acquire(1)
+        ff(oacc, ml, g, o, hp)
+        ogout.release(1); ain.release(1)
+    for _ in range((ACORES - 1 - c) * N_OG): ain.acquire(1); ain.release(1)
+
+
 def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
           fm, fq, fk, fv, fi, fs, fsn, ff, fsb, fsbn, c):
+    if A.KV_PAIR:
+        _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                   fm, fq, fk, fv, fi, fs, fsn, ff, c)
+        return
     h0 = c * NHL
     e = ain.acquire(2)                                      # [qn | kn], the position record
     fm(e[0], e[1], qn, kn, cs, pb)
@@ -568,8 +631,8 @@ def attn_workers(of_ain, of_aout, of_og, a, afns):
     def abufs(c):
         s = "" if c == 0 else str(c)
         return [Buffer(a["b256"], name=f"qn{s}"), Buffer(a["b256"], name=f"kn{s}"), Buffer(a["f64"], name=f"cs{s}"),
-                Buffer(a["fq"], name=f"qs{s}"), Buffer(a["f256"], name=f"tmp{s}"), Buffer(a["b512"], name=f"kout{s}"),
-                Buffer(a["b512"], name=f"vout{s}"), Buffer(a["foacc"], name=f"oacc{s}"),
+                Buffer(a["fq"], name=f"qs{s}"), Buffer(a["f256"], name=f"tmp{s}"), Buffer(a["kv"], name=f"kout{s}"),
+                Buffer(a["kv"], name=f"vout{s}"), Buffer(a["foacc"], name=f"oacc{s}"),
                 Buffer(a["fml"], name=f"ml{s}"), Buffer(a["pb"], name=f"pb{s}")]
 
     workers = [Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,

@@ -351,6 +351,40 @@ class Linear:
     AB_LANES: int = 32
     AB_ROWS: int = 64
     GLUE_HALF_OUTER: bool = False
+    XN_F32: bool = False
+    CONV_F32: bool = False
+    FACTORED_READOUT: bool = False
+
+
+def paired_attention(spec: ModelSpec) -> bool:
+    """The validated wide dense Qwen attention geometry uses paired KV and FP32 OG."""
+    return (spec.family == "qwen35" and spec.hidden == 5120 and
+            (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (24, 4, 256, 64))
+
+
+def linear_fp32(spec: ModelSpec) -> bool:
+    """Validated wide dense DeltaNet entry and conv-history storage."""
+    return (spec.family == "qwen35" and spec.hidden == 5120 and
+            (spec.lin_key_heads, spec.lin_value_heads, spec.lin_key_dim,
+             spec.lin_value_dim, spec.conv_kernel) == (16, 48, 128, 128, 4) and
+            norm_split(spec) and bool(down_split(spec)))
+
+
+def attention_entry_fp32(spec: ModelSpec) -> bool:
+    """Validated FP32 entry route on the paired, split dense attention geometry."""
+    return paired_attention(spec) and norm_split(spec) and bool(down_split(spec))
+
+
+def factored_recurrence(spec: ModelSpec) -> bool:
+    """Compensated readout with validated full-lx program/data memory budgets."""
+    return (spec.has_linear and spec.intermediate == 17408 and spec.num_experts == 0 and
+            linear_fp32(spec) and all(spec.quant_of(role) == "q4_1"
+                                     for role in ("linear", "linear_out", "attn", "ffn")))
+
+
+def consistent_q4_sum(spec: ModelSpec) -> bool:
+    """Validated full-lx Q4 affine terms use the same quantized FP32 activation."""
+    return factored_recurrence(spec) and attention_entry_fp32(spec)
 
 
 @dataclass(frozen=True)
@@ -371,6 +405,9 @@ class Attn:
     # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
     # kernel every family compiled before it existed
     VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
+    XN_F32: bool = False                 # full-attention entry norm and projection input
+    XN_ELEMS: int = 1                    # 4-KiB entry stream elements
+    KV_PAIR: bool = False                # [K hi, K lo, V hi, V lo], with FP32 gated output
     BLOCK: int = 0                       # 1: attn.h ATTN_BLOCK_ONLY -- no single-row kernel is built,
                                          # and the driver pads the streamed row count to a whole
                                          # number of blocks (stream_patch::attn_apply, manifest `rb`)
@@ -388,6 +425,8 @@ class Ffn:
     # (`down_split`): each piece is a whole number of h's f32 elements and runs as its own
     # GEMV into its own act region. Empty -- one GEMV over FF -- for every size that fits.
     DOWN_SPLIT: tuple = ()
+    XM_F32: bool = False  # split dense FFN preserves the post-attention norm input
+    CONSISTENT_SUM: bool = False  # direct FP32 table: sum reconstructed INT16 values
 
 
 @dataclass(frozen=True)
@@ -643,12 +682,13 @@ def _common_dense(spec: ModelSpec) -> Common:
 def ffn_geometry(spec: ModelSpec) -> Ffn:
     n = LIMITS["n_cols"]
     hid, ff = spec.hidden, spec.intermediate
+    fp32 = bool(down_split(spec)) and norm_split(spec)
     return Ffn(
         FF=ff, UP_PC=ff // BAND_ROWS // n, DOWN_PC=hid // BAND_ROWS // n,
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=FFN_MS_FLOATS,
-        XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * 2, ELEM) // ELEM,
+        XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * (4 if fp32 else 2), ELEM) // ELEM,
         H_ELEMS=roundup(ff * 4, ELEM) // ELEM,
-        DOWN_SPLIT=down_split(spec),
+        DOWN_SPLIT=down_split(spec), XM_F32=fp32, CONSISTENT_SUM=consistent_q4_sum(spec),
     )
 
 
@@ -824,7 +864,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
                   GLUE_SIDE_BYTES=glue_side, SIDE_ALPHA=side.off["alpha"], SIDE_BETA=side.off["beta"],
                   SIDE_SMALL=side.off["small"], SIDE_CONV=side.off["conv"])
         a = _Alloc()
-        a.add("xn", F.XN_ELEMS * ELEM)
+        a.add("xn", roundup(hid * (4 if linear_fp32(spec) else 2), ELEM))
         a.add("qkv", nch * 4)
         a.add("z", vw * 4)
         a.add("vec", spec.lin_value_heads * DN_RECORD_FLOATS * 4)
@@ -842,7 +882,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
                   A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_OUT2B=a.off.get("out2b", 0),
                   A_BYTES=roundup(a.n, ELEM))
         s_head = C.DN_PAD * C.DN_DIM * 4
-        s_off = (spec.conv_kernel - 1) * nch * 2
+        s_off = (spec.conv_kernel - 1) * nch * (4 if linear_fp32(spec) else 2)
         kv.update(S_ROWS=C.DN_PAD, S_HEAD_BYTES=s_head, STATE_S_OFF=s_off,
                   STATE_BYTES=s_off + spec.lin_value_heads * s_head)
     else:
@@ -855,8 +895,9 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
     e_a, kv_row = 0, 0
     if spec.has_full:
         qw, kvw, hd = spec.attn_q_width, spec.attn_kv_width, spec.head_dim
-        e_a, kv_row = kvw * 2, 4 * kvw
-        og_att = roundup(qw * 2, ELEM) // ELEM * ELEM
+        paired = paired_attention(spec)
+        e_a, kv_row = kvw * 2, (8 if paired else 4) * kvw
+        og_att = roundup(qw * (4 if paired else 2), ELEM) // ELEM * ELEM
         c = _Alloc()
         c.add("lnw", eln)
         c.add("postln", eln)
@@ -867,7 +908,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         kv.update(CA_LNW=c.off["lnw"], CA_POSTLN=c.off["postln"], CA_META=c.off["meta"], CA_RW=0, CA_SGW=0,
                   CA_BYTES=c.n)
         a = _Alloc()
-        a.add("xn", F.XN_ELEMS * ELEM)
+        a.add("xn", roundup(hid * (4 if attention_entry_fp32(spec) else 2), ELEM))
         a.add("qg", 2 * qw * 4)                        # q | gate f32
         a.add("kvn", 2 * kvw * 4)                      # k | v f32
         a.add("og", og_att)
@@ -944,9 +985,11 @@ def linear(spec: ModelSpec) -> Linear | None:
     tile = 1024                                     # dn_glue's channel tile
     key_width = spec.lin_key_heads * spec.lin_key_dim
     lanes = ab_lanes(spec)
-    xn_elems = roundup(spec.hidden * 2, ELEM) // ELEM
+    fp32 = linear_fp32(spec)
+    xn_elems = roundup(spec.hidden * (4 if fp32 else 2), ELEM) // ELEM
     return Linear(
-        AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes),
+        AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes), XN_F32=fp32, CONV_F32=fp32,
+        FACTORED_READOUT=factored_recurrence(spec),
         GLUE_HALF_OUTER=glue_fills(xn_elems, False) > LIMITS["shim_fills"],
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=spec.hidden // BAND_ROWS // n,
         QKV_DIM=nch, VW=vw,
@@ -956,7 +999,7 @@ def linear(spec: ModelSpec) -> Linear | None:
         RECORD_BYTES=DN_RECORD_FLOATS * 4, O_HEAD_BYTES=spec.lin_value_dim * 4,
         OUT_K=vw, QKV_K=spec.hidden,
         OG_ELEMS=roundup(vw * 2, ELEM) // ELEM,
-        XN_SIDE_ELEMS=roundup(spec.hidden * 2, ELEM) // ELEM,
+        XN_SIDE_ELEMS=xn_elems,
     )
 
 
@@ -968,6 +1011,11 @@ def attn(spec: ModelSpec) -> Attn | None:
     e_a = kvw * 2                                 # one cache-row half, attn.h's fifo element
     hpe, hpo = e_a // (hd * 4), e_a // (hd * 2)   # f32 heads per q/k/v/gate element; bf16 heads per og element
     A = attn_knobs(spec, spec.num_heads, hpo)
+    paired = paired_attention(spec)
+    if paired:
+        if not A.VEXP or A.RB != 1 or A.BLOCK or A.NHL != 4:
+            raise OpRangeError("paired Qwen attention requires VEXP=1, RB=1, NHL=4")
+        hpo = hpe  # FP32 output heads per EA-byte FIFO element
     return Attn(
         NH=spec.num_heads, KVH=spec.num_kv_heads, HD=hd, ROT=spec.rotary_dim,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=spec.hidden // BAND_ROWS // n,
@@ -976,7 +1024,9 @@ def attn(spec: ModelSpec) -> Attn | None:
         E_A=e_a, HPE=hpe, HPO=hpo,
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
-        OG_ELEMS=roundup(qw * 2, ELEM) // ELEM,
+        OG_ELEMS=roundup(qw * (4 if paired else 2), ELEM) // ELEM, KV_PAIR=paired,
+        XN_F32=attention_entry_fp32(spec),
+        XN_ELEMS=roundup(spec.hidden * (4 if attention_entry_fp32(spec) else 2), ELEM) // ELEM,
         VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
     )
 
@@ -1299,6 +1349,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
             **({"out_split": True} if split else {}),
             "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,
+            **({"conv_dtype": "float32"} if linear_fp32(spec) else {}),
             **m2, **(ffn_of(LINEAR) if dense else {}),
         }
     if spec.has_full:

@@ -71,6 +71,67 @@ int main(int argc, char** argv) {
         std::printf("FAIL  load: %s\n", e.what());
         return 1;
     }
+    // Cache and output precision are one ABI. Test the parser independently of XRT.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_kv_dtype"] = "bfloat16_pair";
+        j["layout"]["attn_output_dtype"] = "float32";
+        const size_t row = m.kv_row * 2;
+        j["layout"]["kv_row"] = row;
+        j["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row;
+        try {
+            auto pair = Manifest::parse(j, "paired cache");
+            check(pair.attn_kv_pair && pair.kv_row == row, "paired KV ABI accepted");
+        } catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 4; ++bad) {
+            auto broken = j;
+            if (bad == 0) broken["layout"]["attn_output_dtype"] = "bfloat16";
+            if (bad == 1) broken["layout"]["attn_kv_dtype"] = "float16";
+            if (bad == 2) broken["layout"]["kv_row"] = row / 2;
+            if (bad == 3) broken["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row / 2;
+            try { Manifest::parse(broken, "bad paired cache"); check(false, "bad paired ABI accepted"); }
+            catch (const std::runtime_error&) { check(true, "bad paired ABI refused"); }
+        }
+    }
+    // Entry norm dtype is explicit; the parser must not silently accept a typo.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_entry_dtype"] = "float32";
+        try { Manifest::parse(j, "FP32 entry"); check(true, "FP32 entry accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        j["layout"]["attn_entry_dtype"] = "float16";
+        try { Manifest::parse(j, "bad entry dtype"); check(false, "bad entry dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad entry dtype refused"); }
+    }
+    // Linear entry/history dtypes are an explicit ABI, not optional hints.
+    for (const char* field : {"linear_entry_dtype", "linear_conv_dtype"}) {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"][field] = "float16";
+        try { Manifest::parse(j, "bad linear dtype"); check(false, "bad linear dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad linear dtype refused"); }
+    }
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt=j["layer_types"]["linear_attention"];
+        if (lt.contains("gemm_block")) {
+            auto& gb=lt["gemm_block"];
+            const auto old_off=gb["state_s_off"].get<uint64_t>();
+            j["layout"]["linear_entry_dtype"]="float32";
+            j["layout"]["linear_conv_dtype"]="float32";
+            gb["conv_dtype"]="float32"; gb["state_s_off"]=2*old_off;
+            lt["buffers"]["state"]["bytes"]=lt["buffers"]["state"]["bytes"].get<uint64_t>()+old_off;
+            try { auto m=Manifest::parse(j,"FP32 linear state"); check(m.linear_conv_f32,"FP32 state accepted"); }
+            catch (const std::exception& e) { check(false,e.what()); }
+            for(int bad=0;bad<3;++bad) {
+                auto b=j; auto& t=b["layer_types"]["linear_attention"];
+                if(bad==0) t["gemm_block"].erase("conv_dtype");
+                if(bad==1) t["gemm_block"]["state_s_off"]=old_off;
+                if(bad==2) t["buffers"]["state"]["bytes"]=1;
+                try { Manifest::parse(b,"bad FP32 state"); check(false,"incompatible linear state accepted"); }
+                catch(const std::runtime_error&) { check(true,"incompatible linear state refused"); }
+            }
+        }
+    }
     // ---- what the recipe wrote for the 27B
     // Only exercise the new pack-op schema; this synthetic manifest is not a
     // claim that a 48-head kernel has been built or validated.
@@ -296,14 +357,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = Manifest::parse(g, "lean");  // Manifest is move-only since #180 (its gguf view)
+        Manifest fast = Manifest::parse(g, "fast route");
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = Manifest::parse(g, "lean");
+        Manifest lean = Manifest::parse(g, "lean route");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -808,14 +869,20 @@ int main(int argc, char** argv) {
             check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
                   "host attention: " + f.family + " is refused by name");
             if (f.family == "qwen3") {
-                Manifest k = f;
-                k.family = "k2";
+                // Manifest owns its optional alternate route with unique_ptr.
+                // Reload independent fixtures rather than copying that ownership.
+                auto k2_fixture = [&]() {
+                    Manifest k = Manifest::load(argv[i]);
+                    k.family = "k2";
+                    return k;
+                };
+                Manifest k = k2_fixture();
                 check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
-                Manifest half = k;
+                Manifest half = k2_fixture();
                 half.rotary_dim = half.rotary_dim / 2;
                 check(half.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with a partial rotation is refused on geometry");
-                Manifest odd = k;
+                Manifest odd = k2_fixture();
                 const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
                 odd.hf_config_check["head_dim"] = hd;
                 odd.rotary_dim = hd;
@@ -826,7 +893,7 @@ int main(int argc, char** argv) {
                 }
                 check(odd.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with an odd head_dim is refused on geometry");
-                Manifest wide = k;
+                Manifest wide = k2_fixture();
                 wide.layer_types.begin()->second.gemm_block.qw += 1;
                 check(wide.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");

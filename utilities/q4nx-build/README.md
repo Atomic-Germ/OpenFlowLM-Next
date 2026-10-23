@@ -40,6 +40,25 @@ Create a virtual environment using python 3.13
 
 The main entry point for conversion is `convert.py`.
 
+### Normalize an existing dense Qwen3.5 container config
+
+```bash
+python convert.py --normalize-config -i /path/to/Qwen3.8-27B-NPU2
+```
+
+This offline operation flattens a nested `text_config` using the converter's
+runtime normalization and keeps the canonical `qwen3_5` model type. It checks
+the Q4NX header, tensor byte ranges, contiguous layer indices and input-norm
+widths before changing metadata. It backs up the original config as
+`config.json.before-normalize` and atomically replaces `config.json`.
+Weights and tokenizer assets are not rewritten; a second invocation is a no-op.
+An existing backup is never overwritten. Conversion/deployment options cannot
+be combined with this mode.
+
+This mode supports dense `qwen3_5` / `qwen3_5_text` configs only. It repairs
+metadata layout, not incorrect tensor conversion or incomplete tokenizer assets.
+Source-weight comparisons and inference validation remain separate checks.
+
 ### Help
 ```bash
 python convert.py -h

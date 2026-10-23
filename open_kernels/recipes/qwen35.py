@@ -94,7 +94,9 @@ def _check(spec: ModelSpec) -> None:
         # PR #148 implements the >32-head case (glue_ab_w.cc's 64-lane tile and the
         # half-outer walk in glue_side_fills), so the old "fused wide glue needs 3 input
         # DMA channels" refusal is gone: head count no longer gates this recipe.
-        if fills > LIMITS["shim_fills"]:
+        # The FP32 route has 17 sequential fills, bounded by Pipeline(3);
+        # its half-tile schedule is hardware-validated independently.
+        if fills > LIMITS["shim_fills"] and not M.linear_fp32(spec):
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
                 f"(each xn half, then both accumulators' weight tiles for it, then small and conv), "
@@ -114,7 +116,7 @@ def _check(spec: ModelSpec) -> None:
 
 def xn_side_elems(spec: ModelSpec) -> int:
     """4 KB elements the layer-entry norm output arrives in on the glue's `side` channel."""
-    return roundup(spec.hidden * 2, ELEM) // ELEM
+    return roundup(spec.hidden * (4 if M.linear_fp32(spec) else 2), ELEM) // ELEM
 
 
 def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
@@ -122,7 +124,7 @@ def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
     4 KB element of the projection -- 64 rows at 32 lanes, 32 rows at the 27B's 64 -- and a
     half carries min(2048, HID - h*2048) rows. Equal halves only when HID is a multiple of
     2048 -- at HID 2560 the two halves are 32 and 8 tiles."""
-    rows = ELEM // 2                                  # bf16 rows in one 4 KB element
+    rows = ELEM // (4 if M.linear_fp32(spec) else 2)
     per_tile = ELEM // (2 * ab_lanes(spec))
     return [min(rows, spec.hidden - h * rows) // per_tile for h in range(xn_side_elems(spec))]
 
@@ -309,6 +311,12 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     `has_moe` goes false and nothing asks for the router record."""
     L = layout(spec, max_ctx)
     return {
+        **({"attn_kv_dtype": "bfloat16_pair", "attn_output_dtype": "float32"} if M.paired_attention(spec) else {}),
+        **({"attn_entry_dtype": "float32"} if M.attention_entry_fp32(spec) else {}),
+        **({"linear_entry_dtype": "float32", "linear_conv_dtype": "float32"} if M.linear_fp32(spec) else {}),
+        **({"linear_recurrence": "factored_compensated"} if M.factored_recurrence(spec) else {}),
+        **({"q4_activation_sum": "quantized_fp32"} if M.consistent_q4_sum(spec) else {}),
+        **({"ffn_norm_dtype": "float32"} if ffn_geometry(spec).XM_F32 else {}),
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
         "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,

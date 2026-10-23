@@ -184,6 +184,21 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.moe.share_down = get<uint64_t>(moe, "share_down", mw);
     if (m.moe.topk > 8 || m.moe.topk == 0) fail(mw, "topk " + std::to_string(m.moe.topk) + " (the router record holds 8)");
     }
+    const std::string kv_dtype = lay.value("attn_kv_dtype", "bfloat16");
+    const std::string og_dtype = lay.value("attn_output_dtype", "bfloat16");
+    const std::string entry_dtype = lay.value("attn_entry_dtype", "bfloat16");
+    if (entry_dtype != "bfloat16" && entry_dtype != "float32")
+        fail(lw, "unsupported attention entry dtype");
+    m.attn_kv_pair = kv_dtype == "bfloat16_pair";
+    if ((kv_dtype != "bfloat16" && !m.attn_kv_pair) ||
+        og_dtype != (m.attn_kv_pair ? "float32" : "bfloat16"))
+        fail(lw, "unsupported attention cache/output dtype combination");
+    const std::string linear_entry = lay.value("linear_entry_dtype", "bfloat16");
+    const std::string linear_conv = lay.value("linear_conv_dtype", "bfloat16");
+    if ((linear_entry != "bfloat16" && linear_entry != "float32") ||
+        (linear_conv != "bfloat16" && linear_conv != "float32"))
+        fail(lw, "unsupported linear entry/history dtype");
+    m.linear_conv_f32 = linear_conv == "float32";
     m.attn.kv_row = m.kv_row;
     m.attn.ptab_row = m.ptab_row;
 
@@ -434,6 +449,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
+                    const std::string conv_dtype = gj.value("conv_dtype", "bfloat16");
+                    if (conv_dtype != (m.linear_conv_f32 ? "float32" : "bfloat16"))
+                        fail(gw, "conv dtype disagrees with the linear state ABI");
+                    g.conv_f32 = m.linear_conv_f32;
+                    if (g.conv_kernel < 2 || g.state_s_off != (g.conv_kernel - 1) * g.qkv_dim * (g.conv_f32 ? 4 : 2) ||
+                        g.s_rows < g.head_dim || g.s_head_bytes != g.s_rows * g.head_dim * 4 ||
+                        t.state_bytes != g.state_s_off + g.value_heads * g.s_head_bytes)
+                        fail(gw, "linear state offsets/size disagree with conv dtype and recurrence geometry");
                     g.out_split = gj.value("out_split", false);
                     // the flag predates per-step `split` and means the same thing for the out step
                     if (g.out_split) g.program.at(1).split = true;
@@ -641,6 +664,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     for (const auto& o : need(need(pack, "lm_head", where), "ops", where + " pack.lm_head")) m.lmhead_ops.push_back(parse_op(o, where + " pack.lm_head"));
     if (m.lmhead_ops.empty()) fail(where, "pack.lm_head has no ops");
     m.hf_config_check = need(j, "hf_config_check", where);
+    if (m.attn_kv_pair) {
+        const size_t kw = get<size_t>(m.hf_config_check, "num_key_value_heads", where) *
+                          get<size_t>(m.hf_config_check, "head_dim", where);
+        if (!kw || m.kv_row != kw * 8) fail(lw, "paired KV row size mismatch");
+        for (const auto& [name, t] : m.layer_types)
+            if (t.state_kind == "kv" && t.state_row != m.kv_row)
+                fail(lw, "paired layer KV row size mismatch");
+    }
     if (j.contains("hf_config_defaults")) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];

@@ -663,7 +663,7 @@ if(NOT OFLM_USE_HRX)
     if(MSVC)
         set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-ffp-contract=off")
     endif()
 endif()
 
