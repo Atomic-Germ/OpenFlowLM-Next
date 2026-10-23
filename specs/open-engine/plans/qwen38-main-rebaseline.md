@@ -1,5 +1,48 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — composed attention/FFN replay, 2026-10-23
+
+Private N14336/K5120 entry control/low kernels and fresh production host bridges
+replay the complete captured L63 attention prefix, then compose P1 through
+output projection, residual, normalization, FFN up/gate, activation and down.
+All **64/64 final NPU dispatches** complete across two placements. Individual
+production/private products, native Q/K/V/gate, paired KV, attention output,
+FFN and final residual controls are byte-exact. Corrected intermediate results
+agree across placements; all inactive columns are zero. Host block/single-token
+attention and KV agree exactly.
+
+All **2240 entry head gates** strictly improve maxrel and rel_fro (worst
+4.8850442e-6 / 3.0968432e-6). All **1280 independent host head/cache gates** pass
+(worst maxrel 1.1655479e-5 <0.001), together with **46 output/upgate/down gates**.
+
+| Gate | Control maxrel | Candidate maxrel | Candidate rel_fro |
+|---|---:|---:|---:|
+| Independent L63/P1 output | 0.0096485275 | **0.0040805495** | **0.0017167913** |
+| Conditioned FFN | — | 2.5746182e-5 | 4.7519969e-6 |
+
+The composed final output now passes both unchanged bounds (maxrel <0.005,
+rel_fro <=0.005). The CPU re-audit recomputes the report from raw captures.
+This is isolated suffix acceptance on retained incoming residuals, not fresh
+cross-layer propagation: full-depth **4000/4032** remains FAIL and
+`model_acceptance=false`. Production sources, kernels, manifest and model packing
+are unchanged; there is no throughput claim.
+
+Both new builds pass 32-core resource checks (text 4784/5568 bytes, L1 buffer
+end 61448 bytes, stacks 4096 bytes, 801 compiler dependencies each). Fresh host
+bridges pin 342 attention / 105 FFN dependencies. Eight packed/source weight
+identities pass. No full-model residency is needed.
+
+The initial 28-dispatch run stopped at a strict dtype check: the retained native
+output used an FP64 container for exact FP32 values. A tested lossless FP32
+conversion fixes preparation; failed v1 evidence remains retained, and fresh v2
+preparation/replay succeeds. Fourteen RED-to-GREEN tests; **1723 passed / 47
+skipped** overall. Workflow: `utilities/prefill-attention-replay/`; artifacts:
+`Models/qwen38-27b/prefill-attention-replay/{prepared-v2,native-v2}`.
+
+Next extend the private combined CLI to attention entry/out and FFN down,
+then validate fresh full-depth propagation and repeat/reset. Long-prefix,
+production promotion and end-to-end model acceptance remain open.
+
 ## Latest checkpoint — isolated paired-weight FFN down, 2026-10-23
 
 Built private N5120/K17408/T256 control and low-weight kernels from copied
