@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-combined-validation</name>
+    <description>Validate fresh paired/weighted controls, combined all-layer prefill precision and repeated resident requests after reset.</description>
+    <location>.agents/skills/open-qwen38-prefill-combined-validation/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-combined-cli</name>
     <description>Build paired-input, weighted-FFN and combined linear QKV/Z/out CLIs with exact role guards and pinned preparation.</description>
     <location>.agents/skills/open-qwen38-prefill-combined-cli/SKILL.md</location>

@@ -63,8 +63,8 @@ baseline, then fresh weighted control versus the retained weighted-FFN baseline.
 Compare sequential logits, scratch and all residuals bytewise. Only then run
 the combined candidate with independent 64-layer, 20-token references and one
 continuation. Require complete logits and all residual gates, hybrid schedule
-identity, repeated requests and reset. The current tracer only accepts one
-request: repeated-request/reset instrumentation remains a separate prerequisite.
+identity, repeated requests and reset. The v1 tracer only accepts one request;
+use the separate repeat build below to capture two requests without overwrites.
 Keep maxrel <0.005 and original logit gates. Passing builds or isolated replays
 do not establish cross-layer or long-prefix model acceptance.
 
@@ -82,3 +82,86 @@ residual files and the complete current model-derived manifest. It retains 151
 byte-identical files (149 reference arrays, IDs and original metadata). The
 history graphs preserve old/current identities separately. Six new TDD tests;
 full host suite **1672 passed / 47 skipped**. No NPU run or model residency.
+
+## Full-depth native validation
+
+The runner verifies the immutable preparation, historical/current identities,
+current native dependencies and exported kernels. It serializes device use,
+checks free memory before every process, and runs two controls before the
+candidate. Paired control must reproduce retained logits/scratch; weighted
+control must also reproduce every retained residual. Sequential captures must
+match across fresh variants, and hybrid schedules must agree. Independent
+all-layer gates remain mandatory even when logits pass. Reports distinguish
+completed numerical failure from execution/preflight failure.
+
+```bash
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
+  utilities/prefill-combined-cli/run.py run \
+  --prepared Models/qwen38-27b/prefill-combined-cli/prepared-v1 \
+  --out Models/qwen38-27b/prefill-combined-cli/native-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-combined-cli/run.py audit \
+  --out Models/qwen38-27b/prefill-combined-cli/native-v1
+```
+
+Both commands return 1 for a completed numerical failure. Inspect `complete`,
+`passed` and per-route gates; never treat failed accuracy as failed capture.
+No historical reference metadata is rewritten to bypass source checks.
+
+## Two requests on one resident engine
+
+`repeat.py build` copies the verified combined stage and changes only CLI capture
+plumbing. It requires `--twice`, separates request prefixes/writers and flushes
+stdout so two marked request logs can be extracted from the preserved raw log.
+The existing `request()` body, including `Core::reset()`, stays unchanged.
+The snapshot/restore calls before request 2 are retained, but the reset that
+follows means this is not an independent checkpoint-correctness test.
+
+```bash
+xrt_sdk=/home/prihlop/sources/xdna-driver/xrt/build/Release/opt/xilinx/xrt
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-combined-cli/repeat.py build \
+  --parent Models/qwen38-27b/prefill-combined-cli/v1/combined \
+  --out Models/qwen38-27b/prefill-combined-cli/repeat-build-v1 \
+  --xrt-include "$xrt_sdk/include" --xrt-lib "$xrt_sdk/lib"
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
+  utilities/prefill-combined-cli/repeat.py run \
+  --build Models/qwen38-27b/prefill-combined-cli/repeat-build-v1 \
+  --baseline Models/qwen38-27b/prefill-combined-cli/native-v1 \
+  --out Models/qwen38-27b/prefill-combined-cli/repeat-native-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-combined-cli/repeat.py audit \
+  --out Models/qwen38-27b/prefill-combined-cli/repeat-native-v1
+```
+
+The first request must reproduce all single-request captures. The second must
+match all first-request logits, residuals and scratch bytewise. Independently
+recompute both requests' numerical gates and verify the two extracted logs
+against the raw log. Repeat `passed` denotes exact repeatability;
+`numerical_passed` separately reports accuracy. Neither implies long-prefix
+acceptance. This exercises normal request reset, not zeroing every scratch or
+KV buffer. No production kernel or model artifact is modified.
+
+## Native results (2026-10-23)
+
+`native-v1/report.json` and its independent `audit.json` record nine completed
+resident runs (three variants, three routes, 64 layers, 20 prompt tokens plus
+one continuation). Fresh paired and weighted controls reproduce **69/69** and
+**261/261** retained captures respectively. Sequential captures are byte-exact
+across variants; hybrid schedules agree in all logits and residuals.
+
+The combined candidate passes **63/63 logit gates** and **4000/4032 residual
+gates**. Each hybrid route passes **1328/1344**, versus **1315/1344** for weighted
+FFN; sequential passes **1344/1344**. Worst hybrid residual error is
+**0.0121972127**, above the unchanged **0.005** bound. Sixteen formerly failing
+rows improve, but three new failures appear at L53/P18, L56/P17 and L63/P1.
+L63/P1 grows from **0.0049026924 to 0.0096485275**. Both the run and independent
+audit correctly record numerical FAIL; this is not full-model acceptance.
+
+`repeat-native-v1/` completes three two-request resident processes. All
+**261/261** first-request captures match the single-request candidate and all
+**261/261** second-request captures match after normal request reset. The
+independent repeat audit passes, with `numerical_passed=false` and
+`model_acceptance=false`. The repeat CLI SHA256 is
+`f2f9ca67238e44e0f73c7bcb6030087a71785a87fb3a17228fbf78002490186e`;
+its build pins **591** compiler dependencies and passes **CTest 4/4**.
+Eight new RED-to-GREEN tests cover capture rejection, residual acceptance,
+control identity, preflight evidence and separate complete repeated requests.
+Full host suite: **1680 passed / 47 skipped**.
