@@ -512,12 +512,61 @@ path (the 0.8B native and the dense GGUFs run cleanly) that needs its own
 investigation. Until that is resolved, hybrid GGUF-direct does not complete
 a turn on this box.
 
+## First size of a family that only had f32 twins: Qwen3-14B (2026-10-23)
+
+The native (`qwen3-0.6b` .. `8b`) and Qwen3.5 sizes were in the catalogue;
+the qwen3-14b spec built everything EXCEPT the `lm_head_q4` head — its
+catalogue point at K=5120 (hidden 5120) had never been fixture-run, so the
+export died on `lm_head_q4: K=5120 is outside the validated set`. The
+attention tuple (128, 40, 8, 128) was already in (entered by the attention
+gate, qwen3-14b earlier).
+
+The clean run, entirely through `utilities/`:
+
+1. **Fixture.** The `lm_head_q4` design had no fixture of its own
+   (`build-new-spec.py`'s OP_FIXTURE named `designs/lm_head_q8/make_test.py`
+   as the model to port). Ported to
+   `open_kernels/designs/lm_head_q4/make_test.py` + `compare.py`: fp64
+   reference from the pool bytes, the band law IS `q4_1_pack`'s standard one
+   at rs=2 (64-row bands; the uneven 8-core band split is taps, not bytes),
+   `--layout q4nx|gguf` for the bf16-scale and f32-scale (GGMF-direct)
+   chunk layouts, `--k <width>`. NPU run at K=5120 (4096 rows, 64 bands,
+   8 x 6+2 over the cores): q4nx **PASS cos=1.0, maxrel 4.3e-06**; gguf
+   **PASS cos 1.0, maxrel 3.9e-06**.
+
+   Fixture trap worth remembering: the f32-scale kernel NARROWS the pool's
+   f32 scales to bf16 in flight (`gemv_q4.h load_scale`, documented as
+   "numerics bit-identical to the q4nx chunks; the pool keeps the GGUF scale
+   values exactly"). The reference must narrow the scales the same way
+   (`deq_chunk`, scale dtype bf16) — comparing against the exact f32 gives
+   maxrel ~2.3e-3 / 335 bad rows: a fixture bug, not a kernel bug. The
+   `lm_head_q8` fixture keeps the same discipline via
+   `dequant_pool_lmhead(..., scale_dtype=bfloat16)`.
+
+2. **Catalogue.** `utilities/catalogue-add-point.py` now takes
+   `--param K --value 5120` next to `--point ...` (a values() Param is not a
+   combination() tuple; both writes are AST-located, comment-placed, and
+   verified after writing; a params dict can be a POSITIONAL child of the
+   Template, so the locator checks both shapes). The insert is
+   character-offset based — appending to a values() call whose args sit
+   inline with its `)` on the same line must NOT emit a new source line, or
+   `5120,` lands outside the call (the first attempt produced
+   `Template(...) got multiple values for 'note'`; reverted, then fixed to
+   char-offset insertion with the note at the params dict's line end).
+
+3. **Export.** `utilities/export-kernels.py --specs qwen3-14b --skip-bert`
+   through the validated path: `ok: qwen3-14b`. Notably the exporter prints
+   **"no GGUF-direct twin (dx_f32): the f32-scale build does not fit a core
+   at this shape"** — the 14B set ships only the q4nx head; a GGUF-direct
+   install of a Qwen3-14B-geometry model rides the lm-head q8 requant path
+   (`lmhead_q8`, pools.cpp) instead, so the missing twin is not a blocker.
+
+Commit: the fixture pair, `recipes/catalogue.py` (the K=5120 point),
+`utilities/catalogue-add-point.py` (--param/--value), and `OP_FIXTURE` in
+`utilities/build-new-spec.py` updated to name the new fixture.
+
 ## Still open (Phase-MoE / later)
 
-- The raw-GGUF q8 head requant above (Q8_0 remap is mechanical; Q6_K/Q4_K
-  dequant+requant to int8/bf16 groups) — the Q8_0 case makes every
-  whole-file q8 GGUF decodable the day it is written, so it is the next
-  hybrid-GGUF feature.
 - qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
   and lm_head law-combos where the family ships them, plus the
   expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors) and the

@@ -232,7 +232,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family, 5120 with "
                   "the 27B"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
-             {"K": values(1024, 2048, 2560, 3072, 3840, 4096), "vocab": multiple_of(64)},
+             {"K": values(1024, 2048, 2560, 3072, 3840, 4096, 5120), "vocab": multiple_of(64)},  # Qwen3-14B, hidden 5120 (designs/lm_head_q4 fixture, q4nx + gguf f32, 2026-10-23)
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
 ]}
 

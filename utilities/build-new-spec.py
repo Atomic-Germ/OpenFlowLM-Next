@@ -52,8 +52,8 @@ OP_FIXTURE = {
     "gemv_q4": "open_kernels/designs/gemv_q4/make_test.py (--K <width>)",
     "gemv_q8": "the OPEN-QUANT-Q8 procedure (no per-K fixture exists)",
     "ln": "open_kernels/designs/ln/make_test.py (--N <width>)",
-    "lm_head_q4": "the q4 head has no fixture of its own: designs/lm_head_q8/make_test.py "
-                  "is the model to port (the q4 head is the same kernel with another band split)",
+    "lm_head_q4": "open_kernels/designs/lm_head_q4/make_test.py (--k <width>, --layout "
+                  "q4nx|gguf for the f32-scale build)",
     "lm_head_q8": "designs/lm_head_q8/make_test.py (--K <width>)",
 }
 
