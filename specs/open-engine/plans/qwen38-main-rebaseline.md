@@ -1,5 +1,35 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — expanded private prefill CLI preparation, 2026-10-23
+
+Built fresh combined control, expanded candidate and two-request candidate CLIs.
+The expanded policy adds paired-weight full-attention Q/K/V/gate, full-attention
+output and dense FFN down, retaining corrected linear entry/output and FFN
+up/gate. Exact role/argument/geometry checks distinguish the shared output shape
+and reject incompatible split, epsilon, activation, norm or state/KV layouts.
+Original GEMM dispatch and FP32 summation helpers remain unchanged.
+
+All three builds pass **CTest 4/4 each**, pinning **591 / 592 / 592 compiler
+dependencies**. The fresh control binary is byte-identical to the retained
+combined CLI. Both candidate executables bind the same five verified low-weight
+kernels; repeat engine sources match recursively, excluding only CLI request
+capture plumbing. No new XCLBIN or production source/manifest/model change.
+
+Preparation verifies **2006 input hashes**, accepted attention replay/raw
+captures and retained full-depth measurements. It preserves **151 independent
+reference files** unchanged (149 arrays plus IDs/metadata) and confirms the
+complete current model-derived manifest. Seven RED-to-GREEN tests; full host
+suite **1730 passed / 47 skipped**. Workflow: `utilities/prefill-expanded-cli/`;
+artifacts: `Models/qwen38-27b/prefill-expanded-cli/{v1,prepared-v1}`.
+
+This is build/preparation acceptance only, with no engine residency or NPU
+model dispatch. `native_validated=false` and `model_acceptance=false`; retained
+full-depth **4000/4032 residual FAIL** is preserved. Next adapt the resident
+runner/audit to the new variants, require fresh control identity, independent
+64-layer prompt/continuation gates, hybrid schedule identity and two resident
+requests after reset. At least 35 GiB available RAM is required for that run.
+Long-prefix and production acceptance remain open.
+
 ## Latest checkpoint — composed attention/FFN replay, 2026-10-23
 
 Private N14336/K5120 entry control/low kernels and fresh production host bridges
