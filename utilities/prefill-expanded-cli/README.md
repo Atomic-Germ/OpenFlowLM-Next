@@ -1,4 +1,4 @@
-# Expanded private prefill CLI preparation
+# Expanded private prefill CLI validation
 
 Build fresh `combined` control, `expanded` candidate and `expanded-repeat`
 executables. The control retains the previous combined patch exactly. The
@@ -44,8 +44,8 @@ The repeat executable uses the existing separate capture plumbing; engine
 sources must be identical to the single-request candidate. Its request body,
 including reset, remains unchanged. This is not checkpoint-correctness testing.
 
-No engine residency or NPU dispatch in this stage. `native_validated` and
-`model_acceptance` remain false. Next require at least 35 GiB available RAM and
+Preparation performs no engine residency or NPU dispatch. Its `native_validated`
+and `model_acceptance` remain false. Resident validation requires at least 35 GiB available RAM and
 exclusive device access, exact fresh control capture identity against retained
 combined results, unchanged sequential results, fresh 64-layer 20-token plus
 continuation residual/logit gates, hybrid schedule identity and two separate
@@ -53,10 +53,9 @@ resident requests after reset. Keep numerical acceptance distinct from capture
 validity/repeatability. Full-depth long-prefix and production acceptance remain
 open even if the short prompt passes.
 
-The previous `prefill-combined-cli/run.py` expects three older variant names;
-do not point it directly at this preparation. The next stage must adapt its
-runner/audit and repeated-request checks to `combined` and `expanded`, binding
-the repeat executable separately before resident execution.
+The previous `prefill-combined-cli/run.py` expects three older variant names.
+Use the expanded runner below, which binds `combined`, `expanded` and the
+separate repeat executable to this preparation.
 
 ## Build checkpoint — 2026-10-23
 
@@ -83,3 +82,85 @@ measurements revalidate; the baseline still records **4000/4032 residual FAIL**.
 Repeat engine source inventories agree recursively, excluding only the CLI.
 Seven RED-to-GREEN tests; full host suite **1730 passed / 47 skipped**.
 No native model run or new numerical acceptance is claimed by this preparation.
+
+## Full-depth resident validation
+
+The expanded runner now consumes this preparation directly. It revalidates all
+builds and historical/current evidence, requires the exact three-build inventory,
+then runs the fresh combined control before expanded. All retained combined
+captures must match bytewise before the candidate can start. Candidate
+sequential captures must match the fresh control. Each native process checks
+>=35 GiB available RAM and exclusive NPU access under the shared validation lock.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-expanded-cli/run.py preflight \
+  --prepared Models/qwen38-27b/prefill-expanded-cli/prepared-v1 \
+  --out Models/qwen38-27b/prefill-expanded-cli/preflight-v1
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
+  utilities/prefill-expanded-cli/run.py run \
+  --prepared Models/qwen38-27b/prefill-expanded-cli/prepared-v1 \
+  --out Models/qwen38-27b/prefill-expanded-cli/native-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-expanded-cli/run.py audit \
+  --out Models/qwen38-27b/prefill-expanded-cli/native-v1
+```
+
+Single-request run/audit return 1 for completed numerical failure. A passing
+logit check cannot hide a failing intermediate residual. The independent audit
+recomputes every route and control identity, binds exact commands, CLI hashes,
+validator sources and preparation, and retains the original acceptance bounds.
+Preflight completion only validates evidence: `memory_ready` is separate and
+memory/device availability is checked again before every native process.
+
+Repeat validation requires a complete independently audited single-request run,
+including when its numerical result is FAIL. The repeat build comes from the
+same immutable preparation; its engine source inventory must match the candidate.
+
+```bash
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
+  utilities/prefill-expanded-cli/repeat.py run \
+  --baseline Models/qwen38-27b/prefill-expanded-cli/native-v1 \
+  --out Models/qwen38-27b/prefill-expanded-cli/repeat-native-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-expanded-cli/repeat.py audit \
+  --out Models/qwen38-27b/prefill-expanded-cli/repeat-native-v1
+```
+
+First-request captures must match the expanded single-request run; second-request
+captures must match the first bytewise. Preserve raw marked logs, independently
+score both requests and check all three routes. Repeat `passed` means identity;
+`numerical_passed` requires both requests to pass numerical gates. Normal request
+reset is exercised, not full-buffer clearing or independent checkpoint semantics.
+All reports keep `model_acceptance=false`: short-prefix acceptance alone is
+insufficient for long-prefix or production promotion. Reuse a fresh output path
+if rerunning; failed experiments must remain recorded.
+
+Seven additional RED-to-GREEN tests cover build inventory, failure preservation,
+control-first ordering, memory refusal before dispatch, completed numerical
+failure and independent repeat/accuracy aggregation. Host suite on 2026-10-24:
+**1737 passed / 47 skipped**. `preflight-v1` validates immutable evidence but
+records insufficient memory (24.3 GiB); this is not a native run result.
+
+## Resident checkpoint — 2026-10-24
+
+`native-v1` completes with expanded **4032/4032 residual gates and 63/63 logits
+PASS** across sequential, hybrid layer-major and hybrid block-major on 64
+layers, 20 prompt tokens and one continuation. Fresh combined **261/261 captures**
+match retained controls, preserving their 4000/4032 numerical failure. Expanded
+sequential **87/87 captures** remain exact; hybrid schedules agree in **86/86
+logit/residual files**. Independent CPU audit confirms the measurements.
+
+Expanded hybrid worst residual maxrel is **0.0012128028** (control 0.0121972127),
+minimum logit correlation **0.9999979147**. Sequential worst residual remains
+**0.0048820188**. Original <0.005 residual and >0.9999 correlation gates are
+unchanged; all argmax checks and continuation IDs `[17,478]` agree.
+
+`repeat-native-v1` completes two resident requests per route: **261/261 first
+captures** match the single-request baseline, **261/261 second captures** match
+the first after reset. Both requests independently pass 4032/4032 residual and
+63/63 logit gates. The separate repeat CPU audit confirms both requests.
+`passed=true`, `numerical_passed=true`; model_acceptance stays
+false. Retain the initial insufficient-memory preflight; native runs started
+only after about 61 GiB RAM became available. No new builds were needed.
+
+Next validate 255/256/257-token full-depth propagation with the expanded policy,
+retained independent references, fresh controls and causal prefix/schedule
+identity. Production integration and serving remain open.

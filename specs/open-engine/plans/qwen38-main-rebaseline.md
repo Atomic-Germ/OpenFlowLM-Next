@@ -1,5 +1,50 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — expanded full-depth prefill validation, 2026-10-24
+
+Added resident run/audit and two-request reset validators for the prepared
+combined and expanded private CLIs. They bind build/source/preparation hashes,
+exact commands and independent references, require fresh control identity
+before candidate dispatch, and check RAM/device ownership before each process.
+Completed numerical failure remains distinct from an incomplete run or identity
+failure; neither report can promote overall model acceptance.
+
+Fresh **64-layer, 20-token prompt plus continuation** measurements pass all
+**4032/4032 residual gates and 63/63 logits** for expanded. Unchanged bounds:
+residual maxrel <0.005 and logit correlation >0.9999 with matching argmax.
+
+| Route | Residual gates | Worst residual maxrel | Minimum logit correlation |
+|---|---:|---:|---:|
+| Sequential | 1344/1344 | 0.0048820188 | 0.9999943778 |
+| Hybrid layer-major | 1344/1344 | 0.0012128028 | 0.9999979147 |
+| Hybrid block-major | 1344/1344 | 0.0012128028 | 0.9999979147 |
+
+The fresh combined control reproduces all **261/261 captures** bytewise and
+retains its **4000/4032 residual FAIL**. Expanded sequential preserves **87/87
+captures**; hybrid schedules match in **86/86 logits/residual files**. Corrected
+hybrid worst error falls from **0.0121972127 to 0.0012128028**. Continuation IDs
+are `[17,478]`; expanded hybrid final continuation residual is **0.0007136553**.
+The separate CPU audit recomputes metrics and confirms every control identity.
+
+Two requests on each resident expanded engine also pass: **261/261 first-request
+captures** match the single-request baseline and **261/261 second-request
+captures** match the first after normal `Core::reset`. Each request independently
+passes **4032/4032 residuals and 63/63 logits** across all three routes. Raw
+request-marked logs and separate captures are retained. This checks normal
+request reset, not checkpoint semantics or independent full-buffer clearing.
+The separate repeat CPU audit also passes, remeasuring both requests and
+verifying log extraction, commands and provenance.
+Seven RED-to-GREEN runner tests; full host suite **1737 passed / 47 skipped**.
+The first preflight retained insufficient RAM (24.3 GiB); subsequent resident
+execution began after about 61 GiB became available. Existing binaries/kernels
+were reused without production source, manifest or model changes.
+
+Artifacts: `Models/qwen38-27b/prefill-expanded-cli/{native-v1,repeat-native-v1}`.
+Short-prefix acceptance does not close 255/256/257-token full-depth accuracy,
+production integration, serving or final model acceptance. Next validate the
+expanded policy over the retained long-prefix references with fresh controls,
+all-layer gates and causal prefix/schedule identity. `model_acceptance=false`.
+
 ## Latest checkpoint — expanded private prefill CLI preparation, 2026-10-23
 
 Built fresh combined control, expanded candidate and two-request candidate CLIs.
