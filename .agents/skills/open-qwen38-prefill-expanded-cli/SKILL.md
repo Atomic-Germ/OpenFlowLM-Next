@@ -89,3 +89,42 @@ memory preflight. No new libraries or kernels were built for this validation.
 Next validate expanded 255/256/257-token full-depth propagation with retained
 independent references, fresh exact controls and causal prefix/schedule identity.
 Do not infer long-prefix or production acceptance from this short-prefix PASS.
+
+## Long-prefix workflow
+
+Use `boundaries.py prepare/run/audit` from the runbook. Reuse accepted short-run
+builds and immutable 255/256/257 references; no new binaries are needed. The
+control is the fresh paired-input CLI from the combined preparation, so its
+long-prefix logits and final activation captures can be checked against retained
+paired-input native runs before expanded starts. Do not substitute the combined
+short-prompt control: it has no retained long-prefix baseline.
+
+Preparation validates historical/current source identity, all reference hashes,
+finite sizes, CPU continuation selection and causal reference prefixes. Verify
+all 64-layer geometry fields against the accepted short run. Native validation
+runs 18 serial processes, with exclusive NPU access and >=35 GiB RAM checked
+before each. Compare expanded sequential to fresh paired captures, all hybrid
+schedule files, and cross-length logit/residual prefixes excluding continuation.
+
+Numerical failures remain completed FAIL results, not runner errors. Audit raw
+captures independently and preserve failed experiments. Short-reference metadata
+and previous preparations must never be edited to make long-prefix reuse pass.
+Long-prefix PASS alone does not establish production or serving acceptance.
+
+### Long-prefix result — 2026-10-24
+
+`boundaries-prepared-v1` verifies 1155 references, 3504 inputs and 172 historical
+entries. `boundaries-native-v1` completes all 18 processes and its independent
+CPU re-audit. Both exit 1 for completed numerical failure, not process error.
+Expanded hybrid passes 98,688/98,688 residual gates and 1542/1542 logits, worst
+maxrel 0.0025616438, minimum correlation 0.9999961799, no argmax mismatch.
+All 2331 historical controls, 969 sequential captures, 1917 causal prefixes per
+variant and 966 expanded hybrid schedule files match exactly.
+
+Sequential remains FAIL: 46,357/49,344 residuals and 550/771 logits pass. First
+temporal residual crossing L60/P38; shallowest failing layer L33/P241; first
+logit failure P80. Worst residual 0.5389499720 at L58/P220, minimum correlation
+0.9351669042; argmax still matches. These crossings do not identify a faulty
+operation. Next diagnose causal sequential state/arithmetic using saved traces.
+Keep overall model_acceptance false and long-prefix repeat/production open.
+Seven new RED-to-GREEN tests; 1744 host tests pass, 47 skip. No new builds.

@@ -164,3 +164,65 @@ only after about 61 GiB RAM became available. No new builds were needed.
 Next validate 255/256/257-token full-depth propagation with the expanded policy,
 retained independent references, fresh controls and causal prefix/schedule
 identity. Production integration and serving remain open.
+
+## Long-prefix validation
+
+`boundaries.py` reuses the accepted short run and the retained independent
+255/256/257-token references. It verifies the historical reference/source/build
+chain without rewriting old hashes, checks current model/export geometry, and
+validates every reference's size, finite values and CPU-selected continuation.
+All 64 residual prefixes and every prompt logit must match across lengths.
+
+The fresh paired-input control comes from the verified combined preparation.
+Run all its lengths/routes before expanded, requiring exact historical logits
+and final activation captures. Expanded sequential must then match that fresh
+control, including every layer's residual trace. Both variants are independently
+scored at all layers/positions; hybrid schedule identity and cross-length causal
+logit/residual prefixes are mandatory. Continuations are scored independently,
+not compared across prompt lengths.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-expanded-cli/boundaries.py prepare \
+  --baseline Models/qwen38-27b/prefill-expanded-cli/native-v1 \
+  --references Models/qwen38-27b/prefill-full/boundaries \
+  --out Models/qwen38-27b/prefill-expanded-cli/boundaries-prepared-v1
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
+  utilities/prefill-expanded-cli/boundaries.py run \
+  --prepared Models/qwen38-27b/prefill-expanded-cli/boundaries-prepared-v1 \
+  --out Models/qwen38-27b/prefill-expanded-cli/boundaries-native-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-expanded-cli/boundaries.py audit \
+  --out Models/qwen38-27b/prefill-expanded-cli/boundaries-native-v1
+```
+
+This runs 18 native processes serially under the shared NPU lock, with >=35 GiB
+available RAM and device ownership checked before each. Keep that headroom for
+the entire run. A completed numerical failure returns 1 while preserving all
+measurements; partial execution remains incomplete. CPU audit recomputes all
+metrics, controls and prefix comparisons and binds commands, CLI/source hashes
+and preparation. Overall model acceptance stays false even if this experiment
+passes. Existing output directories are refused; use new paths for reruns.
+
+### Boundary checkpoint — 2026-10-24
+
+Preparation verifies 1155 reference arrays, 3504 inputs and 172 historical/current
+entries. All 18 native processes complete; the independent CPU audit confirms
+the measurements, identities, commands and provenance. Run and audit return 1
+for the preserved numerical failure, with `complete=true`, `passed=false` and
+`model_acceptance=false`.
+
+Expanded hybrid routes pass **98,688/98,688 residuals and 1542/1542 logits**.
+Worst hybrid maxrel is **0.0025616438** (control 0.4325418278), minimum correlation
+**0.9999961799**, zero argmax mismatches. All 2331 historical control captures,
+969 expanded sequential captures, 1917 cross-length prefix checks per variant
+and 966 expanded hybrid schedule files are byte-exact.
+
+Sequential remains unchanged: **46,357/49,344 residuals and 550/771 logits**
+pass. First residual crossing is L60/P38; shallowest is L33/P241. Logits first
+fail at P80, minimum correlation is 0.9351669042, and argmax still agrees. Worst
+residual maxrel is 0.5389499720 at L58/P220. Preserve this overall FAIL; the
+hybrid result does not establish sequential or production acceptance.
+
+Seven RED-to-GREEN tests; full host suite **1744 passed / 47 skipped**. Artifacts
+are `boundaries-prepared-v1/`, `boundaries-native-v1/` and `boundaries-*.log` under
+the experiment root. Next diagnose sequential causal state/arithmetic from the
+retained traces; long-prefix repeat/reset and production integration remain open.

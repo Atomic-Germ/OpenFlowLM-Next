@@ -1,5 +1,59 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — expanded long-prefix validation, 2026-10-24
+
+Added preparation, resident runner and CPU audit for immutable 255/256/257-token
+references. The runner verifies historical/current source identity and accepted
+short-run builds, then requires all fresh paired-input controls before expanded.
+Every process checks >=35 GiB available RAM and exclusive device access. It
+scores every layer/position and separately checks causal prefixes, schedule
+identity and continuation. Completed numerical failure remains distinct from an
+incomplete run; acceptance thresholds are unchanged.
+
+All **18 native processes complete**. The separate CPU audit recomputes all
+measurements and confirms commands, provenance, controls and prefix identities.
+Run/audit exit 1 means completed numerical FAIL, not a process failure.
+Expanded hybrid layer-major and block-major
+pass all **98,688/98,688 residual gates and 1542/1542 logits**, including one NPU
+continuation for each prompt. Minimum correlation is **0.9999961799 >0.9999**,
+with no argmax mismatches. Worst hybrid residual maxrel improves from
+**0.4325418278 to 0.0025616438 <0.005** (L58/P205).
+
+| Prompt tokens | Expanded residual gates, both hybrid routes | Logits | Final continuation maxrel |
+|---|---:|---:|---:|
+| 255 | 32,768/32,768 | 512/512 | 0.0001198608 |
+| 256 | 32,896/32,896 | 514/514 | 0.0006099073 |
+| 257 | 33,024/33,024 | 516/516 | 0.0002888666 |
+
+All **2331 fresh paired control captures** match the historical baseline.
+Expanded sequential matches all **969 fresh control captures**, including
+all-layer residuals. Each variant passes **1917/1917 cross-length prefix
+identities** (1533 logit files and 384 residual prefixes); expanded hybrid
+schedules match **966/966 logit/residual files**. Continuations are scored
+independently and excluded from comparisons between different prompt lengths.
+
+**Overall acceptance remains FAIL because sequential is unchanged:**
+**46,357/49,344 residuals and 550/771 logits** pass. The first temporal residual
+crossing is **L60/P38**; the shallowest failing layer is **L33/P241**. Logit
+correlation first fails at **P80**, reaches **0.9351669042** at its worst, and
+argmax remains correct. Worst sequential residual is **0.5389499720** at L58/P220.
+These are threshold crossings, not attribution to a specific faulty operation.
+The aggregate expanded result is **145,045/148,032 residuals and 2092/2313 logits**.
+
+Preparation verifies **1155 reference files**, **3504 inputs** and **172
+historical/current dependency entries**, including CPU-selected continuations
+and all reference prefixes. Seven RED-to-GREEN tests; full host suite **1744
+passed / 47 skipped**. Existing private binaries and kernels are reused;
+production sources, manifests and model packing are unchanged.
+
+Artifacts: `Models/qwen38-27b/prefill-expanded-cli/`:
+`boundaries-prepared-v1`, `boundaries-native-v1` and their preparation/run/audit
+logs. Next localize sequential drift using the retained causal inputs and
+residuals at L60/P38 and L33/P241, separating propagated error from local
+arithmetic/state. Hybrid long-prefix precision now passes for these fixtures;
+long-prefix repeated requests, production integration, serving and final model
+acceptance remain open. `model_acceptance=false`.
+
 ## Latest checkpoint — expanded full-depth prefill validation, 2026-10-24
 
 Added resident run/audit and two-request reset validators for the prepared
