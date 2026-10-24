@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-fp32-post-output</name>
+    <description>Build private full-lx FP32 post-output/direct output preparation and validate exact causal L0 controls, state identity and independent residuals.</description>
+    <location>.agents/skills/open-qwen38-fp32-post-output/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-sequential-l0-replay</name>
     <description>Replay production L0 over 243 causal positions with one pool, exact native controls and independent entry/state/FFN boundary checks.</description>
     <location>.agents/skills/open-qwen38-sequential-l0-replay/SKILL.md</location>
