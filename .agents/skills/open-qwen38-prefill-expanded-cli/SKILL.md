@@ -128,3 +128,28 @@ logit failure P80. Worst residual 0.5389499720 at L58/P220, minimum correlation
 operation. Next diagnose causal sequential state/arithmetic using saved traces.
 Keep overall model_acceptance false and long-prefix repeat/production open.
 Seven new RED-to-GREEN tests; 1744 host tests pass, 47 skip. No new builds.
+
+## Sequential causal attribution — 2026-10-24
+
+Use [the CPU diagnostic runbook](../../../utilities/prefill-sequential-drift/README.md)
+for L33/P240–242 and L60/P37–39. `check.py run/audit` validates the retained
+boundary audit and every native capture, streams decoded weights one layer at
+a time, and replays independent reference/native prefixes from zero history.
+Copy reference state before evaluating a native current input: the oracle
+mutates recurrence. Separate current-input, input-history, implementation-gap
+and reference-rounding signed vectors on one output scale; their maxima do not
+add. The implementation gap is not proof of one faulty operation or native state.
+
+`Models/qwen38-27b/prefill-sequential-drift/run-v1` and its fresh causal re-audit
+complete: 6 reference outputs exact, 12 attributions/NPZ arrays reproduced,
+6222 input hashes, decoded-weight cache <=1.426 GiB. No NPU execution or build.
+Current input dominates both crossings. Sequential L33/P241 has propagated
+maxrel 0.0050250579 and gap 0.0000162030; L60/P38 has propagated 0.0076834838
+and gap 0.0013556628. Reference rounding is zero here. Selected sequential
+outputs pass 4/6; hybrid 6/6, worst 1.8360597e-5. Overall FAIL remains.
+Twelve RED-to-GREEN tests; 1756 host tests pass, 47 skip.
+
+Next trace incoming error through L32/P241 and L59/P38 and inspect L0/P241
+(retained output maxrel about 0.0012928 on the common embedding). Select actual
+native sublayer/state captures using those results, without changing primary
+references or claiming model acceptance from counterfactual ideal history.

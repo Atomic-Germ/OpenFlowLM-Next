@@ -1,5 +1,50 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — sequential causal drift attribution, 2026-10-24
+
+Added a CPU diagnostic for L33/P240–242 and L60/P37–39 on the retained
+257-token run. It verifies the audited native inputs and immutable preparation,
+then replays every preceding token with independent conv/recurrent/KV history.
+Weights are decoded and cached one layer at a time (maximum **1.426 GiB** of
+cached decoded weights); no NPU dispatch or full-model residency is required.
+
+All **6/6 selected CPU references reconstruct bytewise** and all **12 signed
+attributions** close. A separate CPU audit reruns all causal histories and
+requires byte-exact equality for every saved NPZ array and metric. Counterfactual state copies separate current-input effects
+from effects of earlier native inputs; reference output rounding is explicit
+(and zero for these fixtures). Every component uses the same output-reference
+scale, so signed vectors add but their scalar maxima generally do not.
+
+| Sequential target | Current input | Input-history effect | Implementation gap | Total maxrel |
+|---|---:|---:|---:|---:|
+| L33/P241 | 0.0050773486 | 0.0000522907 | 0.0000162030 | 0.0050229750 |
+| L60/P38 | 0.0076863502 | 0.0000208493 | 0.0013556628 | 0.0090391466 |
+
+The main error at both threshold crossings is propagated through the current
+input. Even the independent layer on native causal inputs fails at these rows:
+propagated maxrel is **0.0050250579 / 0.0076834838**. Incoming residual error,
+on its own input scale, is **0.0030828957 / 0.0040749071**. L60 additionally has
+a measurable implementation gap. This gap includes local arithmetic and actual
+native state accumulated over the prefix; these residual-only captures cannot
+attribute it to one operation or prove native-state correctness.
+
+Selected sequential output gates pass **4/6**; hybrid passes **6/6**, worst
+maxrel **0.0000183606** and implementation gap <=**4.384963e-7**. Native outputs
+and overall long-prefix FAIL are unchanged. This is diagnostic attribution,
+not a corrected model execution or production acceptance.
+
+Twelve RED-to-GREEN tests cover causal carry, state-copy isolation, route reset,
+invalid inputs, signed cancellation/rounding and persisted failures. Full host
+suite: **1756 passed / 47 skipped**. The diagnostic binds **6222 input files**
+and **12 NPZ artifacts**. Workflow: `utilities/prefill-sequential-drift/`;
+artifacts: `Models/qwen38-27b/prefill-sequential-drift/run-v1/`.
+
+Next follow the incoming drift into preceding layers, starting at L32/P241 and
+L59/P38 and examining L0/P241, where the retained sequential residual already
+has maxrel 0.0012928 despite identical embedding input. Select actual native
+sublayer/state capture targets from that evidence. Production integration,
+long-prefix reset and final model acceptance remain open.
+
 ## Latest checkpoint — expanded long-prefix validation, 2026-10-24
 
 Added preparation, resident runner and CPU audit for immutable 255/256/257-token
