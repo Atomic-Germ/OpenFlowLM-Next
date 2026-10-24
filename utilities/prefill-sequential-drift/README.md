@@ -210,3 +210,51 @@ These differently scaled errors do not quantify final residual contribution.
 Next perform signed vector attribution of post-output rounding through output
 projection and FFN before selecting an FP32 experiment. Keep the exact native
 control and independent references intact.
+
+## Signed post-output attribution
+
+`post_attribution.py` analyzes the exact audited native L0 replay without an NPU
+run. It carries two independent histories from zero: the existing mixed-precision
+layer oracle (required to reproduce stored residual references bytewise) and the
+FP64 entry/conv/recurrence reference. Native state never seeds either history.
+One layer's effective weights are cached; the mixed/FP64 copies materialize
+approximately 4.282 GiB of weights, not a resident full model.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/post_attribution.py run \
+  --capture Models/qwen38-27b/prefill-sequential-drift/native-l0-v2 \
+  --out Models/qwen38-27b/prefill-sequential-drift/post-attribution-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/post_attribution.py audit \
+  --out Models/qwen38-27b/prefill-sequential-drift/post-attribution-v1
+```
+
+The six targets are P36–38/P240–242. Each NPZ retains the intermediate final
+outputs, raw post/recurrence/Z vectors and a telescoping signed decomposition:
+reference storage rounding, mixed-oracle versus FP64 math, recurrence, Z,
+post-output BF16 rounding, remaining post arithmetic, output projection,
+residual addition and conditioned FFN arithmetic. The post vectors are propagated
+through the nonlinear FP64 FFN before taking differences. All output effects use
+one stored-reference scale; maxima must not be added. The decomposition depends
+on the stated replacement order and does not claim a unique nonlinear attribution.
+
+`without_post_rounding` subtracts the rounding contribution while freezing the
+other downstream error vectors. It is a CPU counterfactual, not a corrected NPU
+execution; removing rounding can expose cancellation with another operation.
+The audit reconstructs both causal trajectories and requires byte-identical NPZ
+arrays and metrics. Missing references, changed controls or incomplete inventories
+invalidate the result. Diagnostic completion never changes model acceptance.
+
+### Post-output attribution checkpoint — 2026-10-24
+
+All six references reconstruct bytewise; signed closure is exact. A separate
+causal audit reproduces every NPZ array and metric. At P37/P241, native residual
+maxrel is 0.0011891532 / 0.0012928460; the post-rounding contributions are
+0.0012200074 / 0.0013051784. The frozen-downstream CPU prediction without that
+rounding is 0.0000308542 / 0.0000123325, roughly 39x/105x lower. At P242 it
+worsens from 0.0000202869 to 0.0000891240 because rounding and projection errors
+partially cancel. These are local diagnostic effects, not model acceptance.
+
+Nine RED-to-GREEN tests; full host suite 1801 passed / 47 skipped. No build or
+NPU run was needed. Next validate a private FP32 post-output and direct-FP32
+output-preparation path against exact production controls, retaining all 243
+positions and the cancellation case at P242.
