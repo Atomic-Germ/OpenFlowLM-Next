@@ -1,5 +1,53 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — private FP32 DeltaNet post-output, 2026-10-24
+
+Added a private full-lx builder and causal replay that retain FP32 post-recurrence
+norm/gate output through direct FP32 Q4 output-projection preparation. The fresh
+BF16 control reproduces all **729 original activation/state/residual captures
+byte-for-byte** over 243 positions. The candidate preserves entry norm, QKV/Z,
+records, recurrence output and complete native state exactly at **243/243**
+positions. Independent final residual gates pass **243/243**, and all six selected
+post/output/FFN-front/down cases pass unchanged bounds.
+
+| Position | Control residual maxrel | FP32 residual maxrel | Reduction |
+|---|---:|---:|---:|
+| P36 | 0.0008119891 | 0.0000015643 | 519x |
+| P37 | 0.0011891532 | 0.0000263390 | 45x |
+| P38 | 0.0000585909 | 0.0000129919 | 4.5x |
+| P240 | 0.0010099215 | 0.0000018431 | 548x |
+| P241 | 0.0012928460 | 0.0000038302 | 338x |
+| P242 | 0.0000202869 | 0.0000123079 | 1.65x |
+
+Across the prefix, worst residual maxrel drops from **0.0015055132 (P143)** to
+**0.0000357078 (P116)**; median drops from **0.0003848893** to **0.0000083408**.
+242 positions improve. P202 rises slightly from **0.0000257763** to
+**0.0000260274**, still within the original bound. P242 improves despite the
+prior frozen-error CPU prediction because this experiment changes both post
+storage and projection preparation; the downstream error is not frozen.
+
+All 11 cores pass the original resource limits. Maximum linked text is
+**15,936 / 16,000 bytes** for control/candidate; maximum assigned L1 buffer end
+is **62,336 bytes** for both. The candidate appends **24,576 bytes** to scratch
+(393,216 -> 417,792), retains the 3,317,760-byte state ABI and streams six FP32
+blocks through the existing depth-two FIFO. Each build pins 849 dependency
+entries, including current factored recurrence and consistent Q4 helpers.
+The initial control-v1 compiled but failed its dependency audit due to IRON's
+`post_fn.cc` rename; a regression test fixes the mapping and control-v2 is fresh.
+
+Thirteen RED-to-GREEN tests; full host suite **1814 passed, 47 skipped**.
+Control and candidate execute **486 NPU dispatches** in total, with one L0 pool.
+Separate numerical re-audits pass for both runs, reproducing every capture
+hash and metric with pinned source/build/input provenance.
+Artifacts: `Models/qwen38-27b/deltanet-post-fp32/`.
+Workflow: `utilities/deltanet-post-fp32/README.md` and the registered
+`open-qwen38-fp32-post-output` skill.
+
+This establishes a local L0 precision improvement. Production sources/exports
+are unchanged; full-model sequential long-prefix acceptance remains FAIL.
+Broaden the private experiment to other linear layers with streamed weights,
+fresh exact controls and actual causal prefixes before full-depth propagation.
+
 ## Latest checkpoint — signed L0 post-output attribution, 2026-10-24
 
 Added a CPU-only attribution tool over the exact audited production L0 captures.
