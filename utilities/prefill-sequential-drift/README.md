@@ -142,3 +142,71 @@ through P242. Require exact native residual identity at every position before
 interpreting available entry/conv/recurrence/output/FFN boundaries at P37/P241
 and neighboring rows. Keep production arithmetic and primary references intact.
 Overall sequential long-prefix FAIL and model_acceptance=false remain unchanged.
+
+## Production L0 causal capture
+
+`native_l0.py` prepares a single production L0 pool with original model
+embeddings at P0–242. It validates the retained long-prefix audit and current
+recipe/bundle compatibility, repacks through the shared packer, and binds all
+inputs and sources. The standard `open_kernels/harness` executes unchanged
+production lx kernels. State and scratch are initialized once, then carried
+through the entire prefix; only the incoming embedding is replaced per step.
+
+Build instructions and XRT runtime selection are in
+[the L0 replay skill](../../.agents/skills/open-qwen38-sequential-l0-replay/SKILL.md).
+The build-tree XRT library is suitable for linking; runtime must use the
+installed XDNA driver under `/opt/xilinx/xrt`. An attempt using build-tree
+runtime libraries is retained as `native-l0-v1` and failed before dispatch.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/native_l0.py prepare \
+  --baseline Models/qwen38-27b/prefill-expanded-cli/boundaries-native-v1 \
+  --out Models/qwen38-27b/prefill-sequential-drift/native-l0-v2
+XILINX_XRT=/opt/xilinx/xrt LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 \
+  ironvenv/bin/python utilities/prefill-sequential-drift/native_l0.py run \
+  --out Models/qwen38-27b/prefill-sequential-drift/native-l0-v2 \
+  --harness Models/qwen38-27b/prefill-sequential-drift/harness-l0-v1/run_kernel
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/native_l0.py audit \
+  --out Models/qwen38-27b/prefill-sequential-drift/native-l0-v2
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/l0_boundaries.py \
+  --capture Models/qwen38-27b/prefill-sequential-drift/native-l0-v2 \
+  --out Models/qwen38-27b/prefill-sequential-drift/l0-boundaries-v1
+```
+
+Use fresh directories; preparation and native captures cannot be overwritten.
+The runner holds the common resident-validation lock and checks that the NPU is
+idle. It stores all 729 complete residual/activation/state buffers. Every FP32
+residual must match the full-model native trace bytewise, including signed zero.
+Tolerance-based agreement cannot authorize boundary interpretation. A separate
+audit rechecks all input/capture hashes and identity measurements; failures stay
+explicit and do not become model acceptance.
+
+`l0_boundaries.py` requires that exact audited control, then uses existing
+independent entry/conv/recurrence references through every causal position from
+zero. It retains strict per-head failures separately from whole-tensor gates.
+At P36–38 and P240–242 it also checks Z, post-recurrence gating, output projection,
+residual addition, FFN norm/activation and both down partials. These latter
+checks are conditioned on captured inputs, not independent full-model evidence.
+Raw FFN up/gate projections are not retained in production scratch; the checker
+can observe their combined activation, not infer separate projection accuracy.
+
+This replay uses approximately 0.240 GiB of logical NPU buffers and stores
+906,743,808 capture bytes. CPU scoring decodes one layer only. The original
+production binaries, baseline captures and overall sequential long-prefix FAIL
+remain unchanged; passing local gates is not a correction or full-model PASS.
+
+### Native L0 checkpoint — 2026-10-24
+
+The isolated production replay completes 243 dispatches and reproduces every
+retained full-model L0 residual exactly. Independent audit verifies 729 captures.
+All 243 entry/conv/state gates and 11,664 strict recurrence head cases pass;
+all six selected projection/front/down cases pass. Host suite: 1792 passed,
+47 skipped. Production arithmetic and the overall long-prefix FAIL are unchanged.
+
+At P37/P241, the post-recurrence norm/gate BF16 boundary has maxrel
+0.0029327378 / 0.0029708429 against its unrounded conditioned reference.
+The full-prefix composed recurrence output error stays below 2.121e-5.
+These differently scaled errors do not quantify final residual contribution.
+Next perform signed vector attribution of post-output rounding through output
+projection and FFN before selecting an FP32 experiment. Keep the exact native
+control and independent references intact.

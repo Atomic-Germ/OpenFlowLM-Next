@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-sequential-l0-replay</name>
+    <description>Replay production L0 over 243 causal positions with one pool, exact native controls and independent entry/state/FFN boundary checks.</description>
+    <location>.agents/skills/open-qwen38-sequential-l0-replay/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-expanded-cli</name>
     <description>Build combined control and expanded attention/down prefill CLIs with exact roles, pinned replay evidence and repeat capture support.</description>
     <location>.agents/skills/open-qwen38-prefill-expanded-cli/SKILL.md</location>

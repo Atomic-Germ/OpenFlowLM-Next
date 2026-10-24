@@ -1,5 +1,51 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — exact production L0 replay, 2026-10-24
+
+Added a one-pool production L0 replay over P0–242 with original model embeddings,
+continuous native conv/recurrent state and full residual/activation/state capture.
+The unchanged lx export completes **243 NPU dispatches**. All **243 residuals
+match the retained full-model sequential CLI byte-for-byte**; a separate audit
+rechecks all **729 captures (906,743,808 bytes)** and their provenance.
+
+Independent entry/conv/state checks pass **243/243** positions; conditioned
+recurrence passes **11,664/11,664 strict head cases**. All six selected
+Z/post/output and FFN front/down cases at P36–38 and P240–242 pass unchanged
+bounds. No CPU state is substituted into native execution or independent carry.
+
+| Boundary | Worst maxrel over the full prefix |
+|---|---:|
+| Entry norm | 0.0000165581 |
+| QKV / conv history | 0.0000128526 |
+| Independent composed state | 0.0000251507 |
+| Independent composed output | 0.0000212016 |
+
+The selected post-recurrence norm/gate BF16 boundary has maxrel **0.0029327378
+at P37** and **0.0029708429 at P241** against its unrounded conditioned
+reference. Selected FFN activation errors at those positions are about 8.49e-6
+and 7.30e-6. These local gates pass and use different reference scales; their
+scalar errors cannot establish contribution to the final residual. This
+nominates post-recurrence BF16 output for signed causal attribution, not a
+proven correction or a recurrence defect.
+
+Next quantify the post-output rounding vector through the output projection
+and FFN against the independent L0 residual, separating incoming recurrence/Z
+error from local rounding and downstream arithmetic. Require byte-exact native
+controls before any FP32 post-output experiment. Overall sequential long-prefix
+accuracy remains FAIL, and production kernels/defaults are unchanged.
+
+Logical NPU buffers: **0.239906 GiB**, one resident weight pool. Fresh standard
+harness: GCC 15.2.0, **326 pinned compiler dependencies**. Link with source-tree
+XRT development libraries and run with installed `/opt/xilinx/xrt` plus the
+XDNA driver. The initial build-tree-runtime attempt failed before dispatch;
+its logs are retained separately. No full model residency is required.
+
+TDD: 19 initial RED-to-GREEN cases plus two failure/overwrite regression tests;
+full host suite **1792 passed, 47 skipped**. Evidence:
+`Models/qwen38-27b/prefill-sequential-drift/{native-l0-v2,l0-boundaries-v1,harness-l0-v1}/`.
+Tools: `utilities/prefill-sequential-drift/{native_l0.py,l0_boundaries.py}`.
+Build/replay instructions are in the registered sequential-L0 skill.
+
 ## Latest checkpoint — preceding-layer causal attribution, 2026-10-24
 
 Added configurable target selection to the CPU drift diagnostic without changing
