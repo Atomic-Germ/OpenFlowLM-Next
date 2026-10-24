@@ -1,5 +1,50 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — signed L0 post-output attribution, 2026-10-24
+
+Added a CPU-only attribution tool over the exact audited production L0 captures.
+It reconstructs independent mixed-precision and FP64 histories through P242,
+reproduces all **six stored L0 references byte-for-byte**, and propagates selected
+post-output changes through output projection and the nonlinear FFN. A separate
+causal re-audit reproduces every array in all six NPZ artifacts and all metrics.
+Signed decomposition closure is exact for these fixtures (max absolute gap 0).
+
+The replacement chain separates reference rounding/math, recurrence, Z,
+post-output BF16 rounding, remaining post arithmetic, output projection,
+residual addition and conditioned FFN arithmetic. Every output contribution uses
+the same final-reference scale; scalar maxima must not be added.
+
+| Position | Native residual maxrel | Post-rounding contribution | Output-projection contribution | CPU result without post rounding |
+|---|---:|---:|---:|---:|
+| P36 | 0.0008119891 | 0.0008331544 | 0.0000220021 | 0.0000211652 |
+| P37 | 0.0011891532 | 0.0012200074 | 0.0000323789 | 0.0000308542 |
+| P38 | 0.0000585909 | 0.0000417831 | 0.0000150979 | 0.0000168078 |
+| P240 | 0.0010099215 | 0.0009798124 | 0.0000310685 | 0.0000301091 |
+| P241 | 0.0012928460 | 0.0013051784 | 0.0000122293 | 0.0000123325 |
+| P242 | 0.0000202869 | 0.0000688372 | 0.0000872370 | 0.0000891240 |
+
+Post-output rounding dominates the selected P37/P241 drift. Removing its signed
+contribution while freezing downstream error vectors predicts about **39x/105x**
+lower residual error. This is a CPU counterfactual, not a corrected NPU run.
+At P242 the prediction worsens because rounding partially cancels projection
+error. The chain's nonlinear attribution depends on the stated replacement
+order. All selected residuals remain below 0.005; full-model sequential
+long-prefix accuracy remains FAIL.
+
+The BF16 rounding prediction differs from captured post output in only **6/7
+of 6144 values at P37/P241**, with maxrel **2.4414e-5 / 1.2207e-5**. Remaining
+post arithmetic is measured separately rather than attributed to rounding.
+Next build a private FP32 post-output/direct-FP32 output-preparation experiment
+with a byte-exact production control, all 243 causal positions and explicit
+scratch/stream/resource checks. Include P242 and projection gates to expose
+cancellation regressions before considering production integration.
+
+Nine RED-to-GREEN tests; full host suite **1801 passed, 47 skipped**. Materialized
+mixed/FP64 weights: **4.282 GiB**, one layer; no new build or NPU dispatch.
+Artifacts: `Models/qwen38-27b/prefill-sequential-drift/post-attribution-v1/`.
+Tool: `utilities/prefill-sequential-drift/post_attribution.py`.
+Production code, binaries, retained native captures and thresholds are unchanged.
+
 ## Latest checkpoint — exact production L0 replay, 2026-10-24
 
 Added a one-pool production L0 replay over P0–242 with original model embeddings,
