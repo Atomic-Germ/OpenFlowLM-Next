@@ -1,5 +1,47 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — preceding-layer causal attribution, 2026-10-24
+
+Added configurable target selection to the CPU drift diagnostic without changing
+its pinned predecessor. Targets bind exact layer/position coverage and refuse
+ambiguous or out-of-range selections. Layer zero uses the shared FP32 model
+embedding, with exact zero current-input, input-history and propagated vectors
+required before interpreting its implementation gap.
+
+Replayed L0/P240–242, L32/P240–242 and L59/P37–39, carrying every causal row.
+All **9/9 independent references reconstruct bytewise**, all **18 signed
+attributions** close, and selected output gates pass **9/9 for each route**.
+A separate CPU audit reruns the histories and reproduces every array in all
+18 NPZ artifacts and their metrics bytewise.
+These selected gates remain below 0.005; the overall sequential long-prefix
+FAIL is unchanged.
+
+| Sequential target | Current input | Input-history effect | Implementation gap | Total maxrel |
+|---|---:|---:|---:|---:|
+| L0/P241 | 0 | 0 | 0.0012928460 | 0.0012928460 |
+| L32/P241 | 0.0032113675 | 0.0001437686 | 0.0000152968 | 0.0030828957 |
+| L59/P38 | 0.0041249896 | 0.0000384913 | 0.0000115911 | 0.0040749071 |
+
+L32/L59 mainly transmit incoming error. At L0 the inputs and ideal histories
+are exact, isolating the discrepancy to the first layer's arithmetic/native
+history; residual-only captures still cannot identify the responsible operation.
+Hybrid L0/P241 maxrel is **0.0000016314**, versus sequential **0.0012928460**.
+The same embedding token (ID 1235) occurs at P37/88/139/190/241; retained L0
+sequential maxrel is already **0.0011891532 at P37**, rising to 0.0012928460
+at P241. This nominates two causal-history lengths, not a recurrence diagnosis.
+
+Next prepare an isolated production L0 replay through P242 with one weight
+pool, require byte-exact native residual controls for every position, and
+capture available entry/conv/recurrence/output/FFN boundaries at P37 and P241
+(with neighboring rows). Keep the same production arithmetic and independent
+references until those controls identify a concrete precision change.
+
+Fifteen RED-to-GREEN tests; full host suite **1771 passed / 47 skipped**.
+Maximum cached decoded weights **1.426 GiB**; no NPU dispatch or native build.
+Artifacts: `Models/qwen38-27b/prefill-sequential-drift/predecessors-v1/`;
+workflow: `utilities/prefill-sequential-drift/targets.py`. Production integration,
+long-prefix reset and model acceptance remain open.
+
 ## Latest checkpoint — sequential causal drift attribution, 2026-10-24
 
 Added a CPU diagnostic for L33/P240–242 and L60/P37–39 on the retained

@@ -153,3 +153,28 @@ Next trace incoming error through L32/P241 and L59/P38 and inspect L0/P241
 (retained output maxrel about 0.0012928 on the common embedding). Select actual
 native sublayer/state captures using those results, without changing primary
 references or claiming model acceptance from counterfactual ideal history.
+
+## Predecessor selection — 2026-10-24
+
+The same [CPU runbook](../../../utilities/prefill-sequential-drift/README.md)
+now includes `targets.py run/audit --target layer:positions`. Reuse pinned
+`check.py`; do not mutate its source or earlier evidence. Selected coverage
+must be explicit, normalized and complete. Layer zero uses shared FP32 model
+embeddings; reject any nonzero current-input/input-history/propagated vector
+there. Later layers use preceding-layer traces without continuation rows.
+
+`predecessors-v1` and its fresh causal re-audit reproduce 9 references and 18
+cases at L0/P240–242, L32/P240–242 and L59/P37–39. Both routes pass 9/9 selected
+output gates, but overall sequential long-prefix FAIL remains. L32/P241 and
+L59/P38 implementation gaps are 1.52968e-5 / 1.15911e-5: incoming error dominates.
+L0/P241 has exact common inputs but sequential gap 0.0012928460 versus hybrid
+1.6313961e-6. The same embedding token 1235 also occurs at P37, where retained
+sequential error is already 0.0011891532. Do not infer a recurrence-only cause.
+Fifteen RED-to-GREEN tests; 1771 host tests pass, 47 skip. No native build/NPU.
+
+Next prepare production L0 replay through P242 with one pool, preserving every
+causal position and requiring byte-exact native residual controls before any
+sublayer interpretation. Capture available entry/conv/recurrence/output/FFN
+boundaries at P37 and P241 with neighbors. Register a new workflow before any
+new harness/library build; do not modify production arithmetic or references
+before the boundary evidence identifies a concrete correction.
