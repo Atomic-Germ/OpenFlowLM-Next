@@ -309,12 +309,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 4}"));
+    json j = json::parse(std::string("{\"manifest_version\": 5}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 4 is refused");
+        check(false, "manifest_version 5 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 4") != std::string::npos, std::string("manifest_version 4 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 5") != std::string::npos, std::string("manifest_version 5 is refused: ") + e.what());
     }
     // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
     auto bf16_weight = [](json& j, int version, bool mixed) {

@@ -1,5 +1,30 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — shared paired prefill runtime, 2026-10-25
+
+Moved four-product prefill composition into the shared Core compiled by both
+`oflm` and `open_qwen36_cli`. Manifest version 4 explicitly binds high/low
+projection roles, validates wide dense geometry and state ABI, and rejects
+missing, partial or swapped companions. Versions 1–3 retain their single
+dispatch behavior. Stage-major direct submission is disabled on paired routes
+so it cannot silently bypass input/weight corrections. Host sums preserve the
+validated order and never modify mapped device outputs.
+
+Full host suite: **1832 passed, 47 skipped**. Eighteen RED-to-GREEN CPU
+regression cases cover cancellation-sensitive sum order, output
+ownership, non-finite inputs, legacy compatibility and malformed declarations.
+Standalone CLI builds with the existing XRT development tree and passes CTest
+4/4. The standard `oflm` application builds in the existing Docker builder; with
+`OFLM_CONFIG_PATH=/code/src/model_list.json`, `oflm version` exits 0.
+The initial local build lacked installed XRT headers; the retry uses the same
+development headers/libraries as earlier accepted CLI builds. The first Docker
+retry lacked permission to write old artifacts; the normal builder user works.
+
+This is runtime integration, not an activated kernel export or new resident
+accuracy result. Production export of five low-weight companion streams and
+fresh integrated numerical/reset checks remain open. No NPU execution, model
+weight changes or FP32 post-output promotion occurred in this checkpoint.
+
 ## Latest checkpoint — private FP32 DeltaNet post-output, 2026-10-24
 
 Added a private full-lx builder and causal replay that retain FP32 post-recurrence

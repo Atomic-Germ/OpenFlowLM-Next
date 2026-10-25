@@ -1,6 +1,7 @@
 /// \file manifest.cpp
 /// \brief manifest.json parsing and the model check (see manifest.hpp).
 #include "open_qwen36/manifest.hpp"
+#include "open_qwen36/prefill_precision_policy.hpp"
 
 #include <cmath>
 #include <fstream>
@@ -118,6 +119,8 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
 void check_step(const Manifest& m, const Step& s, const std::string& where, const char* what) {
     auto it = m.kernels.find(s.kernel);
     if (it == m.kernels.end()) fail(where, std::string(what) + " names unknown kernel " + s.kernel);
+    if (!it->second.weight_component.empty())
+        fail(where, std::string(what) + ": low-weight kernel cannot be a standalone program step");
     if (s.op == "moeroute2" && it->second.patch != "moeroute2")
         fail(where, std::string(what) + ": moeroute2 on kernel " + s.kernel + ", whose patch is '" +
                         (it->second.patch.empty() ? std::string("none") : it->second.patch) + "'");
@@ -146,8 +149,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
     // a step is split, and an older engine refuses the set by name instead of misreading it.
     // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
-    if (m.version < 1 || m.version > 3)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 3)");
+    // 4 adds paired prefill products; older readers must not silently drop the low halves.
+    if (m.version < 1 || m.version > 4)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 4)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -224,6 +228,10 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
+        d.weight_component = v.value("weight_component", "");
+        if (!d.weight_component.empty() &&
+            (d.weight_component != "bf16_residual" || m.version < 4 || !d.patch.empty()))
+            fail(where, "unsupported kernel weight_component or manifest version: " + k);
         m.kernels[k] = d;
     }
     if (j.contains("rows")) {
@@ -551,6 +559,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             check_split(g.program, g.weights, "program");
             check_split(g.shared_program, g.shared_weights, "shared");
             check_split(g.ffn_program, g.ffn_weights, "ffn");
+            if (gj.contains("low_kernels")) {
+                g.low_kernels = get<std::map<std::string, std::string>>(gj, "low_kernels", gw);
+                if (g.low_kernels.empty()) fail(gw, "low_kernels must be nonempty when present");
+            }
+            prefill_precision_policy::validate(m, g);
         };
         if (v.contains("gemm_block")) parse_gemm_block(v["gemm_block"], tw + " gemm_block", t.gemm_block);
         // OPEN-PREFILL-MODE: whole routes the engine may load in place of gemm_block

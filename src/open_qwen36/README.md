@@ -635,3 +635,23 @@ OpenAI-style chat completions:
 The same prompt twice in one server session gives the same answer (state reset
 through the app's checkpoint/restore path). Prompt cache, sampler, chat
 template, tool parsing — all the app's, unchanged.
+
+## Paired prefill runtime (manifest version 4)
+
+The shared Core accepts `gemm_block.low_kernels`, mapping each high GEMM name
+to its `<high>_low` companion. Low descriptors must declare
+`weight_component: "bf16_residual"`, a separate context/stream, and no patch.
+The validated wide dense Qwen3.5 roles require all four projections, FP32
+convolution history, paired KV, and unchanged norm/activation geometry.
+Incompatible or incomplete declarations fail during manifest parsing.
+
+Each projection evaluates `(W_hi X_hi + W_hi X_lo) +
+(W_lo X_hi + W_lo X_lo)` with host-owned intermediate outputs. The shared
+implementation is compiled into both `oflm` and `open_qwen36_cli`. Stage-major
+raw dispatch is disabled for these routes; layer-major and block-major retain
+the validated block-at-a-time arithmetic. Legacy manifests use one dispatch.
+
+This runtime support requires an exported version-4 kernel bundle to activate.
+Rebuilding the executable alone does not upgrade old kernels or manifests.
+Production recipe/export activation and resident comparison remain pending;
+the local FP32 DeltaNet post-output experiment is a separate change.

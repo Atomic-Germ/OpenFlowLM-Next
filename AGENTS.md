@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-runtime</name>
+    <description>Build shared paired prefill runtime with manifest-v4 validation and exact four-product sums.</description>
+    <location>.agents/skills/open-qwen38-prefill-runtime/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-fp32-post-output</name>
     <description>Build private full-lx FP32 post-output/direct output preparation and validate exact causal L0 controls, state identity and independent residuals.</description>
     <location>.agents/skills/open-qwen38-fp32-post-output/SKILL.md</location>
