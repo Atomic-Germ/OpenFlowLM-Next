@@ -1,5 +1,48 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — standard paired-prefill export, 2026-10-25
+
+The ordinary qwen35 recipe now exports five low-weight GEMM companions for
+validated dense Q4 H5120/FF17408 geometry, producing **46 sets** and manifest
+version 4. The shared GEMM design computes BF16 dequantization residuals from
+the original Q4NX weights. High kernels retain their default specialization;
+other model sizes and MoE exports are unchanged. Runtime paths remain relative
+to the exported bundle. No weight conversion or manual manifest edits are needed.
+
+A private build root now isolates source staging and compiler lock files as
+well as outputs. Two initial attempts hit Docker-owned shared staging/locks;
+regression tests preceded both fixes. The third complete export succeeds.
+A second normal export reuses those binaries with the local model's exact spec:
+`real_vocab=248077` instead of the geometry fixture's 248320. Padded vocabulary
+and kernel geometry agree; `--model-dir` derives the same spec automatically.
+
+All five low GEMMs pass compiler-dependency and **32-core** resource checks:
+maximum linked text **5568/16384 bytes**, assigned L1 buffer end **61448/65536**,
+stack **4096 bytes**. Each instruction stream is byte-identical to its retained
+validated low-weight control; XCLBIN comparison differs only in build stamps.
+The original memory limits and independent numerical thresholds are unchanged.
+
+The unpatched shared CLI loads all 64 layers from the new bundle. For a
+20-token prompt and one continuation, both hybrid schedules reproduce all
+**44/44 logit files** exactly and pass **42/42 independent CPU logit cases**;
+continuation IDs are 17 and 478. The smoke runner pins model/kernel/reference
+hashes, binds reference metadata to the audited preparation, and rejects missing,
+extra, truncated or non-finite outputs. Full host suite: **1848 passed,
+47 skipped**. Seven new smoke-gate cases and nine recipe/export cases follow TDD.
+
+Evidence: `Models/qwen38-27b/prefill-production/` contains `build-v3`,
+`kernels-v3`, `kernels-model-v1`, `resources-v1.json`, `low-identity-v1.json`
+and `smoke-v1`/`smoke-v2`. The first smoke passed; the second uses the final
+reference-metadata binding guard. The normal application already includes the
+shared runtime, but an executable rebuild alone does not replace an installed
+older kernel bundle. This checkpoint does not activate a running service.
+
+This is export and short-logit integration evidence. Fresh integrated all-layer
+residual, long-prefix and resident reset checks remain open, as do serving and
+full model acceptance. Hybrid norms/recurrence still execute on the host.
+FP32 DeltaNet post-output promotion remains a separate change; sequential
+long-prefix precision is still a known failing gate.
+
 ## Latest checkpoint — shared paired prefill runtime, 2026-10-25
 
 Moved four-product prefill composition into the shared Core compiled by both

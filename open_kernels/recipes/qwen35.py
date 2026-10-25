@@ -243,6 +243,16 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+def paired_prefill(spec: ModelSpec) -> bool:
+    """The independently validated dense wide input/weight precision route."""
+    return (spec.hidden == 5120 and spec.intermediate == 17408 and
+            spec.lin_key_heads == 16 and spec.lin_value_heads == 48 and
+            spec.lin_key_dim == spec.lin_value_dim == 128 and spec.conv_kernel == 4 and
+            spec.num_heads == 24 and spec.num_kv_heads == 4 and spec.head_dim == 256 and
+            spec.rotary_dim == 64 and spec.norm_eps == 1e-6 and
+            all(spec.quant_of(role) == "q4_1" for role in ("attn", "linear", "linear_out", "ffn")))
+
+
 def gemm_route(spec: ModelSpec) -> dict | None:
     """The block prefill route (OPEN-PREFILL-BATCH): `qwen36moe.gemm_route` over this family's
     pack plan, with the dense FFN in place of the MoE block. None means the sequential set,
@@ -250,7 +260,21 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     tile (not a multiple of 256) -- refused here rather than failing the whole export, since
     the sequential path serves that size either way."""
     try:
-        return M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        route = M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        if route and paired_prefill(spec):
+            for g in route["layer_types"].values():
+                g["low_kernels"] = {}
+                for step in g["program"] + g["ffn_program"]:
+                    high = step["kernel"]
+                    low = high + "_low"
+                    g["low_kernels"][high] = low
+                    route["contexts"][low] = f"{low}/final.xclbin"
+                    route["kernels"][low] = dict(context=low, insts=f"{low}/insts.bin",
+                                                 build=low, weight_component="bf16_residual")
+                    b = route["builds"][high]
+                    route["builds"][low] = dict(design=b["design"], build_dir=b["build_dir"] + "_low",
+                                                env=dict(b["env"], GQP_WEIGHT_LOW="1", GQP_BREUSE="0"))
+        return route
     except OpRangeError:
         return None
 
