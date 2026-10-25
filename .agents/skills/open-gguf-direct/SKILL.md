@@ -620,7 +620,11 @@ the official registry's gaps. What landed:
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
 - End-to-end `flm serve` with a dense-family GGUF (vocab must match a shipped
   spec exactly; none in the HF cache qualifies today — Peach is llama-arch
-  with vocab 64000 vs the llama31-8b spec's 128256).
+  with vocab 64000 vs the llama31-8b spec's 128256). **When the blocker is a missing
+  spec/catalogue entry for the model's geometry, generate it with
+  `utilities/gen-kernel-spec.py` / `utilities/build-new-spec.py` (see
+  "Filling out the missing sizes") rather than trying to force a link. Spec
+  files are tracked exceptions (do not derive them at runtime).**
 
 
 
