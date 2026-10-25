@@ -653,5 +653,14 @@ the validated block-at-a-time arithmetic. Legacy manifests use one dispatch.
 
 This runtime support requires an exported version-4 kernel bundle to activate.
 Rebuilding the executable alone does not upgrade old kernels or manifests.
-Production recipe/export activation and resident comparison remain pending;
-the local FP32 DeltaNet post-output experiment is a separate change.
+The normal qwen35 recipe now exports the five low-weight companions (46 sets)
+for validated dense Q4 H5120/FF17408 models. Use `--model-dir` with the ordinary
+exporter to retain the model's exact vocabulary metadata; weights do not need
+repacking. Export paths remain relative to the bundle.
+
+The shared CLI with this bundle reproduces 44 retained logit files exactly
+across both hybrid schedules, and passes 42 independent CPU logit comparisons
+for a 64-layer, 20-token prompt plus continuation. Integrated all-layer,
+long-prefix and reset checks remain separate gates. The local FP32 DeltaNet
+post-output experiment is also a separate change. See
+[the export/smoke workflow](../../utilities/prefill-production/README.md).

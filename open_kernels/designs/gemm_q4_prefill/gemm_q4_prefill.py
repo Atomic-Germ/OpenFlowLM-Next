@@ -174,7 +174,9 @@ def gemm_q4_prefill(
     n_weight: CompileTime[int], k: CompileTime[int], t: CompileTime[int],
     tile_n: CompileTime[int] = 32, b_reuse: CompileTime[bool] = True,
     srchash: CompileTime[int] = 0, fmt: CompileTime[str] = "q4_1",
+    weight_low: CompileTime[bool] = False,
 ):
+    assert not weight_low or fmt == "q4_1", "low dequantization requires q4_1 weights"
     m, k_tile = M_TILE, K_TILE
     n = tile_n
     n_aie_rows, n_aie_cols = N_AIE_ROWS, N_AIE_COLS
@@ -217,6 +219,8 @@ def gemm_q4_prefill(
         _dequant_flags.append("-DGQD_NULL_GATHER")
     if os.environ.get("GQP_NULL_DEQUANT") == "1":
         _dequant_flags.append("-DGQD_NULL_DEQUANT")
+    if weight_low:
+        _dequant_flags.append("-DGQD_WEIGHT_LOW")
     if fmt == "q4_1":
         dequant_srcs = ensure_dequant_entries()
         dequant_kernels = [
@@ -433,6 +437,14 @@ SPECIALIZE = {
     "n_weight": N_WEIGHT, "k": K, "t": T, "tile_n": TILE_N,
     "b_reuse": recommend_b_reuse(K, T, TILE_N), "fmt": FMT,
 }
+
+_weight_low = os.environ.get("GQP_WEIGHT_LOW", "0")
+if _weight_low not in ("0", "1"):
+    raise ValueError("GQP_WEIGHT_LOW must be 0 or 1")
+if _weight_low == "1":
+    if FMT != "q4_1":
+        raise ValueError("GQP_WEIGHT_LOW requires q4_1")
+    SPECIALIZE["weight_low"] = True
 
 if __name__ == "__main__":
     b = mem_tile_budget_bytes(K, T, TILE_N)

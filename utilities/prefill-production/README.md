@@ -1,0 +1,50 @@
+# Standard paired-prefill export and smoke test
+
+The ordinary qwen35 recipe exports manifest v4 and 46 kernel sets for the
+validated dense Q4 H5120/FF17408 geometry. Five GEMM companions compute the
+BF16 residual of dequantized weights; both components read the same packed
+Q4NX file. Other sizes and MoE recipes retain their existing exports.
+
+Build with the normal exporter, using a fresh output directory:
+
+```bash
+source utilities/env.sh
+export OFLM_KEEP_FAILED=1
+ironvenv/bin/python open_kernels/export_qwen36_kernels.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --build-root Models/qwen38-27b/prefill-production/build-v3 \
+  --out Models/qwen38-27b/prefill-production/kernels-model-v1 -j2
+```
+
+Use the actual model to derive its spec. The checked-in geometry fixture has
+`real_vocab=248320`; the local converted model has `real_vocab=248077` with the
+same padded vocabulary and kernels. Do not hand-edit a manifest to bridge that
+difference. `--build-root` also isolates source staging and lock files from
+Docker-owned shared build directories. Do not run source-generating tests
+while an export is compiling.
+
+The unpatched shared CLI must include manifest-v4 runtime support. Run the
+bounded integration check against retained audited data:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/smoke.py \
+  --cli Models/qwen38-27b/prefill-runtime/cli-v2/open_qwen36_cli \
+  --kernels Models/qwen38-27b/prefill-production/kernels-model-v1 \
+  --baseline Models/qwen38-27b/prefill-expanded-cli/native-v1 \
+  --out Models/qwen38-27b/prefill-production/smoke-v2
+```
+
+The runner takes the shared NPU validation lock, checks device availability and
+requires 35 GiB available RAM before each resident run. It verifies model,
+bundle and reference hashes, then runs a 20-token prompt plus continuation
+through 64 layers with layer-major and block-major hybrid scheduling. Each
+route must reproduce all 22 retained logit files byte for byte and pass 21
+independent CPU logit comparisons (correlation >0.9999, matching argmax).
+Missing/extra files, wrong dimensions, NaNs, changed reference metadata and
+changed golden hashes fail. Each output directory is new; failures are kept.
+
+This checks integration and short-prompt logits. It does not capture every
+intermediate layer, establish long-prefix/reset acceptance, exercise serving,
+or demonstrate that hybrid host stages run on the NPU. The full application
+uses the same Core, but needs the new kernel bundle to enable paired prefill;
+an executable rebuild alone does not upgrade an installed older bundle.

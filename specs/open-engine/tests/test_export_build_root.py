@@ -37,7 +37,8 @@ def test_private_build_root_cache_and_source_invalidation(tmp_path, monkeypatch)
     assert exporter.build("probe", sets, spec) == out
     assert exporter.build("probe", sets, spec) == out
     assert len(calls) == 1
-    assert len(list(exporter.LOCKS.glob("*.lock"))) == 1
+    assert len(list((out.parent / ".locks").glob("*.lock"))) == 1
+    assert not exporter.LOCKS.exists()
     source.write_text("# changed source\n")
     exporter.build("probe", sets, spec)
     assert len(calls) == 2
@@ -47,3 +48,15 @@ def test_private_build_root_cache_and_source_invalidation(tmp_path, monkeypatch)
     (out / "insts.bin").unlink()
     exporter.build("probe", sets, spec)
     assert len(calls) == 4
+
+
+def test_private_build_roots_have_distinct_source_stages(tmp_path):
+    from recipes.load import default_spec
+    spec = default_spec()
+    a = exporter.staging_root(spec, tmp_path/'one')
+    b = exporter.staging_root(spec, tmp_path/'two')
+    ordinary = exporter.staging_root(spec)
+    assert a != b and a != ordinary
+    assert a == exporter.staging_root(spec, tmp_path/'one'/'..'/'one')
+    # Design relative imports require the stage directly under open_kernels.
+    assert a.parent == b.parent == ordinary.parent == exporter.HERE

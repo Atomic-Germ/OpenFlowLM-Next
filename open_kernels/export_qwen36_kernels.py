@@ -64,7 +64,7 @@ from recipes.load import default_spec, load_spec, spec_from_model_dir  # noqa: E
 from recipes.manifest import dumps, manifest  # noqa: E402
 
 # knobs that must NOT leak in from the caller's shell
-CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
+CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC", "GQP_WEIGHT_LOW")
 FILES = ("final.xclbin", "insts.bin")
 
 
@@ -134,11 +134,13 @@ LOCKS = DESIGNS / ".locks"
 @contextlib.contextmanager
 def design_lock(out: Path):
     """Hold an exclusive cross-process lock for one build directory."""
-    LOCKS.mkdir(parents=True, exist_ok=True)
+    canonical = out.resolve()
+    locks = LOCKS if canonical.is_relative_to(DESIGNS.resolve()) else canonical.parent / ".locks"
+    locks.mkdir(parents=True, exist_ok=True)
     # Private --build-root workspaces may be outside designs/. Hash the
     # canonical path so aliases share a lock and long paths stay valid names.
-    key = hashlib.sha256(str(out.resolve()).encode()).hexdigest()
-    lock_path = LOCKS / f"{key}.lock"
+    key = hashlib.sha256(str(canonical).encode()).hexdigest()
+    lock_path = locks / f"{key}.lock"
     fh = open(lock_path, "a+b")
     try:
         if os.name == "nt":
@@ -276,6 +278,13 @@ def disambiguate_build_dirs(sets: dict) -> dict:
             s["build_dir"] = f"{s['build_dir']}_{hashlib.sha256(blob).hexdigest()[:8]}"
         out[name] = s
     return out
+
+
+def staging_root(spec, build_root: Path | None = None) -> Path:
+    """Keep relative design imports while isolating private compiler workspaces."""
+    suffix = "" if build_root is None else "_" + hashlib.sha256(
+        str(build_root.resolve()).encode()).hexdigest()[:16]
+    return HERE / f".staging_{spec.spec_hash()[7:26]}{suffix}"
 
 
 def stage_design_tree(stage_root: Path) -> None:
@@ -468,7 +477,7 @@ def main() -> int:
     # spec's gen could overwrite the sources another spec was compiling, and
     # the xclbin that came out was silently wrong. So each spec stages its
     # own copy of the design tree and compiles from that.
-    stage_root = HERE / f".staging_{spec.spec_hash()[7:26]}"  # strip "sha256:", keep 19 chars
+    stage_root = staging_root(spec, a.build_root)
 
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)

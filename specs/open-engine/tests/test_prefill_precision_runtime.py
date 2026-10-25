@@ -79,7 +79,8 @@ def test_four_product_order_and_output_ownership(native):
 def test_paired_manifest_and_legacy_both_load(native,tmp_path):
     m=paired_manifest()
     assert run_manifest(native,tmp_path,m).returncode == 0
-    m=manifest(load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json'))
+    m=manifest(load_spec(ROOT/'open_kernels/recipes/specs/qwen35-9b.json'))
+    assert m['manifest_version'] < 4
     assert run_manifest(native,tmp_path,m).returncode == 0
 
 
