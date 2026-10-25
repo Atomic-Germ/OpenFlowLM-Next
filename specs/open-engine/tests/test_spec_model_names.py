@@ -41,6 +41,12 @@ EXPECTED = {
     "qwen25-3b": "Qwen2.5-3B-Instruct-NPU2",
     "qwen3-4b": "Qwen3-4B-NPU2",
     "qwen3-8b": "Qwen3-8B-NPU2",
+    "qwen3-0.6b": "Qwen3-0.6B-NPU2",
+    "qwen3-1.7b": "Qwen3-1.7B-NPU2",
+    "qwen3-14b": "Qwen3-14B-NPU2",
+    "llama32-1b": "Llama-3.2-1B-NPU2",
+    "llama32-3b": "Llama-3.2-3B-NPU2",
+    "lfm2-2.6b": "LFM2-2.6B-NPU2",
 }
 
 

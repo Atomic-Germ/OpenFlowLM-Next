@@ -152,4 +152,9 @@ Adding a setting is documented in `src/create_new_model.md`.
     <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
     <location>.agents/skills/open-wide-deltanet-chain/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-attention-gate</name>
+    <description>Add a new model SIZE to a family that already has kernels -- generate the spec from the model's config.json, compile the family's kernel set, run the attention kernel at the new geometry against an fp64 oracle on a bare NPU, and record the validated point in the catalogue. Use when the catalogue refuses a geometry ("is outside the validated combinations"), when a model has no kernels yet, or when adding a size of a known family.</description>
+    <location>.agents/skills/open-attention-gate/SKILL.md</location>
+  </skill>
 </available_skills>

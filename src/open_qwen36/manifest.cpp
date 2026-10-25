@@ -168,6 +168,12 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.rope_theta = get<double>(lay, "rope_theta", lw);
     m.rope_inv_freq = get<std::vector<double>>(lay, "rope_inv_freq", lw);
     if (m.rope_inv_freq.size() != m.rotary_dim / 2) fail(lw, "rope_inv_freq has " + std::to_string(m.rope_inv_freq.size()) + " values, the rotary dim wants " + std::to_string(m.rotary_dim / 2));
+    // The pairing law the cos / sin table does not carry (it is pair-ordered either way).
+    // Absent on manifests written before llama-family GGUF-direct: half-split (Qwen / neox).
+    const std::string pairing = lay.value("rope_pairing", std::string("half-split"));
+    if (pairing != "half-split" && pairing != "interleaved")
+        fail(lw, "rope_pairing " + pairing + " is neither half-split nor interleaved");
+    m.rope_interleaved = pairing == "interleaved";
     m.rout_idx_off = lay.value("rout_idx_off", 1024ull);
     m.has_moe = lay.contains("moe");
     if (m.has_moe) {
@@ -717,34 +723,51 @@ std::string Manifest::host_attention_refusal() const {
     return "";
 }
 
-void Manifest::check_model(const json& config, const std::string& where) const {
+void Manifest::check_model(const json& config, const std::string& where, bool model_type) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
     auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };
+    // A VLM config nests the text tower's fields under "text_config" (Qwen3.5's
+    // published form: the model_type says qwen3_5, the tower says qwen3_5_text).
+    // The recipes read both forms, so the check does too: the field is looked up
+    // at the top level first, then in the text tower.
+    const json* text = (config.contains("text_config") && config["text_config"].is_object())
+                           ? &config["text_config"] : nullptr;
+    auto find = [&](const std::string& key) -> const json* {
+        if (config.contains(key)) return &config[key];
+        if (text && text->contains(key)) return &(*text)[key];
+        return nullptr;
+    };
     for (const auto& [key, want] : hf_config_check.items()) {
+        const json* got_ptr = find(key);
         if (key == "model_type") {
-            if (!config.contains(key)) lacks(key);
+            if (!model_type) continue;                 // a GGUF's arch is not a model_type
+            if (!got_ptr) lacks(key);
             bool ok = false;
-            for (const auto& t : want) ok |= (config[key] == t);
-            if (!ok) fail(where, "config.json model_type " + config[key].dump() + " is not one this kernel set serves (" + want.dump() + ")");
+            for (const auto& t : want) ok |= (*got_ptr == t);
+            if (!ok) fail(where, "config.json model_type " + got_ptr->dump() + " is not one this kernel set serves (" + want.dump() + ")");
         } else if (key == "layer_types") {
             std::vector<std::string> got;
-            if (config.contains("layer_types")) {
-                got = config["layer_types"].get<std::vector<std::string>>();
-            } else if (config.contains("full_attention_interval") && config.contains("num_hidden_layers")) {
-                int iv = config["full_attention_interval"].get<int>(), n = config["num_hidden_layers"].get<int>();
-                if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
-                for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+            if (got_ptr) {
+                got = got_ptr->get<std::vector<std::string>>();
             } else {
-                lacks("layer_types");
+                const json* iv_j = find("full_attention_interval");
+                const json* n_j = find("num_hidden_layers");
+                if (iv_j && n_j) {
+                    int iv = iv_j->get<int>(), n = n_j->get<int>();
+                    if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
+                    for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+                } else {
+                    lacks("layer_types");
+                }
             }
             if (got != want.get<std::vector<std::string>>())
                 fail(where, "config.json layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
         } else {
             // an absent key means its default when the manifest names one (Phi-3's optional
             // fields); the comparison is the same either way, so the check stays two-way
-            const bool present = config.contains(key);
+            const bool present = got_ptr != nullptr;
             if (!present && !hf_config_defaults.contains(key)) lacks(key);
-            const json& got = present ? config[key] : hf_config_defaults[key];
+            const json& got = present ? *got_ptr : hf_config_defaults[key];
             if (got != want)
                 fail(where, "config.json " + key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
                                  ", the kernel set was built for " + want.dump());

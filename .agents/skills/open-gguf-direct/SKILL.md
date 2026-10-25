@@ -235,6 +235,89 @@ records (`ATTN_QKV_BIAS` / `ATTN_PTAB_SPLIT`), and `lfm2.py` re-exports
 GGUF twins export in the same build, so a Qwen2.5-3B or LFM2 container shipped
 as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
 
+## Fine-tunes of a supported model (2026-10-21)
+
+The GGUF-direct path is for FINE-TUNES as much as for the base models, and
+the steps that used to stand between them are gone (branch `feat/fedora-docker`):
+
+- **The gate is the manifest, not a family-name list.** The list of
+  "GGUF-capable families" was generated from the recipes and compared with
+  the WRONG names: the recipes say `qwen35` / `qwen36moe`, the registry (and
+  every `details.family`) says `qwen3.5` / `qwen3.6-moe`. So the gate
+  refused exactly the families it was written for. The capability is a
+  property of the kernel set (its manifest carries the f32-scale `gguf`
+  section), so the gate reads the manifest of the set the install links.
+  `utilities/generate-gguf-families.py` is gone; the check that replaced it
+  is `specs/open-engine/tests/test_gguf_twin.py` (the section may only name
+  kernels the manifest's builds make).
+- **The family of a fine-tune is derived from what the model IS.** Two
+  routes, both from what is on disk: the *geometry* (the installed kernel
+  set whose `ModelSpec.kernel_hash()` matches -- the depth and the
+  tokenizer's id count are the manifest's business, the kernels' are not --
+  names the official model, and the registry says that model's family) and
+  the *base chain* (the README's base model, when it is an official model).
+  "Ornith-1.5-9B" says nothing; it is a Qwen3.5-9B and the installed set
+  says so.
+- **The f32 twin is the recipes' business, in one place**
+  (`open_kernels/recipes/gguf.py`): the section and the `*_f32` builds
+  cannot disagree any more.
+- **What a GGUF of the hybrid (qwen35) family needs** (the dense families
+  were already there): llama.cpp's names for the linear attention
+  (`ssm_*`, `attn_qkv`, `attn_gate`) and `post_attention_norm` for the
+  pre-FFN norm; the SSM parameters f32 (or quantized) where the container
+  keeps them bf16 (the consts ops decode and convert); the config.json may
+  be the VLM's form (the text tower's fields under `text_config`); the
+  eos ids come from the config.json when the chain has no
+  generation_config.json.
+
+### Still open: the hybrid family's f32 numerics (RESOLVED — see below)
+
+**Superseded by "The lx_f32 wedge (FIXED 2026-10-22 — the mixed-law build)"**
+and the sections after it: the NaN residual was the mixed-law build (recipe
+not re-derived after the `GEMV_SCALES_F32` flip), the deadlock the same f32
+build's non-integral state pieces, and the "reply garbage" the host sampler
+zero-vocab crash plus the lm-head container gap below. The bisect knob
+`OFLM_GGUF_POOL_Q41=1` (commit 5182da0) remains the law bisect for any new
+hybrid-GGUF math question: with the same GGUF run through the *q4_1* twin —
+the builds every shipped q4nx model answers on — the residual after the
+layers is finite (nan=0; the packing is proven against the Python reference
+by `gguf_pack_test`, so math questions narrow to the f32 chunk handling
+itself). The layer_x's `make_test.py` + `compare.py` chain (fp64 replica,
+spec from `OPEN_KERNELS_SPEC`) is still the tool of record for localising
+any f32-law math fault to a stage (qkv, xres, xm, S, out).
+
+### The geometry comes from the weights
+
+A fine-tune's repo rarely carries its own config.json: the one the
+installer fetches is the BASE's. The Qwen3.8-9B-Distill's GGUF says 33
+blocks where the stack is 32 -- the extra block is the **MTP head**
+(next-token prediction), whose tensors carry `nextn.eh_proj / enorm /
+hnorm` and whose *regular* tensors look exactly like a full attention
+layer's. llama.cpp's block_count counts it; the stack does not. So the
+depth and the layer types are read off the file's tensors, with every
+block that carries a `nextn` tensor excluded:
+
+- the recipes' GGUF spec reads the depth and the layer types off the
+  file's tensor names (a linear layer carries the fused `attn_qkv`, a
+  full one the separate `attn_q` / `attn_k` / `attn_v`), minus the MTP
+  block;
+- the engine's derived config does the same (whole `nextn` blocks
+  excluded), and for a GGUF the file's geometry wins over the
+  config.json's claims (the model_type comparison is for the q4nx
+  container's config only);
+- oflm-add derives the model's spec from the GGUF too.
+
+### A new depth is a new manifest, not a new build
+
+The kernels are width-keyed; the depth is the manifest's business (the
+layer loop it drives). So oflm-add, when no installed set was built for
+the model's shape exactly, looks for a set that serves the same
+*geometry* (`ModelSpec.kernel_hash()`) and writes the **sibling set**:
+the base's kernel files (hard-linked) with this model's own manifest.
+The Qwen3.8-9B-Distill (33 layers) runs on the Qwen3.5-9B's kernels
+with its own manifest -- no export, no build, nothing for the user to
+run.
+
 ## Gotchas learned here
 
 - **designs/dense/gen_kernels.py regenerates gemv_q4_gy.cc / gemv_q4_gms.cc
@@ -261,12 +344,301 @@ as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
 - harness taplib rejects a tap whose offset == tensor size (zero-band cores
   at tiny N): test with >= 1 band per core.
 
+## GGUF-direct on the qwen35 family: the shipped-manifest bug (found 2026-10-22)
+
+Every qwen3.5-family set (0.8/2/4/9/27B) shipped with its `gguf` section naming
+`lx/final.xclbin` and `ax/final.xclbin` — the **q4_1-law** builds — while a
+GGUF model's pool is packed at the **f32 law**. The q4_1 kernels consumed
+f32-law chunks (scale planes read as bf16 code words -> `~3.4e38` finite
+garbage + uniform `±NaN(1)` `0x7F81`), which is the full NaN signature. The
+dense sets got this right (`Qwen3-8B-NPU2` names `dx_f32/`), so a 3-minute
+shipshape check is: **list `gguf.contexts` across `src/xclbins/*/manifest.json`
+and expect the projection contexts to carry `_f32`** — any set naming `lx/` or
+`ax/` in its gguf section will run bf16 kernels on f32 pools.
+
+- Fix: `recipes/qwen35.py programs()` now derives `lx_set = "lx_f32" if f32
+  else "lx"` / same for `ax_set`, mirroring `dense.py`'s `dx_set` switch
+  (`programs(replace(spec, quant=q4_1_f32))` is what the gguf section runs, so
+  the context paths must follow the quant). `recipes/dense.py` programs()
+  ~line 697 is the reference pattern.
+- Re-export is enough (`--no-build`): all five sets re-exported 2026-10-22,
+  manifests regenerated, no rebuild needed (the twins were already built and
+  correct — they were just orphaned by the stale names). The 9B repro build is
+  byte-identical to the shipped `lx_f32/insts.bin` (`cmp` = OK).
+- A misread that cost time: a dumped `XN` region full of NaN is NOT the norm's
+  output — `lx.py` `(d)` dense_sequence stage 9 overwrites the spent A_XN
+  region with a "junk xn" at layer end; the first norm's xn is invisible in
+  end-of-run act dumps.
+
+### The lx_f32 wedge (FIXED 2026-10-22 — the mixed-law build)
+
+The genuine `lx_f32` build deadlocked at its first dispatch (ERT state 8
+timeout) while the byte-adjacent q4_1 twin ran fine. Root cause: **the f32
+build was mixed-law**. `designs/layer_x/layout.py` loaded the recipe
+(`R = current_recipe()`) BEFORE the `GEMV_SCALES_F32` flip of
+`SPEC.quant -> q4_1_f32`, so the layout constants (`_L`, `S_HEAD_BYTES` …)
+were f32-law but every other recipe-derived law stayed q4_1: `xcommon`'s
+`C = R.common` kept `CALL_BYTES/TILE = 5120`, so the `@w0..@w7` object fifos
+compiled as `memref<5120xui8>` while the DeltaNet state piece is f32-law
+67,584 B (= 11×6144, but 13.2×5120 — not an integral multiple). A piece that
+is not a multiple of its object fifo's element can never complete its shim
+acquire counts → deterministic deadlock at the first state piece. Forensics
+that nailed it: `aiebu-dump -d insts.bin` on a fresh build — every shim
+BLOCKWRITE `len` must be `k ×` its fifo element; per law
+`67,584 / 6,144 = 11` ✓ vs `67,584 / 5,120 = 13.2` ✗.
+
+- **Fix** (`designs/layer_x/layout.py`, one site): after the flip,
+  re-derive the recipe — `SPEC = replace(SPEC, quant="q4_1_f32"); R =
+  for_spec(SPEC).recipe(SPEC)` — exactly what `designs/dense/dx.py` (the
+  working f32-law dense tail) already did; layer_x just never picked the
+  pattern up. All recipe consumers (`C = R.common` in xcommon, `D =
+  R.linear`/`R.attn` in lx/ax/ux) then agree with the layout.
+- **Now verified on the NPU at every size**, all ten f32 twins
+  (`lx_f32` + `ax_f32` of 0.8B/2B/4B/9B/27B) complete (probe state 4) and the
+  fresh q4_1 builds are byte-identical (`cmp` ✓) to the shipped streams — the
+  flip is inert without the env, so nothing else moved. The generated kernel
+  TUs are law-stable (`PER_CALL = 2` is a module constant and the baked band
+  quotients survive the ×6/5 chunk scaling), so the exporter's single
+  law-blind `generate()` stays correct.
+- `aiebu-dump`-how-to: 8-word shim descriptors `[len, addr_lo, 0, 0, ctrl,
+  colbase, 0, colbase]`; per-column BD tables at `0x1d000 + bd*0x20`, column
+  prefixes step 0x2000000. `txn2mlir.py` core-dumps on these streams; use
+  `aiebu-dump -d` + the build's `final.prj/aie.mlir` instead.
+- `utilities/lx-probe.cpp` gained a **generic N-buffer mode**: `lx-probe -g
+  <xclbin> <insts.bin> <out_path> <wait_s> <in_bytes...>` — all-zeros inputs,
+  the last buffer is dumped out on completion (`paths` empty ⇒ `n_in = 0`; an
+  earlier version read past the vector and segfaulted). The ax stream's run
+  arguments are `pool, xres, consts, KV, act, ptab` (manifest
+  `full_attention.program[0].args` — passing KV/act/ptab in any other order
+  segfaults the probe on a 24 MB-writing BD aimed at a small BO).
+- End-to-end: prefill on `ornith-gguf:9b-i1` ran with `OFLM_OPEN_LAYER_NAN=1`
+  — all 32 layers `xres nan=0`, decode began, and the engine then segfaulted
+  in the host sampler (`Sampler::sampler_topk_apply`) — fixed separately, see
+  "the sampler zero-vocab crash" below.
+
+### The sampler zero-vocab crash (fixed 2026-10-22)
+
+`oflm run ornith-gguf:9b-i1` segfaulted in `Sampler::sampler_topk_apply`
+after a clean prefill: a Qwen3.5 GGUF pulled straight from HF keeps the
+model's **nested config** (`text_config` holds the LM hyperparams
+including `vocab_size`; only `hidden_size`/`eos_token_id` sit at the top).
+`LM_Config` reads top-level only, so `AutoModel::set_sampler` built the
+sampler over **zero features** — the `sample()` copy loop no-ops and
+`sampler_topk_apply(top_k=20)` then calls
+`std::partial_sort(begin, begin+20, begin)` on an empty vector (middle
+beyond last) → UB → segfault on the first decode token. The q4nx converter
+(`inject_oflm_keys` in utilities/q4nx-build) flattens `text_config` at
+conversion time, but a pulled GGUF ships the model's raw config.
+Fix: `LM_Config::from_pretrained` now lifts `text_config` into the canonical
+top-level key set with the same semantics as the converter (`model_type`
+always follows the text model; every other key only fills a missing top-level
+hole; flat configs without `text_config` are untouched).
+
+### The lx_f32 wedge (historical, superseded above)
+
+With the manifest fixed, the real f32 twins actually run — and the **genuine
+`lx_f32` build deadlocked at its first dispatch** (ERT state 8 timeout), while
+the byte-adjacent q4_1 twin ran fine. Reproduced WITHOUT the engine:
+`utilities/lx-probe.cpp` dispatches one context with the engine's exact call
+sequence against file fixtures (the dumped `/tmp/opencode/f32_pool0.bin`,
+`f32_consts0.bin`; missing or `-` files start as zeros — the wedge does not
+need valid data). q4_1 completes in ~150 ms; lx_f32 timed out. Not staleness:
+a warm rebuild was `cmp`-identical. Root cause and fix above.
+
+- `utilities/lx-probe.cpp`: usage + fixture sizes in its header comment
+  (manifest `gguf.layer_types.linear_attention.buffers` gives consts/state
+  bytes; `globals.xres` etc.). Compiles with the XRT C headers from
+  `$XILINX_XRT` (the dual-mode headers give the `xrt::` classes; there are no
+  `.hpp` wrappers in this install).
+- `utilities/act-region-report.py`: region census of a `--dump-act` file
+  against the design's layout (XN/QKV/Z/VEC/O/OG/OUT/RES/XM nan + maxabs).
+  Pass the model's spec json; `GEMV_SCALES_F32=1` (default) reads the f32 law.
+- `OFLM_OPEN_DUMP_POOLS=<dir>` dumps layer 0's packed pool+consts per law
+  (`{f32,q41}_pool0/consts0.bin`), `OFLM_OPEN_LAYER_NAN=1` does the per-layer
+  xres NaN/maxabs census. Both are bring-up knobs, classified in
+  `generate-registry.py` `NON_SETTING_ENV_VARS` (the registry check fails
+  otherwise). `OFLM_GGUF_POOL_Q41=1` is the older law bisect; it now swaps
+  kernel contexts through `std_perm_gguf`->`std_perm` pairing in core.cpp.
+- **The LX_STOP truncation shim is a dead end**: `LX_STOP=1` (truncate part 0
+  after the glue, in `lx.py` dense_sequence) wedges at BOTH laws — a truncated
+  stream leaves the workers' fifo-acquire counts unsatisfied, so the run never
+  completes without core-body cooperation. Stage isolation by stream
+  truncation does NOT work here.
+
+### The lm-head container gap (closed 2026-10-22)
+
+With the sampler fixed, decode ran — and produced ~4.8 tok/s of garbage: ids
+248068/271/248069/271 (the think template, correct) then a fixed cycling
+of ascii-range ids 22–37 (`'7' ':' '<' '=' '>' '?' '@' 'A' …`). The dumped
+logits (the CLI's `--dump-logits`) explained it: **47,695 of 248,320 logit
+rows are NaN**, all within the first 191,736 ids, ~25% of them, no row
+periodicity (mod 2/3/4/5/8 flat) — a garbage scale read, not a per-group
+bug. Everything past file coverage recovers the memset zeros.
+
+Root cause: the head op `lmhead_q8` (`src/open_qwen36/pools.cpp` ~773) was a
+plain memcpy in the kernel's supertile order — it assumed `lm_head.weight`
+(= gguf `output.weight`) already held the engine's q8 chunk raster: 32-row ×
+256-column chunks, 256 bf16 scales then 8192 int8 codes, at pool chunk
+k ← file `(4*(k/per_band) + k%4)*nk + k%per_band/4`, `per_band = 4*nk`
+(nk = in_dim/256). Only a q4nx-build conversion writes that (Q8NX layout).
+A raw llama.cpp GGUF stores the head row-major in its own quant; Ornith-1.5's
+`output.weight` is **Q6_K** (4096 × 248320), `Qwen3.8-9B-Distill-GGUF`'s
+is whole-file **Q8_0** (byte count even lands exactly on the chunk grid —
+1,080,688,640 = 124,160 × 8,704 — but row-major raster + fp16 scales,
+still wrong). The op's `bounds()` silently passed a short count and filled
+the pool with misread bytes.
+
+Implemented (`lmhead_q8`, GGUF branch): the same transcode the pool ops do.
+  - Q8_0: pure remap — the source already carries per-32-block int8 codes
+    and an fp16 scale, so widen fp16→bf16 (RNE, matching the converter's
+    cast) and write into the chunk raster at the plain (row-major) index
+    `(row/32)*ncol + kt` — a raw GGUF is row-major, so no supertile
+    permutation (the memcpy path permutes because the q4nx container stores
+    the head in supertile order). Bit-identical to a q4nx conversion of the
+    same Q8_0 tensor.
+  - anything else (Q6_K, Q4_K, Q4_0, ...): dequant each row to f32 (the
+    same llama.cpp-faithful path `std_perm_gguf` uses for the pool tensors)
+    and requant to int8 code + bf16 scale per 32-value group
+    (`bf16_rne(mx/127)`, clamp to [-127,127]), at the same plain index.
+Verified: a fresh CLI run on ornith-gguf:9b-i1 now reports **0 NaN logit
+rows** (was 47,695) with a real argmax; `gguf_pack_test` + the registered
+ctest (GGUF-PACK, OPEN-MANIFEST) pass; the q4nx path is untouched
+(`qwen35-npu2:0.8b` still answers a full coherent "**Paris**." turn).
+
+Open: the 9B hybrid GGUF path **hangs at prefill layer 30 (full_attention)**
+on every run — it reproduces with both the f32 and the q4_1 law, so it is
+not the head and not the law; it is a per-layer slice issue on the 9B hybrid
+path (the 0.8B native and the dense GGUFs run cleanly) that needs its own
+investigation. Until that is resolved, hybrid GGUF-direct does not complete
+a turn on this box.
+
+## First size of a family that only had f32 twins: Qwen3-14B (2026-10-23)
+
+The native (`qwen3-0.6b` .. `8b`) and Qwen3.5 sizes were in the catalogue;
+the qwen3-14b spec built everything EXCEPT the `lm_head_q4` head — its
+catalogue point at K=5120 (hidden 5120) had never been fixture-run, so the
+export died on `lm_head_q4: K=5120 is outside the validated set`. The
+attention tuple (128, 40, 8, 128) was already in (entered by the attention
+gate, qwen3-14b earlier).
+
+The clean run, entirely through `utilities/`:
+
+1. **Fixture.** The `lm_head_q4` design had no fixture of its own
+   (`build-new-spec.py`'s OP_FIXTURE named `designs/lm_head_q8/make_test.py`
+   as the model to port). Ported to
+   `open_kernels/designs/lm_head_q4/make_test.py` + `compare.py`: fp64
+   reference from the pool bytes, the band law IS `q4_1_pack`'s standard one
+   at rs=2 (64-row bands; the uneven 8-core band split is taps, not bytes),
+   `--layout q4nx|gguf` for the bf16-scale and f32-scale (GGMF-direct)
+   chunk layouts, `--k <width>`. NPU run at K=5120 (4096 rows, 64 bands,
+   8 x 6+2 over the cores): q4nx **PASS cos=1.0, maxrel 4.3e-06**; gguf
+   **PASS cos 1.0, maxrel 3.9e-06**.
+
+   Fixture trap worth remembering: the f32-scale kernel NARROWS the pool's
+   f32 scales to bf16 in flight (`gemv_q4.h load_scale`, documented as
+   "numerics bit-identical to the q4nx chunks; the pool keeps the GGUF scale
+   values exactly"). The reference must narrow the scales the same way
+   (`deq_chunk`, scale dtype bf16) — comparing against the exact f32 gives
+   maxrel ~2.3e-3 / 335 bad rows: a fixture bug, not a kernel bug. The
+   `lm_head_q8` fixture keeps the same discipline via
+   `dequant_pool_lmhead(..., scale_dtype=bfloat16)`.
+
+2. **Catalogue.** `utilities/catalogue-add-point.py` now takes
+   `--param K --value 5120` next to `--point ...` (a values() Param is not a
+   combination() tuple; both writes are AST-located, comment-placed, and
+   verified after writing; a params dict can be a POSITIONAL child of the
+   Template, so the locator checks both shapes). The insert is
+   character-offset based — appending to a values() call whose args sit
+   inline with its `)` on the same line must NOT emit a new source line, or
+   `5120,` lands outside the call (the first attempt produced
+   `Template(...) got multiple values for 'note'`; reverted, then fixed to
+   char-offset insertion with the note at the params dict's line end).
+
+3. **Export.** `utilities/export-kernels.py --specs qwen3-14b --skip-bert`
+   through the validated path: `ok: qwen3-14b`. Notably the exporter prints
+   **"no GGUF-direct twin (dx_f32): the f32-scale build does not fit a core
+   at this shape"** — the 14B set ships only the q4nx head; a GGUF-direct
+   install of a Qwen3-14B-geometry model rides the lm-head q8 requant path
+   (`lmhead_q8`, pools.cpp) instead, so the missing twin is not a blocker.
+
+Commit: the fixture pair, `recipes/catalogue.py` (the K=5120 point),
+`utilities/catalogue-add-point.py` (--param/--value), and `OP_FIXTURE` in
+`utilities/build-new-spec.py` updated to name the new fixture.
+
+## Filling out the missing sizes (2026-10-23)
+
+`utilities/build-new-spec.py --repo <hf-repo> [--spec-name <stem>]` run over
+the official registry's gaps. What landed:
+
+- **llama32-1b, llama32-3b, lfm2-2.6b** — full chains (spec → gate PASS →
+  catalogue → build → export). Shipped as the canonical set names
+  `Llama-3.2-1B-NPU2` / `Llama-3.2-3B-NPU2` / `LFM2-2.6B-NPU2` (extra.model
+  must be the registry name — the name test enforces it; export writes
+  `src/xclbins/<extra.model>/open_kernels`, so fix extra.model BEFORE the
+  first export, not after).
+- The engine's match key is `ModelSpec.kernel_hash()`
+  (`open_kernels/recipes/spec.py`). `gen-kernel-spec.py` now matches existing
+  specs and generates candidates THROUGH `ModelSpec.from_hf_config` /
+  `kernel_hash()` instead of its old family+hidden shortcut, which produced
+  two false links this session: Llama-3.2-1B ↔ minicpm5-2b (same family+hidden,
+  head_dim 64 vs 128 — different compiled attention) and — the subtle one —
+  LFM2-2.6B ↔ lfm2-1.2b (same family+hidden, FF 10752→adjusted **7168** vs
+  the 1.2B's **8192**). After the fix LFM2-2.6B correctly got its OWN kernels.
+- Geometry links that are genuine (kernel-hash equal, link-only, no artifact —
+  build-new-spec deletes fresh link files): LFM2.5-1.2B → lfm2-1.2b (same
+  conv/full pattern [2,5,8,10,12,14], FF 12288→adjusted 8192, rope 1e6),
+  DeepSeek-R1-0528-Qwen3-8B → qwen3-8b, DeepSeek-R1-Distill-Llama-8B →
+  llama31-8b (its config carries the llama3 rope_scaling).
+- **gemma3-1b is a recipe wall, not a spec**: head_dim 256 with ONE kv head
+  (cos/sin straddle two 512-byte attention elements in the dense design) and
+  hidden 1152 (not a multiple of 256). Candidate parked at
+  `open_kernels/recipes/candidates/gemma3-1b.json` — needs a design change,
+  do not re-attempt without one.
+- LFM2-2.6B numbers worth remembering: hidden 2048, 30 layers (layer_types
+  derive from its config's `layer_types` list, same conv/full mix), FF
+  10752 → **7168** after the swiglu auto-adjust; the registry's "2.6B" is a
+  deeper LFM2-1.2B, NOT a wider one.
+- Tests: the frozen spec_hash map in `specs/open-engine/tests/test_lfm2.py`
+  needs an entry for every new shipped spec (asserts the set of specs.json
+  names first, then each hash); the `manifest_qwen35_9b` fixture was stale
+  from the GGUF-direct switch and regenerated via `make_fixtures.py` (IRON
+  python) — its only diff was the gguf section's f32 build dirs
+  (ax/lx → ax_f32/lx_f32), the expected divergence.
+- `cmake --build build --target export_kernels`: **25 specs + BERT**, ok.
+- Pre-existing environmental failure on this box only:
+  `test_qwen35_wide_glue.py::test_small_bank_pointer_arithmetic_in_compiled_cpp`
+  — the test links with `-fsanitize=undefined,bounds` and Fedora's sanitizer
+  runtime (`/usr/lib64/libubsan.so.1.0.0`) is not installed; test/fixture/
+  dn_glue are byte-identical to origin/main.
+
 ## Still open (Phase-MoE / later)
 
-- qwen36moe recipe: f32 twin builds (lx/ax/dx/lm_head_q8 *_f32), the
-  expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors), the
-  singular/plural `model.layer(s)` name mismatch, q8 f32 numerics bug above.
+- qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
+  and lm_head law-combos where the family ships them, plus the
+  expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors) and the
+  singular/plural `model.layer(s)` name mismatch.
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
-- End-to-end `flm serve` with a real GGUF (needs a dense-family GGUF matching
-  a shipped spec's vocab exactly; none in the HF cache qualifies today —
-  Peach is llama-arch with vocab 64000 vs the llama31-8b spec's 128256).
+- End-to-end `flm serve` with a dense-family GGUF (vocab must match a shipped
+  spec exactly; none in the HF cache qualifies today — Peach is llama-arch
+  with vocab 64000 vs the llama31-8b spec's 128256). **When the blocker is a missing
+  spec/catalogue entry for the model's geometry, generate it with
+  `utilities/gen-kernel-spec.py` / `utilities/build-new-spec.py` (see
+  "Filling out the missing sizes") rather than trying to force a link. Spec
+  files are tracked exceptions (do not derive them at runtime).**
+
+
+
+## Llama3 rope pairing (interleaved) — 2026-10-24 (feat/fedora-docker)
+
+Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(j, j+ROT/2)` for all families, but llama3-family GGUF expects interleaved pairs `(2j, 2j+1)` (llama.cpp NORM rope law). Qwen3 works with half-split. 
+
+**Plumbing (both kernel design + host):**
+- `open_kernels/recipes/spec.py`: `ROPE_INTERLEAVED_FAMILIES = {"llama3"}`, `ModelSpec.rope_interleaved` property.
+- `open_kernels/recipes/dense.py`: passes `ROPE_IL` in geometry/flags and writes `layout.rope_pairing` (`"interleaved"` or `"halfsplit"`) into the manifest.
+- `open_kernels/designs/dense/dx_attn.py`: threads `ATTN_ROPE_IL` flag to `dx_attn` kernel build.
+- `open_kernels/designs/attn/attn.h`: adds `ATTN_ROPE_IL` path using `aie::interleave_unzip`/`aie::interleave_zip` over the head dim (identical pair-ordered cos/sin tables).
+- `src/open_qwen36/manifest.{hpp,cpp}`: parses `layout.rope_pairing` → `rope_interleaved` (default false).
+- `src/open_qwen36/block_host.{hpp,cpp}`: `AttnGeom.rope_il` propagated; interleaved `rope()` matches kernel pairing.
+- `src/open_qwen36/core.cpp`: wires `rope_il` from manifest to host paths (block prefill/host attention) and keeps layer dump plumbing intact.
+
+**Validation:** rebuilt `Llama-3.2-1B-NPU2` kernels with `rope_pairing: interleaved` (export/kernels regen), rebuilt `open_qwen36_cli`, and NPU greedy decode of the test prompt produced coherent text matching the reference. Layer-wise dumps (`OFLM_OPEN_LAYER_DUMP`) show correct alignment after the fix.

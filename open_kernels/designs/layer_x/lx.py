@@ -133,7 +133,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
 
     # ---- host sequences (one per instruction stream)
     def dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                       side_p, gact_p, gout_c, pin_p, pout_c):
+                       side_p, gact_p, gout_c, pin_p, pout_c, stop=99):
         """ONE instruction stream: the MoE stream's steps 1-6 with the router dropped, then
         designs/dense/dx.py's steps 5-7 (residual + norm, the FFN, the output residual)."""
         # 1. layer-entry norm: xn -> act[A_XN]
@@ -184,10 +184,18 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             pipe.fill(gact_p, a_state, rows3(tt))
         pipe.finish()                                    # the records are in DDR
         ps.finish()
+        if stop == 1:                                    # LX_STOP debug truncation (lx.py)
+            pw.finish()
+            px.finish()
+            return
         # 4. DeltaNet on the main cores: S in place, o -> act[A_O]
         X.dn_sequence(pw, py, a_state, a_act, w_prods, y_conss, A_BYTES, A_VEC, A_O, STATE_BYTES, STATE_S_OFF,
                       S_HEAD_BYTES)
         py.finish()                                      # o is in DDR
+        if stop == 2:                                    # LX_STOP debug truncation (lx.py)
+            pw.finish()
+            px.finish()
+            return
         # 5. post: og -> act[A_OG] (z from act, o from DeltaNet)
         pipe = Pipeline(3)
         pipe.fill(pin_p, a_consts, bt(C_BYTES, C_NW, ELEM))
@@ -238,7 +246,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     def sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c):
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                           side_p, gact_p, gout_c, pin_p, pout_c)
+                           side_p, gact_p, gout_c, pin_p, pout_c, stop=STOP)
         elif part == 0:
             XL.linear_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
                                side_p, gact_p, gout_c, pin_p, pout_c, stop=STOP)

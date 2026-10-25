@@ -185,9 +185,11 @@ int main(int argc, char** argv) {
           m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
           m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    check(m.files().size() == 59, "59 files named (8 xclbin + 51 insts: the route adds one GEMM context whatever K, the MoE one, seven "
-                                  "streams, the token-batched expert kernel one context and six streams, and the attention GEMM one "
-                                  "context and 32 streams)");
+    // the q4_1 set: 8 xclbin + 51 insts (the route adds one GEMM context whatever K, the MoE
+    // one, seven streams, the token-batched expert kernel one context and six streams, and
+    // the attention GEMM one context and 32 streams). The MoE family ships no GGUF-direct
+    // twin (its expert pack ops have no GGUF form yet), so the count is the set's own.
+    check(m.files().size() == 59, "59 files named (8 xclbin + 51 insts)");
     // the attention products on the NPU (OPEN-PREFILL-ATTN): a stream per 256 rows of window, both
     // products, on one xclbin; full attention only
     const auto& ab = fg.attn_block;
@@ -808,14 +810,18 @@ int main(int argc, char** argv) {
             check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
                   "host attention: " + f.family + " is refused by name");
             if (f.family == "qwen3") {
-                Manifest k = f;
+                // A Manifest holds a unique_ptr (the GGUF-direct twin), so it is not
+                // copyable: each variant is a fresh load of the same file.
+                Manifest k = Manifest::load(argv[i]);
                 k.family = "k2";
                 check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
-                Manifest half = k;
+                Manifest half = Manifest::load(argv[i]);
+                half.family = "k2";
                 half.rotary_dim = half.rotary_dim / 2;
                 check(half.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with a partial rotation is refused on geometry");
-                Manifest odd = k;
+                Manifest odd = Manifest::load(argv[i]);
+                odd.family = "k2";
                 const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
                 odd.hf_config_check["head_dim"] = hd;
                 odd.rotary_dim = hd;
@@ -826,7 +832,8 @@ int main(int argc, char** argv) {
                 }
                 check(odd.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with an odd head_dim is refused on geometry");
-                Manifest wide = k;
+                Manifest wide = Manifest::load(argv[i]);
+                wide.family = "k2";
                 wide.layer_types.begin()->second.gemm_block.qw += 1;
                 check(wide.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");

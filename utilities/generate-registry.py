@@ -50,6 +50,9 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_MOE_BATCH_LOG", "OFLM_OPEN_MOE_REDISPATCH",
     "OFLM_OPEN_OMP_PASSIVE", "OFLM_OPEN_OMP_THREADS",
     "OFLM_OPEN_QUIET", "OFLM_OPEN_READ_FENCE",
+    "OFLM_OPEN_LAYER_NAN",               # bring-up probe: per-layer NaN / maxabs census of xres
+    "OFLM_OPEN_DUMP_POOLS",              # bring-up probe: dump layer 0's packed pool + consts for offline compare
+    "OFLM_GGUF_POOL_Q41",                # the f32-numerics bisect: a GGUF model on the q4_1 twin
     "OFLM_OPEN_ROUTE_SENTINEL", "OFLM_OPEN_SPIN_US",
     "OFLM_OPEN_STAGE_MAJOR", "OFLM_OPEN_STEP_TRACE",
     "OFLM_OPEN_SUBMIT_AHEAD", "OFLM_OPEN_TIMEOUT_MS",

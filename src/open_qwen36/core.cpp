@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <functional>
 #include <limits>
 #include <map>
@@ -179,6 +180,49 @@ nlohmann::json derive_config(const GgufFile& g) {
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
         c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
+    // The layer types (the hybrid families): the manifest names the per-layer
+    // list, and the FILE's tensors are what decide it -- a linear layer
+    // carries the fused attn_qkv, a full one the separate attn_q / attn_k /
+    // attn_v. The header's full_attention_interval describes the pattern
+    // llama.cpp assumed, and a fine-tune can differ (the Qwen3.8-9B distill
+    // ends in two full attention layers where the interval says one).
+    {
+        // The MTP head is a whole extra block whose regular tensors look like a
+        // full attention layer's: exclude every block that carries a nextn
+        // tensor before classifying the rest.
+        std::set<int> nextn;
+        for (const auto& name : g.tensor_names())
+            if (name.find(".nextn.") != std::string::npos && name.rfind("blk.", 0) == 0)
+                nextn.insert(std::atoi(name.c_str() + 4));
+        std::set<int> linear, full;
+        for (const auto& name : g.tensor_names()) {
+            if (name.rfind("blk.", 0) != 0) continue;
+            const int l = std::atoi(name.c_str() + 4);
+            if (nextn.count(l)) continue;
+            const size_t d = name.find(".attn_qkv.");
+            const size_t q = name.find(".attn_q.");
+            if (d != std::string::npos) linear.insert(l);
+            else if (q != std::string::npos) full.insert(l);
+        }
+        if (!linear.empty() || !full.empty()) {
+            int n = 0;
+            for (int l : linear) n = std::max(n, l + 1);
+            for (int l : full) n = std::max(n, l + 1);
+            nlohmann::json lt = nlohmann::json::array();
+            for (int l = 0; l < n; ++l)
+                lt.push_back(linear.count(l) ? "linear_attention"
+                                              : (full.count(l) ? "full_attention" : "full_attention"));
+            c["layer_types"] = lt;
+            c["num_hidden_layers"] = n;
+        } else if (g.kv_has(arch + ".full_attention_interval")) {
+            const int iv = static_cast<int>(g.kv_u64(arch + ".full_attention_interval"));
+            const int n = static_cast<int>(g.kv_u64(arch + ".block_count"));
+            nlohmann::json lt = nlohmann::json::array();
+            for (int l = 0; l < n; ++l)
+                lt.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+            c["layer_types"] = lt;
+        }
+    }
     return c;
 }
 
@@ -220,6 +264,84 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
                                  "(manifest.json has no gguf section; re-export the kernels)");
+    // ---- OFLM_GGUF_POOL_Q41: run the GGUF-sourced weights through the q4_1
+    // twin instead of the f32-scale one. Every shipped q4nx model runs on the
+    // q4_1 builds, so this separates the f32-scale CHUNK handling in the
+    // layer_x builds from everything else: same source file, same family
+    // geometry, the same kernels the q4nx model answers on. The two sections'
+    // pack ops pair one to one (the same tensors, the same chunk counts --
+    // only the byte offsets move with the chunk law), so each op takes the
+    // base section's geometry under the GGUF packing kind, and the base
+    // section's chunk / pool / lx / ax: the packed slots land where the q4_1
+    // designs read them. Whatever still misbehaves is then not the f32 chunk.
+    if (const char* q = std::getenv("OFLM_GGUF_POOL_Q41"); gguf_ && w_ && q && *q && *q != '0') {
+        Manifest& m = *man_.gguf;
+        const Manifest& b = man_;
+        auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
+                        const std::string& lt) {
+            if (go.size() != bo.size())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt +
+                                         ": the sections' pack ops do not pair (" +
+                                         std::to_string(go.size()) + " vs " + std::to_string(bo.size()) + ")");
+            for (size_t i = 0; i < go.size(); ++i) {
+                if (go[i].tensor != bo[i].tensor)
+                    throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " op " + std::to_string(i) +
+                                             ": tensors differ (" + go[i].tensor + " vs " + bo[i].tensor + ")");
+                // Only the projection pairs move: the base's std_perm becomes the
+                // GGUF-reading kind under the base's geometry. The ops whose kind
+                // is NOT a chunk law question (put, conv, lm head...) stay exactly
+                // as the GGUF section has them -- they work there today.
+                if (bo[i].op != "std_perm" || go[i].op != "std_perm_gguf") continue;
+                go[i].nch = bo[i].nch;
+                go[i].in_dim = bo[i].in_dim;
+                go[i].chunk0 = bo[i].chunk0;
+                go[i].dst = bo[i].dst;
+                go[i].split.clear();
+                go[i].via.clear();
+            }
+        };
+        for (auto& [lt, g] : m.layer_types) {
+            const auto it = b.layer_types.find(lt);
+            if (it == b.layer_types.end())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " is not in the base section");
+            const LayerType& bl = it->second;
+            merge(g.pool, bl.pool, lt);
+            merge(g.consts, bl.consts, lt);
+            g.consts_bytes = bl.consts_bytes;
+            g.act_bytes = bl.act_bytes;
+            g.state_kind = bl.state_kind;
+            g.state_bytes = bl.state_bytes;
+            g.state_row = bl.state_row;
+            g.program = bl.program;                  // the base builds' step
+            g.gemm_block = GemmBlockProgram{};       // the q4nx prefill route stays off for a GGUF
+        }
+        m.chunk_bytes = b.chunk_bytes;
+        m.pool_bytes = b.pool_bytes;
+        // the decode builds: name lx / ax through the base section's kernels;
+        // the head (lm) and the norm (ln) stay the GGUF section's f32 ones
+        // the kernels to swap are whatever the LAYER programs name -- derived,
+        // not a list: the steps' kernels pair one to one across the sections,
+        // and anything else (the tail's norm and head, the prefill GEMM route
+        // this section does not have) stays what the GGUF section names. When a
+        // name exists in both sections and its context differs, it drives the
+        // pool slot law, so it takes the base section's build.
+        std::set<std::string> swap_names;
+        for (const auto& name_step : m.layer_types)
+            for (const auto& s : name_step.second.program)
+                swap_names.insert(s.kernel);
+        for (const std::string& n : swap_names) {
+            const auto kt = m.kernels.find(n);
+            if (kt == m.kernels.end()) continue;
+            const auto bt = b.kernels.find(n);
+            if (bt == b.kernels.end()) continue;
+            m.contexts[bt->second.context] = b.contexts.at(bt->second.context);
+            kt->second = bt->second;             // the base's context and instruction stream
+        }
+        merged_q41_ = true;
+        log("OFLM_GGUF_POOL_Q41: GGUF weights on the q4_1 twin (chunk " +
+            std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
+            "for the f32-numerics bisect");
+    }
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
     // there); anything GGUF does not carry is refused with its name.
@@ -232,9 +354,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
         if (gguf_) {
+            // The GGUF is the model: its OWN metadata is the geometry the
+            // manifest must match. The config.json beside it is a claim about
+            // the model the repo was built from, and for a fine-tune that is
+            // often the BASE (a distill's repo ships no config.json at all,
+            // and the one its README names says 32 layers where the file has
+            // 33). So the file's geometry wins over the config's.
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())
-                if (!j.contains(key)) j[key] = value;
+                if (key != "model_type") j[key] = value;
         }
     } else if (gguf_) {
         j = derive_config(*static_cast<GgufFile*>(file_.get()));
@@ -242,7 +370,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
-    w_->check_model(j, md.filename().string());
+    // A GGUF's architecture is not an HF model_type (the manifest was built
+    // for a family, and the file's arch is what named that family), so the
+    // model_type comparison is for the q4nx container's config.json only.
+    w_->check_model(j, md.filename().string(), !gguf_);
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
@@ -422,6 +553,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_READ_FENCE")) g_read_fence = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_STEP_TRACE")) step_trace_ = std::atoi(env);
+    if (const char* env = std::getenv("OFLM_OPEN_LAYER_NAN")) layer_nan_ = std::atoi(env) != 0;
+    dump_pools_ = std::getenv("OFLM_OPEN_DUMP_POOLS") != nullptr;
     if (const char* env = std::getenv("OFLM_OPEN_SPIN_US")) spin_us_ = std::atoi(env);
     // OPEN-DECODE-PIPELINE. Level 1 keeps the next layer's first dispatch in flight behind
     // this layer's last one only when the two share a hardware context; level 2 crosses
@@ -600,11 +733,29 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
+        if (dump_pools_ && l == 0) {
+            const char* d = std::getenv("OFLM_OPEN_DUMP_POOLS");
+            const std::string dir = d && *d ? d : "/tmp/opencode";
+            fs::path out(dir);
+            out /= law_tag() + std::string("_pool0.bin");
+            std::ofstream f(out, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(pool_host), w_->pool_bytes);
+            log("dumped layer-0 pool, " + std::to_string((w_->pool_bytes >> 20)) + " MB -> " + out.string());
+        }
         xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(*w_, lt, *file_, l, c_host);
         build_weights(lt, l, "consts", c_host);
+        if (dump_pools_ && l == 0) {
+            const char* d = std::getenv("OFLM_OPEN_DUMP_POOLS");
+            const std::string dir = d && *d ? d : "/tmp/opencode";
+            fs::path out(dir);
+            out /= law_tag() + std::string("_consts0.bin");
+            std::ofstream f(out, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(c_host), lt.consts_bytes);
+            log("dumped layer-0 consts, " + std::to_string(lt.consts_bytes) + " B -> " + out.string());
+        }
         build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
             if (lt.gemm_block.kind == "dense") {
@@ -644,10 +795,9 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 // file, by the names the consts plan carries (no consts layout knowledge here)
                 const GemmBlockProgram& gb = lt.gemm_block;
                 HostConsts& h = hc_[l];
-                auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
-                if (!qf)
-                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
-                auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
+                // The file may be a q4nx container or a GGUF: both decode these small
+                // tensors to f32 (the container's bf16, the GGUF's f32 or quantized).
+                auto bf = [&](const char* suffix) { return file_->bf16(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + what + " has " +
@@ -1834,6 +1984,36 @@ void Core::write_record(size_t row, const double pos[3]) {
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
 }
 
+std::string Core::law_tag() const {
+    if (!gguf_) return "q4nx";
+    return merged_q41_ ? "q41" : "f32";
+}
+
+void Core::layer_nan_check(xrt::bo& xres, int layer) {
+    xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+    const float* x = xres.map<float*>();
+    int nnan = 0;
+    float mx = 0.f;
+    for (size_t i = 0; i < w_->hidden; ++i) {
+        if (!std::isfinite(x[i])) ++nnan;
+        else mx = std::max(mx, std::fabs(x[i]));
+    }
+    char detail[24] = "";
+    if (nnan == 0 && mx < 1.f) std::snprintf(detail, sizeof detail, " (small)");
+    log("layer " + std::to_string(layer) + " (" + types_[layer]->name + ") xres nan=" +
+        std::to_string(nnan) + " maxabs=" + std::to_string(mx) + detail);
+    // bring-up (OFLM_OPEN_LAYER_DUMP=<prefix>): also write the layer's xres row
+    // as raw f32 hidden floats, one file per (step, layer) — the step index is
+    // the dump sequence, so the first prompt token's layer 0 is _0_l0 etc.
+    if (const char* pfx = std::getenv("OFLM_OPEN_LAYER_DUMP")) {
+        char path[512];
+        std::snprintf(path, sizeof path, "%s_%zu_l%d.bin", pfx, dump_seq_++, layer);
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(x), w_->hidden * 4);
+        f.close();
+    }
+}
+
 void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                      const float* deepstack, int n_deepstack) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
@@ -1925,7 +2105,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !deepstack;
+    const bool pipe = submit_ahead_ > 0 && !deepstack && !layer_nan_;
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
@@ -1955,6 +2135,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
+            if (layer_nan_) layer_nan_check(xres, l);
             continue;
         }
         // (1) the previous layer's last dispatch, so its instruction BO is free to patch and
@@ -2433,6 +2614,9 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
     // it into the bf16 cache row, round v likewise. Padding tokens are computed
     // too -- the NPU path dispatches them as well, and real columns never read
     // rows behind them, so the real outputs do not depend on the padding.
+    // The manifest's pairing law: half-split pairs (i, i + half) by default;
+    // an interleaved family (rope_pairing "interleaved" -- llama.cpp's NORM
+    // layout) takes pairs (2i, 2i + 1) instead.
 #pragma omp parallel for
     for (long long t = 0; t < static_cast<long long>(T); ++t) {
         const size_t tk = static_cast<size_t>(t), p = P0 + tk;
@@ -2442,19 +2626,23 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
             for (size_t i = 0; i < half; ++i) {
                 const double a = static_cast<double>(p) * inv_freq[i];
                 const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-                const float x1 = qh[i], x2 = qh[i + half];
-                qh[i] = x1 * c - x2 * s;
-                qh[i + half] = x2 * c + x1 * s;
+                const size_t b1 = w_->rope_interleaved ? 2 * i : i;
+                const size_t b2 = w_->rope_interleaved ? b1 + 1 : i + half;
+                const float x1 = qh[b1], x2 = qh[b2];
+                qh[b1] = x1 * c - x2 * s;
+                qh[b2] = x2 * c + x1 * s;
             }
         }
         for (size_t h = 0; h < kvh; ++h)
             for (size_t i = 0; i < half; ++i) {
                 const double a = static_cast<double>(p) * inv_freq[i];
                 const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-                const float x1 = y_qkv3[(qw + h * hd + i) * T + tk];
-                const float x2 = y_qkv3[(qw + h * hd + i + half) * T + tk];
-                K[p * kvw + h * hd + i] = x1 * c - x2 * s;
-                K[p * kvw + h * hd + i + half] = x2 * c + x1 * s;
+                const size_t b1 = w_->rope_interleaved ? 2 * i : i;
+                const size_t b2 = w_->rope_interleaved ? b1 + 1 : i + half;
+                const float x1 = y_qkv3[(qw + h * hd + b1) * T + tk];
+                const float x2 = y_qkv3[(qw + h * hd + b2) * T + tk];
+                K[p * kvw + h * hd + b1] = x1 * c - x2 * s;
+                K[p * kvw + h * hd + b2] = x2 * c + x1 * s;
             }
         for (size_t j = 0; j < kvw; ++j) {
             const float vj = y_qkv3[(qw + kvw + j) * T + tk];
@@ -2536,7 +2724,7 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     timing_.state_ms += ms_since(tt);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
     host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
@@ -3392,7 +3580,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
     if (attn_block_on_ && gb.attn_block.present()) {
@@ -3659,7 +3847,7 @@ void Core::layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, s
     auto geom = [&](size_t b) {
         host::AttnGeom g;
         g.T = T; g.t_real = std::min(T, N - b * T); g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-        g.pos0 = pos0 + b * T; g.eps = gb.eps;
+        g.pos0 = pos0 + b * T; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
         return g;
     };
     // each block's attention window is explicit, so later blocks' K / V rows in the map change nothing

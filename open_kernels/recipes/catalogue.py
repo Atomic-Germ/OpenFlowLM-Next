@@ -182,6 +182,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (256, 24, 4, 64, True, True, False, False),     # Qwen3.8-27B: 24 heads over 4 kv, six cores x 4 (OPEN-FAMILY-QWEN35)
                  (128, 16, 2, 128, False, False, False, True),   # Qwen2.5-3B: a q/k/v bias, and the narrowest
                                                                  # attention element yet at 512 B (OPEN-ATTN-QKV-BIAS)
+                 (64, 16, 8, 64, True, False, False, False),     # Qwen3-0.6B: head dim 64, a GQA group of 2 (the attention gate)
+                 (128, 40, 8, 128, True, False, False, False),   # Qwen3-14B: 40 heads over 8 kv, five cores of eight (the attention gate)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them
@@ -230,7 +232,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family, 5120 with "
                   "the 27B"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
-             {"K": values(1024, 2048, 2560, 3072, 3840, 4096), "vocab": multiple_of(64)},
+             {"K": values(1024, 2048, 2560, 3072, 3840, 4096, 5120), "vocab": multiple_of(64)},  # Qwen3-14B, hidden 5120 (designs/lm_head_q4 fixture, q4nx + gguf f32, 2026-10-23)
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
 ]}
 

@@ -41,6 +41,33 @@ Source: `open_kernels/designs/dit_ew/` (README has the numbers). Tests: `make_te
 
 ## Build / test one op
 
+Both platforms are in active use around this repo (Linux builds/hosts the generator,
+Windows/WWSL and Linux both host the NPU). The same five steps apply; the generated
+`run.cfg` and `spec.json` are portable across both — only the toolchain prefix changes.
+
+### Linux (verified 2026-10-16)
+
+```
+# toolchain PATH: ironvenv/bin (aiecc) + venv site-packages llvm-aie/bin (clang, opt)
+#   + /opt/xilinx/xrt/bin (xclbinutil) + the repo root — see dit-conv's SKILL.md setup,
+#   ironvenv/ built with `uv venv --python 3.11 ironvenv && uv pip install -r ironvenv-requirements.txt`
+# generate fixture (also writes spec.json):
+ironvenv/bin/python open_kernels/designs/dit_ew/make_test.py --op res_ln_mod --out /tmp/op/<t>
+# build the stream — DE_SPEC env is mandatory; build_design.py takes only 2 positional
+#   args and silently IGNORES extra flags (a --spec I passed was dropped, the build used
+#   dit_ew.py's default spec, and the test compared garbage until I set DE_SPEC):
+DE_SPEC="$(cat /tmp/op/<t>/spec.json)" ironvenv/bin/python \
+  open_kernels/build_design.py open_kernels/designs/dit_ew/dit_ew.py /tmp/op/<b>
+# bind the test to that build (rewrites run.cfg inside <t>):
+ironvenv/bin/python open_kernels/designs/dit_ew/make_test.py --op res_ln_mod --out /tmp/op/<t> --build /tmp/op/<b>
+# run on the NPU (open_kernels/harness/build/run_kernel, built with
+#   cmake -S open_kernels/harness -B open_kernels/harness/build && cmake --build ... -j):
+open_kernels/harness/build/run_kernel /tmp/op/<t>/run.cfg        # XRT chatters on stderr; 2>/dev/null or grep "state"
+ironvenv/bin/python open_kernels/designs/dit_ew/compare.py /tmp/op/<t>
+```
+
+### Windows
+
 ```
 python open_kernels\designs\dit_ew\make_test.py --op res_ln_mod --out <t>
 $env:DE_SPEC = Get-Content <t>\spec.json; . C:\dev\mlir-aie\iron_env.ps1
@@ -50,6 +77,14 @@ open_kernels\harness\out\run_kernel.exe <t>\run.cfg
 python open_kernels\designs\dit_ew\compare.py <t>
 ```
 
+The one cross-platform trap both platforms share (it bit on Linux, it would bit on
+Windows too): **`DE_SPEC` is mandatory** — `build_design.py` takes only 2 positional
+args and silently IGNORES extra flags; without `DE_SPEC` it builds `dit_ew.py`'s
+default spec.
+
+Expected: PASS at rel_fro 1.6-2.8e-3 (norm ops, RoPE, Euler; bf16 floor 1.7e-3) and
+3.5-5.4e-3 (SiLU, SwiGLU). Verified Linux: res_ln_mod PASS 1.6-2.8e-3, silu PASS 3.5e-3,
+qk_qwen PASS 1.7-2.8e-3 (its make_test fixture prints a harmless invalid-cast warning).
 Expected: PASS at rel_fro 1.6-2.8e-3 (norm ops, RoPE, Euler; bf16 floor 1.7e-3) and
 3.5-5.4e-3 (SiLU, SwiGLU).
 

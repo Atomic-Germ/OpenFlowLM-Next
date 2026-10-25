@@ -85,6 +85,62 @@ def random_q8_0_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 
     return blocks
 
 
+def random_iq4_xs_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 0.02) -> np.ndarray:
+    """GGUF IQ4_XS raw blocks uint8[n, k//256, 136] (fp16 d, 2 B of 2-bit scale highs,
+    4 B of 4-bit scale lows, 128 B of 4-bit codes)."""
+    assert k % 256 == 0
+    nb = k // 256
+    d = (rng.random((n, nb), np.float32) * scale + 1e-3).astype(np.float16)
+    # the six-bit scales are stored as the value + 32 (the reader's "(u) - 32")
+    sc = rng.integers(0, 64, (n, nb, 8), dtype=np.int16)
+    q = rng.integers(0, 16, (n, nb, 8, 32), dtype=np.uint8)
+    blocks = np.zeros((n, nb, IQ4_XS_BYTES), np.uint8)
+    blocks[..., 0:2] = d.view(np.uint8).reshape(n, nb, 2)
+    lo = (sc & 0xF).astype(np.uint8)
+    hi = ((sc >> 4) & 0x3).astype(np.uint8)
+    for g in range(8):
+        if g & 1:
+            blocks[..., 4 + g // 2] |= lo[:, :, g] << 4
+        else:
+            blocks[..., 4 + g // 2] |= lo[:, :, g]
+        blocks[..., 2] |= hi[:, :, g] << (2 * g)
+    blocks[..., 8:136] = (q[..., :16] | (q[..., 16:] << 4)).reshape(n, nb, 128)
+    return blocks
+
+
+def random_q5_k_blocks(n: int, k: int, rng: np.random.Generator, scale: float = 0.02) -> np.ndarray:
+    """GGUF Q5_K raw blocks uint8[n, k//256, 176] (fp16 d, fp16 dmin, 12 B of 6-bit
+    scales, 32 B of the fifth bit, 128 B of 4-bit codes)."""
+    assert k % 256 == 0
+    nb = k // 256
+    d = (rng.random((n, nb), np.float32) * scale + 1e-3).astype(np.float16)
+    dm = (rng.random((n, nb), np.float32) * scale * 0.1).astype(np.float16)
+    sc = rng.integers(0, 64, (n, nb, 8), dtype=np.int16)
+    mn = rng.integers(0, 64, (n, nb, 8), dtype=np.int16)
+    q = rng.integers(0, 16, (n, nb, 4, 64), dtype=np.uint8)
+    fifth = rng.integers(0, 2, (n, nb, 256), dtype=np.uint8)
+    blocks = np.zeros((n, nb, 176), np.uint8)
+    blocks[..., 0:2] = d.view(np.uint8).reshape(n, nb, 2)
+    blocks[..., 2:4] = dm.view(np.uint8).reshape(n, nb, 2)
+    # the scales array (bytes 4..15): the first four scale/min pairs in the low six
+    # bits of bytes 0..3 and 4..7, the last four split across the shared bytes 8..11
+    s = np.zeros((n, nb, 12), np.uint8)
+    s[..., 0:4] = (sc[..., 0:4] & 0x3F).astype(np.uint8)
+    s[..., 4:8] = (mn[..., 0:4] & 0x3F).astype(np.uint8)
+    s[..., 8:12] |= (sc[..., 4:8] & 0x0F).astype(np.uint8)
+    s[..., 0:4] |= ((sc[..., 4:8] >> 4) & 0x03).astype(np.uint8) << 6
+    s[..., 4:8] |= ((mn[..., 4:8] >> 4) & 0x03).astype(np.uint8) << 6
+    s[..., 8:12] |= ((mn[..., 4:8] & 0x0F) << 4).astype(np.uint8)
+    blocks[..., 4:16] = s
+    # the fourth-bit codes: per 64-value half, the low nibbles of 32 bytes then the high
+    for h in range(4):
+        blocks[..., 48 + h * 32:48 + h * 32 + 32] = (q[..., h, 0:32] | (q[..., h, 32:64] << 4))
+    # the fifth bit: byte (v % 32) holds the bits of the values v, v+32, v+64, ...
+    for v in range(256):
+        blocks[..., 16 + v % 32] |= (fifth[..., v] << (v // 32)).astype(np.uint8)
+    return blocks
+
+
 def unpack_q4(raw: np.ndarray, gguf_type: str = "Q4_1"):
     """Raw block bytes uint8[n, nb, B] -> (d f32[n, nb], m f32[n, nb], q uint8[n, nb*32])."""
     n, nb, b = raw.shape
@@ -116,6 +172,106 @@ def dequant_q8_0(raw: np.ndarray) -> np.ndarray:
     n, nb, _ = raw.shape
     d, v = unpack_q8_0(raw)
     return v.astype(np.float32) * np.repeat(d, BLK, axis=1)
+
+
+# llama.cpp's iq4_nl codebook: the sixteen values a 4-bit code indexes. iq4_xs uses
+# the same table (a finer-grained scale on top of it).
+IQ4_NL_VALUES = np.array([-127, -104, -83, -65, -49, -35, -22, -10,
+                           1, 13, 25, 38, 53, 69, 89, 113], dtype=np.int8)
+IQ4_NL_BYTES = 18        # fp16 d, 16 nibble bytes
+IQ4_XS_BYTES = 136      # fp16 d, 2 B of 2-bit scale highs, 4 B of 4-bit scale lows, 128 code bytes
+
+
+def get_scale_min_k4(scales: np.ndarray):
+    """The eight 6-bit scale/min pairs of a k-quant super-block: [..., 12] -> ([..., 8], [..., 8]).
+
+    The same law as the reader's get_scale_min_k4: the first four pairs are the
+    low six bits of bytes 0..3 (scale) and 4..7 (min); the last four split a
+    byte's high two bits (scale) and high two bits (min) with the top bits of
+    the earlier bytes.
+    """
+    q = scales.astype(np.uint16)
+    out_d = np.empty(q.shape[:-1] + (8,), np.int32)
+    out_m = np.empty_like(out_d)
+    for j in range(8):
+        if j < 4:
+            out_d[..., j] = q[..., j] & 63
+            out_m[..., j] = q[..., j + 4] & 63
+        else:
+            out_d[..., j] = (q[..., j + 4] & 0xF) | ((q[..., j - 4] >> 6) << 4)
+            out_m[..., j] = (q[..., j + 4] >> 4) | ((q[..., j] >> 6) << 4)
+    return out_d, out_m
+
+
+def dequant_q5_k(raw: np.ndarray) -> np.ndarray:
+    """GGUF Q5_K blocks uint8[n, nb, 176] -> f32[n, nb*256].
+
+    A super-block of 256 values: fp16 d, fp16 dmin, 12 bytes of 6-bit scales
+    (eight scale/min pairs over eight groups of 32 values), 32 bytes of the
+    FIFTH bit (byte v%32 holds the bits of the values v, v+32, v+64, ...), then
+    128 bytes of 4-bit codes. The value is d*scale*(nibble | fifth<<4) - dmin*min.
+    """
+    n, nb, _ = raw.shape
+    d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16).reshape(n, nb).astype(np.float32)
+    dmin = np.ascontiguousarray(raw[..., 2:4]).view(np.float16).reshape(n, nb).astype(np.float32)
+    sc, m = get_scale_min_k4(raw[..., 4:16])
+    qh = raw[..., 16:48]
+    qs = raw[..., 48:176]
+
+    # the 4-bit codes: per 64-value half, the low nibbles of 32 bytes then the high ones
+    ql = np.empty((n, nb, 256), np.uint8)
+    for h in range(4):
+        ql[..., h * 64:h * 64 + 32] = qs[..., h * 32:h * 32 + 32] & 0xF
+        ql[..., h * 64 + 32:h * 64 + 64] = qs[..., h * 32:h * 32 + 32] >> 4
+    # the fifth bit: byte (v % 32) holds the bits of the values v, v+32, v+64, ...
+    fifth = ((qh[..., :, None] >> np.arange(8, dtype=np.uint8)) & 0x01)            # [n, nb, 32, 8]
+    fifth = fifth.transpose(0, 1, 3, 2).reshape(n, nb, 256)                      # bit-major -> value order
+    q = (ql | (fifth << 4)).astype(np.float32).reshape(n, nb, 8, 32)
+    d = (d[..., None] * sc.astype(np.float32))[..., None]    # [n, nb, 8, 1]: a scale per group of 32
+    dm = (dmin[..., None] * m.astype(np.float32))[..., None]
+    return (d * q - dm).reshape(n, nb * 256)
+
+
+def dequant_iq4_nl(raw: np.ndarray) -> np.ndarray:
+    """GGUF IQ4_NL blocks uint8[n, nb, 18] -> f32[n, nb*32].
+
+    Each 4-bit code indexes a sixteen-entry codebook (llama.cpp's iq4_nl), scaled by
+    the block's fp16 d.
+    """
+    n, nb, _ = raw.shape
+    d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16).reshape(n, nb).astype(np.float32)
+    qs = raw[..., 2:18]
+    q = np.concatenate([qs & 0xF, qs >> 4], axis=-1).reshape(n, nb * 32)
+    return d[:, :, None] * IQ4_NL_VALUES[q].astype(np.float32)
+
+
+def dequant_iq4_xs(raw: np.ndarray) -> np.ndarray:
+    """GGUF IQ4_XS blocks uint8[n, nb, 136] -> f32[n, nb*256].
+
+    A super-block of 256 values: fp16 d, two bytes of 2-bit scale highs, four bytes
+    of 4-bit scale lows, then 128 bytes of 4-bit codes. Eight groups of 32 values,
+    each with a signed 6-bit scale (the low nibble | the high two bits << 4, minus
+    32) times d; the codes index the iq4_nl codebook.
+    """
+    n, nb, _ = raw.shape
+    d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16).reshape(n, nb).astype(np.float32)
+    sh = np.ascontiguousarray(raw[..., 2:4]).view(np.uint16).reshape(n, nb)
+    sl = raw[..., 4:8]
+    qs = raw[..., 8:136]
+
+    # the eight group scales: the low nibble of scales_l (two per byte) | the high two
+    # bits of scales_h << 4, as a signed 6-bit value
+    # the low nibbles and the high ones INTERLEAVE (byte 0 low, byte 0 high, byte 1 low, ...)
+    lo = np.stack([sl & 0xF, sl >> 4], axis=-1).reshape(n, nb, 8).astype(np.int16)
+    hi = ((sh[:, :, None] >> np.arange(8, dtype=np.uint16) * 2) & 0x3).astype(np.int16)
+    scales = (lo | (hi << 4)) - 32
+    dl = (d[:, :, None] * scales.astype(np.float32))[:, :, :, None]     # [n, nb, 8, 1]
+
+    # the codes: 16 bytes per group of 32 values -- the sixteen low nibbles first,
+    # then the sixteen high ones
+    q = qs.reshape(n, nb, 8, 16)
+    q = np.concatenate([q & 0xF, q >> 4], axis=-1).reshape(n, nb, 8, 32)
+    return (dl * IQ4_NL_VALUES[q].astype(np.float32)).reshape(n, nb * 256)
 
 
 def chunk_geometry(n: int, k: int, rs: int):
@@ -325,14 +481,24 @@ def read_gguf(path: str):
               4: ("u32", 4), 5: ("i32", 4), 6: ("f32", 4), 7: ("bool", 1),
               8: ("str", None), 9: ("arr", None), 10: ("u64", 8), 11: ("i64", 8),
               12: ("f64", 8)}
-    GGUF_W = {0: 32, 1: 32, 2: 16, 3: 32, 4: 32, 5: 32, 6: 16, 7: 8, 8: 16,
-              9: 32, 10: 64, 12: 32, 13: 8, 14: 4, 15: 8, 16: 20, 17: 18,
-              18: 34, 19: 34, 20: 66, 21: 210, 22: 164, 23: 144, 30: 34,
-              31: 36, 32: 84}  # superblock types (Q2/Q3/Q4/Q5/Q6_K, IQ) get 0
+    # The ggml type numbers (gguf/constants.py, the same table
+    # src/open_qwen36/gguf_file.hpp carries): type -> (values per block, bytes per block).
+    # The k- and i-quants' BYTES are what the reader needs to walk a tensor; the older
+    # table here had the "_S/_M" names of a since-merged ggml and no byte sizes for
+    # the superblock types at all.
+    GGUF_W = {0: 4, 1: 2, 2: 18, 3: 20, 6: 22, 7: 24, 8: 34, 9: 40,
+              10: 84, 11: 110, 12: 144, 13: 176, 14: 210, 15: 292,
+              16: 66, 17: 74, 18: 98, 19: 50, 20: 18, 21: 110, 22: 82, 23: 136,
+              24: 1, 25: 2, 26: 4, 27: 8, 28: 8, 29: 56, 30: 2}
+    GGUF_BLK = {2: 32, 3: 32, 6: 32, 7: 32, 8: 32, 9: 32, 10: 256, 11: 256, 12: 256,
+                13: 256, 14: 256, 15: 256, 16: 256, 17: 256, 18: 256, 19: 256,
+                20: 32, 21: 256, 22: 256, 23: 256, 29: 256}
     QNAME = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1",
-             8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M",
-             13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S",
-             17: "Q5_K_M", 18: "Q6_K", 24: "Q8_K", 28: "IQ4_NL", 30: "BF16"}
+             8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K",
+             14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS",
+             19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS",
+             24: "I8", 25: "I16", 26: "I32", 27: "I64", 28: "F64", 29: "IQ1_M",
+             30: "BF16"}
 
     f = open(path, "rb")
     magic, ver, ntensors, nkv = struct.unpack("<IIQQ", f.read(24))
@@ -373,8 +539,8 @@ def read_gguf(path: str):
         (off,) = struct.unpack("<Q", f.read(8))
         tensors[name] = {"type": QNAME.get(t, f"type{t}"), "gguf_type": t,
                          "dims": list(dims), "offset": off,
-                         "nbytes": int(np.prod(dims, dtype=np.int64)) * GGUF_W.get(t, 0)
-                         if t in GGUF_W else 0}
+                         "nbytes": (int(np.prod(dims, dtype=np.int64)) // GGUF_BLK[t]
+                                    * GGUF_W[t]) if t in GGUF_BLK else 0}
     if ver == 2:
         (align,) = struct.unpack("<I", f.read(4))    # v3 removed it; fixed at 32
     else:
@@ -397,6 +563,53 @@ def _selftest() -> int:
             exact = np.array_equal(got, want)
             print(f"{'PASS' if exact else 'FAIL'} {gtype} n={n} k={k} rs={rs} "
                   f"pool={len(pool)} B  pool==gguf(bit-exact): {exact}")
+            ok &= exact
+        if k % 256 == 0:
+            raw = random_q5_k_blocks(n, k, rng)
+            want = dequant_q5_k(raw).reshape(n, -1)
+            # the reference: the block law, spelled out for the first row
+            blk = raw[0, 0]
+            d = np.float32(np.frombuffer(blk[0:2].tobytes(), np.float16)[0])
+            dmin = np.float32(np.frombuffer(blk[2:4].tobytes(), np.float16)[0])
+            s = blk[4:16]
+            sc = np.empty(8, np.int32)
+            mn = np.empty(8, np.int32)
+            for j in range(8):
+                if j < 4:
+                    sc[j] = s[j] & 63
+                    mn[j] = s[4 + j] & 63
+                else:
+                    j4 = j - 4
+                    sc[j] = (s[8 + j4] & 0x0F) | ((s[j4] >> 6) << 4)
+                    mn[j] = ((s[8 + j4] >> 4) & 0x0F) | ((s[4 + j4] >> 6) << 4)
+            got = np.empty(256, np.float32)
+            for v in range(256):
+                h = (v // 64) * 64
+                byte = blk[48 + h // 2 + (v % 32)]
+                nib = (byte & 0xF) if (v % 64) < 32 else (byte >> 4)
+                bit = (blk[16 + v % 32] >> (v // 32)) & 1
+                got[v] = d * sc[v // 32] * (nib | (bit << 4)) - dmin * mn[v // 32]
+            exact = np.array_equal(got, want[0, :256])
+            print(f"{'PASS' if exact else 'FAIL'} Q5_K n={n} k={k}  dequant==the block law: {exact}")
+            ok &= exact
+            raw = random_iq4_xs_blocks(n, k, rng)
+            want = dequant_iq4_xs(raw).reshape(n, -1)
+            # the reference: the same law, spelled out value by value
+            nb = k // 256
+            got = np.empty_like(want)
+            for b in range(nb):
+                blk = raw[0, b]
+                d = np.float32(np.frombuffer(blk[0:2].tobytes(), np.float16)[0])
+                for g in range(8):
+                    lo = (blk[4 + g // 2] >> 4) if (g & 1) else (blk[4 + g // 2] & 0xF)
+                    hi = (blk[2] >> (2 * g)) & 0x3
+                    dl = d * (int(lo | (hi << 4)) - 32)
+                    for j in range(32):
+                        byte = blk[8 + g * 16 + (j % 16)]
+                        code = (byte & 0xF) if j < 16 else (byte >> 4)
+                        got[0, b * 256 + g * 32 + j] = dl * float(IQ4_NL_VALUES[code])
+            exact = np.array_equal(got[0], want[0])       # the reference spells out row 0
+            print(f"{'PASS' if exact else 'FAIL'} IQ4_XS n={n} k={k}  dequant==the block law: {exact}")
             ok &= exact
         raw = random_q8_0_blocks(n, k, rng)
         pool = pack_q8_pool(raw, rs)

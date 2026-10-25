@@ -87,6 +87,8 @@ struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;
     size_t pos0 = 0;        ///< the block's first position (and KV row)
     double eps = 1e-6;      ///< the q / k norms' eps
+    bool rope_il = false;   ///< interleaved rope pairs (2i, 2i + 1) -- llama.cpp's NORM layout;
+                            ///< false = half-split (i, i + rot/2), everything before this shipped
 };
 
 /// The full-attention layer's middle over a block. q / gate [T, nh*hd], k / v [T, kvh*hd]

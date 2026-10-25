@@ -141,7 +141,7 @@ cmake --install --preset linux-default
 
 **Native package and portable tarball, in one command:**
 ```sh
-cmake --workflow --preset linux-package   # configure + build + test + RPM/TGZ
+cmake --preset linux-package   # configure + build + test + RPM/TGZ
 ```
 
 `.deb` is built separately (`linux-package-deb`) on Debian/Ubuntu or in a

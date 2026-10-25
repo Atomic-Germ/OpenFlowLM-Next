@@ -182,7 +182,11 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
     def build_family(fam: dict) -> tuple[str, bool]:
         name = fam["name"]
         out = XCLBINS / name
-        if (out / "gemm_rtp" / "design.json").is_file() and not force:
+        # Skip only when the actual kernel artifacts are present, not just the
+        # metadata (design.json is shipped in the repo and would otherwise
+        # make the export a no-op).
+        xclbins_present = any((out / "gemm_rtp").glob("*.xclbin")) if (out / "gemm_rtp").is_dir() else False
+        if xclbins_present and not force:
             print(f"-- bert {name}: already built (use --force to rebuild)", flush=True)
             return name, True
         print(f"-- bert {name} ({', '.join(fam['serves'])})", flush=True)

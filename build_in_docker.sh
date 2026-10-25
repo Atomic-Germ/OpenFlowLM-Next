@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="openflowlm-build:ubuntu26"
-PRESET="${1:-linux-package-deb}"
+# Parse command line arguments
+OS="${1:-ubuntu}"        # Default to Ubuntu
+PRESET="${2:-linux-package-deb}"  # Default preset
 
 mkdir -p oflm-build npu-cache
 
-echo "Using preset: $PRESET"
+echo "Using OS: $OS, preset: $PRESET"
+
+# Choose the correct Dockerfile based on OS
+case "$OS" in
+  "fedora")
+    DOCKERFILE="Dockerfile.fedora"
+    IMAGE="openflowlm-build:fedora"
+    ;;
+  "ubuntu")
+    DOCKERFILE="Dockerfile"
+    IMAGE="openflowlm-build:ubuntu26"
+    ;;
+  *)
+    echo "Error: Invalid OS specified. Use 'ubuntu' or 'fedora'."
+    exit 1
+    ;;
+esac
 
 docker build \
   --target builder \
-  -f Dockerfile \
+  -f "$DOCKERFILE" \
   -t "$IMAGE" \
   .
 
@@ -28,9 +45,10 @@ docker run --rm -it \
   bash -eu -c '
     case "$1" in
       linux-package-deb|linux-package-rpm|linux-package-tgz)
-        cmake --workflow --preset linux-default
+        cmake --preset linux-default
         cpack --preset "$1"
         ;;
-      *) cmake --workflow --preset "$1" ;;
+      *) cmake --preset "$1" ;;
     esac
   ' -- "$PRESET"
+

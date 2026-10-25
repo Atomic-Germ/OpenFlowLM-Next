@@ -42,7 +42,11 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     const std::string sel = utils::getenv_oflm(env_var);
     const bool use_open = !sel.empty() ? sel == "open" : !kernels.empty();
     if (use_open && kernels.empty())
-        throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
+        throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name +
+                                 ". The kernel sets are per model SIZE: build this one from the repo with "
+                                 "`python utilities/build-new-spec.py --repo <owner/name>` (it generates the spec, "
+                                 "compiles the set and validates the new geometry on the NPU), or point "
+                                 "OFLM_OPEN_KERNELS_DIR at a built set.");
     if (!use_open) {
         // Name the engine: a closed-engine crash otherwise reads as an open-kernel bug (#215).
         header_print("OFLM", family_label + " on the closed engine ("

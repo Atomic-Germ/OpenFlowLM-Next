@@ -229,6 +229,9 @@ struct Manifest {
     size_t kv_row = 0, ptab_row = 0, rotary_dim = 0, rout_idx_off = 1024;
     double rope_theta = 0;
     std::vector<double> rope_inv_freq;       ///< per rotary pair (rotary_dim / 2 values; Llama 3's scaling is in here)
+    bool rope_interleaved = false;           ///< layout.rope_pairing: the RoPE pairs ADJACENT dims
+                                             ///< (2i, 2i + 1), llama.cpp's NORM layout for the llama
+                                             ///< archs -- vs the default half-split (i, i + rot/2)
     bool has_moe = false;                    ///< layout.moe present (a family with routed experts)
     stream_patch::MoeGeometry moe;
     stream_patch::AttnGeometry attn;
@@ -261,7 +264,8 @@ struct Manifest {
     /// Throws naming the first key of config.json that disagrees with the manifest. A key
     /// config.json lacks takes its hf_config_defaults value when there is one, and is
     /// refused as lacking otherwise.
-    void check_model(const nlohmann::json& config, const std::string& where) const;
+    void check_model(const nlohmann::json& config, const std::string& where,
+                   bool model_type = true) const;
     const LayerType& layer_type(size_t layer) const;
     /// Why the host attention (OPEN-HOST-ATTN-GUARD) cannot compute this model, or "" when it can.
     /// It implements K2's attention only; any other family is refused by name.

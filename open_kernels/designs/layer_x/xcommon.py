@@ -34,7 +34,8 @@ from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern
 
 from layout import R, SPEC, POOL_BYTES, POOL_DOWN, POOL_SHARE_DOWN, POOL_SHARE_GATE, POOL_SHARE_UP
-from ironutil import Pipeline  # noqa: E402
+from ironutil import Pipeline, piece_tap as PU_piece_tap  # noqa: E402
+import ln_split as LS  # noqa: E402
 
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
@@ -94,6 +95,13 @@ BAND16, BAND32 = C.BAND16, C.BAND32   # K=HID / K=2*HID band bytes
 N_HDR = C.N_HDR
 ROWS_PC, HID_PC = C.ROWS_PC, C.HID_PC # MoE rows per core, hidden per core
 OS = ["-Os"]                          # main-core kernels: size over speed (the GEMV is DMA-bound)
+# The GGUF-direct (f32-scale) build: the same q4_1 codes with the block scales in f32
+# instead of bf16, so a chunk is 6144 B instead of 5120 (designs/dense/dx.py's GEMV_DEF).
+# The tile body reads the scale width from the header, so the flag is all the design
+# needs -- and a q4_1 build sees exactly the flags it saw before.
+F32 = SPEC.quant == "q4_1_f32"
+if F32:
+    OS = OS + ["-DGEMV_Q4_SCALES_F32=1"]
 # timing-only ablation (output garbage): LX_NULL_GEMV=1 compiles the q4 / q8 GEMV tile body
 # to a zero store -- the GEMV twin of LX_NULL_DN below -- and leaves every stream, fifo and
 # DMA (so insts.bin) exactly as it was, to tell a stream limit from a compute one.
@@ -444,12 +452,9 @@ def ffn_body(win, xin, yout, B, K):
 
 def piece_tap(off: int, band_stride: int, n: int, nbands: int) -> TensorAccessPattern:
     """One K piece of `nbands` consecutive FF-wide down bands: `n` bytes at `off` inside each
-    band, bands `band_stride` apart. Inside a band chunk c covers k-tile c / 2 (gemv_q4.h), so
-    a piece is a contiguous run of chunks there. Three real DMA dims with a half-chunk inner
-    wrap, as `half_tap` (the innermost wrap stays under 4 KB)."""
-    inner = TILE // 2
-    assert n % inner == 0, (n, inner)
-    return TensorAccessPattern((1, POOL_BYTES), off, [1, nbands, n // inner, inner], [0, band_stride, inner, 1])
+    band, bands `band_stride` apart. The tap itself is shared with the dense recipe's
+    split down GEMV (ironutil.piece_tap) -- the two must not drift."""
+    return PU_piece_tap(POOL_BYTES, off, band_stride, n, nbands, TILE)
 
 
 def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss,
@@ -697,52 +702,11 @@ def ln_body(ain, aout, f_nr, f_lny, f_lnx):
         ain.release(5)
 
 
-def _split_stages(ain, aout, f_nr, f_add2):
-    """Stages 1 and 2 of the split norm helper (recipes/qwen36moe.py norm_split):
-
-      1. layer-entry norm                 [x0 x1 lnw] -> [xn]
-      2. res_i = x_i + a_i, i = 0, 1      [x_i a_i]   -> [res_i]     (res goes to DDR)
-         xm = post_attention_norm(res)    [res0 res1 w] -> [xm]      (res read back)
-    Three input elements at most, so the fifo is 3 deep and 4 elements are ever held."""
-    e = ain.acquire(3)
-    o = aout.acquire(1)
-    f_nr(e[0], e[1], e[2], o)
-    aout.release(1)
-    ain.release(3)
-    for _ in range(2):
-        e = ain.acquire(2)
-        o = aout.acquire(1)
-        f_add2(e[0], e[1], o)
-        aout.release(1)
-        ain.release(2)
-    e = ain.acquire(3)
-    o = aout.acquire(1)
-    f_nr(e[0], e[1], e[2], o)
-    aout.release(1)
-    ain.release(3)
-
-
-def ln_split_body(ain, aout, f_nr, f_add2):
-    """... 3. xres_i = res_i + out2_i         [res_i out2_i] -> [xres_i]"""
-    _split_stages(ain, aout, f_nr, f_add2)
-    for _ in range(2):
-        e = ain.acquire(2)
-        o = aout.acquire(1)
-        f_add2(e[0], e[1], o)
-        aout.release(1)
-        ain.release(2)
-
-
-def ln_split_body3(ain, aout, f_nr, f_add2, f_add3):
-    """... 3. xres_i = res_i + (out2_i + out2b_i), the two down pieces' outputs
-    (recipes/qwen36moe.py down_split)   [res_i out2_i out2b_i] -> [xres_i]"""
-    _split_stages(ain, aout, f_nr, f_add2)
-    for _ in range(2):
-        e = ain.acquire(3)
-        o = aout.acquire(1)
-        f_add3(e[0], e[1], e[2], o)
-        aout.release(1)
-        ain.release(3)
+# The split norm helper's bodies live in open_kernels/ln_split.py: the dense design
+# (designs/dense/dx.py) runs the same stages, and a copy here would drift.
+_split_stages = LS.split_stages
+ln_split_body = LS.ln_split_body
+ln_split_body3 = LS.ln_split_body3
 
 
 def ln_dense_worker(of_lni, of_lno, L):

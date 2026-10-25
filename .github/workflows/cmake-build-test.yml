@@ -45,6 +45,21 @@ jobs:
           git diff --exit-code src/config/settings.json \
                          src/config/settings_registry_generated.hpp
 
+      # Whether a GGUF can be used is derived from the recipes, not kept in a
+      # list: the manifest's "gguf" section may only name kernels the export
+      # builds, and the section and the builds are one recipe's decision. The
+      # check is a recipe-level test over every shipped spec's manifest. It
+      # belongs in THIS job: the derivation builds each family's manifest, so
+      # it needs numpy, and it must fail in seconds rather than after the
+      # whole build.
+      - name: Verify the GGUF-direct twins agree with the builds
+        run: |
+          python3 -m venv /tmp/gguf-check
+          /tmp/gguf-check/bin/pip install --quiet --upgrade pip
+          /tmp/gguf-check/bin/pip install --quiet numpy pytest
+          /tmp/gguf-check/bin/python -m pytest \
+            specs/open-engine/tests/test_gguf_twin.py -q
+
   config-build-test:
     runs-on: ubuntu-latest
     env:
@@ -168,3 +183,7 @@ jobs:
           /tmp/gguf-tools/bin/pip install pytest
           /tmp/gguf-tools/bin/python -m pytest \
             utilities/gguf-utils/gguf-inspect/tests/ -v
+
+      # The families that can load a GGUF are derived from the recipes (the
+      # manifest's "gguf" section and the f32-scale builds it names), and the
+      # check that keeps them honest runs in the fast job above.

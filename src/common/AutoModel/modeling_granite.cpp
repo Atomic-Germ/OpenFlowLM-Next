@@ -29,7 +29,8 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
         throw std::runtime_error("no open kernels were found for " + this->lm_config->model_name +
                                  ". Granite runs on the open kernels only: build them with "
                                  "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
-                                 "OFLM_OPEN_KERNELS_DIR at a built set.");
+                                 "OFLM_OPEN_KERNELS_DIR at a built set. A new SIZE of a family with kernels: "
+                                 "`python utilities/build-new-spec.py --repo <owner/name>`.");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
     header_print("OFLM", "Granite on the open kernels (" + kernels + ")" +

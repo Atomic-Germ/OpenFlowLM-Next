@@ -11,6 +11,7 @@ _site
 .jekyll-metadata
 *.csv
 utilities/mlir-aie
+utilities/lx-probe
 third_party/mlir-aie
 third_party/Peano
 ironvenv
@@ -106,6 +107,10 @@ result
 result-*
 bin/
 .env
+
+# reference-study venvs (torch/transformers/diffusers; not used by builds or the engine)
+ditref-venv
+refvenv
 
 # local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
 TestGGUF/
