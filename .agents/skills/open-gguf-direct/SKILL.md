@@ -622,3 +622,19 @@ the official registry's gaps. What landed:
   spec exactly; none in the HF cache qualifies today — Peach is llama-arch
   with vocab 64000 vs the llama31-8b spec's 128256).
 
+
+
+## Llama3 rope pairing (interleaved) — 2026-10-24 (feat/fedora-docker)
+
+Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(j, j+ROT/2)` for all families, but llama3-family GGUF expects interleaved pairs `(2j, 2j+1)` (llama.cpp NORM rope law). Qwen3 works with half-split. 
+
+**Plumbing (both kernel design + host):**
+- `open_kernels/recipes/spec.py`: `ROPE_INTERLEAVED_FAMILIES = {"llama3"}`, `ModelSpec.rope_interleaved` property.
+- `open_kernels/recipes/dense.py`: passes `ROPE_IL` in geometry/flags and writes `layout.rope_pairing` (`"interleaved"` or `"halfsplit"`) into the manifest.
+- `open_kernels/designs/dense/dx_attn.py`: threads `ATTN_ROPE_IL` flag to `dx_attn` kernel build.
+- `open_kernels/designs/attn/attn.h`: adds `ATTN_ROPE_IL` path using `aie::interleave_unzip`/`aie::interleave_zip` over the head dim (identical pair-ordered cos/sin tables).
+- `src/open_qwen36/manifest.{hpp,cpp}`: parses `layout.rope_pairing` → `rope_interleaved` (default false).
+- `src/open_qwen36/block_host.{hpp,cpp}`: `AttnGeom.rope_il` propagated; interleaved `rope()` matches kernel pairing.
+- `src/open_qwen36/core.cpp`: wires `rope_il` from manifest to host paths (block prefill/host attention) and keeps layer dump plumbing intact.
+
+**Validation:** rebuilt `Llama-3.2-1B-NPU2` kernels with `rope_pairing: interleaved` (export/kernels regen), rebuilt `open_qwen36_cli`, and NPU greedy decode of the test prompt produced coherent text matching the reference. Layer-wise dumps (`OFLM_OPEN_LAYER_DUMP`) show correct alignment after the fix.
