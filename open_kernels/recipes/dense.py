@@ -85,6 +85,12 @@ class DenseGeometry:
     MS_U: int; MS_G: int; MS_FLOATS: int                            # the up / gate band scratch
     VEXP: int; MLS: int                                             # batched softmax exponentials; ml stride
     ACORES: int; NHL: int; RB: int                                  # attention cores; heads each owns; rows per call
+    # Gemma 4 (OPEN-FAMILY-GEMMA4); the defaults are every other family, whose flags then
+    # stay off the build line (dx.py), so their kernels compile byte for byte as before
+    VNORM: int = 0                                                  # attn.h ATTN_VNORM: weightless RMSNorm on V
+    SCALE: float = 0.0                                              # attn.h ATTN_SCALE; 0 = 1/sqrt(HD)
+    ROPE_PAIR: int = 0                                              # attn.h ATTN_ROPE_PAIR; 0 = ROT/2
+    QLOCAL: int = 0                                                 # attn.h ATTN_QLOCAL: a core keeps only its q heads
 
 
 @dataclass(frozen=True)
@@ -115,7 +121,7 @@ BLOCK_ATTN_ROPE = ("k2",)
 # that - attention_bias covers its o_proj, and all three expert projections carry one - so
 # adding it here is not enough on its own; it needs a fourth consts slot (gptoss-bringup.md).
 QKV_BIAS_FAMILIES = ("qwen2",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2")
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2", "gemma4")
 
 
 def qkv_bias(spec: ModelSpec) -> bool:

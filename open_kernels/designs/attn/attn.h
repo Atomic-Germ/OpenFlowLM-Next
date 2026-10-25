@@ -63,6 +63,9 @@
 #ifndef ATTN_QKNORM_POST
 #define ATTN_QKNORM_POST 0   // 1: the norm weight multiplies AFTER RoPE (HunYuan); 0: before (Qwen3)
 #endif
+#ifndef ATTN_VNORM
+#define ATTN_VNORM 0   // Gemma 4: a weightless RMSNorm on V (attn_v_impl)
+#endif
 #ifndef ATTN_EPS
 #define ATTN_EPS 1e-6f       // the qk RMSNorm's epsilon (the model's rms_norm_eps)
 #endif
@@ -139,7 +142,19 @@ static constexpr unsigned kKVH = ATTN_KVH;
 static constexpr unsigned kHD = ATTN_HD;
 static constexpr unsigned kRot = ATTN_ROT;
 static constexpr unsigned kV = 32;
+// ATTN_QLOCAL: a core keeps only the q heads it scores -- the caller hands attn_q its own
+// elements, numbered from 0 -- so q is kNHL heads wide instead of kNH. Gemma 4's global layers
+// (16 heads x 512) need it: all sixteen pre-split are 32 KB of a core's 64.
+#ifndef ATTN_QLOCAL
+#define ATTN_QLOCAL 0
+#endif
+#if ATTN_QLOCAL
+static constexpr unsigned kQW = ATTN_NHL * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW] | lo bf16[QW]], local heads
+#else
 static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW] | lo bf16[QW]]
+#endif
+// the head index into q: the global one, or the core-local one under ATTN_QLOCAL
+#define ATTN_QH(h, hl) (ATTN_QLOCAL ? (hl) : (h))
 // ATTN_VEXP stores q as that bf16 pair; without it q stays the fp32 vector it always was,
 // so a family that does not take this path compiles byte-for-byte what it compiled before.
 #if ATTN_VEXP
@@ -153,8 +168,14 @@ static constexpr unsigned kHPO = kKVH;        // bf16 og heads per element
 static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
               kNH % kHPO == 0 && kKVH % kHPE == 0,
               "attn.h: HD a multiple of 32, rotary dim a multiple of 32 within HD, an even kv-head count that divides NH");
+// ATTN_SCALE replaces 1/sqrt(HD) outright: Gemma 4 scores with 1.0 (its q_norm / k_norm carry
+// the scale), at head dims 256 AND 512. A power of two, so it takes the scale-in-q path below.
+#ifdef ATTN_SCALE
+static constexpr float kScale = ATTN_SCALE;
+#else
 static constexpr float kScale = kHD == 256 ? 0.0625f : kHD == 128 ? 0.08838834764831845f
                                 : kHD == 64 ? 0.125f : 0.0f;   // 1/sqrt(HD); a new HD adds its constant here
+#endif
 static_assert(kScale > 0.0f, "attn.h: no 1/sqrt(HD) for this head dim");
 // Where 1/sqrt(HD) goes on the ATTN_VEXP path. At HD 64 and 256 it is a power of two, so
 // scaling each bf16 half of q is an exponent shift and the scores come out bit-identical
@@ -163,7 +184,11 @@ static_assert(kScale > 0.0f, "attn.h: no 1/sqrt(HD) for this head dim");
 // (three bf16 macs, ~2^-16 relative), on the vector unit, where the scalar version of
 // that same multiply was the 25 ms the fold removed. The HD 64 / 256 builds contain
 // neither branch of that #if and compile byte-for-byte what they did.
+#ifdef ATTN_SCALE
+#define ATTN_SCALE_IN_Q 1     // the override is a power of two (the recipe only emits 1.0)
+#else
 #define ATTN_SCALE_IN_Q (ATTN_HD == 64 || ATTN_HD == 256)
+#endif
 // ml stride: [m: kMLS][l: kMLS]. With ATTN_VEXP the head count is rounded up to
 // a whole vector so BOTH halves are aligned for a 32-float load; without it the
 // halves are packed and ml is 2 * NH as before.
@@ -356,14 +381,25 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
   // rope on dims [0, ROT): pairs (a = dst[j], b = dst[j + ROT/2]); cs = [cos ROT/2 | sin ROT/2].
   // 32 pairs a step, then a 16-lane tail when ROT/2 is not a multiple of 32 (Phi-3 rotates
   // 96 of 128 dims: 48 pairs).
+  // ATTN_ROPE_PAIR moves the PARTNER, not the count: Gemma 4's proportional RoPE turns only
+  // ROT/2 = 64 pairs of a 512-dim head, but pairs dim j with j + HD/2 = 256, because HF
+  // rotates the whole head with inv_freq zero past the first 64 (identity there). So ROT/2
+  // pairs are rotated, kPair apart, and the record still holds only ROT/2 cos / sin.
   constexpr unsigned kHalf = kRot / 2, kHalfV = kHalf - kHalf % kV;
+#ifdef ATTN_ROPE_PAIR
+  constexpr unsigned kPair = ATTN_ROPE_PAIR;
+  static_assert(kPair >= kHalf && kPair + kHalf <= kHD && kPair % kV == 0,
+                "attn.h: ATTN_ROPE_PAIR must leave the rotated pairs disjoint and inside the head");
+#else
+  constexpr unsigned kPair = kHalf;
+#endif
   for (unsigned j = 0; j < kHalfV; j += kV) {
     const v32f c = aie::load_v<kV>(cs + j);
     const v32f s = aie::load_v<kV>(cs + kHalf + j);
     const v32f a = aie::load_v<kV>(dst + j);
-    const v32f b = aie::load_v<kV>(dst + kHalf + j);
+    const v32f b = aie::load_v<kV>(dst + kPair + j);
     aie::store_v(dst + j, fsub32(fmul32(a, c), fmul32(b, s)));
-    aie::store_v(dst + kHalf + j, fadd32(fmul32(b, c), fmul32(a, s)));
+    aie::store_v(dst + kPair + j, fadd32(fmul32(b, c), fmul32(a, s)));
   }
 #if (ATTN_ROT / 2) % 32
   {
@@ -468,6 +504,37 @@ static inline void attn_k_impl(const float *__restrict ke ATTN_BIAS_PARM, const 
     to_bf16_hd(tmp, kout + (e * kHPE + i) * kHD);
   }
 }
+#if ATTN_VNORM
+// Gemma 4's v_norm: an RMSNorm over the head with NO weight (HF Gemma4RMSNorm(with_scale=False)),
+// straight into the bf16 cache row. The same reduction and reciprocal norm_rope uses, so the
+// v row and the k row of one head are normalised by identical arithmetic.
+static inline void rms_to_bf16_hd(const float *__restrict x, bfloat16 *__restrict dst) {
+  accf32 ss = aie::zeros<accfloat, kV>();
+  for (unsigned j = 0; j < kHD; j += kV) {
+    v32b h, l;
+    split32(aie::load_v<kV>(x + j), h, l);
+    ss = aie::mac(ss, h, h);
+    ss = aie::mac(ss, h, l);
+    ss = aie::mac(ss, h, l);
+  }
+#if ATTN_INTFP
+  const float ms = smul_rn(aie::reduce_add(ss.template to_vector<float>()), 1.0f / kHD) + ATTN_EPS;
+  const float hx = smul_rn(0.5f, ms);
+  float inv = aie::invsqrt(ms);
+  inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
+  inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
+#else
+  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + ATTN_EPS);
+#endif
+  const bfloat16 ih = (bfloat16)inv;
+  const bfloat16 il = (bfloat16)(inv - (float)ih);
+  for (unsigned j = 0; j < kHD; j += kV) {
+    accf32 t = aie::zeros<accfloat, kV>();
+    t = mac_vs(t, aie::load_v<kV>(x + j), ih, il);
+    aie::store_v(dst + j, t.template to_vector<bfloat16>());
+  }
+}
+#endif
 static inline void attn_v_impl(const float *__restrict ve ATTN_BIAS_PARM, bfloat16 *__restrict vout, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
 #if ATTN_QKV_BIAS
@@ -477,7 +544,11 @@ static inline void attn_v_impl(const float *__restrict ve ATTN_BIAS_PARM, bfloat
 #else
   const float *__restrict vsrc = ve;
 #endif
+#if ATTN_VNORM
+  for (unsigned i = 0; i < kHPE; ++i) rms_to_bf16_hd(vsrc + i * kHD, vout + (e * kHPE + i) * kHD);
+#else
   for (unsigned i = 0; i < kHPE; ++i) to_bf16_hd(vsrc + i * kHD, vout + (e * kHPE + i) * kHD);
+#endif
 }
 
 static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml ATTN_SINK_IN_PARM) {
@@ -543,7 +614,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
     const unsigned kvh = h / (kNH / kKVH);
-    const bfloat16 *q = qs + h * kHD;
+    const bfloat16 *q = qs + ATTN_QH(h, hl) * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     // Two accumulators, not one: the hi and lo terms are independent, so this is
     // twice the distance between dependent macs for the scheduler to fill.
@@ -654,7 +725,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all
     const unsigned kvh = h / (kNH / kKVH);
-    const float *q = qs + h * kHD;
+    const float *q = qs + ATTN_QH(h, hl) * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     const bfloat16 *v = Vt + kvh * kHD;
     accf32 d = aie::zeros<accfloat, kV>();
@@ -796,7 +867,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   {
     const unsigned hb = kSplit ? (unsigned)h0 : 0u;
     const unsigned kvh = hb / (kNH / kKVH);         // one kv head for all of the core's heads
-    const bfloat16 *q0 = qs + hb * kHD;
+    const bfloat16 *q0 = qs + ATTN_QH(hb, 0u) * kHD;
     v32f z[2 * kRB];                                // level 1: [row r: heads 0,1 | heads 2,3]
     for (unsigned hp = 0; hp < 2; ++hp) {
       AIE_LOOP_UNROLL_FULL
@@ -830,7 +901,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;
     const unsigned kvh = h / (kNH / kKVH);
-    const bfloat16 *q = qs + h * kHD;
+    const bfloat16 *q = qs + ATTN_QH(h, hl) * kHD;
     AIE_LOOP_UNROLL_FULL
     for (unsigned r = 0; r < kRB; ++r) {
       const bfloat16 *k = Kb[r] + kvh * kHD;

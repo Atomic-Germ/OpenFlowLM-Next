@@ -120,7 +120,11 @@ void pack_consts(const Manifest& m, const LayerType& lt, const WeightFile& f, in
 void pack_lmhead(const Manifest& m, const WeightFile& f, uint8_t* dst);
 /// A small weight (a layernorm) as bf16: the q4nx container stores it bf16, a
 /// GGUF may store f32/f16 — converted exactly as the container does.
-void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst);
+/// `div`: every value is divided by it before the one rounding to bf16 (Gemma 4's folded
+/// layer_output_scale, PackOp::div_running); 1.0 is the plain conversion, byte for byte.
+void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst, double div = 1.0);
+/// The one value of a single-element tensor (f32 / f16 / bf16), as a double.
+double scalar_value(const WeightFile& f, const std::string& name);
 /// A position record table: row p = [valid | nf | cos | sin] for the window's row counts
 /// (stream_patch::attn_window) and these RoPE frequencies, `rows` rows of m.ptab_row.
 void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* dst);
