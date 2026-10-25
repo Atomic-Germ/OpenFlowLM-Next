@@ -164,6 +164,8 @@ struct GemmBlockProgram {
     // `ff` is its width. Present => the layer type has no MoE block (has_dense_ffn()).
     std::vector<Step> ffn_program;
     std::map<std::string, GemmWeight> ffn_weights;
+    // High-kernel -> BF16 dequantization-residual kernel; four products per projection.
+    std::map<std::string, std::string> low_kernels;
     bool has_dense_ffn() const { return !ffn_program.empty(); }
     // full: the attention products on the NPU (absent: attention on the host)
     AttnBlock attn_block;
@@ -181,6 +183,7 @@ struct LayerType {
 };
 
 struct KernelDesc {
+    std::string weight_component;            ///< empty (normal) | bf16_residual (paired prefill only)
     std::string context;                     ///< name in Manifest::contexts
     std::string insts;                       ///< relative path of insts.bin
     std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows
