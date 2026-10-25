@@ -351,6 +351,9 @@ private:
     int submit_ahead_ = 0;
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
     bool layer_nan_ = false;                   ///< OFLM_OPEN_LAYER_NAN: after each layer, count NaN / maxabs in xres
+    /// OFLM_OPEN_LAYER_DUMP=<prefix>: alongside layer_nan_check, write each layer's
+    /// post-layer xres row (raw f32 hidden) to <prefix>_<step>_<layer>.bin — bring-up only
+    size_t dump_seq_ = 0;
     bool dump_pools_ = false;                  ///< OFLM_OPEN_DUMP_POOLS (<dir>): dump layer 0's packed pool + consts
     bool merged_q41_ = false;                  ///< the OFLM_GGUF_POOL_Q41 bisect rewrote the gguf section
     void layer_nan_check(xrt::bo& xres, int layer);

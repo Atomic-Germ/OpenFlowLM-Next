@@ -88,7 +88,7 @@ FILES = ("final.xclbin", "insts.bin")
 KEY_FILE = ".build_key"
 
 
-def build_content_key(design: Path, out: Path, env: dict) -> str:
+def build_content_key(design: Path, out: Path, env: dict, spec: Path | None = None) -> str:
     """Hash of everything that determines the build's output.
 
     Covers the design's source files (excluding build outputs and caches) and
@@ -102,8 +102,22 @@ def build_content_key(design: Path, out: Path, env: dict) -> str:
     too), and a design whose srchash moved has a different output -- so the
     cache key has to move with it, or the export reuses a stale xclbin whose
     recipe no longer matches.
+
+    The SPEC is part of it when the design is given one (`env
+    OPEN_KERNELS_SPEC`): several designs read their whole geometry from it at
+    build time (dx/dx_attn: head geometry, kv row, rope), so their SOURCE
+    bytes are identical for every spec of a family while the compiled output
+    is not. Without this, two specs that share a build dir (llama3 h2048:
+    Llama-3.2-1B and MiniCPM5-2B) also share a cache marker, and the second
+    build reuses the first one's kernels VERBATIM -- Llama-3.2-1B shipped
+    MiniCPM5-2B's head-dim-128 dx and refused to load ("unexpected kv
+    transfer at offset 4096").
     """
     h = hashlib.sha256()
+    if spec is not None and spec.is_file():
+        h.update(b"\0spec=")
+        h.update(spec.read_bytes())
+        h.update(b"\0")
     h.update(str(out.relative_to(DESIGNS)).encode())
     h.update(b"\0")
     for f in sorted(design.rglob("*")):
@@ -316,6 +330,36 @@ def stage_design_tree(stage_root: Path) -> None:
     shutil.copytree(DESIGNS, stage_root, ignore=_ignore, dirs_exist_ok=True)
 
 
+def _bdir(name: str, sets: dict) -> Path:
+    return DESIGNS / sets[name]["build_dir"]
+
+
+def _snapshot(name: str, bdir: Path, stage_root: Path | None) -> Path:
+    """A private copy of the build's artifacts, taken under the design lock.
+
+    The build dirs are shared between specs (dense/build_llama3_h2048 is both
+    Llama-3.2-1B's and MiniCPM5-2B's), so a later spec's rebuild overwrites
+    final.xclbin / insts.bin in place once its marker says "not mine". A spec
+    copies its artifacts only after ALL of its sets' builds finish, so an
+    overwriting build can lose that race and the export silently SHIPS THE
+    OTHER SPEC'S xclbin -- and the per-file sha256 the manifest then records
+    blesses the wrong bytes, so every later export sees "up to date" and keeps
+    them. Found on hardware: a Llama-3.2-1B set whose dx was MiniCPM5-2B's
+    (a KV drain at row 4096 against a 2048-byte kv_row; load refused with
+    "unexpected kv transfer at offset 4096").
+
+    With stage_root=None (no staging: sequential, nothing builds alongside)
+    there is nobody to lose the race to: return bdir itself.
+    """
+    if stage_root is None:
+        return bdir
+    d = stage_root / "snapshots" / name
+    d.mkdir(parents=True, exist_ok=True)
+    for f in FILES:
+        shutil.copyfile(bdir / f, d / f)
+    return d
+
+
 def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> tuple[str, Path]:
     """Build one kernel set. Worker for the parallel build; returns (name, bdir).
 
@@ -328,7 +372,7 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
     design_path = sets[name]["design"]
     src = (stage_root / design_path) if stage_root else (DESIGNS / design_path)
 
-    out = DESIGNS / sets[name]["build_dir"]
+    out = _bdir(name, sets)
     knobs = sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
@@ -343,12 +387,12 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
         # The cache lives next to the output, so it is covered by the same lock
         # as the build: a spec that finds a current key reuses the xclbin
         # instead of rebuilding an identical one.
-        key = build_content_key(src.parent, out, knobs)
+        key = build_content_key(src.parent, out, knobs, spec=spec_file)
         marker = out / KEY_FILE
         have = all((out / f).is_file() for f in FILES)
         if have and marker.is_file() and marker.read_text(encoding="utf-8").strip() == key:
             print(f"[{name}] up to date (build key {key[:19]}), reusing", flush=True)
-            return name, out
+            return name, _snapshot(name, out, stage_root)
 
         # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
         # reports a core whose program does not fit only as an invalid ELF.
@@ -371,11 +415,12 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
             raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
                                f"Last build output:\n{detail or '(no output)'}")
         marker.write_text(key + "\n", encoding="utf-8")
+        snap = _snapshot(name, out, stage_root)
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
-    used = fullest_core(out)
+    used = fullest_core(snap)
     if used:
         print(f"[{name}] program memory: fullest core {used} of {PROGRAM_MEMORY} B ({PROGRAM_MEMORY - used} B free)")
-    return name, out
+    return name, snap
 
 
 def build(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> Path:
@@ -498,8 +543,15 @@ def main() -> int:
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
     if a.no_build:
+        # The artifacts this export ships are the ones already in out_root --
+        # `have` verified every file is there. The design build dirs are
+        # shared between specs and another spec's build may have overwritten
+        # them since; copying from those would re-bless the other spec's
+        # bytes into this set (the copy loop records their sha256 in the
+        # toolchain record). Copying from out_root is a no-op (src == dst)
+        # that just re-hashes the shipped files.
         for n in names:
-            bdirs[n] = DESIGNS / sets[n]["build_dir"]
+            bdirs[n] = out_root / n
     else:
         workers = max(1, min(a.jobs, len(names)))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
