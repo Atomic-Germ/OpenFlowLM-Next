@@ -75,6 +75,12 @@
 #ifndef ATTN_SINK
 #define ATTN_SINK 0          // 1: a learned per-head logit joins the softmax denominator with no
 #endif                       // value vector behind it, so a head can attend to nothing (GPT-OSS)
+#ifndef ATTN_ROPE_IL
+#define ATTN_ROPE_IL 0       // 1: rope pairs INTERLEAVED dims (2i, 2i + 1) -- llama.cpp's NORM
+#endif                       // layout, which the llama-family GGUF archs use -- instead of the
+                             // half-split (i, i + ROT/2) every other family's rotation is.
+                             // The cs table is pair-ordered ([cos ROT/2 | sin ROT/2]) under both
+                             // laws, so nothing else in the design changes.
 #ifndef ATTN_PTAB_SPLIT
 #define ATTN_PTAB_SPLIT 0    // 1: the position record is wider than a fifo element, so cos / sin
 #endif                       // arrive in a second one (Qwen2.5-3B: a 1024 B record, 512 B elements)
@@ -353,9 +359,31 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
 #endif
   }
 #endif
-  // rope on dims [0, ROT): pairs (a = dst[j], b = dst[j + ROT/2]); cs = [cos ROT/2 | sin ROT/2].
-  // 32 pairs a step, then a 16-lane tail when ROT/2 is not a multiple of 32 (Phi-3 rotates
-  // 96 of 128 dims: 48 pairs).
+  // rope on dims [0, ROT). Two pairing laws, one table:
+  //   half-split (default): pairs (a = dst[j], b = dst[j + ROT/2]) -- Qwen / NEOX style.
+  //   interleaved (ATTN_ROPE_IL): pairs (a = dst[2j], b = dst[2j + 1]) -- llama.cpp's NORM
+  //     layout, which the llama-family GGUF archs rotate with. cs is pair-ordered either way
+  //     ([cos ROT/2 | sin ROT/2]: pair i reads cs[i] / cs[ROT/2 + i]), so the position table
+  //     (pools.cpp's ptab records) is identical under both laws and only the pairing changes.
+  // Half-split steps 32 pair-vectors, then a 16-lane tail when ROT/2 is not a multiple of 32
+  // (Phi-3 rotates 96 of 128 dims: 48 pairs).
+#if ATTN_ROPE_IL
+  // A 32-lane window [2j, 2j + 32) holds 16 pairs. interleave_unzip splits it into the window's
+  // even and odd lanes -- the (a, b) partners, ordered by pair index, so the (then identical)
+  // complex multiply runs on the same cos / sin rows -- and interleave_zip re-lays the two
+  // rotated halves into the window's interleaved order. All v16f: the native shuffle width.
+  constexpr unsigned kHalf = kRot / 2;
+  static_assert(kRot % 32 == 0, "ATTN_ROPE_IL rotates in 16-pair windows");
+  for (unsigned j = 0; j < kHalf; j += 16) {
+    const v16f x0 = aie::load_v<16>(dst + 2 * j), x1 = aie::load_v<16>(dst + 2 * j + 16);
+    const auto ab = aie::interleave_unzip(x0, x1, 1);
+    const v16f c = aie::load_v<16>(cs + j), s = aie::load_v<16>(cs + kHalf + j);
+    const auto eh = aie::interleave_zip(fsubN<16>(fmulN<16>(ab.first, c), fmulN<16>(ab.second, s)),
+                                        faddN<16>(fmulN<16>(ab.second, c), fmulN<16>(ab.first, s)), 1);
+    aie::store_v(dst + 2 * j, eh.first);
+    aie::store_v(dst + 2 * j + 16, eh.second);
+  }
+#else
   constexpr unsigned kHalf = kRot / 2, kHalfV = kHalf - kHalf % kV;
   for (unsigned j = 0; j < kHalfV; j += kV) {
     const v32f c = aie::load_v<kV>(cs + j);
@@ -374,6 +402,7 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
     aie::store_v(dst + kHalfV, fsubN<16>(fmulN<16>(a, c), fmulN<16>(b, s)));
     aie::store_v(dst + kHalf + kHalfV, faddN<16>(fmulN<16>(b, c), fmulN<16>(a, s)));
   }
+#endif
 #endif
 #if ATTN_QKNORM_POST
   // the whole head, not just [0, ROT): the unrotated tail is scaled too

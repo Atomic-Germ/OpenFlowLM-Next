@@ -19,23 +19,31 @@ def rms_norm(x: np.ndarray, eps: float) -> np.ndarray:
 
 
 def norm_rope(x: np.ndarray, w: np.ndarray, cs: np.ndarray, eps: float,
-              qk_norm: bool, post: bool) -> np.ndarray:
+              qk_norm: bool, post: bool, interleaved: bool = False) -> np.ndarray:
     """rms(q) * w, then the rotation over the first rotary_dim dims.
 
-    `cs` is [cos(ROT/2) | sin(ROT/2)] as the host sends it; the rotation is
-    half-split: the pair (j, j + ROT/2) turns by the angle at j.
+    `cs` is [cos(ROT/2) | sin(ROT/2)] as the host sends it -- pair-ordered under
+    both pairing laws. Half-split (the default): the pair (j, j + ROT/2) turns
+    by the angle at j. Interleaved (llama.cpp's NORM archs, ATTN_ROPE_IL): the
+    pair (2j, 2j + 1) turns by the angle at j.
     """
     y = np.asarray(x, np.float64).copy()
     if qk_norm and not post:
         y = rms_norm(y, eps) * np.asarray(w, np.float64)
     rot = len(cs)                     # cs is [cos(ROT/2) | sin(ROT/2)]: ROT entries
-    half = rot // 2                   # the pairs are (j, j + ROT/2)
-    a = y[..., :half].copy()
-    b = y[..., half:rot].copy()
+    half = rot // 2                   # pair j turns by the angle at j, either law
     c = cs[:half].astype(np.float64)
     s = cs[half:].astype(np.float64)
-    y[..., :half] = a * c - b * s
-    y[..., half:rot] = b * c + a * s
+    if interleaved:
+        a = y[..., 0:rot:2].copy()
+        b = y[..., 1:rot:2].copy()
+        y[..., 0:rot:2] = a * c - b * s
+        y[..., 1:rot:2] = b * c + a * s
+    else:
+        a = y[..., :half].copy()
+        b = y[..., half:rot].copy()
+        y[..., :half] = a * c - b * s
+        y[..., half:rot] = b * c + a * s
     if qk_norm and post:
         y = y * np.asarray(w, np.float64)
     return y
@@ -50,7 +58,8 @@ def cos_sin(pos: int, rot: int, theta: float) -> np.ndarray:
 
 def decode(q: np.ndarray, k: np.ndarray, v: np.ndarray, qn: np.ndarray, kn: np.ndarray,
            cs: np.ndarray, cache_k: np.ndarray, cache_v: np.ndarray, *,
-           nh: int, kvh: int, hd: int, eps: float, qk_norm: bool, post: bool):
+           nh: int, kvh: int, hd: int, eps: float, qk_norm: bool, post: bool,
+           interleaved: bool = False):
     """The attention step: the new position's rows plus the cached window.
 
     `cache_k` / `cache_v` are the window's bf16 rows ([rows, KVH, HD]). The
@@ -60,8 +69,8 @@ def decode(q: np.ndarray, k: np.ndarray, v: np.ndarray, qn: np.ndarray, kn: np.n
     here the same way and rounded to bf16 -- the kernel's own row is the input
     of the score, not a separate value.
     """
-    qp = norm_rope(q, qn, cs, eps, qk_norm, post)                       # [NH, HD]
-    kp = norm_rope(k, kn, cs, eps, qk_norm, post).astype(bfloat16)       # [KVH, HD]
+    qp = norm_rope(q, qn, cs, eps, qk_norm, post, interleaved)           # [NH, HD]
+    kp = norm_rope(k, kn, cs, eps, qk_norm, post, interleaved).astype(bfloat16)  # [KVH, HD]
     vp = np.asarray(v, np.float32).astype(bfloat16)                      # [KVH, HD]
     rows_k = np.concatenate([np.asarray(cache_k, np.float64), kp[None].astype(np.float64)], 0)
     rows_v = np.concatenate([np.asarray(cache_v, np.float64), vp[None].astype(np.float64)], 0)

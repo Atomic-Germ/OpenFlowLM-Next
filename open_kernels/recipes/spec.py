@@ -31,6 +31,18 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
+
+# The families whose RoPE pairs ADJACENT dims -- (2i, 2i + 1), llama.cpp's NORM layout, which is
+# how every GGUF of the family's architecture defines the rotation. The other families (Qwen,
+# Gemma, the neox-style archs) pair (i, i + rot/2) -- what the kernels hard-wire, so half-split
+# is the default everywhere and this list switches it (dense.py's geometry, attn.h's
+# ATTN_ROPE_IL). A measured family property like QKNORM_POST_ROPE: Llama 3.2's GGUF-direct
+# garbage was exactly this -- BOS (position 0, an identity rotation) perfect, every other
+# position wrong. Phi-3 and Granite are the same llama.cpp NORM law in principle but stay
+# half-split here until their GGUF-direct weights are measured against their own reference the
+# way llama's were (Phi-3 also rotates only rotary_dim of a head, and llama.cpp keeps that
+# tail in the un-rotated neox-style position: verify before moving either family).
+ROPE_INTERLEAVED_FAMILIES = ("llama3",)
 QUANT_FORMATS = ("q4_1", "q4_1_f32", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
 NORM_GROUPS = (1, 2, 4)   # the GroupRMSNorm counts the `ln` kernels build (ln.h LN_GROUPS)
@@ -166,6 +178,13 @@ class ModelSpec:
             return ""
         q = self.canonical_quant()
         return hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:8]
+
+    @property
+    def rope_interleaved(self) -> bool:
+        """The RoPE pairing law this family's GGUF uses: True for the interleaved (2i, 2i + 1)
+        NORM archs, False for half-split (i, i + rot/2). Family-driven, like qk_norm: the law
+        comes from the architecture, never from a per-model field."""
+        return self.family in ROPE_INTERLEAVED_FAMILIES
 
     def rope_inv_freq(self, local: bool = False, ctx: int | None = None) -> list[float]:
         """The inverse frequency of each rotary pair i < rotary_dim/2: theta^(-2i/rot), with Llama 3's

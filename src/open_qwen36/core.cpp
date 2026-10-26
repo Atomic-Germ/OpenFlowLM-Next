@@ -2430,7 +2430,10 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
         }
 
     // Phase A (per token, disjoint cache rows): rope q into Q, rope k and round
-    // it into the bf16 cache row, round v likewise. Padding tokens are computed
+    // it into the bf16 cache row, round v likewise. The manifest's pairing law:
+    // half-split pairs (i, i + half) by default; an interleaved family
+    // (rope_pairing "interleaved" -- llama.cpp's NORM layout) pairs (2i, 2i + 1).
+    // Padding tokens are computed
     // too -- the NPU path dispatches them as well, and real columns never read
     // rows behind them, so the real outputs do not depend on the padding.
 #pragma omp parallel for
@@ -2442,19 +2445,23 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
             for (size_t i = 0; i < half; ++i) {
                 const double a = static_cast<double>(p) * inv_freq[i];
                 const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-                const float x1 = qh[i], x2 = qh[i + half];
-                qh[i] = x1 * c - x2 * s;
-                qh[i + half] = x2 * c + x1 * s;
+                const size_t b1 = w_->rope_interleaved ? 2 * i : i;
+                const size_t b2 = w_->rope_interleaved ? b1 + 1 : i + half;
+                const float x1 = qh[b1], x2 = qh[b2];
+                qh[b1] = x1 * c - x2 * s;
+                qh[b2] = x2 * c + x1 * s;
             }
         }
         for (size_t h = 0; h < kvh; ++h)
             for (size_t i = 0; i < half; ++i) {
                 const double a = static_cast<double>(p) * inv_freq[i];
                 const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-                const float x1 = y_qkv3[(qw + h * hd + i) * T + tk];
-                const float x2 = y_qkv3[(qw + h * hd + i + half) * T + tk];
-                K[p * kvw + h * hd + i] = x1 * c - x2 * s;
-                K[p * kvw + h * hd + i + half] = x2 * c + x1 * s;
+                const size_t b1 = w_->rope_interleaved ? 2 * i : i;
+                const size_t b2 = w_->rope_interleaved ? b1 + 1 : i + half;
+                const float x1 = y_qkv3[(qw + h * hd + b1) * T + tk];
+                const float x2 = y_qkv3[(qw + h * hd + b2) * T + tk];
+                K[p * kvw + h * hd + b1] = x1 * c - x2 * s;
+                K[p * kvw + h * hd + b2] = x2 * c + x1 * s;
             }
         for (size_t j = 0; j < kvw; ++j) {
             const float vj = y_qkv3[(qw + kvw + j) * T + tk];
@@ -2536,7 +2543,7 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     timing_.state_ms += ms_since(tt);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
     host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
@@ -3392,7 +3399,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
     if (attn_block_on_ && gb.attn_block.present()) {
@@ -3659,7 +3666,7 @@ void Core::layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, s
     auto geom = [&](size_t b) {
         host::AttnGeom g;
         g.T = T; g.t_real = std::min(T, N - b * T); g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-        g.pos0 = pos0 + b * T; g.eps = gb.eps;
+        g.pos0 = pos0 + b * T; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
         return g;
     };
     // each block's attention window is explicit, so later blocks' K / V rows in the map change nothing

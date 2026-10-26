@@ -98,7 +98,8 @@ def main() -> int:
         cv = np.ascontiguousarray(cache_v, bfloat16)
         new, og = REF.decode(q, k, v, qn, kn, cs, ck, cv, nh=nh, kvh=kvh, hd=hd,
                              eps=spec.norm_eps, qk_norm=spec.qk_norm,
-                             post=bool(G.QKNORM_POST))
+                             post=bool(G.QKNORM_POST),
+                             interleaved=bool(spec.rope_interleaved))
         cache = np.concatenate([ck, cv], 1)               # [rows, 2, KVH, HD]
         for prefix, data in (("meta", meta), ("qg", qg), ("kvn", kvn),
                              ("ref-new", new), ("ref-og", og.astype(np.float32))):

@@ -74,6 +74,7 @@ class DenseGeometry:
     QKVB: bool                                                      # q/k/v carry a per-channel bias (Qwen2)
     PTAB_ELEMS: int; PTAB_CS_ELEM: int                              # fifo elements per position record; which one holds cos / sin
     EPS: float; ACT: str; SANDWICH: bool; WINDOW: int
+    ROPE_IL: bool                                                   # interleaved RoPE pairs (llama.cpp's NORM archs)
     PER_CALL: int; CALL_BYTES: int                                  # chunks per weight element (1 when the table is wide)
     QW: int; KVW: int
     Q_PC: int; KV_PC: int; O_PC: int; UP_PC: int; DOWN_PC: int      # bands per core
@@ -271,7 +272,8 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         QKVB=qkv_bias(spec),
         PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=512 // e_a,
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
-        WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * ch,
+        WINDOW=spec.sliding_window if spec.has_local else 0, ROPE_IL=spec.rope_interleaved,
+        PER_CALL=pc, CALL_BYTES=pc * ch,
         QW=qw, KVW=kvw,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=hid // BAND_ROWS // n,
         UP_PC=ff // BAND_ROWS // n, DOWN_PC=hid // BAND_ROWS // n,
@@ -362,7 +364,7 @@ def attn_flags(G: DenseGeometry, probe_env=()) -> list[str]:
         flags.append(f"-DATTN_RB={G.RB}")                 # would change every other family's build line
     if G.QKVB:                                            # same: only a family that has a bias sees the flag
         flags.append("-DATTN_QKV_BIAS=1")
-    if getattr(G, "ROPE_IL", False):                      # interleaved RoPE pairs; set by the rope-pairing port
+    if G.ROPE_IL:                                         # same: interleaved RoPE pairs (the NORM archs)
         flags.append("-DATTN_ROPE_IL=1")
     if G.PTAB_ELEMS > 1:                                 # the position record spans two elements
         flags.append("-DATTN_PTAB_SPLIT=1")
@@ -778,8 +780,13 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
             "chunk_bytes": chunk_bytes(pool_quant(spec)), "pool_bytes": L.POOL_BYTES,
             "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
             "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
-            "rope_inv_freq": spec.rope_inv_freq()}     # the global table's short/base table; each ptab
+            "rope_inv_freq": spec.rope_inv_freq(),          # the global table's short/base table; each ptab
             # global carries its own (both tables, for a longrope family -- see programs())
+            # The pairing law the NPU rope does NOT bake into the table: the table itself is
+            # pair-ordered [cos ROT/2 | sin ROT/2] under both laws, so the host half (and any
+            # later block-attention prep) reads the law from here. Older manifests have no
+            # key, which the engine reads as half-split.
+            "rope_pairing": "interleaved" if spec.rope_interleaved else "half-split"}
 
 
 def _phi3_raw_scaling(spec: ModelSpec):
