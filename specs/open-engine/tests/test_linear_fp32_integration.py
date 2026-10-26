@@ -17,7 +17,7 @@ def spec(size='27b'):return load_spec(ROOT/f'open_kernels/recipes/specs/qwen35-{
 def test_wide_linear_fp32_layout_and_contract():
     s=spec();r=recipe(s);l=r.layout;m=manifest(s)
     assert r.linear.XN_F32 and r.linear.CONV_F32 and r.linear.XN_SIDE_ELEMS==5
-    assert l.A_QKV-l.A_XN==20480 and l.A_BYTES==393216
+    assert l.A_QKV-l.A_XN==20480 and l.A_BYTES==417792
     assert l.STATE_S_OFF==122880 and l.STATE_BYTES==3317760
     assert m['layout']['linear_entry_dtype']=='float32'
     assert m['layout']['linear_conv_dtype']=='float32'

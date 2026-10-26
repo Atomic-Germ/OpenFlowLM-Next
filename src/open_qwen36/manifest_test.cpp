@@ -103,6 +103,28 @@ int main(int argc, char** argv) {
         try { Manifest::parse(j, "bad entry dtype"); check(false, "bad entry dtype accepted"); }
         catch (const std::runtime_error&) { check(true, "bad entry dtype refused"); }
     }
+    // An explicit post-output region must fit the declared linear scratch BO.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt = j["layer_types"]["linear_attention"];
+        const uint64_t offset = (lt["buffers"]["act"].get<uint64_t>() + 4095) / 4096 * 4096;
+        lt["buffers"]["act"] = offset + 24576;
+        lt["post_output"] = {{"dtype", "float32"}, {"offset", offset}, {"bytes", 24576}};
+        try { Manifest::parse(j, "FP32 post"); check(true, "FP32 post accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 6; ++bad) {
+            auto broken = j;
+            auto& t = broken["layer_types"]["linear_attention"];
+            if (bad == 0) t["post_output"]["dtype"] = "float16";
+            if (bad == 1) t["post_output"]["offset"] = offset + 1;
+            if (bad == 2) t["post_output"]["bytes"] = 0;
+            if (bad == 3) t["buffers"]["act"] = offset + 24575;
+            if (bad == 4) t["post_output"]["offset"] = UINT64_MAX - 4095;
+            if (bad == 5) t["buffers"]["state"] = {{"kind", "kv"}, {"row", 4096}};
+            try { Manifest::parse(broken, "bad post output"); check(false, "bad post ABI accepted"); }
+            catch (const std::exception&) { check(true, "bad post ABI refused"); }
+        }
+    }
     // Linear entry/history dtypes are an explicit ABI, not optional hints.
     for (const char* field : {"linear_entry_dtype", "linear_conv_dtype"}) {
         json j; std::ifstream(argv[1]) >> j;

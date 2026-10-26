@@ -14,6 +14,7 @@ from decode_bundle import load_bundle
 from recipes.load import load_spec
 from recipes.manifest import manifest
 from recipes.cache import build_key
+from export_qwen36_kernels import staging_root
 
 
 def digest(path):
@@ -30,7 +31,7 @@ def dependencies(name):
     return result
 
 
-def audit_compilation(build_root):
+def audit_compilation(build_root, stage_root=None):
     hashes={}
     for name in ('lx','ax'):
         prj=build_root/name/'final.prj';source=prj/'dense_prep_f32.cc'
@@ -43,7 +44,10 @@ def audit_compilation(build_root):
             dep=prj/(obj+'.o.d')
             tokens=shlex.split(dep.read_text().replace('\\\n',''))
             for path in headers:
-                if str(path) not in tokens:raise ValueError('compiler used wrong header: '+str(dep))
+                used=path if stage_root is None else stage_root/path.relative_to(ROOT/'open_kernels/designs')
+                if str(used) not in tokens or digest(used)!=digest(path):
+                    raise ValueError('compiler used wrong or stale header: '+str(dep))
+                hashes[str(used)]=digest(used)
                 hashes[str(path)]=digest(path)
             hashes[str(dep.resolve())]=digest(dep)
     return hashes
@@ -54,7 +58,7 @@ def audit(export,build_root):
     selected=load_bundle(export,manifest(spec,max_ctx=old['max_ctx_default']))
     if selected['build_key']!=build_key(spec):raise ValueError('export source identity mismatch')
     if selected['layout'].get('q4_activation_sum')!='quantized_fp32':raise ValueError('missing arithmetic identity')
-    hashes=audit_compilation(build_root)
+    hashes=audit_compilation(build_root, staging_root(spec,build_root))
     for name in ('lx','ax'):
         for filename in ('final.xclbin','insts.bin'):
             source=build_root/name/filename;dest=export/name/filename

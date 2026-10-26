@@ -14,7 +14,7 @@ def spec():return load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json')
 
 def test_full_layer_requires_current_fp32_production_geometry():
     g=m.geometry(spec())
-    assert g['act_bytes']==393216 and g['state_bytes']==3317760
+    assert g['act_bytes']==417792 and g['state_bytes']==3317760
     assert g['scratch_floats']==1280 and g['rows']==10
 
 

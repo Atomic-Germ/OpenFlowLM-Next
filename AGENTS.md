@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-post-output-integration</name>
+    <description>Build standard FP32 DeltaNet post-output kernels and validate scratch compatibility, resources and full-depth decode.</description>
+    <location>.agents/skills/open-qwen38-post-output-integration/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-shared-post-output</name>
     <description>Build shared BF16/FP32 post-output specializations and verify full-lx binary identity before production ABI promotion.</description>
     <location>.agents/skills/open-qwen38-shared-post-output/SKILL.md</location>

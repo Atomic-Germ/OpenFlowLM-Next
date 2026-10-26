@@ -86,7 +86,9 @@ def test_production_arithmetic_matches_validated_shared_headers():
 def test_manifest_refuses_pre_correction_bundle_and_preserves_packing(tmp_path):
     s = spec(); new = manifest(s)
     assert new['layout']['linear_recurrence'] == 'factored_compensated'
-    with patch.object(geometry, 'factored_recurrence', return_value=False):
+    # Hold the independently validated post-output storage contract constant.
+    with patch.object(geometry, 'factored_recurrence', return_value=False), \
+         patch.object(geometry, 'linear_post_fp32', return_value=True):
         old = manifest(s); old_pack = pack_plan(s); old_layout = recipe(s).layout
     assert old_pack == pack_plan(s) and old_layout == recipe(s).layout
     assert 'linear_recurrence' not in old['layout']

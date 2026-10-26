@@ -1,6 +1,50 @@
 # Qwen3.8-27B validation report
 
-## Latest checkpoint — shared DeltaNet post-output, 2026-10-26
+## Standard FP32 DeltaNet post-output — 2026-10-26
+
+Promoted the shared FP32 post-output path into the standard wide dense Q4 recipe.
+The 24576-byte region is appended at byte 393216; linear scratch is now 417792
+bytes. Existing scratch offsets, recurrent state and weight packing stay intact.
+Manifest v4 declares the post region and the native reader rejects invalid dtype,
+alignment, state kind and bounds. The private BF16 control explicitly retains
+its old layout. Other model geometries and mixed Q8 roles keep their storage.
+
+A fresh model-derived export builds all **46 sets / 92 binary hashes**. Compiled
+consistent-sum/factored headers match current production sources, including
+isolated staging copies. Standard lx instructions match the audited private FP32
+candidate exactly; the XCLBIN differs only in 80 build-stamp bytes. lx/ax maximum
+text is **16000 / 13760 bytes**, assigned L1 end **62336 / 59920**, stacks **6144**.
+No resource limits were raised. Build key:
+`67f3c4395334a0bc3aa0dcb2bcff398cfa01147451cddd3b022afca4215c7a13`.
+
+All **66 model/pool hashes** and **195 fresh CPU reference files** match retained
+provenance. A new 64-layer, three-position NPU run completes 198 dispatches;
+**192/192 residuals pass**, worst maxrel **0.0001072489** at L63/T1 against 0.005.
+The previous standard three-position maximum was 0.0030399006. Logit correlations
+are **0.9999993162 / 0.9999987908 / 0.9999988379**, with CPU/NPU argmax
+**8678 / 198 / 2**. Acceptance thresholds and the independent oracle are unchanged.
+
+All seven independent boundary checkers pass: DeltaNet input/state **144/144**,
+strict recurrence heads **6912/6912**, attention heads **1152/1152**, attention
+projections **48/48**, FFN front/down **192/192** each and LM-head **3/3**.
+A fresh shared CLI runs two resident requests; all three second-request logits
+match the harness bytewise. Full-buffer forced-token reset has **0/3** differing
+replays. CPU weight checkers and resident NPU runs were serialized.
+
+TDD includes recipe/manifest and native parser failures before implementation,
+plus an audit regression for isolated staged headers. Host suite: **1886 passed,
+47 skipped**; native CTest **4/4**. The manifest regression executable also
+loads the actual new export successfully. Evidence is retained under
+`Models/qwen38-27b/production-post-fp32/` with binary/resource, source, reference,
+numerical and lifecycle reports. No installed bundle or running service changed.
+
+This completes standard-export integration and short decode validation. Fresh
+short prefill, block-boundary and long-prefix checks remain required for this
+export. Serving and measured performance acceptance are still open; full model
+acceptance is not claimed.
+
+
+## Shared DeltaNet post-output checkpoint, 2026-10-26
 
 Moved the private FP32 post-output specialization into the shared post kernel,
 FIFO declarations, dense DMA and output-projection preparation. One explicit

@@ -15,10 +15,11 @@ def spec(m):return m.load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json'
 
 def test_append_scratch_and_double_post_stream():
     m=load();sp=spec(m);old=m.recipe(sp).layout;g=m.geometry(sp,'fp32')
-    assert g['post_offset']==old.A_BYTES
-    assert g['act_bytes']==old.A_BYTES+6144*4
+    assert g['post_offset']==old.A_OG==393216
+    assert g['act_bytes']==old.A_BYTES==417792
     assert g['post_elements']==6 and g['state_bytes']==old.STATE_BYTES
-    assert m.geometry(sp,'control')['post_offset']==old.A_OG
+    assert m.geometry(sp,'control')['post_offset']==208896
+    assert m.geometry(sp,'control')['act_bytes']==393216
 
 
 def test_candidate_and_control_compile_the_shared_post_source():
