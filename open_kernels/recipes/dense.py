@@ -343,6 +343,35 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     )
 
 
+def attn_flags(G: DenseGeometry, probe_env=()) -> list[str]:
+    """The compile-time macros attn.h is built with for this geometry.
+
+    One list, two callers: the layer design (designs/dense/dx.py) and the attention
+    gate (designs/attn/probe_dense.py) that validates a geometry without a model.
+    The gate has to build the SHIPPED kernel's configuration, so the flags live
+    here rather than in the design that happens to use them today -- a second copy
+    would drift, and a drifted gate validates a kernel nobody ships.
+
+    `probe_env` are the probe overrides (ATTN_NULL / ATTN_ABL / ...): they change
+    the compiled kernel, so they belong in the build key, not in a default.
+    """
+    flags = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
+             f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
+             f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
+    if G.RB > 1:                                           # attn.h defaults it to 1; adding the flag
+        flags.append(f"-DATTN_RB={G.RB}")                 # would change every other family's build line
+    if G.QKVB:                                            # same: only a family that has a bias sees the flag
+        flags.append("-DATTN_QKV_BIAS=1")
+    if getattr(G, "ROPE_IL", False):                      # interleaved RoPE pairs; set by the rope-pairing port
+        flags.append("-DATTN_ROPE_IL=1")
+    if G.PTAB_ELEMS > 1:                                 # the position record spans two elements
+        flags.append("-DATTN_PTAB_SPLIT=1")
+    for k, v in probe_env:
+        if k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
+            flags.append(f"-D{k}={v}")                    # In the build key -- recipes/cache.py.
+    return flags
+
+
 def recipe(spec: ModelSpec, max_ctx: int = 4096) -> DenseRecipe:
     _check(spec)
     return DenseRecipe(spec=spec, layout=layout(spec, max_ctx), geo=geometry(spec), max_ctx=max_ctx)

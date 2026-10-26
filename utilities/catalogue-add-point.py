@@ -35,6 +35,7 @@ CAT = ROOT / "open_kernels" / "recipes" / "catalogue.py"
 def load_catalogue():
     spec = importlib.util.spec_from_file_location("_catalogue_probe", CAT)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclasses look the module up here (3.14 requires it)
     spec.loader.exec_module(mod)
     return mod
 

@@ -148,20 +148,9 @@ def bt(total, off, n):
     return TensorAccessPattern((1, total), off, [1, 1, 1, n], [0, 0, 0, 1])
 
 
-ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
-              f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
-              f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
-if G.RB > 1:                                           # attn.h defaults it to 1; adding the flag
-    ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")             # would change every other family's build line
+ATTN_FLAGS = QR.attn_flags(G, QR.probe_env().items())  # recipes/dense.py: the one list, shared with the gate
 QKVB = G.QKVB
-if QKVB:                                               # same: only a family that has a bias sees the flag
-    ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
 NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position record; which holds cos / sin
-if NPTAB > 1:
-    ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
-for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
-    if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
-        ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits

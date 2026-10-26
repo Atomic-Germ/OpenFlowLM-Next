@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 from . import dense as D
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
+from .dense import attn_flags  # noqa: F401  (the same list the dense design builds attn.h with)
 from .catalogue import OpRangeError, check_buffer_args, require
 from .qwen36moe import (CHUNK, ELEM, MB, mixed_check, proj_op, q4_chunks, quant_check,
                         require_gemv, role_bytes, roundup)
