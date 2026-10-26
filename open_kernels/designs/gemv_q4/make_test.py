@@ -82,9 +82,23 @@ def main() -> int:
     ap.add_argument("--layout", default="q4nx", choices=["q4nx", "gguf"],
                     help="q4nx: bf16-scale chunks (q4_1_pack); gguf: the direct-GGUF "
                          "f32-scale chunks (gguf_pool), built with GEMV_SCALES_F32=1")
+    ap.add_argument("--K", type=int, default=None,
+                    help="override the region's K (synthetic only): validate a width no "
+                         "region carries, e.g. --region share_down --N 2560 --K 10496")
+    ap.add_argument("--N", type=int, default=None, help="override the region's N (synthetic only)")
+    ap.add_argument("--per-call", type=int, default=None,
+                    help="chunks per weight element for the build (default: the design's 4; "
+                         "use the recipe's per_call when RS * K / 256 is not a multiple of 4)")
     a = ap.parse_args()
 
     _, n, k, rs = REGIONS[a.region]
+    if a.K is not None or a.N is not None:
+        if a.source != "synthetic":
+            ap.error("--K/--N only apply to the synthetic source (a captured region is fixed)")
+        if a.K is not None:
+            k = a.K
+        if a.N is not None:
+            n = a.N
     if a.source == "captured":
         sys.path.insert(0, str(HERE.parents[1]))
         import fixture_paths as FX
@@ -134,6 +148,9 @@ def main() -> int:
     if a.layout == "gguf":
         tag += "_gguf"
     build = f"{a.region}_gguf" if a.layout == "gguf" else a.region
+    if a.K is not None or a.N is not None:
+        tag += f"_k{k}"          # an off-region width gets its own vectors, cfg and build dir
+        build += f"_k{k}"
     if a.source == "captured":
         tag += "_cap"
     (HERE / f"w_{tag}.bin").write_bytes(w.tobytes())
@@ -151,7 +168,8 @@ def main() -> int:
     cores = min(8, n // (32 * rs))
     print(f"{tag}: N={n} K={k} RS={rs} w={nbytes} B x={x.nbytes} B ref={ref.nbytes} B "
           f"ref[:4]={ref[:4]} absmax={np.abs(ref).max():.4g}")
-    print(f"build: GEMV_N={n} GEMV_K={k} GEMV_RS={rs} GEMV_CORES={cores} "
+    pc = f"GEMV_PER_CALL={a.per_call} " if a.per_call is not None else ""
+    print(f"build: GEMV_N={n} GEMV_K={k} GEMV_RS={rs} GEMV_CORES={cores} {pc}"
           f"python build_design.py designs/gemv_q4/gemv_q4.py designs/gemv_q4/build_{build}")
     print(f"run:   (cd designs/gemv_q4 && run_kernel run_{tag}.cfg && python compare.py {tag})")
     return 0
