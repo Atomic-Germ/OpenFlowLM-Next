@@ -243,6 +243,7 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
         except GateError as exc:
             last = exc
             print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; trying the next")
+            _cleanup(d, tag, cc_before, keep=dry)     # a failed build leaves TUs behind too
             continue
         _run([harness, d / f"run_{tag}.cfg"], env=e, cwd=d, quiet=True)
         _run([py, d / "compare.py", tag], env=e, cwd=d)
