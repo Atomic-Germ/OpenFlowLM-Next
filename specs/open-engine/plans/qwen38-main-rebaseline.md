@@ -1,5 +1,38 @@
 # Qwen3.8-27B validation report
 
+## Resident short-prefill reset on the FP32 export — 2026-10-26
+
+Added a runner and separate auditor for repeated requests against the fresh
+FP32 short-prefill baseline. Both baseline report and audit are pinned; the
+runner recomputes their numerical measurements and verifies current builds,
+model, CPU references and export inputs before and after execution. Production
+runtime and kernels are unchanged. The new capture build preserves `request()`
+and `Core::reset()`, with separate output files and ordered request log markers.
+
+Three resident processes cover sequential NPU and both hybrid schedules. Each
+executes two identical 20-token prompts plus one continuation through all 64
+layers. Both requests independently pass the unchanged gates: **8064/8064
+residual rows** and **126/126 logit cases**. All **261/261 first-request files**
+match the audited single-request baseline; all **261/261 second-request files**
+match the first. Hybrid schedules agree on **86/86 residual/logit files**.
+Separate audit reproduces all measurements and verifies their provenance.
+
+Worst residual maxrel is unchanged between requests: sequential **0.0008187178**
+at L63/P17 and hybrid **0.0000779139** at L61/P16, below the 0.005 bound. Minimum
+logit correlation is **0.9999978970**, above 0.9999; argmax and generated tokens
+match. The fresh repeat CLI pins 590 compiler dependencies and passes **CTest
+4/4**. TDD covers stale or failed baseline proof, changed inputs/measurements,
+failed second-request gates and invalidation of prior audit success. Host suite:
+**1912 passed, 47 skipped**.
+
+Evidence: `Models/qwen38-27b/post-prefill-production/{repeat-v1,reset-v1}` and
+`reset-summary.json`. This checks ordinary reset for identical short prompts,
+including the existing checkpoint/restore before the second request. It does
+not establish full-buffer zeroing, different-prompt isolation, block-boundary
+or long-prefix precision, serving or performance acceptance. Hybrid host stages
+remain explicit. No installed bundle, model configuration or service changed.
+
+
 ## Full-depth short prefill with FP32 post-output — 2026-10-26
 
 Added a byte-unmodified shared-CLI build mode and a separate runner/auditor for
