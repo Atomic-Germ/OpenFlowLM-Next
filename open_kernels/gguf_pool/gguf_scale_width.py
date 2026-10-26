@@ -47,11 +47,13 @@ import sys
 import numpy as np
 from ml_dtypes import bfloat16
 
-import gguf_pool
-import q4_1_pack
+# CH_Q8 is defined in open_kernels.gguf_pool; we need it for Q8_CH_F32
+# Import from the package to avoid circular dependency
+from open_kernels.q4_1_pack import pack_q4_1_pool
+from open_kernels.gguf_pool import CH_Q8
 
 Q8_CH_BF16 = 8704       # q4nx q8 chunk: 256 bf16 scales, then 8192 int8 codes
-Q8_CH_F32 = gguf_pool.CH_Q8
+Q8_CH_F32 = CH_Q8  # 9216: pool chunk bytes, 32 rows x 256 k (q8 lm_head, f32 scales)
 
 
 def kernel_rne(f32: np.ndarray) -> np.ndarray:

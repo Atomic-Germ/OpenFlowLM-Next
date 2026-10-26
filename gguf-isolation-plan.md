@@ -88,14 +88,21 @@ The isolation will proceed in **7 phases**, each focusing on a distinct subsyste
   - Verified all include paths resolve correctly from `src/` directory
 - **Risk**: Low - this is self-contained file parsing, now isolated in `src/gguf/`
 
-### Phase 2: Pool Packing/Unpacking Isolation
-- **Goal**: Extract `open_kernels/gguf_pool.py` and related pool code
-- **What to do**:
-  - Create `open_kernels/gguf_pool/` directory with Python modules
-  - Move `gguf_pool.py` and `gguf_scale_width.py` to the new directory
-  - Update imports in dependent files (lm_head_q8, gemv_q4)
-  - Create compatibility shims if needed
-- **Risk**: Medium - pool code is used by multiple kernel designs
+### Phase 2: Pool Packing/Unpacking Isolation ✅ COMPLETED
+- **Goal**: Isolate `open_kernels/gguf_pool.py` and `open_kernels/gguf_scale_width.py` into a dedicated package
+- **What was done**:
+  - Created `open_kernels/gguf_pool/` package directory with:
+    - `gguf_pool.py` - Core pool operations (CH_Q4, CH_Q8, chunk_geometry, random_q4_blocks, random_q8_0_blocks, unpack/dequant functions, pack functions)
+    - `gguf_scale_width.py` - F32 scale width validation (Q8_CH_F32, kernel_rne, test functions)
+    - `__init__.py` - Package re-exports for convenient import
+  - Created shim at `open_kernels/gguf_pool.py` that re-exports all symbols from the package, maintaining backward compatibility with `from gguf_pool import ...`
+  - Updated `__init__.py` to properly export `Q8_CH_F32` and other symbols
+  - Verified all import patterns work:
+    - `from gguf_pool import CH_Q4, CH_Q8` ✅
+    - `from gguf_pool import CH_Q4, chunk_geometry as gg_chunk_geometry` ✅
+    - `from gguf_pool import CH_Q8 as CH_GGUF, dequant_pool_lmhead as gg_dequant` ✅
+    - `import gguf_pool` ✅
+- **Risk**: Low - the shim maintains full backward compatibility; all existing import patterns continue to work
 
 ### Phase 3: Manifest and Conversion Isolation
 - **Goal**: Extract manifest code and conversion utilities
