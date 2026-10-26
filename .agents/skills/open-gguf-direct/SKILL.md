@@ -19,16 +19,25 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 > `*_f32` twins (verified by re-exporting Qwen3.5-0.8B: manifest byte-identical
 > to fedora's shipped one modulo build_key).
 >
+> **ALSO NOW ON THIS BRANCH** (2026-10-26): `ModelSpec.kernel_hash`
+> (`1d1571c` — oflm-add's geometry match; without it every fine-tune/GGUF
+> `oflm add` crashed), the **build-new-spec workflow** (`b72c2e7`:
+> `utilities/build-new-spec.py` + the attention gate in
+> `designs/attn/{probe_dense,probe_support,make_test,compare,attn_reference}.py`
+> + `recipes/dense.attn_flags()` as the single attn.h flag list), and the
+> entire **rope-pairing** feature (`c85d185` — llama3 GGUF twins now rotate
+> correctly; the gate's fp64 oracle learned the interleaved law too, which
+> fedora's has not). Spec count is now **25** (added qwen3-0.6b, qwen3-1.7b,
+> lfm2-2.6b, llama32-1b, llama32-3b, nanbeige41-3b; gemma-3-1b-it is parked in
+> `recipes/candidates/` — a recipe wall, same as fedora). Registration of a
+> new spec in the frozen test lists is **scripted**:
+> `utilities/register-spec.py` (build-new-spec step 6) — never hand-edit the
+> hashes in test_lfm2.py / test_spec_model_names.py.
+>
 > Still **absent** on this branch (present on fedora-docker):
 >
 > - `specs/open-engine/tests/test_gguf_twin.py`
 > - `utilities/lx-probe.cpp`
-> - `utilities/build-new-spec.py`
-> - `open_kernels/recipes/candidates/gemma3-1b.json`
-> - the entire **rope-pairing** feature (`ROPE_INTERLEAVED_FAMILIES`,
->   `rope_pairing`, `ATTN_ROPE_IL`, `rope_il`) — see its section below. Until it
->   lands, a **llama3-family** GGUF twin (Llama-3.1-8B, MiniCPM5-2B) decodes
->   garbage (half-split vs interleaved pairs); Qwen/Gemma families are fine.
 > - the MoE **expert GGUF ops** — `GGUF_EXPERT_OPS_READY = False` in
 >   `qwen36moe.py`, so the qwen36-moe family still ships no `gguf` section.
 >
@@ -401,9 +410,10 @@ manifest section and build their `lx_f32`/`ax_f32` twins:
   (`replace(SPEC, quant="q4_1_f32")` + recipe re-derivation).
 - `designs/layer_x/xcommon.py`: `F32` → `-DGEMV_Q4_SCALES_F32=1`.
 
-Deliberately NOT ported: rope-pairing (`spec.py` `ROPE_INTERLEAVED_FAMILIES`),
+Deliberately NOT ported at the time: rope-pairing (`spec.py` `ROPE_INTERLEAVED_FAMILIES`),
 the export cache/race fixes, `LX_STOP` debug, and the `piece_tap`/`ln_split`
-design hunks (those modules do not exist here). `GGUF_EXPERT_OPS_READY` stays
+design hunks (those modules do not exist here). (Rope-pairing and the export
+cache fixes have since landed — `c85d185`, see the banner.) `GGUF_EXPERT_OPS_READY` stays
 `False`.
 
 **Verification (this box):**
@@ -717,19 +727,20 @@ the official registry's gaps. What landed:
 
 
 
-## Llama3 rope pairing (interleaved) — NOT ON THIS BRANCH (lives on `feat/fedora-docker`)
+## Llama3 rope pairing (interleaved) — ON THIS BRANCH since `c85d185` (2026-10-26)
 
-> **Scope note (2026-10-25):** every rope-pairing change below lives **only on
-> `origin/feat/fedora-docker`** (commit `4066987`). It is *not* merged to
-> `main`, and *none* of its symbols are on `feat/gguf-direct` (this branch) —
-> grep for `ROPE_INTERLEAVED_FAMILIES`, `rope_pairing`, `ATTN_ROPE_IL`,
-> `rope_il` here and you get nothing. Do not look for them in this tree. The
-> notes are kept because reconciling fedora-docker later will need them, and
-> the failure mode they fix is real.
+> **Scope note:** ported from `origin/feat/fedora-docker` commit `4066987`
+> on 2026-10-26. All symbols below (`ROPE_INTERLEAVED_FAMILIES`,
+> `rope_pairing`, `ATTN_ROPE_IL`, `rope_il`) are in this tree. One deliberate
+> divergence from fedora: the attention gate's fp64 oracle
+> (`designs/attn/attn_reference.py`) implements the interleaved law and
+> `make_test.py` passes `spec.rope_interleaved` — fedora's oracle is still
+> half-split-only, so a fedora gate run on a llama geometry would fail.
+> Llama-3.2-1B/3B and Nanbeige4.1-3B were gated with it (all PASS).
 
 Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(j, j+ROT/2)` for all families, but llama3-family GGUF expects interleaved pairs `(2j, 2j+1)` (llama.cpp NORM rope law). Qwen3 works with half-split.
 
-**Plumbing (both kernel design + host) — all on `feat/fedora-docker`:**
+**Plumbing (both kernel design + host):**
 - `open_kernels/recipes/spec.py`: `ROPE_INTERLEAVED_FAMILIES = {"llama3"}`, `ModelSpec.rope_interleaved` property.
 - `open_kernels/recipes/dense.py`: passes `ROPE_IL` in geometry/flags and writes `layout.rope_pairing` (`"interleaved"` or `"halfsplit"`) into the manifest.
 - `open_kernels/designs/dense/dx_attn.py`: threads `ATTN_ROPE_IL` flag to `dx_attn` kernel build.
