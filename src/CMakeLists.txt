@@ -658,12 +658,18 @@ if(NOT OFLM_USE_HRX)
             target_link_libraries(oflm PRIVATE delayimp)
         endif()
     endif()
-    # The block prefill's host stages (open_qwen36/block_host.cpp) are written for the
-    # vectoriser; the same per-source flag the open embedding sources carry.
+    # Block host stages and core's host-attention / argmax helpers use AVX2
+    # and FMA intrinsics. Keep the flags on those translation units only.
     if(MSVC)
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+        set_source_files_properties(
+            "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
+            PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        set_source_files_properties(
+            "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
     endif()
 endif()
 
