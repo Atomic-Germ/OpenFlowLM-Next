@@ -204,11 +204,37 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (d.rb > 1 && d.patch != "attnpos")
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
-        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
+        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
+            d.patch != "attnrows")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
         m.kernels[k] = d;
+    }
+    if (j.contains("rows")) {
+        const json& r = j["rows"];
+        const std::string rw = where + " rows";
+        m.rows.l = get<uint64_t>(r, "l", rw);
+        m.rows.kernel = get<std::string>(r, "kernel", rw);
+        m.rows.head = get<std::string>(r, "head", rw);
+        m.rows.act_bytes = get<uint64_t>(r, "act_bytes", rw);
+        m.rows.head_act_bytes = get<uint64_t>(r, "head_act_bytes", rw);
+        m.rows.head_cores = get<uint64_t>(r, "head_cores", rw);
+        m.rows.head_out_floats = get<uint64_t>(r, "head_out_floats", rw);
+        if (m.rows.l == 0 || m.rows.l % 4) fail(rw, "l " + std::to_string(m.rows.l) + " is not a multiple of 4");
+        auto rk = m.kernels.find(m.rows.kernel);
+        if (rk == m.kernels.end() || rk->second.patch != "attnrows")
+            fail(rw, "kernel " + m.rows.kernel + " is not a kernel built with the attnrows patch table");
+        if (!m.kernels.count(m.rows.head)) fail(rw, "head " + m.rows.head + " is not a kernel");
+        m.rows.lora_kernel = r.value("lora_kernel", "");
+        if (!m.rows.lora_kernel.empty()) {
+            auto lk = m.kernels.find(m.rows.lora_kernel);
+            if (lk == m.kernels.end() || lk->second.patch != "attnrows")
+                fail(rw, "lora_kernel " + m.rows.lora_kernel + " is not a kernel built with the attnrows patch table");
+            m.rows.lora_file = get<std::string>(r, "lora_file", rw);
+            m.rows.lora_pool_bytes = get<uint64_t>(r, "lora_pool_bytes", rw);
+            for (const auto& o : need(r, "lora_pack", rw)) m.rows.lora_pack.push_back(parse_op(o, rw + ".lora_pack"));
+        }
     }
     for (const auto& [name, v] : need(j, "layer_types", where).items()) {
         const std::string tw = where + " layer type " + name;
@@ -280,7 +306,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 a.args = get<std::vector<std::string>>(aj, "args", aw);
                 if (dense_ab) {
                     a.prep = get<std::string>(aj, "prep", aw);
-                    if (a.prep != "qknorm_rope") fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope)");
+                    if (a.prep != "qknorm_rope" && a.prep != "rope")
+                        fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope, rope)");
                 }
                 // the products tile K^T by (64, 32) and V by (64, 32): a dense head dim of 64 or
                 // 128 is a narrower product, the full layers' 256 the widest
@@ -666,6 +693,28 @@ std::vector<std::string> Manifest::files() const {
         f.insert(f.end(), nested.begin(), nested.end());
     }
     return f;
+}
+
+std::string Manifest::host_attention_refusal() const {
+    if (family != "k2")
+        return "host attention implements K2's attention (no q/k norm, no bias, no gate, no window, "
+               "full rotation) and nothing else; this kernel set is family '" + family + "'";
+    auto num = [&](const char* key) -> size_t {
+        return hf_config_check.contains(key) ? hf_config_check[key].get<size_t>() : 0;
+    };
+    const size_t nh = num("num_attention_heads"), kvh = num("num_key_value_heads"), hd = num("head_dim");
+    // the same invariants host_attn_layer re-checks per layer at dispatch, so a manifest that would throw there is refused at load
+    bool widths = true;
+    for (size_t l = 0; l < layers.size(); ++l) {
+        const GemmBlockProgram& gb = layer_type(l).gemm_block;
+        widths &= gb.qw == nh * hd && gb.kvw == kvh * hd;
+    }
+    if (!nh || !kvh || !hd || nh % kvh || rotary_dim > hd || rotary_dim != hd || rotary_dim % 2 ||
+        rope_inv_freq.size() != rotary_dim / 2 || !widths)
+        return "host attention needs K2's geometry (full rotary over head_dim, whole GQA groups); "
+               "this manifest has heads " + std::to_string(nh) + "/" + std::to_string(kvh) + ", head_dim " +
+               std::to_string(hd) + ", rotary_dim " + std::to_string(rotary_dim);
+    return "";
 }
 
 void Manifest::check_model(const json& config, const std::string& where) const {

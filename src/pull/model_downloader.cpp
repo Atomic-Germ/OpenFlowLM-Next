@@ -52,7 +52,15 @@ nlohmann::json load_model_file_records(const nlohmann::json& model_info,
     if (!stream.is_open()) {
         throw std::runtime_error("model_info.json could not be opened");
     }
-    return nlohmann::json::parse(stream).at(key);
+    const nlohmann::json all = nlohmann::json::parse(stream);
+    const auto it = all.find(key);
+    // A model that is not in model_info.json has no remote records: it was
+    // installed from a local directory, so there is nothing to check its
+    // files against. An empty set says so, and the caller decides what to
+    // do with it -- the pull path reports the gap, the check path has
+    // nothing to verify.
+    if (it == all.end()) return nlohmann::json::array();
+    return *it;
 }
 
 const nlohmann::json& find_file_record(const nlohmann::json& records,
@@ -768,6 +776,17 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
         // record source. model_info_key lets one tag share another entry's
         // per-generation records.
         const nlohmann::json records = load_model_file_records(model_info, new_model_tag);
+        if (records.empty()) {
+            // No manifest for this model: it was installed from a local
+            // directory and has no remote record to check its files against.
+            // That is not a defect of the installation, so it is not an
+            // error -- the files that are there are all there is to check.
+            if (!sub_process_mode) {
+                header_print("OFLM", "No manifest for " + new_model_tag +
+                                     "; nothing to verify against.");
+            }
+            return true;
+        }
 
         for (const auto& filename : model_files) {
             if (!sub_process_mode) {

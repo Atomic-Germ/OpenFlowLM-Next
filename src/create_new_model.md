@@ -141,7 +141,8 @@ Always in this order — the shared helper parses `config.json`, resolves `MAX_L
 and sets `this->model_path` / `this->lm_config` before you can construct the engine:
 
 ```cpp
-this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 this->q4nx = std::make_unique<Q4NX>(this->model_path);
 this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 this->lm_engine->load_weights(*this->q4nx);
@@ -472,6 +473,122 @@ oflm serve gemma4-12b:12b     # then exercise /v1/chat/completions, streaming, a
 ```
 
 ---
+
+## Adding a new setting
+
+User-facing settings are defined in **one place**: `src/config/settings.json`.
+The C++ registry the binary compiles in is **generated** from it, along with
+the help text, the interactive picker, the schema and the validation. Do not
+edit `src/config/settings_registry_generated.hpp` — it is overwritten.
+
+### Step 1: Add to settings.json
+
+Add an entry to the `settings` array:
+
+```json
+{
+  "key": "decode_mode",                    // Canonical name in settings.json
+  "cli_flag": "--decode-mode",             // CLI flag (empty if none)
+  "env_var": "OFLM_OPEN_DECODE_MODE",      // Env var (for ENV_VAR delivery)
+  "description": "Decode mode: exact or fast",
+  "type": "enum",
+  "options": [
+    {"value": "exact", "description": "Bit-exact, slower"},
+    {"value": "fast", "description": "Faster, approximate"}
+  ],
+  "min_value": null,
+  "max_value": null,
+  "presets": [],
+  "default_value": "exact",
+  "scope": "per_model",                    // global, per_model, or both
+  "reload_required": true,                 // Needs model reload if changed
+  "category": "performance",                // Grouping for help/picker
+  "registry_key": "",                      // Maps to model_list.json entry key
+  "delivery": "env_var"                    // How the value reaches the engine
+}
+```
+
+### Step 2: Choose the delivery mechanism
+
+The `delivery` field controls how the setting's value reaches the code that
+consumes it:
+
+| Delivery | When to use | What happens |
+|----------|-------------|--------------|
+| `env_var` | Value must cross the `OFLM_DLL` boundary | `apply_settings()` calls `setenv()` automatically |
+| `direct` | Same process, passed via function parameter | Value is in the resolved JSON; consumer reads it |
+| `api_field` | Per-request override via REST API | Value is used as default; API field overrides |
+| `registry` | Value lives in the model registry entry | Read from merged registry at load time |
+
+**For engine options that cross the DLL boundary, use `env_var`.** The engine
+reads the env var (one line: `getenv_oflm("OFLM_OPEN_DECODE_MODE")`), and
+`apply_settings()` setenvs it automatically. No glue code needed.
+
+The value the engine reads must match what the settings system delivers: a
+boolean arrives as `true`/`false`, so a switch the engine tests with `== "1"`
+has to accept both.
+
+### Step 3: Engine reads the value
+
+```cpp
+std::string decode_mode = utils::getenv_oflm("OFLM_OPEN_DECODE_MODE");
+if (decode_mode.empty()) decode_mode = "exact"; // default
+```
+
+### Step 4: Classify every flag and variable the code reads
+
+CI scans the source tree for CLI flags and `OFLM_*` variables, and fails if
+one is neither a setting nor explicitly excluded. If the code reads
+`OFLM_SOMETHING` and it is **not** a user-facing setting, list it in
+`NON_SETTING_ENV_VARS` in `utilities/generate-registry.py`, with a reason.
+
+### Step 5: Regenerate, build and test
+
+```bash
+cmake --build --preset linux-default --target generate-settings
+git diff --exit-code src/config/settings.json src/config/settings_registry_generated.hpp
+
+cmake --build --preset linux-default --target oflm
+./build/src/oflm config gen-schema | python3 -m json.tool | grep decode_mode
+./build/src/oflm config show
+ctest --preset linux-default
+```
+
+The new setting automatically appears in:
+- `oflm config --help`
+- `oflm config show`
+- `oflm config set` (with validation)
+- Interactive picker
+- Shipped `model_list.json` schema (at package time)
+
+**Before you push, run the check the way CI runs it** — it merges the target
+branch in, so a variable the target branch added does not break you:
+
+```bash
+utilities/check-settings-ci.sh
+```
+
+### Field reference
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `key` | Yes | Canonical name in settings.json and API |
+| `cli_flag` | No | CLI flag (e.g. `--decode-mode`), empty if none |
+| `env_var` | If env_var delivery | Environment variable name |
+| `description` | Yes | Human-readable description |
+| `type` | Yes | `enum`, `int`, `bool`, or `string` |
+| `options` | If enum | Valid options with descriptions |
+| `min_value`/`max_value` | If int | Value range |
+| `presets` | No | Quick-pick values for int in picker |
+| `default_value` | No | Fallback default (empty = from registry entry) |
+| `scope` | Yes | `global`, `per_model`, or `both` |
+| `reload_required` | Yes | `true` if changing requires model reload |
+| `category` | Yes | Grouping: `performance`, `memory`, `generation` |
+| `registry_key` | No | Maps to model_list.json entry key (e.g. `default_context_length`) |
+| `delivery` | Yes | `direct`, `env_var`, `api_field`, or `registry` |
+
+---
+
 
 ## Checklist
 

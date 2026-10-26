@@ -283,6 +283,27 @@ if(WIN32)
     endif()
 endif()
 
+# sentencepiece creates third_party/absl -> third_party/abseil-cpp/absl only
+# when the link is missing, so a link left over from another checkout survives
+# and points at a tree that is not here. The build then fails on
+# "third_party/absl/log/check.h: No such file or directory" in a place that
+# says nothing about the cause. Drop a link that points elsewhere so
+# sentencepiece makes a correct one.
+if(NOT WIN32)
+    set(OFLM_SPM_TP
+        "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
+    if(IS_SYMLINK "${OFLM_SPM_TP}/absl")
+        file(READ_SYMLINK "${OFLM_SPM_TP}/absl" OFLM_SPM_LINK_TARGET)
+        get_filename_component(OFLM_SPM_LINK_DIR "${OFLM_SPM_LINK_TARGET}" DIRECTORY)
+        get_filename_component(OFLM_SPM_LINK_NAME "${OFLM_SPM_LINK_TARGET}" NAME)
+        if(NOT OFLM_SPM_LINK_NAME STREQUAL "absl" OR
+           NOT OFLM_SPM_LINK_DIR STREQUAL "${OFLM_SPM_TP}/abseil-cpp")
+            message(STATUS "sentencepiece: replacing a stale third_party/absl link")
+            file(REMOVE "${OFLM_SPM_TP}/absl")
+        endif()
+    endif()
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
                  ${CMAKE_BINARY_DIR}/tokenizers-cpp
                  EXCLUDE_FROM_ALL)
@@ -290,10 +311,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
 # ———————————————————————————————————————————————
 # Gather your sources
 # ———————————————————————————————————————————————
+file(GLOB OFLM_CONFIG_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/config/*.cpp")
 file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
 # Unit-test translation units carry their own main() and must never join the engine.
 list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
+
+list(APPEND SOURCES ${OFLM_CONFIG_SOURCES})
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT OFLM_USE_HRX)
@@ -1084,19 +1108,28 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
     # (q4nx.cli:main defaults argv=None), so "$@" flows through sys.argv.
+    #
+    # The package is found RELATIVE to the launcher, not at the prefix the
+    # tree was configured with: an install into another prefix (a staging
+    # directory, a tarball unpacked somewhere else) then finds its own
+    # package. The configured path stays as the fallback, for a launcher that
+    # was copied out of its tree.
     function(_oflm_install_utility name subdir module)
         set(_oflm_util_dir "${CMAKE_INSTALL_PREFIX}/${OFLM_SHARE_DESTINATION}/utilities")
         set(_oflm_util_tmpl "${CMAKE_BINARY_DIR}/_oflm-utility-launcher.in")
         if(NOT EXISTS "${_oflm_util_tmpl}")
             file(WRITE "${_oflm_util_tmpl}" [==[#!/bin/sh
 # Bundled launcher: runs the @_OFLM_UTIL_NAME@ package installed beside this tool.
-_OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
+# Beside means relative to this script, so the install can be moved.
+_OFLM_UTIL_DIR="$(cd -- "$(dirname -- "$0")/../@_OFLM_SHARE_REL@/utilities" 2>/dev/null && pwd)"
+[ -d "$_OFLM_UTIL_DIR" ] || _OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
 export PYTHONPATH="${_OFLM_UTIL_DIR}/@_OFLM_UTIL_SUBDIR@${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -c 'import sys; from @_OFLM_UTIL_MODULE@ import main; sys.exit(main())' "$@"
 ]==])
         endif()
         set(_OFLM_UTIL_NAME "${name}")
         set(_OFLM_UTIL_DIR "${_oflm_util_dir}")
+        set(_OFLM_SHARE_REL "${OFLM_SHARE_DESTINATION}")
         set(_OFLM_UTIL_SUBDIR "${subdir}")
         set(_OFLM_UTIL_MODULE "${module}")
         configure_file("${_oflm_util_tmpl}" "${CMAKE_BINARY_DIR}/${name}" @ONLY)
@@ -1353,12 +1386,24 @@ else()
     option(OFLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" ON)
 endif()
 set(OFLM_KERNEL_SPECS "" CACHE STRING "Comma-separated spec names to export (empty = all specs in open_kernels/recipes/specs)")
+
+# Parallel jobs for the kernel export. 0 = auto-detect CPU count.
+# The export runs one subprocess per kernel spec, so this is what turns a
+# 20-100 minute serial build into a 2-10 minute parallel one.
+include(ProcessorCount)
+ProcessorCount(OFLM_NPROC)
+if(NOT OFLM_NPROC)
+    set(OFLM_NPROC 8)
+endif()
+set(OFLM_KERNEL_JOBS "${OFLM_NPROC}" CACHE STRING "Parallel jobs for kernel export (0 = auto)")
+
 if(OFLM_BUILD_KERNELS AND NOT WIN32)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_export_script "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/export-kernels.py")
     add_custom_target(export_kernels ALL
         COMMENT "Exporting open NPU kernel xclbins into src/xclbins"
         COMMAND "${Python3_EXECUTABLE}" "${_export_script}" "--specs=${OFLM_KERNEL_SPECS}"
+                "-j" "${OFLM_KERNEL_JOBS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
         VERBATIM)
 endif()
@@ -1372,6 +1417,40 @@ enable_testing()
 # in-tree registry, since a build-tree run has no installed share/oflm/.
 add_test(NAME oflm_smoke COMMAND $<TARGET_FILE:oflm> list)
 set_tests_properties(oflm_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Config command smoke tests
+add_test(NAME oflm_config_show COMMAND $<TARGET_FILE:oflm> config show --config-model dummy)
+set_tests_properties(oflm_config_show PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+add_test(NAME oflm_config_gen_schema COMMAND $<TARGET_FILE:oflm> config gen-schema --config-model dummy)
+set_tests_properties(oflm_config_gen_schema PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Test config set/unset with isolated settings file
+add_test(NAME oflm_config_set_unset
+    COMMAND ${CMAKE_COMMAND} -E env
+        "OFLM_SETTINGS_PATH=${CMAKE_BINARY_DIR}/test_settings.json"
+        "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json"
+        sh -c "$<TARGET_FILE:oflm> config set --config-key ctx_len --config-value 8192 --config-model llama3.1:8b && \
+               $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\".*\"8192\"' && \
+               $<TARGET_FILE:oflm> config unset --config-key ctx_len --config-model llama3.1:8b && \
+               $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\"'")
+
+# TUI smoke test. The full-screen browse needs a real terminal; under ctest
+# there is none, so it must refuse gracefully -- say what to use instead and
+# exit non-zero, not crash and not hang.
+add_test(NAME oflm_config_browse_smoke
+    COMMAND sh -c "echo q | $<TARGET_FILE:oflm> config browse; \
+                   test \$? -eq 1 && echo q | $<TARGET_FILE:oflm> config browse 2>&1 | grep -q 'guided flow'")
+set_tests_properties(oflm_config_browse_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Guided flow smoke test (Tier 1 fallback)
+add_test(NAME oflm_config_guided_smoke
+    COMMAND sh -c "printf '0\\n' | $<TARGET_FILE:oflm> config")
+set_tests_properties(oflm_config_guided_smoke PROPERTIES
     ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
 # openai_compat: the OpenAI wire vocabulary (finish_reason, error bodies, HTTP
@@ -1639,4 +1718,31 @@ set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 # /etc/profile.d and /usr/bin belong to the base filesystem packages; do not
 # make openflowlm claim ownership of them.
 set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
+
+# Generate settings registry from source code scan + settings.json
+#
+# Python3 is looked for HERE, unconditionally: the target below is built
+# whatever the other options are, and with Python3_EXECUTABLE empty the
+# rule ran the scripts as programs -- which failed with "Permission
+# denied" on the CI, where the scripts are not executable.
+#
+# Not REQUIRED: a build that never runs the target (the Windows release)
+# must still configure on a machine with no python3.
+find_package(Python3 COMPONENTS Interpreter)
+if(NOT Python3_EXECUTABLE)
+    set(Python3_EXECUTABLE "python3")
+    message(STATUS "No python3 interpreter found: generate-settings will use 'python3' from PATH")
+endif()
+add_custom_target(generate-settings
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/scan-settings.py
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+            > ${CMAKE_BINARY_DIR}/scan-settings.json
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/generate-registry.py
+            --settings ${CMAKE_CURRENT_SOURCE_DIR}/config/settings.json
+            --scan-output ${CMAKE_BINARY_DIR}/scan-settings.json
+            --output ${CMAKE_CURRENT_SOURCE_DIR}/config/settings_registry_generated.hpp
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Generating settings registry from source code"
+)
+
 include(CPack)
