@@ -109,6 +109,12 @@ def test_manifest_rows_are_per_kernel(unvalidated):
     assert m["globals"]["ptab_local"]["rotary_dim"] == 256 and len(m["globals"]["ptab_local"]["inv_freq"]) == 128
     assert m["layout"]["final_logit_softcapping"] == 30.0
     assert m["layer_types"][DENSE]["buffers"]["state"]["row"] == 4096
+    # manifest.cpp's own check: the layout's frequencies match the layout's rotary dim, and
+    # they are the local table (the layout's rows are the local layers')
+    for mm in (m, manifest(spec())):
+        lay = mm["layout"]
+        assert len(lay["rope_inv_freq"]) == lay["rotary_dim"] // 2
+        assert lay["rope_inv_freq"] == mm["globals"]["ptab_local"]["inv_freq"]
 
 
 def test_the_catalogue_does_not_take_gemma3s_point_for_a_gemma4_layer(monkeypatch):

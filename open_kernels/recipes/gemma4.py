@@ -245,6 +245,10 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     """The local layers' rows are the model-wide defaults; the global kernels override theirs."""
     out = D.manifest_layout(sub_spec(spec, "local"), max_ctx)
+    # The layout's frequencies must be the table its rotary_dim describes (manifest.cpp refuses
+    # a mismatch); rope_inv_freq() unqualified is the GLOBAL table, 64 pairs, not the local 128.
+    out["rope_inv_freq"] = spec.rope_inv_freq(local=True)
+    out["rope_theta"] = spec.rope_local_theta
     out["pool_bytes"] = pool_bytes(spec)
     if spec.final_softcap:
         out["final_logit_softcapping"] = spec.final_softcap
