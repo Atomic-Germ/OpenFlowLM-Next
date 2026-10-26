@@ -51,9 +51,10 @@ def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take
 
 
 def test_an_unvalidated_gemv_k_is_refused():
-    with pytest.raises(OpRangeError, match=r"gemv_q4: K=7168 is outside the validated set "
-                                          r"\{1024, 2048, 2560, 3072, 3584, 3840, 4096, 5120, 6144, 8192, 9216, 9728, 10240, "
-                                          r"10752, 11264, 12288, 14336, 15360\}"):
+    # the refusal, not the set: spelling the set out fails on every new validated
+    # point (10496 entered it with Nanbeige4.1-3B), which is a test that has to be
+    # edited by whoever adds a size -- exactly what utilities/op-gate.py avoids
+    with pytest.raises(OpRangeError, match=r"gemv_q4: K=7168 is outside the validated set \{"):
         require("gemv_q4", K=7168)
 
 

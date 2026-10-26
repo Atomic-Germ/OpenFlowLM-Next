@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -87,6 +88,31 @@ def combination(*points, defaults: dict | None = None, keys: tuple[str, ...]) ->
     return Combination(keys=keys, points=frozenset(points), defaults=defaults or {})
 
 
+_COLLECTING: list | None = None          # set by collecting(): the missing points seen so far
+
+
+@contextmanager
+def collecting():
+    """Record every missing point in this block instead of raising on the first.
+
+        with catalogue.collecting() as missing:
+            recipe(spec)                  # runs to completion
+        for op, kw in missing: ...        # every point the spec needs
+
+    A recipe validates many ops in a row (gemv K, ln width, the attention
+    tuple, the head); raising at the first one means a caller has to re-run the
+    recipe once per missing point to discover them. utilities/op-gate.py and
+    utilities/build-new-spec.py use this to gate them all in one pass.
+    """
+    global _COLLECTING
+    prev = _COLLECTING
+    _COLLECTING = []
+    try:
+        yield _COLLECTING
+    finally:
+        _COLLECTING = prev
+
+
 @dataclass(frozen=True)
 class Template:
     name: str
@@ -95,8 +121,15 @@ class Template:
     note: str = ""
     combos: tuple[Combination, ...] = ()  # groups checked as a whole, not one key at a time
 
-    def _refuse(self, msg: str) -> None:
+    def _refuse(self, msg: str, op: str = "", kw: dict | None = None) -> None:
         msg = msg + (f" ({self.note})" if self.note else "")
+        if _COLLECTING is not None:
+            # A caller enumerating what a spec needs (utilities/op-gate.py): record
+            # the point and keep going, so ONE recipe() pass yields every missing
+            # point instead of only the first.
+            if kw is not None:
+                _COLLECTING.append((op or self.name, dict(kw)))
+            return
         if os.environ.get("OPEN_KERNELS_UNVALIDATED"):
             # the way a new point gets validated: build it, run its fixture, then add it here
             if msg not in _WARNED:
@@ -115,7 +148,8 @@ class Template:
                                    f"(has {sorted(set(self.params) | grouped)})")
             p = self.params[k]
             if not p.ok(v):
-                self._refuse(f"{self.name}: {k}={v!r} is outside the validated set {p.expected()}")
+                self._refuse(f"{self.name}: {k}={v!r} is outside the validated set {p.expected()}",
+                             self.name, kw)
         for c in self.combos:
             missing = [k for k in c.keys if k not in kw and k not in c.defaults]
             if missing:
@@ -124,7 +158,7 @@ class Template:
             v = c.value(kw)
             if v not in c.points:
                 self._refuse(f"{self.name}: {tuple(c.keys)} = {v} is outside the validated "
-                             f"combinations {c.expected()}")
+                             f"combinations {c.expected()}", self.name, kw)
 
 
 CATALOGUE: dict[str, Template] = {t.name: t for t in [

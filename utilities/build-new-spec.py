@@ -13,10 +13,13 @@ What it does, in order, and why each step exists:
                where the catalogue refuses a geometry it has not seen, so the
                run is made with OPEN_KERNELS_UNVALIDATED=1: the build proves the
                design COMPILES at the new geometry, which is half the question.
-  3. GATE      the attention kernel is RUN at the new geometry and scored
-               against an fp64 oracle (open_kernels/designs/attn/: the
-               production worker, synthetic inputs, no model). This is the
-               other half: the numbers are right, not just the compile.
+  3. GATE      every point the catalogue is missing is RUN and scored before
+               the build: the attention kernel against an fp64 oracle
+               (designs/attn/), and each other op through its own fixture
+               (utilities/op-gate.py: gemv_q4 at the new K, ln at the new width,
+               ...). A point is written into the catalogue only after its
+               fixture PASSES, so "the numbers are right" is checked, not
+               assumed, for every geometry the new size introduces.
   4. CATALOGUE the validated point is written into open_kernels/recipes/
                catalogue.py, so the next build of this size needs no override.
   5. REBUILD   the kernel set is compiled again through the validated path,
@@ -52,17 +55,7 @@ EXPORT = ROOT / "utilities" / "export-kernels.py"
 GEN_SPEC = ROOT / "utilities" / "gen-kernel-spec.py"
 ADD_POINT = ROOT / "utilities" / "catalogue-add-point.py"
 REGISTER = ROOT / "utilities" / "register-spec.py"
-
-# the fixture that validates each other op's new point, for the report
-OP_FIXTURE = {
-    "gemv_q4": "open_kernels/designs/gemv_q4/make_test.py (--K <width>)",
-    "gemv_q8": "the OPEN-QUANT-Q8 procedure (no per-K fixture exists)",
-    "ln": "open_kernels/designs/ln/make_test.py (--N <width>)",
-    "lm_head_q4": "open_kernels/designs/lm_head_q4/make_test.py (--k <width>, --layout "
-                  "q4nx|gguf for the f32-scale build)",
-    "lm_head_q8": "designs/lm_head_q8/make_test.py (--K <width>)",
-}
-
+OP_GATE = ROOT / "utilities" / "op-gate.py"
 
 def run(cmd, env=None, cwd=None, check=True, quiet=False):
     cmd = [str(c) for c in cmd]
@@ -72,6 +65,14 @@ def run(cmd, env=None, cwd=None, check=True, quiet=False):
     if check and p.returncode != 0:
         raise SystemExit(f"build-new-spec: FAILED: {' '.join(cmd)}")
     return p.returncode
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def load_export_module():
@@ -114,30 +115,33 @@ def spec_geometry(spec_path: Path) -> dict:
     }
 
 
-def preflight(spec_path: Path) -> list[tuple[str, str]]:
-    """What stands between this spec and a build.
+def preflight(spec_path: Path) -> tuple[list[str], list[tuple[str, dict]]]:
+    """(the RECIPE's walls, the missing CATALOGUE points) in one pass.
 
-    Two kinds, and the difference matters: the RECIPE's own limits (a width
-    that does not fit a core's L1, say) are not a geometry the gate can
-    validate -- the size is simply not supported by this recipe. The
-    CATALOGUE's limits are: the attention one is what the gate exists for, and
-    the others name the fixture that validates them.
+    The recipe is the FAMILY's (`recipes/families.for_spec`), not `dense`:
+    Qwen3.5 / LFM2 / the MoE each have their own, and asking `dense` about them
+    raises "dense recipe given a 'qwen35' spec" -- which used to be printed as a
+    catalogue problem and swallow the real validation of those families
+    entirely.
+
+    The two kinds are different: a RECIPE wall (a width that does not fit a
+    core's L1) means this size is not supported by this recipe at all, and no
+    gate can fix it. A missing CATALOGUE point is a claim the hardware has not
+    proved yet -- utilities/op-gate.py proves it.
     """
     sys.path.insert(0, str(ROOT / "open_kernels"))
-    from recipes import dense as D
+    from recipes import catalogue as C
+    from recipes.families import for_spec
     from recipes.load import load_spec
     from recipes.catalogue import OpRangeError
     spec = load_spec(spec_path)
-    problems = []
-    try:
-        D.geometry(spec)
-    except OpRangeError as exc:
-        problems.append(("recipe", str(exc)))
-    try:
-        D.recipe(spec)
-    except OpRangeError as exc:
-        problems.append(("catalogue", str(exc)))
-    return problems
+    walls = []
+    with C.collecting() as missing:
+        try:
+            for_spec(spec).recipe(spec)
+        except OpRangeError as exc:
+            walls.append(str(exc))
+    return walls, missing
 
 
 def build_probe(py: Path, env: dict, spec_path: Path, work: Path, rows: int) -> Path:
@@ -216,21 +220,16 @@ def main() -> int:
 
     geo = spec_geometry(spec_path)
     print(f"   family {geo['family']}, attention point {geo['point']}", flush=True)
-    problems = preflight(spec_path)
-    fatal = False
-    for kind, msg in problems:
-        if kind == "recipe":
-            fatal = True
-            print(f"   the RECIPE does not support this shape: {msg}")
-            print("      (a width that does not fit the design -- a different recipe, or a "
-                  "different family)")
-        else:
-            op = msg.split(":")[0]
-            print(f"   catalogue: {msg.splitlines()[0]}")
-            hint = OP_FIXTURE.get(op)
-            if hint:
-                print(f"      validate it with {hint}")
-    if fatal:
+    walls, missing = preflight(spec_path)
+    for msg in walls:
+        print(f"   the RECIPE does not support this shape: {msg}")
+        print("      (a width that does not fit the design -- a different recipe, or a "
+              "different family)")
+    if missing:
+        print(f"   the catalogue has not validated {len(missing)} point(s) this size needs:")
+        for op, kw in missing:
+            print(f"      {op}: {kw}")
+    if walls:
         # a spec the recipe cannot build would break every later export, so it
         # does not stay in the specs dir -- but it is not thrown away either:
         # a recipe that learns the shape (the FF split, say) picks it up.
@@ -246,6 +245,20 @@ def main() -> int:
 
     work = Path(a.work) if a.work else ROOT / "build" / "attn-gate" / name
     work.mkdir(parents=True, exist_ok=True)
+
+    # 3a. every op EXCEPT attention: run its own fixture and write the point.
+    # Attention is 3b, because its gate builds the model's worker, not a fixture.
+    if missing:
+        print("-- op gates: run each missing point's fixture before the build", flush=True)
+        mod_gate = _load_module("_op_gate", OP_GATE)
+        try:
+            mod_gate.gate_points(load_spec(spec_path), spec_path, py, env,
+                                 harness_binary(work), skip=("attn",))
+        except mod_gate.GateError as exc:
+            print(exc, file=sys.stderr)
+            print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
+                  "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
+            return 1
 
     # 2. the kernel set compiles at this geometry
     if not a.skip_export:

@@ -70,6 +70,29 @@ def captured_bytes(f, region: str, expert: int, bands_cap: int | None):
     return w, n
 
 
+def build_names(region: str, *, k_override: int | None = None, n_override: int | None = None,
+                per_call: int | None = None, layout: str = "q4nx", captured: bool = False,
+                expert: int = 0) -> tuple[str, str]:
+    """The fixture's output tag and build dir: `(tag, build)`.
+
+    One definition, two callers: this script and utilities/op-gate.py, which has
+    to predict both to run the harness on what the fixture just built. An
+    off-region geometry (--K / --N / --per-call) gets its own tag and build dir,
+    so a second width never reuses the first one's xclbin or vectors.
+    """
+    tag = region if not region.startswith("exp_") else f"{region}{expert}"
+    if layout == "gguf":
+        tag += "_gguf"
+    build = f"{region}_gguf" if layout == "gguf" else region
+    if k_override is not None or n_override is not None:
+        tag += f"_k{k_override}"
+        build += f"_k{k_override}"
+    if per_call is not None:
+        tag += f"_p{per_call}"
+        build += f"_p{per_call}"
+    return tag, build
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--region", default="qkv", choices=sorted(REGIONS))
@@ -144,13 +167,8 @@ def main() -> int:
         ref = y.astype(np.float32)
     else:
         ref = pool_reference(w, x, n, k, rs)
-    tag = a.region if not a.region.startswith("exp_") else f"{a.region}{a.expert}"
-    if a.layout == "gguf":
-        tag += "_gguf"
-    build = f"{a.region}_gguf" if a.layout == "gguf" else a.region
-    if a.K is not None or a.N is not None:
-        tag += f"_k{k}"          # an off-region width gets its own vectors, cfg and build dir
-        build += f"_k{k}"
+    tag, build = build_names(a.region, k_override=a.K, n_override=a.N, per_call=a.per_call,
+                             layout=a.layout, captured=a.source == "captured", expert=a.expert)
     if a.source == "captured":
         tag += "_cap"
     (HERE / f"w_{tag}.bin").write_bytes(w.tobytes())
