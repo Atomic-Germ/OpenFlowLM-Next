@@ -1,5 +1,51 @@
 # Qwen3.8-27B validation report
 
+## Full-depth short prefill with FP32 post-output — 2026-10-26
+
+Added a byte-unmodified shared-CLI build mode and a separate runner/auditor for
+new-arithmetic prefill. The existing residual tracer retains shared runtime
+arithmetic. Its output must reproduce a fresh ordinary CLI run of the same
+standard export, rather than historical BF16 native output hashes. Production
+runtime, model packing and kernel binaries are unchanged in this checkpoint.
+
+The fixture binds 149 retained independent CPU reference files to their passing
+historical audit and preparation. Model, prompt and oracle code hashes remain
+unchanged; the current manifest and source key are checked separately. All 257
+input hashes pass. Both fresh builds use GCC 15.2, record 589/590 compiler
+dependencies and pass native CTest **4/4** each.
+
+Six resident executions cover sequential NPU and both hybrid schedules using
+ordinary and capture CLIs: 64 layers, 20 prompt tokens and one continuation.
+All **4032/4032 residual rows** and **63/63 traced logit cases** pass the unchanged
+bounds. The ordinary CLI also passes all **63/63 logit cases** and continuation
+residuals. All **69/69 trace/control files** (logits and final scratch) match
+byte-for-byte; both hybrid schedules agree on **86/86 residual/logit files**.
+Separate audit reproduces measurements and verifies source/build/input identity.
+
+| Route | Worst residual maxrel | Minimum logit correlation |
+|---|---:|---:|
+| Sequential | 0.0008187178 (L63/P17) | 0.9999978970 |
+| Hybrid, layer-major | 0.0000779139 (L61/P16) | 0.9999979147 |
+| Hybrid, block-major | 0.0000779139 (L61/P16) | 0.9999979147 |
+
+The previous standard short-prompt maxima were 0.0048820188 and 0.0012128028.
+The reference and bounds (residual <0.005, correlation >0.9999, matching argmax)
+are unchanged. Fresh input validation checks all model and oracle hashes rather
+than exempting artifacts because they are historical.
+
+TDD covers plain-source identity, complete capture inventories, independent
+numerical failures, logits/alias/scratch mismatch, changed input provenance and
+invalidating a prior successful audit after a failed recheck. Full host suite:
+**1899 passed, 47 skipped**. Evidence is retained under
+`Models/qwen38-27b/post-prefill-production/{plain-v1,trace-v1,short-v1}`.
+
+This validates short prefill on the standard FP32 export. Repeated short-prompt
+requests, block-boundary and long-prefix runs remain required; the passing
+three-position decode reset does not replace them. Hybrid host stages remain
+explicit. No serving or performance acceptance is claimed, and no installed
+bundle or running service was changed.
+
+
 ## Standard FP32 DeltaNet post-output — 2026-10-26
 
 Promoted the shared FP32 post-output path into the standard wide dense Q4 recipe.

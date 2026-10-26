@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-post-prefill-validation</name>
+    <description>Validate standard FP32 post-output prefill with fresh shared-CLI controls and independent all-layer gates.</description>
+    <location>.agents/skills/open-qwen38-post-prefill-validation/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-post-output-integration</name>
     <description>Build standard FP32 DeltaNet post-output kernels and validate scratch compatibility, resources and full-depth decode.</description>
     <location>.agents/skills/open-qwen38-post-output-integration/SKILL.md</location>

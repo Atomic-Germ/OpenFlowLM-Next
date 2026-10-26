@@ -76,3 +76,10 @@ def test_capture_inventory_rejects_extra_logits_and_missing_layers(tmp_path):
     extra.unlink()
     (tmp_path/'hybrid_res2.bin').unlink()
     with pytest.raises(ValueError): m.capture_inventory(tmp_path, 'hybrid', 2, 3)
+
+
+def test_plain_control_has_no_instrumentation_or_repeat_patch():
+    m=load('build');cpp='unmodified core';cli='unmodified CLI'
+    assert m.instrument(cpp,cli,False,plain=True)==(cpp,cli)
+    with pytest.raises(ValueError,match='plain'):
+        m.instrument(cpp,cli,True,plain=True)

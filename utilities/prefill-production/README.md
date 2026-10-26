@@ -1,5 +1,10 @@
 # Standard paired-prefill export and smoke test
 
+For the standard FP32 DeltaNet post-output export, use the fresh-control
+workflow below. The earlier smoke/all-layer commands in this document bind
+historical BF16 output hashes and require their recorded sources and export.
+Do not relabel those captures for a new arithmetic contract.
+
 The ordinary qwen35 recipe exports manifest v4 and 46 kernel sets for the
 validated dense Q4 H5120/FF17408 geometry. Five GEMM companions compute the
 BF16 residual of dequantized weights; both components read the same packed
@@ -96,3 +101,25 @@ This validates ordinary request reset with one short prompt. It does not test
 long-prefix reset, full-buffer zeroing, independent checkpoint/restore semantics,
 serving request isolation or full model acceptance. Hybrid host stages remain
 explicit; the known sequential long-prefix accuracy failure remains open.
+
+## Fresh controls after FP32 post-output integration
+
+`build.py --plain` stages the shared CLI without changing core or CLI source.
+The default build adds only synchronized residual tracing. Build both in fresh
+directories, then use `post_validate.py run` with `--plain-build`, `--trace-build`,
+`--baseline`, `--kernels` and `--out`; follow with `post_validate.py audit --out`.
+See the [build/run skill](../../.agents/skills/open-qwen38-post-prefill-validation/SKILL.md)
+for full commands and the retained reference location.
+
+This runner checks the current standard export, model and unchanged independent
+oracle against pinned historical CPU references. It runs a 20-token prompt plus
+continuation through all 64 layers on sequential NPU and both hybrid schedules.
+All trace logits and the final scratch dump must match a fresh unpatched CLI
+run of the same export byte-for-byte. Every residual row and logit must also
+pass the existing independent numerical gates. Both hybrid schedules must match
+on all residual/logit files. Missing or extra captures, changed inputs, failed
+numerical gates and mismatched tracing controls invalidate the result.
+
+The separate audit recomputes measurements and checks build/source identities.
+It does not grant reset, block-boundary, long-prefix, serving or performance
+acceptance. No production runtime or NPU kernel arithmetic is modified here.
