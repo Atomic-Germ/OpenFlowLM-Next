@@ -233,6 +233,34 @@ def gguf_kernel_set(name, roots):
             return mj.parent
     return None
 
+def _require_same_geometry(kdir, spec, respec, model_name):
+    """Refuse a GGUF install whose kernel set is a DIFFERENT geometry.
+
+    The set is found by directory name (the official entry's, or the model's),
+    and a size the registry does not carry used to fall back to the nearest
+    official size -- so a Qwen3-14B GGUF resolved to Qwen3-8B's kernels and the
+    install "succeeded". The kernels decide the arithmetic, so a set whose
+    manifest `spec` has a different kernel_hash cannot run this model.
+    """
+    ModelSpec = _model_spec_class()
+    spec = spec or respec
+    if spec is None or ModelSpec is None:
+        return
+    mj = Path(kdir) / "manifest.json"
+    try:
+        d = json.loads(mj.read_text(encoding="utf-8"))
+        laid = d.get("spec")
+        if not laid or ModelSpec.from_dict(laid).kernel_hash() == spec.kernel_hash():
+            return
+    except (OSError, ValueError):
+        return
+    raise SystemExit(
+        f"{model_name}: the GGUF-direct kernel set at {kdir} is a DIFFERENT geometry "
+        f"({Path(kdir).parent.name}), so it cannot run this model.\n"
+        f"Build this size's kernels first:\n"
+        f"  python utilities/build-new-spec.py --repo <this model's base repo>")
+
+
 SYSTEM_LIST_CANDIDATES = [
     "/opt/openflowlm/share/oflm/model_list.json",
     "/usr/share/oflm/model_list.json",
@@ -2534,12 +2562,15 @@ def main():
     # tree's own (src/xclbins -- a freshly exported set, which may be newer
     # than the installed copy).
     kernel_roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root(), tree_xclbins()]
+    spec = None
+    geom_set = None                     # the set whose GEOMETRY this model needs
     if args.family is None:
         spec = spec_from_config_dict(get_peeked_config())
         fam, set_name = family_from_kernels(system_registry, spec, kernel_roots)
         if fam:
             log(f"[INFO] family '{fam}' from the kernel set '{set_name}' (the same geometry)")
             content_families.append(fam)
+            geom_set = set_name
         fam, base_name = family_from_base_chain(system_registry, get_base_chain())
         if fam and fam not in content_families:
             log(f"[INFO] family '{fam}' from the base model '{base_name}'")
@@ -2618,7 +2649,11 @@ def main():
         official, official_note = resolve_official(system_registry, dir_name, family, size_value)
         base_entry = official[3] if official else None
         src_tag = f"{official[1]}:{official[2]}" if official else None
-        xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
+        # A set whose KERNELS match this model's geometry is the right answer, and
+        # resolve_official's last resort -- the nearest official size -- is not: a
+        # Qwen3-14B model was being handed Qwen3-8B's kernels because the registry
+        # has no 14B entry, which is a wrong link, not a small one.
+        xclbin_source = args.xclbin_from or geom_set or (base_entry or {}).get("name")
 
     # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
     # xclbins must actually carry the GGUF-direct kernel builds (the nested
@@ -2650,6 +2685,9 @@ def main():
                     f"{xclbin_source or dir_name} (family '{family}').\n"
                     f"Build the kernel set for this model size with:\n"
                     f"  python utilities/build-new-spec.py{base_hint}")
+            if not args.open_kernels:
+                _require_same_geometry(kdir, spec, spec_from_config_dict(get_peeked_config()),
+                                       dir_name)
             gguf_kernel_dir = kdir
             if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
                 log(f"[INFO] GGUF-direct kernels: {kdir}")

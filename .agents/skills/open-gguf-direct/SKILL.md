@@ -762,6 +762,26 @@ been RUN on the hardware. `catalogue.collecting()` (used by both scripts) means
 one `recipe()` pass reports EVERY missing point, not just the first that would
 raise — so a new size never has to be discovered one failure at a time.
 
+## The wrong-kernels trap in `oflm add` (found 2026-10-26)
+
+`resolve_official()` ends with "no exact size match for X B; using Y B kernels",
+and that last resort is a WRONG link for a size the registry does not carry: a
+`Qwen/Qwen3-14B-GGUF` install resolved to `Qwen3-8B-NPU2` and would have
+"succeeded". The geometry match already existed -- `family_from_kernels()`
+walks every root for a manifest whose `spec.kernel_hash()` equals the model's --
+but only its FAMILY was used and the set name was discarded.
+
+Now: the geometry-matched set is preferred as the xclbin source, and a GGUF
+install whose set does not match the model's geometry is REFUSED
+(`_require_same_geometry`) with the `build-new-spec` hint. Checked both ways:
+`Qwen3.5-9B-i1-GGUF` still links `Qwen3.5-9B-NPU2`; `Qwen3-14B-GGUF` stops
+(that shape has no f32 twin, so no GGUF-direct set can exist).
+
+Limitation, and why the refusal is the safe end state: the geometry at add time
+comes from the *peeked config*, so a GGUF repo with no usable config.json cannot
+be geometry-matched before the download. Those need a registry entry (or
+`--xclbin-from`).
+
 ## Adding a size that needs a WIDE FF: the dense split (2026-10-26, `940e450`)
 
 Qwen3-14B (hidden 5120, FF **17408**) hit `dense: a 17408-wide activation table
