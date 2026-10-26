@@ -36,9 +36,10 @@ std::vector<RegistryFile> registry_files(const nlohmann::json& manifest, const s
 Fetch status_of(const RegistryFile& f, const std::filesystem::path& model_dir, const Record& record);
 
 // A present, right-size file the record does not name is hashed once; a match joins *record.
+// Pinned models also verify recorded files, queuing corruption without deleting the old file.
 std::vector<std::pair<RegistryFile, Fetch>> plan_pull(const std::vector<RegistryFile>& files,
                                                       const std::filesystem::path& model_dir,
-                                                      Record* record, bool force);
+                                                      Record* record, bool force, bool strict_integrity = false);
 
 std::string file_oid(const std::filesystem::path& p, bool lfs);
 

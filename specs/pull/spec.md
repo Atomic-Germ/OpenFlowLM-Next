@@ -11,10 +11,14 @@ Two registry files describe a model. `model_list.json` names its files, and `mod
 gives each file's size and oid (an LFS file's sha256, otherwise its git blob oid), copied from the
 repository at the revision the entry pins. An upgrade is a new revision of those two files.
 
-Hash checks of downloaded bytes against the registry stay advisory. A repository can serve bytes
-the registry's oid does not describe (LFS vs git-blob, mirrors), and a failing check must not
+For unpinned models, hash checks of downloaded bytes against the registry stay advisory. A
+repository can serve bytes the registry's oid does not describe (LFS vs git-blob, mirrors), and a failing check must not
 block a pull or loop on re-downloads. The install record below compares registry with registry,
 which needs no hash, so it does not reopen that.
+
+Models with nonempty `file_sources` keep strict size/hash verification, including for a staged
+replacement and for files whose install record already names the current oid. Verification reports
+stale or corrupt files without deleting them; pull replaces them only after the new bytes pass.
 
 ## Requirements
 
@@ -26,7 +30,8 @@ which needs no hash, so it does not reopen that.
 A file needs fetching when it is absent, when its size differs from the registry's, or when the
 install record names a different oid than the registry. The status check (`oflm list`, every model
 load) and the pull use that one test, so a file that status calls missing is a file the pull
-downloads. The status check never reads a file's contents.
+downloads. The fast status check never reads a file's contents; full pinned-model checks also
+verify the bytes, without removing files that fail.
 
 **Acceptance criteria:**
 - An absent file, a file of the wrong size, and a file recorded for another oid each need
@@ -37,7 +42,8 @@ downloads. The status check never reads a file's contents.
 ### PULL-RECORD: what was installed is recorded, and an install with no record is hashed once
 **Applies to:** openflowlm-next (`src/pull/install_record.cpp`, `src/pull/model_downloader.cpp`)
 **Verification:** test
-**Test:** `src/pull/pull_plan_test.cpp` (CTest `pull_plan`, no network)
+**Tests:** `src/pull/pull_plan_test.cpp` (CTest `pull_plan`) and
+`src/test/downloader_pinning/test_downloader_pinning.cpp` (CTest `test_downloader_pinning`), no network
 
 `<model dir>/.oflm-files.json` maps each file to the registry oid it was downloaded for. A pull
 adds each file as its download completes, so an interrupted pull keeps what it finished. The
@@ -46,18 +52,21 @@ record holds the registry's oid, not a hash of the bytes. `oflm remove` deletes 
 A file that is present, the right size and not named in the record (every file of an install made
 before the record existed) is hashed once by the next pull. A match is recorded without a download;
 a mismatch is downloaded. That catches a file that changed but kept its size, which no status check
-can see. Until then, `oflm list` and the automatic pull treat such an install by size alone; an
+can see. Until then, `oflm list` and the automatic pull treat an unpinned install by size alone; an
 explicit `oflm pull <tag>` runs the one-time check even when the status is Ready.
 
 The one-time check reads every file: klein's 9 GB took 96 s (2026-10-08, `picosha2`, about
-95 MB/s). After that, a pull of a current model returns at once.
+95 MB/s). After that, a pull of a current unpinned model returns at once. Pinned models continue
+checking recorded files for corruption.
 
 **Acceptance criteria:**
 - Of four files (one matching, one the same size with other bytes, one the wrong size, one
   absent), a pull with no record fetches the last three and records the first.
-- A recorded file is not hashed again: its record, not its bytes, says it is current.
+- An unpinned recorded file is not hashed again: its record, not its bytes, says it is current.
+- An unpinned hash mismatch can complete and record the registry oid; the next pull keeps it.
 - A file the registry gives no oid is neither hashed nor fetched for that reason.
 - The record reads back what was written; an absent or unreadable record reads as no record.
+- Rewriting an existing record replaces its contents and leaves no `.tmp`, including on Windows.
 
 ### PULL-FORCE: `--force` downloads every file
 **Applies to:** openflowlm-next (`src/pull/install_record.cpp`, `src/pull/model_downloader.cpp`)
@@ -72,14 +81,21 @@ whatever the status.
 
 ### PULL-ATOMIC: a download replaces a file only once it is whole
 **Applies to:** openflowlm-next (`src/pull/download_model.cpp`, `src/pull/model_downloader.cpp`)
-**Verification:** manual
+**Verification:** test + manual
+**Test:** `src/test/downloader_pinning/test_downloader_pinning.cpp` (CTest `test_downloader_pinning`, no network)
 
 A file downloads to `<file>.part` and is renamed over the old file only when the transfer
-succeeds; a failure removes the `.part`. A pull killed mid-file leaves the old file in place and
-its `.part` behind, and the next pull removes the `.part` before anything else. A replacement needs
+succeeds. An unpinned failure removes the `.part`; pinned transfers retain incomplete parts for
+resume and discard parts that fail size/hash verification. A pull killed mid-file leaves the old
+file in place and its `.part` behind. The next unpinned pull removes the part; a pinned pull can
+resume it and must verify it before promotion. A replacement needs
 disk for the largest file twice, briefly (7.5 GB for klein's `weights.bin`).
 
-**Verification (manual):** on a complete install, `oflm pull <tag> --force` and kill it while it
+Neither pull preflight nor full model status verification removes the existing destination.
+Pinned files with stale oids or corrupt bytes are queued for staged replacement, including with
+`--force`. An unsuccessful replacement leaves the old file and its recorded oid intact.
+
+**Verification (manual, unpinned):** on a complete install, `oflm pull <tag> --force` and kill it while it
 downloads the largest file. The old file is still there with the registry's size and hash, and a
 `.part` is beside it. The next `oflm pull <tag>` removes the `.part` and reports the model already
 downloaded.

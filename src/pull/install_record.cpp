@@ -1,4 +1,5 @@
 #include "install_record.hpp"
+#include "atomic_replace.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -32,9 +33,11 @@ void write_record(const fs::path& model_dir, const Record& record) {
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         f << nlohmann::json{{"version", 1}, {"files", files}}.dump(1) << '\n';
+        f.close();
         if (!f) throw std::runtime_error("cannot write " + tmp.string());
     }
-    fs::rename(tmp, model_dir / kRecordFile);
+    if (const auto error = replace_file_atomically(tmp, model_dir / kRecordFile))
+        throw fs::filesystem_error("cannot replace install record", tmp, model_dir / kRecordFile, error);
 }
 
 const char* describe(Fetch why) {
@@ -90,11 +93,12 @@ Fetch status_of(const RegistryFile& f, const fs::path& model_dir, const Record& 
 }
 
 std::vector<std::pair<RegistryFile, Fetch>> plan_pull(const std::vector<RegistryFile>& files,
-                                                      const fs::path& model_dir, Record* record, bool force) {
+                                                      const fs::path& model_dir, Record* record, bool force,
+                                                      bool strict_integrity) {
     std::vector<std::pair<RegistryFile, Fetch>> out;
     for (const auto& f : files) {
         Fetch why = force ? Fetch::Forced : status_of(f, model_dir, *record);
-        if (why == Fetch::No && !f.oid.empty() && !record->count(f.path)) {
+        if (why == Fetch::No && !f.oid.empty() && (strict_integrity || !record->count(f.path))) {
             if (file_oid(model_dir / f.path, f.lfs) == f.oid) (*record)[f.path] = f.oid;
             else why = Fetch::Hash;
         }

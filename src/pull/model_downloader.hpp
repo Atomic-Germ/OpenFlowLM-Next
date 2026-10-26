@@ -53,7 +53,7 @@ public:
     // Check if model is already downloaded.
     // When fast_check is true, only the local presence + version compatibility
     // are checked; no HuggingFace metadata is fetched and no per-file hash
-    // verification / cleanup is performed. Use this for cheap status queries
+    // verification is performed. Use this for cheap status queries
     // such as `oflm list`.
     ModelStatus is_model_downloaded(const std::string& model_tag, bool sub_process_mode=0, bool fast_check=false);
     
@@ -94,7 +94,7 @@ private:
     // bool check_model_compatibility(const std::string& model_tag);
     ModelStatus check_model_compatibility(const std::string& model_tag, bool sub_process_mode=0);
 
-    // Verify per-file integrity against HuggingFace metadata and remove any
-    // corrupted files. Returns true if all files passed verification.
-    bool verify_and_clean_files(const std::string& model_tag, bool use_modelscope=0, bool sub_process_mode=0);
-}; 
+    // Verify per-file integrity without deleting existing files. Returns true
+    // if all files passed verification (unpinned hash checks remain advisory).
+    bool verify_files(const std::string& model_tag, bool use_modelscope=0, bool sub_process_mode=0);
+};

@@ -224,7 +224,9 @@ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::str
     const bool requires_config =
         std::find(model_files.begin(), model_files.end(), "config.json") != model_files.end();
     if (!requires_config) {
-        return missing_files.empty() ? ModelStatus::Ready : ModelStatus::Missing;
+        return missing_files.empty() &&
+               (!strict_integrity || fast_check || verify_files(new_model_tag, false, sub_process_mode))
+            ? ModelStatus::Ready : ModelStatus::Missing;
     }
     bool is_config_file_missing = std::find(missing_files.begin(), missing_files.end(), "config.json") != missing_files.end();
     ModelStatus modelstatus = ModelStatus::Missing;
@@ -242,13 +244,13 @@ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::str
         if (modelstatus == ModelStatus::Outdated) {
             if (!fast_check) {
                 header_print("OFLM", "Checking outdated files...");
-                verify_and_clean_files(new_model_tag, false, sub_process_mode);
+                verify_files(new_model_tag, false, sub_process_mode);
             }
         }
         else if (modelstatus == ModelStatus::Ready) {
             if (!missing_files.empty() ||
                 (strict_integrity && !fast_check &&
-                 !verify_and_clean_files(new_model_tag, false, sub_process_mode))) {
+                 !verify_files(new_model_tag, false, sub_process_mode))) {
                 // config.json is present and the version check passed, but
                 // other files (e.g. weights) are still missing -- or, for a
                 // pinned entry, present but not the pinned bytes.
@@ -361,7 +363,9 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
             }
         }
 
-        ModelDownloader::ModelStatus status = is_model_downloaded(new_model_tag);
+        // The plan below checks pinned bytes without deleting existing files.
+        // Preflight only needs presence and version compatibility here.
+        ModelDownloader::ModelStatus status = is_model_downloaded(new_model_tag, false, true);
         if (status == ModelStatus::Incompatible) {
             return true;
         }
@@ -377,11 +381,8 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
             header_print("ERROR", "model_info.json describes none of these files required by model_list.json, "
                                   "so they cannot be downloaded: " + names);
             header_print("ERROR", "Adding a model needs an entry in BOTH files.");
+            header_print("ERROR", "For models installed with `oflm add`, re-run `oflm add` with the original source.");
             return false;
-        }
-        if (pinned && (force_redownload || status == ModelStatus::Missing)) {
-            // a pinned file must be the pinned bytes: drop corrupt finals so the plan refetches them
-            verify_and_clean_files(new_model_tag, use_modelscope, status == ModelStatus::Missing);
         }
 
         // a pinned transport resumes its .part and verifies it; an unpinned one starts clean
@@ -394,7 +395,7 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         const bool all_recorded = std::all_of(registry.begin(), registry.end(), [&](const pull::RegistryFile& f) {
             return f.oid.empty() || record.count(f.path) != 0;
         });
-        if (status == ModelStatus::Ready && all_recorded && !force_redownload) {
+        if (!pinned && status == ModelStatus::Ready && all_recorded && !force_redownload) {
             header_print("OFLM", "Model already downloaded. Use --force to re-download.");
             return true;
         }
@@ -404,13 +405,13 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
             header_print("OFLM", "No install record yet: checking the files already present against the registry (once)...");
         }
         const size_t recorded_before = record.size();
-        const auto plan = pull::plan_pull(registry, model_path, &record, force_redownload);
+        const auto plan = pull::plan_pull(registry, model_path, &record, force_redownload, pinned);
         if (record.size() != recorded_before) {
             pull::write_record(model_path, record);
         }
         if (plan.empty()) {
             header_print("OFLM", "All files are present and current.");
-            return !pinned || verify_and_clean_files(new_model_tag, use_modelscope);
+            return !pinned || verify_files(new_model_tag, use_modelscope);
         }
 
         auto [downloads, sum_file_size] = build_download_list(new_model_tag, plan, use_modelscope);
@@ -444,7 +445,7 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
             auto final_missing = get_missing_files(new_model_tag);
             const bool verified = final_missing.empty() &&
                 (!uses_pinned_sources(model_info) ||
-                 verify_and_clean_files(new_model_tag, use_modelscope));
+                 verify_files(new_model_tag, use_modelscope));
             if (verified) {
                 header_print("OFLM", "All files verified successfully.");
             } else {
@@ -574,7 +575,7 @@ std::string ModelDownloader::get_model_file_path(const std::string& model_path, 
 /// \brief Build the download list
 /// \param model_tag the model tag
 /// \param modelscope true to download from ModelScope instead of HuggingFace
-/// \param force_redownload true to re-queue files already on disk
+/// \param plan the files to fetch, in completion/record order
 /// \return the download list
 std::pair<nlohmann::json, float> ModelDownloader::build_download_list(
     const std::string& model_tag, const std::vector<std::pair<pull::RegistryFile, pull::Fetch>>& plan, bool modelscope) {
@@ -595,9 +596,12 @@ std::pair<nlohmann::json, float> ModelDownloader::build_download_list(
             {"localpath", get_model_file_path(model_path, f.path)},
             {"oid", f.oid},
             {"is_lfs", f.lfs},
-            {"hash_algorithm", f.lfs ? "sha256" : "git_blob_sha1"},
             {"revision", source.revision},
         });
+        // This marker opts into strict transport verification. Ordinary registry
+        // hashes stay advisory even when size/hash metadata is available.
+        if (uses_pinned_sources(model_info))
+            downloads.back()["hash_algorithm"] = f.lfs ? "sha256" : "git_blob_sha1";
     }
     return std::make_pair(downloads, sum_file_size);
 }
@@ -738,7 +742,7 @@ bool ModelDownloader::check_model(const std::string& model_tag, bool use_modelsc
             return true;
         case ModelStatus::Outdated:
         case ModelStatus::Ready: {
-            bool ok = verify_and_clean_files(new_model_tag, use_modelscope, sub_process_mode);
+            bool ok = verify_files(new_model_tag, use_modelscope, sub_process_mode);
             if (!ok)
                 header_print("OFLM", "Model check completed with errors. Use `oflm pull " + new_model_tag + "` to re-download corrupted files.");
             else
@@ -750,19 +754,19 @@ bool ModelDownloader::check_model(const std::string& model_tag, bool use_modelsc
 }
 
 /// \brief Verify each model file's hash against HuggingFace metadata and
-///        remove any corrupted files. Files that pass verification are kept.
+///        report corrupt files without deleting them before a replacement exists.
 /// \param model_tag the model tag
 /// \param sub_process_mode if true, suppress informational logging
 /// \return true if all files passed verification, false otherwise
 /// \note Two regimes. Pinned (file_sources) entries are strict: the bytes on
 ///       disk must be the pinned revision's bytes, so a size or hash mismatch
-///       deletes the file and fails verification -- the pull that follows
-///       re-downloads exactly what the pin names. Everything else stays
+///       fails verification -- the pull that follows stages and verifies a
+///       replacement before overwriting the file. Everything else stays
 ///       advisory: a hash mismatch only warns, because the registry oid can
 ///       legitimately disagree with what a repo serves (LFS vs git-blob
 ///       hashing, re-uploads, mirrors), and deleting on such a disagreement
 ///       just forces endless re-downloads.
-bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool use_modelscope, bool sub_process_mode) {
+bool ModelDownloader::verify_files(const std::string& model_tag, bool use_modelscope, bool sub_process_mode) {
     bool any_error = false;
     try {
         auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
@@ -842,16 +846,7 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
 
             if (!sub_process_mode) {
                 header_print("OFLM", "Fail!");
-                header_print("OFLM", "Removing corrupted file: " + filename + "...");
-            }
-
-            if (std::filesystem::remove(local_path)) {
-                if (!sub_process_mode) {
-                    header_print("OFLM", "Successfully removed " + filename + "!");
-                }
-            }
-            else {
-                header_print("ERROR", "Failed to remove corrupted file: " + filename);
+                header_print("OFLM", "Keeping file until a verified replacement is downloaded: " + filename);
             }
             any_error = true;
         }

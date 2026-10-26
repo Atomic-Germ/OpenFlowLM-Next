@@ -15,6 +15,7 @@
 #include "utils/utils.hpp"
 #include "nlohmann/json.hpp"
 #include "install_record.hpp"
+#include "atomic_replace.hpp"
 #include "picosha2.h" 
 #include "sha1.hpp"
 #ifdef _WIN32
@@ -204,8 +205,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
         }
     }
 
-    std::error_code ec;
-    std::filesystem::rename(part_path, local_path, ec);
+    std::error_code ec = pull::replace_file_atomically(part_path, local_path);
     if (ec) {
         std::cerr << "Cannot replace " << local_path << ": " << ec.message() << std::endl;
         std::filesystem::remove(part_path, ec);
@@ -279,18 +279,6 @@ FILE* open_part_file(const std::filesystem::path& path, bool append) {
     return _wfopen(path.c_str(), append ? L"ab" : L"wb");
 #else
     return fopen(path.c_str(), append ? "ab" : "wb");
-#endif
-}
-
-bool promote_atomically(const std::filesystem::path& part,
-                        const std::filesystem::path& destination) {
-#ifdef _WIN32
-    return MoveFileExW(part.c_str(), destination.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-#else
-    std::error_code error;
-    std::filesystem::rename(part, destination, error);
-    return !error;
 #endif
 }
 
@@ -437,7 +425,7 @@ bool download_from_hf_cache(const std::string& url, const std::string& local_pat
         std::filesystem::remove(part, ec);
         return false;
     }
-    if (!promote_atomically(part, dest)) { std::filesystem::remove(part, ec); return false; }
+    if (pull::replace_file_atomically(part, dest)) { std::filesystem::remove(part, ec); return false; }
     header_print("OFLM", "Using cached file from the local HF cache: " << local_path);
     return true;
 }
@@ -525,7 +513,7 @@ bool download_file_atomic(const DownloadRequest& request,
         return false;
     }
 
-    if (!promote_atomically(part, request.destination)) {
+    if (pull::replace_file_atomically(part, request.destination)) {
         std::cerr << "Failed to atomically promote: " << request.destination << std::endl;
         return false;
     }
@@ -656,4 +644,4 @@ CurlInitializer::~CurlInitializer() {
     cleanup_curl();
 }
 
-} // namespace download_utils 
+} // namespace download_utils

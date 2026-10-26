@@ -83,6 +83,11 @@ int main() {
     write(dir / "abc", "abd");
     ok(pull::plan_pull({abc}, dir, &rec, false).empty(),
        "pull: a recorded file is not hashed again (its record, not its bytes, says it is current)");
+    ok(reasons(pull::plan_pull({abc}, dir, &rec, false, true)) == "abc: contents differ from the registry",
+       "pinned pull: a recorded file with corrupt bytes is queued for replacement");
+    ok(pull::file_oid(dir / "abc", true) ==
+           "a52d159f262b2c6ddb724a61840befc36eb30c88877a4030b65cbe86298449c9",
+       "pinned planning preserves the existing file until its replacement completes");
     pull::RegistryFile moved = abc;
     moved.oid = "NEWOID";
     ok(reasons(pull::plan_pull({moved}, dir, &rec, false)) == "abc: downloaded for another revision",
@@ -99,6 +104,10 @@ int main() {
     pull::write_record(dir, {{"a", "1"}, {"sub/b", "2"}});
     ok(pull::read_record(dir) == pull::Record{{"a", "1"}, {"sub/b", "2"}}, "the record reads back what was written");
     ok(!fs::exists(dir / (std::string(pull::kRecordFile) + ".tmp")), "...and leaves no temp file");
+    pull::write_record(dir, {{"a", "new oid"}, {"c", "3"}});
+    ok(pull::read_record(dir) == pull::Record{{"a", "new oid"}, {"c", "3"}},
+       "replacing an existing record reads back only the second contents");
+    ok(!fs::exists(dir / (std::string(pull::kRecordFile) + ".tmp")), "replacement leaves no temp file");
     write(dir / pull::kRecordFile, "{not json");
     ok(pull::read_record(dir).empty(), "an unreadable record reads as no record");
     ok(pull::read_record(dir / "nowhere").empty(), "an absent record reads as no record");
