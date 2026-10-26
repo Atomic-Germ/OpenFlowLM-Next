@@ -35,9 +35,21 @@ sys.path.insert(0, str(ROOT / "open_kernels"))
 from recipes.spec import ModelSpec, SpecError  # noqa: E402
 
 
+def _repo_cache(repo: str) -> str:
+    """A per-repo download directory.
+
+    hf_hub_download(local_dir=...) writes <local_dir>/<filename>, so ONE shared
+    directory means every repo's config.json / tokenizer.json lands on the same
+    path and the second repo reads the first one's file: the probe for
+    Llama-3.1-70B got Gemma 3 27B's config ("config.json lacks 'vocab_size'"),
+    and a spec could be generated from another model's geometry without a word.
+    """
+    return f"/tmp/hf_cfg/{repo.replace('/', '__')}"
+
+
 def fetch_config(repo: str) -> dict:
     from huggingface_hub import hf_hub_download
-    p = hf_hub_download(repo_id=repo, filename="config.json", local_dir="/tmp/hf_cfg")
+    p = hf_hub_download(repo_id=repo, filename="config.json", local_dir=_repo_cache(repo))
     return json.loads(Path(p).read_text())
 
 
@@ -53,13 +65,45 @@ def fetch_real_vocab(repo: str) -> int | None:
     """
     from huggingface_hub import hf_hub_download
     try:
-        p = hf_hub_download(repo_id=repo, filename="tokenizer.json", local_dir="/tmp/hf_cfg")
+        p = hf_hub_download(repo_id=repo, filename="tokenizer.json", local_dir=_repo_cache(repo))
     except Exception as exc:                      # noqa: BLE001 - a gated repo may hide it
         print(f"warn: could not fetch tokenizer.json ({exc}); real_vocab = vocab")
         return None
     sys.path.insert(0, str(ROOT / "open_kernels"))
     from recipes.load import tokenizer_vocab
     return tokenizer_vocab(Path(p))
+
+
+def text_config(cfg: dict) -> dict:
+    """The language model's config for a MULTIMODAL checkpoint.
+
+    Gemma 3 / Medgemma / Translategemma configs wrap the text model
+    (`text_config`), and the density/vocab/rope knobs live there -- the outer
+    dict has the vision tower's. Reading the outer one gives "config.json lacks
+    'vocab_size'", which is how a 27B Gemma looked like a broken config.
+    """
+    for key in ("text_config", "llm_config", "language_config"):
+        inner = cfg.get(key)
+        if isinstance(inner, dict) and inner.get("hidden_size"):
+            merged = dict(inner)
+            merged.setdefault("model_type", cfg.get("model_type"))
+            return merged
+    return cfg
+
+
+def spec_config(repo: str) -> tuple[dict, int | None]:
+    """(the config the recipes want, the tokenizer's real id count).
+
+    Three repairs, all of them things a real repository does: the text model is
+    nested inside a multimodal config (`text_config`), Gemma 3's text config
+    omits `vocab_size` (the tokenizer defines it), and `real_vocab` -- the
+    logits mask -- comes from tokenizer.json, not from the config at all.
+    """
+    cfg = text_config(fetch_config(repo))
+    real_vocab = fetch_real_vocab(repo)
+    if not cfg.get("vocab_size") and real_vocab:
+        cfg["vocab_size"] = real_vocab
+    return cfg, real_vocab
 
 
 def family_from_config(cfg: dict) -> str | None:
@@ -148,7 +192,7 @@ def main():
                          "of writing a link file when another spec covers the geometry")
     args = ap.parse_args()
 
-    cfg = fetch_config(args.repo)
+    cfg, real_vocab = spec_config(args.repo)
     family = family_from_config(cfg)
     if not family:
         print(f"ERROR: could not derive family from config for {args.repo}", file=sys.stderr)
@@ -158,7 +202,7 @@ def main():
     if bm:
         print(f"base_model detected: {bm}")
         try:
-            base_cfg = fetch_config(bm)
+            base_cfg = text_config(fetch_config(bm))
             family = family_from_config(base_cfg) or family
             cfg = base_cfg
         except Exception as e:
@@ -192,7 +236,6 @@ def main():
     # A real ModelSpec from the family builder when the config's model_type has
     # one (layer types off full_attn_idxs / layer_types, the family's FF and
     # rope law); the template derivation stays for unknown model types.
-    real_vocab = fetch_real_vocab(args.repo)
     cand = None
     try:
         cand = ModelSpec.from_hf_config(cfg, real_vocab=real_vocab)

@@ -137,15 +137,21 @@ def _kernel_hashes(paths) -> dict[str, str]:
 def classify(spec_path: Path) -> str:
     """One line: builds here, needs these points, or hits this wall."""
     sys.path.insert(0, str(OPEN))
-    from recipes import catalogue as C
-    from recipes.families import for_spec
     from recipes.load import load_spec
-    from recipes.catalogue import OpRangeError
-
     try:
         spec = load_spec(spec_path)
     except Exception as exc:                                  # noqa: BLE001 - report, do not raise
         return f"cannot load the spec: {type(exc).__name__}: {exc}"
+    return classify_spec(spec)
+
+
+def classify_spec(spec) -> str:
+    """The same verdict for a ModelSpec that is not a file yet (--probe)."""
+    sys.path.insert(0, str(OPEN))
+    from recipes import catalogue as C
+    from recipes.families import for_spec
+    from recipes.catalogue import OpRangeError
+
     gates = _load_module("_op_gate", ROOT / "utilities" / "op-gate.py")
     with C.collecting() as missing:
         try:
@@ -172,14 +178,55 @@ def classify(spec_path: Path) -> str:
     return "needs " + " + ".join(bits)
 
 
+def probe(repo: str) -> tuple[str, str]:
+    """(verdict, model name) for a HuggingFace repo, without writing a spec.
+
+    The same derivation build-new-spec uses, stopped before the file: a size is
+    'easy' when its only missing points have a fixture (utilities/op-gate.py),
+    and a 'design step' when something has none, or the recipe refuses the shape.
+    """
+    sys.path.insert(0, str(OPEN))
+    gks = _load_module("_gen_kernel_spec", ROOT / "utilities" / "gen-kernel-spec.py")
+    from recipes.spec import ModelSpec
+
+    cfg, rv = gks.spec_config(repo)
+    base = gks.base_model_from_readme(repo)
+    if base:
+        try:
+            cfg, rv = gks.spec_config(base)
+        except Exception:                     # noqa: BLE001 - the repo's own config is fine
+            pass
+    try:
+        spec = ModelSpec.from_hf_config(cfg, real_vocab=rv)
+    except Exception as exc:                  # noqa: BLE001 - unknown model_type is a verdict
+        return f"no recipe for this config ({exc})", repo
+    name = spec.extra.get("model") or repo
+    name = f"{spec.family} hidden={spec.hidden} ff={spec.intermediate} " \
+           f"heads={spec.num_heads}/{spec.num_kv_heads} hd={spec.head_dim}"
+    return classify_spec(spec), name
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reference", default="", help="another checkout's root (or its recipes/specs dir)")
     ap.add_argument("--missing-only", action="store_true", help="hide what is already covered")
+    ap.add_argument("--probe", action="append", default=[], metavar="REPO",
+                    help="classify a HuggingFace repo as if adding it (repeatable): does it "
+                         "build here, which points does it need, does any lack a fixture?")
     a = ap.parse_args()
 
     ours = _specs(SPECS)
     problems = 0
+
+    if a.probe:
+        print(f"probe ({len(a.probe)} repo(s)): would build-new-spec be enough?")
+        for repo in a.probe:
+            try:
+                verdict, name = probe(repo)
+            except Exception as exc:          # noqa: BLE001 - a probe must not die on one repo
+                verdict, name = f"probe failed: {type(exc).__name__}: {exc}", repo
+            print(f"  {repo:44} {name}\n      {verdict}")
+        return 0
 
     print(f"this tree: {len(ours)} spec(s) in open_kernels/recipes/specs"
           + (f", {len(_specs(CANDIDATES))} candidate(s)" if CANDIDATES.is_dir() else ""))
