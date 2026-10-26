@@ -46,6 +46,7 @@ EXPECTED = {
     "lfm2-2.6b": "LFM2-2.6B-NPU2",
     "llama32-1b": "Llama-3.2-1B-NPU2",
     "llama32-3b": "Llama-3.2-3B-NPU2",
+    "nanbeige41-3b": "Nanbeige4.1-3B-NPU2",
 }
 
 
