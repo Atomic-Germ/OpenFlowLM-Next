@@ -5,6 +5,30 @@ workflow below. The earlier smoke/all-layer commands in this document bind
 historical BF16 output hashes and require their recorded sources and export.
 Do not relabel those captures for a new arithmetic contract.
 
+For resident reset on the FP32 export, first complete and separately audit the
+fresh-control workflow (`post_validate.py`). Build another fresh capture CLI
+with `build.py --repeat`, keeping the shared request/reset implementation. Then:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/post_reset.py run \
+  --build Models/qwen38-27b/post-prefill-production/repeat-v1 \
+  --baseline Models/qwen38-27b/post-prefill-production/short-v1 \
+  --out Models/qwen38-27b/post-prefill-production/reset-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/post_reset.py audit \
+  --out Models/qwen38-27b/post-prefill-production/reset-v1
+```
+
+The runner binds both baseline report and audit, rechecks current builds and
+export inputs, and recomputes the baseline's independent numerical gates.
+Each route runs two identical short requests in one resident process. Separate
+captures and ordered raw-log markers identify each request. The first must
+match all baseline traces; the second must match the first. Both independently
+pass every residual and logit gate. A separate audit recomputes all results;
+failed audits invalidate previous success. The shared NPU lock, exclusive
+device check and 35 GiB memory preflight apply to every route. This validates
+ordinary request reset, not different-prompt isolation or full-buffer zeroing.
+Block boundaries, long prefixes, serving and performance remain separate gates.
+
 The ordinary qwen35 recipe exports manifest v4 and 46 kernel sets for the
 validated dense Q4 H5120/FF17408 geometry. Five GEMM companions compute the
 BF16 residual of dequantized weights; both components read the same packed
