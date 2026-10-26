@@ -196,13 +196,13 @@ def test_no_shipped_models_hash_moved():
         "qwen35-0.8b.json": "sha256:f898e975f56aa24616a8841a31085c52a16d7215e681e1542d80dff57e856155",
         "qwen35-2b.json": "sha256:619eb2dae91329a88a725bedffcbcc32a1050cca5d9836ceedc237d8b36404a7",
         "qwen35-4b.json": "sha256:06e3163fc4e66163c1e2ee7ea97759f1dc7ce23cfa3440c4969418d2f06af7e5",
-        "qwen3-0.6b.json": "sha256:5d56a494a2801314be998bb9d713e239b74cafa24aeb581c4a8cebb6e84cef96",
-        "qwen3-1.7b.json": "sha256:b6f3b56210d57ec088aa458919691989dff21be1b9afd2056a8be60dc3bb8f91",
-        "lfm2-2.6b.json": "sha256:c121f01ee33e1c0a2c452ea23e93e87112367945914b2b9f3cb8ca01a39eff61",
+        "qwen3-0.6b.json": "sha256:940adeebeea9138ec2b179544c42db59c57f029440d7ffe5a863a4fac1d4615e",
+        "qwen3-1.7b.json": "sha256:46183f28f630e6904f71c1877be03c01f024f887dd6c62babe29c7132c218dbe",
+        "lfm2-2.6b.json": "sha256:90aa8796c49d11448b8841e0d17355b958a83715529d9e09f5cc4befc6ec675d",
         "llama32-1b.json": "sha256:131a7093af07c5af73222e02979def3fcf66e28ef05a77ba7d35a61240fbf96b",
         "llama32-3b.json": "sha256:557fcf71747d606e5bc23aaf26ea287f46d06fe58c70ace11d465ae7b9c5c427",
-        "nanbeige41-3b.json": "sha256:7bb2a579f3a8902479536d81f9abdfa71dd374d31e31b3e02ed89e7946198619",
-        "qwen3-14b.json": "sha256:07670f9c8fc069dd8f03b9c23e84723a1af80b1d2772249d576dbc11ff1c03c7",
+        "nanbeige41-3b.json": "sha256:a65a02d9c89825b338e369726e0e449a7704394a5ad4cae756d6331930c1e127",
+        "qwen3-14b.json": "sha256:2462660b6a12ca1b5133236ff7417e0911a831c9566f4fc8a6a145cee340152d",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

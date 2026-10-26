@@ -45,7 +45,7 @@
     "dense"
   ],
   "vocab": 151936,
-  "real_vocab": 151936,
+  "real_vocab": 151669,
   "num_heads": 40,
   "num_kv_heads": 8,
   "head_dim": 128,

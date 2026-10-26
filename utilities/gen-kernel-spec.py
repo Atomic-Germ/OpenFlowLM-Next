@@ -41,6 +41,27 @@ def fetch_config(repo: str) -> dict:
     return json.loads(Path(p).read_text())
 
 
+def fetch_real_vocab(repo: str) -> int | None:
+    """The tokenizer's id count for this repo, or None.
+
+    `real_vocab` is the head's masking bound: the kernel is built for `vocab`
+    rows (a tile multiple) and the engine masks the logits past the tokenizer's
+    real count. Without it a spec says real == vocab, which leaves the padding
+    rows in the argmax -- a garbage token can win. The hand-written specs carry
+    it (qwen3-4b/8b 151669, qwen35 248070); a GENERATED spec used to lose it,
+    so every size added through this script shipped unmasked logits.
+    """
+    from huggingface_hub import hf_hub_download
+    try:
+        p = hf_hub_download(repo_id=repo, filename="tokenizer.json", local_dir="/tmp/hf_cfg")
+    except Exception as exc:                      # noqa: BLE001 - a gated repo may hide it
+        print(f"warn: could not fetch tokenizer.json ({exc}); real_vocab = vocab")
+        return None
+    sys.path.insert(0, str(ROOT / "open_kernels"))
+    from recipes.load import tokenizer_vocab
+    return tokenizer_vocab(Path(p))
+
+
 def family_from_config(cfg: dict) -> str | None:
     mt = cfg.get("model_type")
     if isinstance(mt, str):
@@ -122,6 +143,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--refresh", action="store_true",
+                    help="regenerate an existing spec in place (keeps extra.model) instead "
+                         "of writing a link file when another spec covers the geometry")
     args = ap.parse_args()
 
     cfg = fetch_config(args.repo)
@@ -140,7 +164,19 @@ def main():
         except Exception as e:
             print(f"warn: could not fetch base config: {e}")
 
-    existing = existing_spec_for_family_size(family, cfg)
+    out_path = Path(args.out) if args.out else SPECS_DIR / f"{family}-candidate.json"
+    kept_model = ""
+    if args.refresh and out_path.is_file():
+        # Refresh an EXISTING spec in place (a tokenizer or config changed): keep the
+        # export name it already has, and skip the link shortcut -- the caller asked
+        # for this spec, not for what covers its geometry.
+        try:
+            kept_model = json.loads(out_path.read_text()).get("extra", {}).get("model", "")
+        except ValueError:
+            kept_model = ""
+        existing = None
+    else:
+        existing = existing_spec_for_family_size(family, cfg)
     if existing:
         print(f"Existing spec covers this size: {existing} — linking instead of generating.")
         out = Path(args.out) if args.out else Path(f"/tmp/{family}-link.json")
@@ -156,9 +192,10 @@ def main():
     # A real ModelSpec from the family builder when the config's model_type has
     # one (layer types off full_attn_idxs / layer_types, the family's FF and
     # rope law); the template derivation stays for unknown model types.
+    real_vocab = fetch_real_vocab(args.repo)
     cand = None
     try:
-        cand = ModelSpec.from_hf_config(cfg)
+        cand = ModelSpec.from_hf_config(cfg, real_vocab=real_vocab)
     except SpecError as e:
         print(f"(the family builder refuses this config: {e}; using the derivation)")
 
@@ -185,6 +222,8 @@ def main():
     spec["num_heads"] = cfg.get("num_attention_heads", spec.get("num_heads"))
     spec["num_kv_heads"] = cfg.get("num_key_value_heads", spec.get("num_kv_heads"))
     spec["vocab"] = cfg.get("vocab_size", spec.get("vocab"))
+    # the tokenizer's id count, which the head masks past (see fetch_real_vocab)
+    spec["real_vocab"] = real_vocab or spec.get("real_vocab") or spec["vocab"]
     rope_theta = cfg.get("rope_theta", spec.get("rope_theta"))
     spec["rope_theta"] = float(rope_theta) if rope_theta is not None else rope_theta
     head_dim = cfg.get("head_dim") or cfg.get("hidden_size", 0) // max(cfg.get("num_attention_heads", 1), 1)
@@ -196,7 +235,9 @@ def main():
         built["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config",
                           "model": args.repo.split("/")[-1] + "-NPU2"}
         spec = built
-    out = Path(args.out) if args.out else SPECS_DIR / f"{family}-candidate.json"
+    out = out_path
+    if kept_model and spec.get("extra"):
+        spec["extra"]["model"] = kept_model
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(spec, indent=2))
     print(f"Wrote candidate spec to {out}")

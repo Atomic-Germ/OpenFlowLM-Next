@@ -35,7 +35,7 @@
     "short_conv"
   ],
   "vocab": 65536,
-  "real_vocab": 65536,
+  "real_vocab": 64400,
   "num_heads": 32,
   "num_kv_heads": 8,
   "head_dim": 64,
