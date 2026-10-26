@@ -172,9 +172,15 @@ nlohmann::json derive_config(const GgufFile& g) {
         c["vocab_size"] = u("vocab_size");
     else
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
+    // A per-layer value is an ARRAY in the metadata (Gemma 4's head_count_kv is 8 on sliding
+    // layers, 1 on full ones) and reads back as ""; it has no single value to derive, so it is
+    // left to config.json, and check_model refuses by name if nothing supplies it.
+    auto scalar = [&](const char* key, const std::string& k) {
+        if (g.kv_has(arch + "." + k) && !g.kv_str(arch + "." + k).empty()) c[key] = u(k);
+    };
     c["num_attention_heads"] = u("attention.head_count");
-    c["num_key_value_heads"] = u("attention.head_count_kv");
-    c["intermediate_size"] = u("feed_forward_length");
+    scalar("num_key_value_heads", "attention.head_count_kv");
+    scalar("intermediate_size", "feed_forward_length");
     if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
