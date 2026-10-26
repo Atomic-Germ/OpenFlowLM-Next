@@ -724,15 +724,22 @@ python utilities/build-new-spec.py --repo Qwen/Qwen3-0.6B        # or --spec-nam
 | the spec JSON from HF config (or a `link_to` when the base already has kernels) | yes | `utilities/gen-kernel-spec.py` |
 | the model name (`extra.model`, the `src/xclbins` directory) | yes, derived; `register-spec.py` records it when the derived name differs | `test_spec_model_names.py` |
 | the **attention** point: run the production worker at the geometry vs an fp64 oracle | yes | `designs/attn/probe_dense.py` (step 3b) |
-| the **other op** points (gemv K, ln width): run each op's own fixture | yes for `gemv_q4` and `ln`; other ops abort with a named reason | `utilities/op-gate.py` |
+| the **other op** points (gemv K, ln width, lm_head K): run each op's own fixture | yes for `gemv_q4`, `ln`, `lm_head_q4`; other ops abort with a named reason | `utilities/op-gate.py` |
 | the catalogue edit (values() AND the whole-tuple combination) | yes | `utilities/catalogue-add-point.py` |
 | the build, the manifest, the `gguf` twin | yes | `utilities/export-kernels.py` |
 | the frozen test lists (spec_hash, EXPECTED name) | yes — never hand-edit them | `utilities/register-spec.py` (step 6) |
+| **what is missing at all** (registry + another checkout) | yes | `utilities/spec-gaps.py` |
+
+`python utilities/spec-gaps.py --reference ../OpenFlowLM-Next` answers "what does
+that tree have that this one does not" with a classification per spec (builds
+here / needs N points, gated or not / recipe wall), and
+`--reference`-less mode checks the official registry. A model that shares a
+family and parameter count with a shipped spec is reported as a `link` (it rides
+that set by `kernel_hash`); a `*-candidate.json` is the generator's default
+output name, not a spec.
 
 What is still a design step (the script refuses, with the op and the value):
 
-- **`lm_head_q4` at a new hidden** — no `make_test.py` in `designs/lm_head_q4`.
-  `vocab` is `multiple_of(64)`, so only K misses.
 - **`lm_head_q8` at a new K** — the fixture compiles K as a module constant (2048).
 - **`gemv_q8`, `deltanet`, `short_conv`, `gemv_q4_prep_f32`, `router`, `moe`** —
   no per-geometry fixture; each was validated through a whole-layer run.
@@ -753,6 +760,41 @@ Reading a missing point: `recipes/catalogue.py` is a list of what has actually
 been RUN on the hardware. `catalogue.collecting()` (used by both scripts) means
 one `recipe()` pass reports EVERY missing point, not just the first that would
 raise — so a new size never has to be discovered one failure at a time.
+
+## Adding a size that needs a WIDE FF: the dense split (2026-10-26, `940e450`)
+
+Qwen3-14B (hidden 5120, FF **17408**) hit `dense: a 17408-wide activation table
+does not leave room for the streams in a core's L1`. The layer_x / qwen35 path
+has had the down-GEMV split since the 27B; the dense path had not. Ported from
+fedora, one implementation shared with layer_x:
+
+- `open_kernels/ln_split.py` — the streaming norm bodies (`ln_split_body`,
+  `ln_split_body3`). The fused helper holds five 10 KB elements; at HID 5120
+  that does not fit the norm core. It adds the residual half by half
+  (`ln_add2`), writes the sum to DDR, norms it back (`ln_nr`).
+- `open_kernels/ironutil.py` — `piece_tap`: one K piece of a banded weight pool.
+- `recipes/dense.py` — `_ffn_split` (`down_split`), per-call measured against
+  the widest PIECE, `DOWN_SPLIT`/`NORM_SPLIT` on the geometry, the `AD_OUT2B`
+  bounce buffer, `DENSE_DOWN_SPLIT`/`DENSE_NORM_SPLIT` probes in the build key,
+  and `GGUF.section(..., twins_built=f32_twin_fits(spec))`: **a split FF has no
+  f32-scale twin** (table + wider elements overflow a core), so the twin is not
+  built and the manifest advertises none.
+- `designs/dense/dx.py` — the down GEMV in K pieces, `ln_body3` (res + out2 +
+  out2b via `ln_add3`), the streaming-norm worker, and the step 6/7/8 DMA
+  branches.
+
+Only a spec with `DOWN_SPLIT` changes the design: `of_x`'s depth becomes 3 at
+HID 5120 (2 everywhere else), so the existing dense sets' generated code is
+unchanged. `build_key` moves anyway — it hashes `recipes/*.py`.
+
+Also: `lm_head_q4` got a fixture (`designs/lm_head_q4/{make_test,compare}.py`,
+from fedora) and a gate, so its K wall is validated by running the kernel:
+K=5120 PASS cos=1.0 maxrel=4.27e-06.
+
+**xclbins are not byte-reproducible** build-to-build (same source, different
+hash — that is why the export cache keys on content, not on the artifact), so
+"did my change alter the design?" is answered at the recipe/geometry level or by
+re-running the model, never by hashing final.xclbin.
 
 ## Still open (Phase-MoE / later)
 
