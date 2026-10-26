@@ -168,12 +168,12 @@ pip install -r ironvenv-requirements.txt          # mlir_aie 1.4.2 + llvm-aie wh
 export PATH="$PWD/ironvenv/lib/python3.13/site-packages/llvm-aie/bin:/opt/xilinx/xrt/bin:$PATH"
 # xclbinutil + aiebu-asm live in /opt/xilinx/xrt/bin (no ~/xrt-tools here)
 
-python open_kernels/gguf_pool.py                              # pool-law self-tests (bit-exact)
+python open_kernels/gguf_pool/gguf_pool.py                              # pool-law self-tests (bit-exact)
 GEMV_SCALES_F32=1 python open_kernels/build_design.py open_kernels/designs/gemv_q4/gemv_q4.py <out>
 LMHEAD_N=... LMHEAD_SCALES_F32=1 python open_kernels/build_design.py open_kernels/designs/lm_head_q8/lm_head_q8.py <out>
 # full export builds both layouts: python open_kernels/export_qwen36_kernels.py --spec ...
 
-cmake -S src/open_qwen36 -B build-oq36 -DXRT_INCLUDE_DIR=/opt/xilinx/xrt/include -DXRT_LIB_DIR=/opt/xilinx/xrt/lib
+cmake -S src/gguf -B build-gguf -DXRT_INCLUDE_DIR=/opt/xilinx/xrt/include -DXRT_LIB_DIR=/opt/xilinx/xrt/lib
 cmake --build build-oq36 && ctest --test-dir build-oq36        # GGUF-PACK + OPEN-MANIFEST
 
 # NPU harness (an accel0 NPU is present on this box):
@@ -183,7 +183,7 @@ cd open_kernels/designs/gemv_q4 && /tmp/opencode/harness/run_kernel run_qkv_gguf
 
 ## Validation results (2026-09-07, this box)
 
-- `open_kernels/gguf_pool.py` self-tests: pool bytes dequantize **bit-exactly**
+- `open_kernels/gguf_pool/gguf_pool.py` self-tests: pool bytes dequantize **bit-exactly**
   to the GGUF blocks (Q4_1/Q4_0/Q8_0, several shapes, both band splits).
 - C++ `std_perm_gguf` (GGUF-PACK ctest): bit-exact vs the reference dequant;
   **byte-identical to the Python packer** on the synthetic file AND on the real
@@ -473,7 +473,7 @@ rows are NaN**, all within the first 191,736 ids, ~25% of them, no row
 periodicity (mod 2/3/4/5/8 flat) — a garbage scale read, not a per-group
 bug. Everything past file coverage recovers the memset zeros.
 
-Root cause: the head op `lmhead_q8` (`src/open_qwen36/pools.cpp` ~773) was a
+Root cause: the head op `lmhead_q8` (`src/gguf/gguf_file.hpp` / `open_kernels/gguf_pool/`) ~773) was a
 plain memcpy in the kernel's supertile order — it assumed `lm_head.weight`
 (= gguf `output.weight`) already held the engine's q8 chunk raster: 32-row ×
 256-column chunks, 256 bf16 scales then 8192 int8 codes, at pool chunk
@@ -635,7 +635,7 @@ Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(
 - `open_kernels/recipes/dense.py`: passes `ROPE_IL` in geometry/flags and writes `layout.rope_pairing` (`"interleaved"` or `"halfsplit"`) into the manifest.
 - `open_kernels/designs/dense/dx_attn.py`: threads `ATTN_ROPE_IL` flag to `dx_attn` kernel build.
 - `open_kernels/designs/attn/attn.h`: adds `ATTN_ROPE_IL` path using `aie::interleave_unzip`/`aie::interleave_zip` over the head dim (identical pair-ordered cos/sin tables).
-- `src/open_qwen36/manifest.{hpp,cpp}`: parses `layout.rope_pairing` → `rope_interleaved` (default false).
+- `src/open_qwen36/manifest_gguf/manifest_gguf.hpp`: parses `layout.rope_pairing` → `rope_interleaved` (default false); the GGUF twin module
 - `src/open_qwen36/block_host.{hpp,cpp}`: `AttnGeom.rope_il` propagated; interleaved `rope()` matches kernel pairing.
 - `src/open_qwen36/core.cpp`: wires `rope_il` from manifest to host paths (block prefill/host attention) and keeps layer dump plumbing intact.
 
