@@ -733,6 +733,14 @@ python utilities/build-new-spec.py --repo Qwen/Qwen3-0.6B        # or --spec-nam
 | the frozen test lists (spec_hash, EXPECTED name) | yes — never hand-edit them | `utilities/register-spec.py` (step 6) |
 | **what is missing at all** (registry + another checkout) | yes | `utilities/spec-gaps.py` |
 
+`python utilities/spec-gaps.py --probe <hf-repo>` (repeatable) says whether a
+SIZE would be an easy add, without writing a spec: "needs attention gate +
+gated: gemv_q4" / "RECIPE WALL: an FF of 18944 does not fit ... a three-way
+split is not implemented" / "no recipe for this config (<the wall>)". Plan an
+expansion from that, not from a guess. Known verdicts (2026-10-26): Qwen3-32B
+and Qwen2.5-14B automatable; Qwen2.5-7B needs a 3-way FF split; Gemma 3 27B is
+a kernel wall (query_pre_attn_scalar 168 vs head_dim 128).
+
 `python utilities/spec-gaps.py --reference ../OpenFlowLM-Next` answers "what does
 that tree have that this one does not" with a classification per spec (builds
 here / needs N points, gated or not / recipe wall), and
