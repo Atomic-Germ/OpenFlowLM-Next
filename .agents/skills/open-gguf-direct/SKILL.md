@@ -635,7 +635,7 @@ Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(
 - `open_kernels/recipes/dense.py`: passes `ROPE_IL` in geometry/flags and writes `layout.rope_pairing` (`"interleaved"` or `"halfsplit"`) into the manifest.
 - `open_kernels/designs/dense/dx_attn.py`: threads `ATTN_ROPE_IL` flag to `dx_attn` kernel build.
 - `open_kernels/designs/attn/attn.h`: adds `ATTN_ROPE_IL` path using `aie::interleave_unzip`/`aie::interleave_zip` over the head dim (identical pair-ordered cos/sin tables).
-- `src/open_qwen36/manifest_gguf/manifest_gguf.hpp`: parses `layout.rope_pairing` → `rope_interleaved` (default false); the GGUF twin module
+- `src/open_qwen36/manifest.cpp`: `Manifest::parse` parses `layout.rope_pairing` → `rope_interleaved` (default half-split).
 - `src/open_qwen36/block_host.{hpp,cpp}`: `AttnGeom.rope_il` propagated; interleaved `rope()` matches kernel pairing.
 - `src/open_qwen36/core.cpp`: wires `rope_il` from manifest to host paths (block prefill/host attention) and keeps layer dump plumbing intact.
 

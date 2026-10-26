@@ -2019,7 +2019,7 @@ def write_vision_sidecar(target, dir_name, quiet=False):
 #      resort when every base repo is unreachable or gated.
 #
 # ggml type numbers (llama.cpp ggml.h; cross-checked with
-# src/open_qwen36/gguf_file.hpp -- only metadata parsing needs these).
+# src/gguf/gguf_file.hpp -- only metadata parsing needs these).
 GGML_TYPE_NAMES = {
     0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1",
     8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K",
