@@ -3,6 +3,25 @@ name: open-gguf-direct
 description: Direct GGUF loading for the open engines (supersedes q4nx for compatible quants). Use when adding GGUF support to another engine, debugging a GGUF model that refuses to load, rebuilding the f32-scale kernel variants, extending to MoE, or changing the pack ops.
 ---
 
+> **Branch scope (2026-10-25):** this document describes the *whole*
+> GGUF-direct feature, which is spread across branches. On **this branch
+> (`feat/gguf-direct`, the isolation refactor)** some cited files do **not
+> exist** — they live on `origin/feat/fedora-docker` and are unmerged to
+> `main`. Verify a path before assuming it is here. Known absent on this
+> branch (present on fedora-docker):
+>
+> - `open_kernels/recipes/gguf.py`
+> - `specs/open-engine/tests/test_gguf_twin.py`
+> - `utilities/lx-probe.cpp`
+> - `utilities/build-new-spec.py`
+> - `open_kernels/recipes/candidates/gemma3-1b.json`
+> - the entire **rope-pairing** feature (`ROPE_INTERLEAVED_FAMILIES`,
+>   `rope_pairing`, `ATTN_ROPE_IL`, `rope_il`) — see its section below
+>
+> Everything else referenced here (the `src/gguf/` parser,
+> `open_kernels/gguf_pool/`, `open_kernels/designs/gguf/`,
+> `manifest_supports_gguf()` in oflm-add) **is** on this branch.
+
 ## The design (decided 2026-09-07)
 
 - **Pool layout for GGUF-direct models** (`spec.quant == "q4_1_f32"`): the
@@ -245,9 +264,12 @@ the steps that used to stand between them are gone (branch `feat/fedora-docker`)
   refused exactly the families it was written for. The capability is a
   property of the kernel set (its manifest carries the f32-scale `gguf`
   section), so the gate reads the manifest of the set the install links.
-  `utilities/generate-gguf-families.py` is gone; the check that replaced it
-  is `specs/open-engine/tests/test_gguf_twin.py` (the section may only name
-  kernels the manifest's builds make).
+  `utilities/generate-gguf-families.py` is gone; on this branch the gate is
+  `manifest_supports_gguf()` in `utilities/oflm-add/oflm_add/__init__.py`
+  (reads the linked set's manifest for its `gguf` section). The deeper test
+  `specs/open-engine/tests/test_gguf_twin.py` (the section may only name
+  kernels the manifest's builds make) lives on `feat/fedora-docker`, **not
+  in this tree** — do not look for it here.
 - **The family of a fine-tune is derived from what the model IS.** Two
   routes, both from what is on disk: the *geometry* (the installed kernel
   set whose `ModelSpec.kernel_hash()` matches -- the depth and the
@@ -626,11 +648,19 @@ the official registry's gaps. What landed:
 
 
 
-## Llama3 rope pairing (interleaved) — 2026-10-24 (feat/fedora-docker)
+## Llama3 rope pairing (interleaved) — NOT ON THIS BRANCH (lives on `feat/fedora-docker`)
 
-Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(j, j+ROT/2)` for all families, but llama3-family GGUF expects interleaved pairs `(2j, 2j+1)` (llama.cpp NORM rope law). Qwen3 works with half-split. 
+> **Scope note (2026-10-25):** every rope-pairing change below lives **only on
+> `origin/feat/fedora-docker`** (commit `4066987`). It is *not* merged to
+> `main`, and *none* of its symbols are on `feat/gguf-direct` (this branch) —
+> grep for `ROPE_INTERLEAVED_FAMILIES`, `rope_pairing`, `ATTN_ROPE_IL`,
+> `rope_il` here and you get nothing. Do not look for them in this tree. The
+> notes are kept because reconciling fedora-docker later will need them, and
+> the failure mode they fix is real.
 
-**Plumbing (both kernel design + host):**
+Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(j, j+ROT/2)` for all families, but llama3-family GGUF expects interleaved pairs `(2j, 2j+1)` (llama.cpp NORM rope law). Qwen3 works with half-split.
+
+**Plumbing (both kernel design + host) — all on `feat/fedora-docker`:**
 - `open_kernels/recipes/spec.py`: `ROPE_INTERLEAVED_FAMILIES = {"llama3"}`, `ModelSpec.rope_interleaved` property.
 - `open_kernels/recipes/dense.py`: passes `ROPE_IL` in geometry/flags and writes `layout.rope_pairing` (`"interleaved"` or `"halfsplit"`) into the manifest.
 - `open_kernels/designs/dense/dx_attn.py`: threads `ATTN_ROPE_IL` flag to `dx_attn` kernel build.
@@ -639,4 +669,4 @@ Root cause of llama3-family GGUF garbage: the engine applied half-split pairs `(
 - `src/open_qwen36/block_host.{hpp,cpp}`: `AttnGeom.rope_il` propagated; interleaved `rope()` matches kernel pairing.
 - `src/open_qwen36/core.cpp`: wires `rope_il` from manifest to host paths (block prefill/host attention) and keeps layer dump plumbing intact.
 
-**Validation:** rebuilt `Llama-3.2-1B-NPU2` kernels with `rope_pairing: interleaved` (export/kernels regen), rebuilt `open_qwen36_cli`, and NPU greedy decode of the test prompt produced coherent text matching the reference. Layer-wise dumps (`OFLM_OPEN_LAYER_DUMP`) show correct alignment after the fix.
+**Validation (on that branch):** rebuilt `Llama-3.2-1B-NPU2` kernels with `rope_pairing: interleaved` (export/kernels regen), rebuilt `open_qwen36_cli`, and NPU greedy decode of the test prompt produced coherent text matching the reference. Layer-wise dumps (`OFLM_OPEN_LAYER_DUMP`) show correct alignment after the fix.
