@@ -43,6 +43,7 @@ EXPECTED = {
     "qwen3-8b": "Qwen3-8B-NPU2",
     "qwen3-0.6b": "Qwen3-0.6B-NPU2",
     "qwen3-1.7b": "Qwen3-1.7B-NPU2",
+    "lfm2-2.6b": "LFM2-2.6B-NPU2",
 }
 
 
