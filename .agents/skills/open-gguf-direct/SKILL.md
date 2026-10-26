@@ -722,6 +722,7 @@ python utilities/build-new-spec.py --repo Qwen/Qwen3-0.6B        # or --spec-nam
 | Step | Automated? | Where |
 |---|---|---|
 | the spec JSON from HF config (or a `link_to` when the base already has kernels) | yes | `utilities/gen-kernel-spec.py` |
+| the tokenizer's **real_vocab** (the logits mask; a generated spec used to ship none) | yes, since `c72d08d` | `gen-kernel-spec.py` (`--refresh` re-derives an existing spec) |
 | the model name (`extra.model`, the `src/xclbins` directory) | yes, derived; `register-spec.py` records it when the derived name differs | `test_spec_model_names.py` |
 | the **attention** point: run the production worker at the geometry vs an fp64 oracle | yes | `designs/attn/probe_dense.py` (step 3b) |
 | the **other op** points (gemv K, ln width, lm_head K): run each op's own fixture | yes for `gemv_q4`, `ln`, `lm_head_q4`; other ops abort with a named reason | `utilities/op-gate.py` |
