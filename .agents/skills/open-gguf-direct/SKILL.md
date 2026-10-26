@@ -5,18 +5,32 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 
 > **Branch scope (2026-10-25):** this document describes the *whole*
 > GGUF-direct feature, which is spread across branches. On **this branch
-> (`feat/gguf-direct`, the isolation refactor)** some cited files do **not
-> exist** — they live on `origin/feat/fedora-docker` and are unmerged to
-> `main`. Verify a path before assuming it is here. Known absent on this
-> branch (present on fedora-docker):
+> (`feat/gguf-direct`)** some cited files do **not exist** — they live on
+> `origin/feat/fedora-docker` and are unmerged to `main`. Verify a path
+> before assuming it is here.
 >
-> - `open_kernels/recipes/gguf.py`
+> **NOW ON THIS BRANCH** (ported from fedora 2026-10-25, commit `88fef13`):
+> the qwen35 **f32-scale twin** — `open_kernels/recipes/gguf.py` (the shared
+> `section()`/`twin_builds()` helper), `recipes/qwen35.py` + `recipes/qwen36moe.py`
+> (twin key, `lx_f32`/`ax_f32` names, `pool_quant`/`pool_chunk`, the f32 law in
+> `common()`), `designs/layer_x/layout.py` (`GEMV_SCALES_F32` flip +
+> re-derivation) and `xcommon.py` (`F32` → `-DGEMV_Q4_SCALES_F32=1`). The Qwen3.5
+> and Qwen3.8-27B sets now emit a `gguf` manifest section and build their
+> `*_f32` twins (verified by re-exporting Qwen3.5-0.8B: manifest byte-identical
+> to fedora's shipped one modulo build_key).
+>
+> Still **absent** on this branch (present on fedora-docker):
+>
 > - `specs/open-engine/tests/test_gguf_twin.py`
 > - `utilities/lx-probe.cpp`
 > - `utilities/build-new-spec.py`
 > - `open_kernels/recipes/candidates/gemma3-1b.json`
 > - the entire **rope-pairing** feature (`ROPE_INTERLEAVED_FAMILIES`,
->   `rope_pairing`, `ATTN_ROPE_IL`, `rope_il`) — see its section below
+>   `rope_pairing`, `ATTN_ROPE_IL`, `rope_il`) — see its section below. Until it
+>   lands, a **llama3-family** GGUF twin (Llama-3.1-8B, MiniCPM5-2B) decodes
+>   garbage (half-split vs interleaved pairs); Qwen/Gemma families are fine.
+> - the MoE **expert GGUF ops** — `GGUF_EXPERT_OPS_READY = False` in
+>   `qwen36moe.py`, so the qwen36-moe family still ships no `gguf` section.
 >
 > Everything else referenced here (the `src/gguf/` parser,
 > `open_kernels/gguf_pool/`, `open_kernels/designs/gguf/`,
@@ -345,10 +359,15 @@ run.
   next export (cost an hour; looks like a mysterious file revert). The
   symbol-prefix fix lives in the GENERATOR templates now
   (GEMV_Q4_WRAP(GEMV_Q4_PREFIX, y/ms)). NOTE: designs/layer_x/gen_kernels.py
-  still emits UNPREFIXED names — correct for today's MoE recipe (no f32
-  twins yet), but the MoE f32 phase MUST add the macro to those templates
-  or lx/ax f32 builds will fail with undefined gemv_q4s32_* exactly like
-  the dense ones did.
+  still emits UNPREFIXED names, and **that is correct — layer_x does NOT need
+  the prefix macro** (resolved 2026-10-25: `lx_f32`/`ax_f32` of Qwen3.5-0.8B
+  built cleanly with the unprefixed `gemv_q4_gy` + the `-DGEMV_Q4_SCALES_F32=1`
+  define). The dense recipe needs the `gemv_q4s32_*` prefix only because its
+  **mixed-law** gemm/q8-split route puts a q4_1 gemv and an f32 gemv in the
+  SAME binary, so the two symbols must not collide. A layer_x build is never
+  mixed — `layout.py` flips the whole `SPEC.quant` wholesale, so exactly one
+  `gemv_q4_gy` exists per binary and the compile define alone selects the body.
+  Do not add the prefix macro to layer_x templates; it is dead weight there.
 
 - `##` in a macro suppresses expansion of its operands: symbol prefixes need
   the two-level `WRAP(PFX, NAME) -> WRAP__(PFX, NAME)` pattern (see
@@ -363,6 +382,56 @@ run.
   build the cfg runs (a stale binary cost an hour here).
 - harness taplib rejects a tap whose offset == tensor size (zero-band cores
   at tiny N): test with >= 1 band per core.
+
+## The qwen35 f32 twin ported to `feat/gguf-direct` (2026-10-25, commit `88fef13`)
+
+Fedora's qwen35 GGUF-twin work was ported **verbatim** (the whole branch diff
+was f32-only), so the Qwen3.5 and Qwen3.8-27B sets on THIS branch emit a `gguf`
+manifest section and build their `lx_f32`/`ax_f32` twins:
+
+- `recipes/gguf.py` (new, byte-identical to fedora): `F32_QUANT`, `section()`,
+  `twin_builds()`.
+- `recipes/qwen36moe.py`: `pool_quant()`/`pool_chunk()`, `chunk`/`stack` params
+  through `core_l1()`/`down_split()`, the f32 law in `common()`/`_common_dense()`,
+  the `gemm_route` f32 early-return, and `GGUF_EXPERT_OPS_READY = False` (the
+  MoE family stays off — no expert GGUF pack ops yet).
+- `recipes/qwen35.py`: the twin key in `programs()`, `lx_set`/`ax_set` =
+  `*_f32` when `f32`, the `GGUF.section` gate, `builds()` twin gate.
+- `designs/layer_x/layout.py`: the `GEMV_SCALES_F32` spec flip
+  (`replace(SPEC, quant="q4_1_f32")` + recipe re-derivation).
+- `designs/layer_x/xcommon.py`: `F32` → `-DGEMV_Q4_SCALES_F32=1`.
+
+Deliberately NOT ported: rope-pairing (`spec.py` `ROPE_INTERLEAVED_FAMILIES`),
+the export cache/race fixes, `LX_STOP` debug, and the `piece_tap`/`ln_split`
+design hunks (those modules do not exist here). `GGUF_EXPERT_OPS_READY` stays
+`False`.
+
+**Verification (this box):**
+- Regression vs pre-change snapshots (`/tmp/opencode/gguf_baseline/`): every
+  non-f32 spec is byte-identical except `build_key` (which hashes
+  `recipes/*.py`, so the new `gguf.py` moves every key — expected); the qwen35
+  specs gain `gguf` + `builds +[lx_f32, ax_f32]` and nothing else changes.
+- Re-export `Qwen3.5-0.8B`: `python open_kernels/export_qwen36_kernels.py --spec
+  open_kernels/recipes/specs/qwen35-0.8b.json -j 4` → only `lx`/`ax`/`lx_f32`/
+  `ax_f32` rebuild (57–63 s each; program memory `lx_f32` 15712/16384,
+  `ax_f32` 13536/16384), `ln`/`lm_head_q8` reuse. The exported manifest is
+  **byte-identical to fedora's shipped one modulo `build_key`**: `gguf` chunk
+  6144, `kernels.lx.build=lx_f32`, `kernels.ax.build=ax_f32`, nested
+  `gguf.builds=[ax, lm_head_q8, ln, lx]`.
+- `utilities/check-settings-ci.sh` OK; the export output under
+  `src/xclbins/*/open_kernels*/` is git-ignored (built kernels are not
+  committed — only the 5 recipe/design files are).
+
+**Box-environment gotcha (this harness):** the shell carries
+`OFLM_ROOT=.../OpenFlowLM-Next` (fedora's tree) and our tree has **no
+`ironvenv`** — the only mlir-aie+Peano install is fedora's. `env.sh` honors a
+pre-existing `OFLM_ROOT` (line 180-181), so without overriding it every path
+points at fedora. The split that works: `OFLM_ROOT` → our tree, `OFLM_VENV_DIR`
+→ fedora's `ironvenv`, unset the stale `OFLM_*` path vars (see
+`/tmp/opencode/env_ours.sh`). The export writes repo-relative, so it lands in
+our tree regardless.
+
+
 
 ## GGUF-direct on the qwen35 family: the shipped-manifest bug (found 2026-10-22)
 
