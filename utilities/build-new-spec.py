@@ -21,6 +21,11 @@ What it does, in order, and why each step exists:
                catalogue.py, so the next build of this size needs no override.
   5. REBUILD   the kernel set is compiled again through the validated path,
                so what ships is a build the catalogue allows.
+  6. REGISTER  the spec joins the frozen lists the tests enforce
+               (utilities/register-spec.py): its spec_hash in test_lfm2.py and,
+               when the name derived from the file stem is not the model it
+               exports as, its name in test_spec_model_names.py. Mechanical
+               edits, scripted -- never hand-written.
 
 Only step 3 needs an NPU; everything else is a compile. Nothing here needs the
 model's weights, a container or the engine.
@@ -46,6 +51,7 @@ HARNESS = ROOT / "open_kernels" / "harness"
 EXPORT = ROOT / "utilities" / "export-kernels.py"
 GEN_SPEC = ROOT / "utilities" / "gen-kernel-spec.py"
 ADD_POINT = ROOT / "utilities" / "catalogue-add-point.py"
+REGISTER = ROOT / "utilities" / "register-spec.py"
 
 # the fixture that validates each other op's new point, for the report
 OP_FIXTURE = {
@@ -278,11 +284,15 @@ def main() -> int:
                 print("build-new-spec: the validated rebuild failed", file=sys.stderr)
                 return rc
 
+    # 6. register the spec in the frozen test lists
+    print("-- register the spec (utilities/register-spec.py)", flush=True)
+    rc = run([sys.executable, REGISTER, name], env=env, check=False)
+    if rc != 0:
+        return rc
+
     print(f"\n{name} is ready: the spec, the built kernels and the catalogue entry.")
-    print(f"  commit: {spec_path.relative_to(ROOT)} and open_kernels/recipes/catalogue.py")
-    print("  then register the spec in the two frozen lists the tests enforce:")
-    print("    specs/open-engine/tests/test_lfm2.py (test_no_shipped_models_hash_moved: the spec_hash)")
-    print("    specs/open-engine/tests/test_spec_model_names.py (EXPECTED, when the derived name differs)")
+    print(f"  commit: {spec_path.relative_to(ROOT)}, open_kernels/recipes/catalogue.py and "
+          "the two test files register-spec.py touched")
     return 0
 
 
