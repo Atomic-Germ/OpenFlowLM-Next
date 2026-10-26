@@ -47,6 +47,26 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 > `open_kernels/gguf_pool/`, `open_kernels/designs/gguf/`,
 > `manifest_supports_gguf()` in oflm-add) **is** on this branch.
 
+## Scope of this phase: TEXT models only (2026-10-26)
+
+Every GGUF-direct claim here is about text LLMs. Deliberately NOT in this
+phase, and not to be "fixed" opportunistically:
+
+- image generation (FLUX.2 klein VAE/DiT kernels), multimodal (VLM towers),
+  embedding models (bge / nomic / gte), audio (whisper) and the MTP path --
+  each has its own engine and its own kernel sets.
+
+The goal is that `oflm add` works for each kind AND that the instrumentation
+(utilities/build-new-spec.py, op-gate.py, register-spec.py, spec-gaps.py) covers
+them the same way; doing it one kind at a time is intentional.
+
+Some models still ship CLOSED pre-built xclbins inherited from AMD/FLM
+(Qwen3.6-MoE, GPT-OSS, ...). Those are read-only reference: the `rea` MCP can
+inspect them (container layout, per-op streams) when an open implementation
+needs to match a legacy layout -- for example the MoE expert GGUF ops, whose
+pack layout the closed 35B set already contains. Do not ship against them; use
+them as the reference an open kernel is verified against.
+
 ## The design (decided 2026-09-07)
 
 - **Pool layout for GGUF-direct models** (`spec.quant == "q4_1_f32"`): the
