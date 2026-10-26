@@ -47,12 +47,10 @@ def geometry(spec,mode):
 
 
 def post_source(mode):
-    mode_check(mode);s=(POST/'post.cc').read_text()
-    if mode=='control':return s
-    for old,new in [('bfloat16 *__restrict og','float *__restrict og'),('bfloat16 *gh = og','float *gh = og'),
-                    ('      accf32 rr;\n      rr.from_vector(r);\n      aie::store_v(gh + j, rr.template to_vector<bfloat16>());',
-                     '      aie::store_v(gh + j, r);')]:s=replace_once(s,old,new)
-    return s
+    mode_check(mode)
+    # Both modes compile the shared source. The same POST_F32 selection controls
+    # its compiler flag, output argument, FIFO, DMA and projection preparation.
+    return (POST/'post.cc').read_text()
 
 
 def generated(spec,mode):
@@ -66,9 +64,8 @@ def helper(mode):
     mode_check(mode);s=(LAYER/'xlayer.py').read_text()
     s=replace_once(s,'HERE = Path(__file__).parent',f'HERE = Path({str(LAYER)!r})')
     s=replace_once(s,'POST = HERE.parent / "dn_post"','POST = Path(__file__).parent / "generated"')
-    if mode=='fp32':
-        s=replace_once(s,'arg_types=[u8_4k, u8_4k, nw_ty, u8_2k]','arg_types=[u8_4k, u8_4k, nw_ty, u8_4k]')
-        s=replace_once(s,'ObjectFifo(g["u8_2k"], name="pout", depth=2)','ObjectFifo(g["u8_4k"], name="pout", depth=2)')
+    s=replace_once(s,'D = R.linear',
+                   f'from dataclasses import replace\nD = replace(R.linear, POST_F32={mode == "fp32"})')
     return s
 
 
@@ -94,11 +91,12 @@ def design(spec,mode):
         ('import xlayer as XL', 'sys.path.insert(0, str(Path(__file__).parent))\nimport private_xlayer as XL'),
         ('import linear_fp32 as LF',f'import linear_fp32 as LF\nsys.path.insert(0, {str(HERE)!r})\nfrom build import private_kernels'),
         ('K = X.kernels(inc, t)','K = private_kernels(X, inc, t, Path(__file__).parent / "generated")')]:s=replace_once(s,old,new)
+    s=replace_once(s,'D = R.linear',
+                   f'from dataclasses import replace\nD = replace(R.linear, POST_F32={mode == "fp32"})')
     if mode=='fp32':
-        s=replace_once(s,'D = R.linear',f'A_OG = {g["post_offset"]}\nA_BYTES = {g["act_bytes"]}\nD = R.linear')
+        s=replace_once(s,'from dataclasses import replace',
+                       f'A_OG = {g["post_offset"]}\nA_BYTES = {g["act_bytes"]}\nfrom dataclasses import replace')
         s=replace_once(s,'OG_ELEMS = D.OG_ELEMS',f'OG_ELEMS = {g["post_elements"]}')
-        s=replace_once(s,'OUT_PC, "linear_out")','OUT_PC, "linear_out", fp32=True)')
-        s=replace_once(s,'A_OG + g * G * 2, G * 2','A_OG + g * G * 4, G * 4')
     return s+f'\nSPECIALIZE["srchash"] = {int(source_hash(spec,mode)[:8],16)}\n'
 
 

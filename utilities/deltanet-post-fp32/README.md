@@ -97,3 +97,51 @@ The two accepted runs total 486 dispatches. Thirteen new RED-to-GREEN tests
 and the complete host suite pass (1814 passed, 47 skipped). These results
 justify broader private layer coverage; they do not close full-model sequential
 long-prefix acceptance or promote the experiment to production.
+
+
+## Shared implementation checkpoint — 2026-10-26
+
+The private builder now selects `Linear.POST_F32` in the shared `lx` and
+`xlayer` code. This one selection controls `DN_POST_FP32`, the post kernel
+argument, output FIFO, dense post DMA and direct FP32 output preparation.
+Both modes compile the same `dn_post/post.cc`; the builder no longer rewrites
+its arithmetic or the stream/preparation code. Scratch placement remains
+private pending recipe/manifest promotion. Published recipes retain BF16 post
+output, including all five Qwen3.5 sizes and Qwen3.6 MoE.
+
+Build fresh `shared-control-v1` / `shared-fp32-v1` directories using the commands
+in the [shared post skill](../../.agents/skills/open-qwen38-shared-post-output/SKILL.md).
+Use `prefill-production/kernels-model-v1` as `--kernels`, because the current
+recipe includes paired prefill. The earlier commands/results above describe
+the historical private implementation and must not be used to overwrite it.
+
+```bash
+ironvenv/bin/python utilities/deltanet-post-fp32/identity.py \
+  --build Models/qwen38-27b/deltanet-post-fp32/shared-control-v1 \
+  --reference Models/qwen38-27b/deltanet-post-fp32/control-v2 \
+  --reference-run Models/qwen38-27b/deltanet-post-fp32/control-run-v1 \
+  --out Models/qwen38-27b/deltanet-post-fp32/shared-control-identity-v1.json
+ironvenv/bin/python utilities/deltanet-post-fp32/identity.py \
+  --build Models/qwen38-27b/deltanet-post-fp32/shared-fp32-v1 \
+  --reference Models/qwen38-27b/deltanet-post-fp32/fp32-v1 \
+  --reference-run Models/qwen38-27b/deltanet-post-fp32/fp32-run-v1 \
+  --out Models/qwen38-27b/deltanet-post-fp32/shared-fp32-identity-v1.json
+```
+
+Both comparisons pass: instruction bytes are exact, and complete XCLBINs
+match except for documented build stamps (79 / 77 bytes). Each reference is
+bound to its previously passing causal audit, build record, two binary hashes
+and all 729 captured buffers. Current builders and compiler dependencies are
+verified separately; historical sources are not reinterpreted as current ones.
+The comparison refuses overwritten reports and changed or incomplete archives.
+
+Both new full-lx builds pass all 11 core resource checks with 849 pinned
+compiler dependency entries. Maximum text is 15936 / 16000 bytes and maximum
+assigned L1 buffer end is 62336, with unchanged 6144-byte stacks. Toolchain:
+mlir-aie 1.4.2, llvm-aie 21.0.0.2026080301+c9c5ecb7.
+
+Eight stream/store tests failed before the change and pass after it; thirteen
+additional cases cover archive integrity and published-recipe ABI preservation.
+Full host suite: **1878 passed, 47 skipped**. No new resident model run or
+performance measurement was performed in this checkpoint. Recipe-owned FP32
+scratch/manifest export and full-depth propagation remain the next gates.

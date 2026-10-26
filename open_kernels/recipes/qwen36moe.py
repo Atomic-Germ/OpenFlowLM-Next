@@ -354,6 +354,9 @@ class Linear:
     XN_F32: bool = False
     CONV_F32: bool = False
     FACTORED_READOUT: bool = False
+    # Opt-in while the FP32 post-output scratch ABI is validated. Production
+    # recipes retain BF16; private full-layer validation selects this explicitly.
+    POST_F32: bool = False
 
 
 def paired_attention(spec: ModelSpec) -> bool:

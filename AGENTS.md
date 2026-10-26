@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-shared-post-output</name>
+    <description>Build shared BF16/FP32 post-output specializations and verify full-lx binary identity before production ABI promotion.</description>
+    <location>.agents/skills/open-qwen38-shared-post-output/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-prefill-production-validation</name>
     <description>Build capture-only shared-runtime CLIs and audit all-layer paired prefill and resident reset against the standard export.</description>
     <location>.agents/skills/open-qwen38-prefill-production-validation/SKILL.md</location>

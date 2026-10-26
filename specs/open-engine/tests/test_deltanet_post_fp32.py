@@ -21,31 +21,30 @@ def test_append_scratch_and_double_post_stream():
     assert m.geometry(sp,'control')['post_offset']==old.A_OG
 
 
-def test_candidate_changes_only_post_store_arithmetic():
-    m=load();original=(m.POST/'post.cc').read_text();candidate=m.post_source('fp32')
-    assert 'float *__restrict og' in candidate
-    assert 'float *gh' in candidate and 'aie::store_v(gh + j, r);' in candidate
-    assert 'rr.template to_vector<bfloat16>()' not in candidate
-    assert m.post_source('control')==original
-    assert original.count('fmul32')==candidate.count('fmul32')
+def test_candidate_and_control_compile_the_shared_post_source():
+    m=load();original=(m.POST/'post.cc').read_text()
+    assert m.post_source('fp32')==m.post_source('control')==original
+    assert 'POST_F32=True' in m.helper('fp32')
+    assert 'POST_F32=False' in m.helper('control')
 
 
 def test_private_design_connects_fp32_scratch_and_prep():
     m=load();code=m.design(spec(m),'fp32')
     assert 'OG_ELEMS = 6' in code
-    assert 'OUT_PC, "linear_out", fp32=True)' in code
-    assert 'A_OG + g * G * 4, G * 4' in code
+    assert 'OUT_PC, "linear_out", fp32=D.POST_F32)' in code
+    assert 'POST_F32=True' in code
     assert 'import private_xlayer as XL' in code
     compile(code,'candidate','exec')
     control=m.design(spec(m),'control')
-    assert 'OUT_PC, "linear_out", fp32=True)' not in control
+    assert 'POST_F32=False' in control
     compile(control,'control','exec')
 
 
 def test_only_post_fifo_and_kernel_argument_widen():
     m=load();code=m.helper('fp32')
-    assert 'arg_types=[u8_4k, u8_4k, nw_ty, u8_4k]' in code
-    assert 'ObjectFifo(g["u8_4k"], name="pout", depth=2)' in code
+    assert code.count('POST_F32=True')==1
+    assert 'arg_types=[u8_4k, u8_4k, nw_ty, post_type]' in code
+    assert 'ObjectFifo(g["u8_4k" if D.POST_F32 else "u8_2k"], name="pout", depth=2)' in code
     assert 'ObjectFifo(g["u8_2k"], name="gout", depth=3)' in code
 
 
