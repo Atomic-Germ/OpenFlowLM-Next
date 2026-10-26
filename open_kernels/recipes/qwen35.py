@@ -302,6 +302,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
+            **({"post_output": {"dtype": "float32", "offset": L.A_OG,
+                                 "bytes": spec.lin_value_width * 4}} if M.linear_post_fp32(spec) else {}),
             "program": [{"op": "run", "kernel": "lx", "args": args}],
         }
     if spec.has_full:

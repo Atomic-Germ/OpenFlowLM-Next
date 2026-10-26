@@ -40,9 +40,11 @@ def geometry(spec,mode):
     if not (spec.hidden==5120 and spec.intermediate==17408 and d and d.VW==6144
             and d.FACTORED_READOUT and d.XN_F32 and d.CONV_F32 and r.ffn.CONSISTENT_SUM and not r.q8):
         raise ValueError('requires production wide dense consistent Q4 recipe')
-    return dict(hidden=spec.hidden,legacy_act_bytes=l.A_BYTES,
-                post_offset=l.A_BYTES if mode=='fp32' else l.A_OG,
-                act_bytes=l.A_BYTES+(d.VW*4 if mode=='fp32' else 0),
+    legacy_bytes=l.A_OG if d.POST_F32 else l.A_BYTES
+    legacy_og=l.A_O+d.VW*4
+    return dict(hidden=spec.hidden,legacy_act_bytes=legacy_bytes,
+                post_offset=legacy_bytes if mode=='fp32' else legacy_og,
+                act_bytes=legacy_bytes+(d.VW*4 if mode=='fp32' else 0),
                 state_bytes=l.STATE_BYTES,post_elements=d.VW*(4 if mode=='fp32' else 2)//4096)
 
 
@@ -93,10 +95,9 @@ def design(spec,mode):
         ('K = X.kernels(inc, t)','K = private_kernels(X, inc, t, Path(__file__).parent / "generated")')]:s=replace_once(s,old,new)
     s=replace_once(s,'D = R.linear',
                    f'from dataclasses import replace\nD = replace(R.linear, POST_F32={mode == "fp32"})')
-    if mode=='fp32':
-        s=replace_once(s,'from dataclasses import replace',
-                       f'A_OG = {g["post_offset"]}\nA_BYTES = {g["act_bytes"]}\nfrom dataclasses import replace')
-        s=replace_once(s,'OG_ELEMS = D.OG_ELEMS',f'OG_ELEMS = {g["post_elements"]}')
+    s=replace_once(s,'from dataclasses import replace',
+                   f'A_OG = {g["post_offset"]}\nA_BYTES = {g["act_bytes"]}\nfrom dataclasses import replace')
+    s=replace_once(s,'OG_ELEMS = D.OG_ELEMS',f'OG_ELEMS = {g["post_elements"]}')
     return s+f'\nSPECIALIZE["srchash"] = {int(source_hash(spec,mode)[:8],16)}\n'
 
 

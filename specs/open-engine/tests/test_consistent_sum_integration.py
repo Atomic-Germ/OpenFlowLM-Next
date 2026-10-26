@@ -55,7 +55,9 @@ def test_small_recipe_keeps_unmodified_generated_sources():
 def test_manifest_identifies_arithmetic_without_changing_abi_or_packing(tmp_path):
     s=spec();new=manifest(s)
     assert new['layout']['q4_activation_sum']=='quantized_fp32'
-    with patch.object(geometry,'consistent_q4_sum',return_value=False):
+    # Isolate arithmetic selection from the later post-output storage upgrade.
+    with patch.object(geometry,'consistent_q4_sum',return_value=False), \
+         patch.object(geometry,'linear_post_fp32',return_value=True):
         old=manifest(s);old_sources=generated(s);old_pack=pack_plan(s);old_layout=recipe(s).layout
     assert old_pack==pack_plan(s) and old_layout==recipe(s).layout
     assert 'q4_activation_sum' not in old['layout']

@@ -5,6 +5,10 @@ description: Build shared BF16/FP32 DeltaNet post-output specializations and com
 
 # Shared post-output preparation
 
+This is the pre-promotion build checkpoint. The standard wide recipe now uses
+FP32 post-output; use [production integration](../open-qwen38-post-output-integration/SKILL.md)
+for current builds. Historical commands below require their recorded checkout.
+
 Use after open-qwen38-fp32-post-output. The shared post.cc specializes output
 storage with DN_POST_FP32. Linear.POST_F32 selects its compile flag, output
 argument, FIFO element, dense post DMA width and direct FP32 output preparation.

@@ -1,9 +1,18 @@
 # Private FP32 DeltaNet post-output
 
+The standard wide dense recipe now selects the shared FP32 path. For a fresh
+production export and full-depth checks, use the
+[integration skill](../../.agents/skills/open-qwen38-post-output-integration/SKILL.md).
+The private builder still supports the original BF16 control and FP32 candidate:
+it explicitly restores the control's scratch layout and does not append the
+FP32 region twice. New private builds require a compatible current export.
+The commands and measurements below describe the retained historical experiment;
+reproduce them from their recorded checkout, without rewriting old evidence.
+
 This experiment retains FP32 post-recurrence norm/gate output through direct
 FP32 preparation of the Q4 output projection. It follows the signed L0 rounding
-attribution. Production recipes, exports, weights and acceptance bounds remain
-unchanged. Both variants compile a complete private lx from current generated
+attribution. At that checkpoint production recipes, exports, weights and
+acceptance bounds were unchanged. Both variants compile a complete private lx from generated
 entry sources, retaining factored recurrence and consistent Q4 activation sums.
 
 The control retains BF16 output. The candidate appends 24,576 bytes to activation

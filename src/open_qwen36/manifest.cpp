@@ -271,6 +271,15 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (t.state_kind == "linear") t.state_bytes = get<uint64_t>(st, "bytes", tw);
         else if (t.state_kind == "kv") t.state_row = get<uint64_t>(st, "row", tw);
         else fail(tw, "unknown state kind " + t.state_kind);
+        if (v.contains("post_output")) {
+            const auto& post = v["post_output"];
+            const auto offset = get<uint64_t>(post, "offset", tw + " post_output");
+            const auto bytes = get<uint64_t>(post, "bytes", tw + " post_output");
+            if (t.state_kind != "linear" || get<std::string>(post, "dtype", tw + " post_output") != "float32" ||
+                offset % 4096 || bytes == 0 || bytes % 4096 ||
+                offset > t.act_bytes || bytes > t.act_bytes - offset)
+                fail(tw, "invalid FP32 post_output region or scratch size");
+        }
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
         // the block prefill route, independent of the sequential `program`

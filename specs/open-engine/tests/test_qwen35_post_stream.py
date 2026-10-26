@@ -17,11 +17,12 @@ from test_qwen35_wide_glue import spec27, xlayer_module, lx_function, XLAYER, LX
 
 @pytest.mark.parametrize("name", ["qwen35-0.8b", "qwen35-2b", "qwen35-4b", "qwen35-9b",
                                  "qwen35-27b", "qwen36-35b-a3b"])
-def test_published_recipes_keep_the_existing_post_abi(name):
+def test_only_the_validated_wide_recipe_selects_fp32_post(name):
     spec = load_spec(XLAYER.parents[2] / "recipes/specs" / (name + ".json"))
     d = linear(spec)
-    assert d.POST_F32 is False
-    assert d.OG_ELEMS * 4096 == ((d.VW * 2 + 4095) // 4096) * 4096
+    assert d.POST_F32 is (name == "qwen35-27b")
+    width = 4 if d.POST_F32 else 2
+    assert d.OG_ELEMS * 4096 == ((d.VW * width + 4095) // 4096) * 4096
 
 
 @pytest.mark.parametrize("fp32", [False, True])

@@ -9,6 +9,13 @@ This directory is the model-side half of the open path: it takes OFLM's own
 kernels stream, writes a driver program for `../harness/run_kernel.exe`, and
 computes an fp64 CPU reference to score the result against.
 
+For Qwen3.8-27B, the standard wide dense Q4 recipe retains DeltaNet post-output
+in FP32 through output-projection preparation. Its manifest-v4 linear type
+declares `post_output` at byte 393216 (24576 bytes), with 417792 bytes of scratch.
+Other scratch offsets, recurrent state and model packing are preserved. Use a
+fresh standard export; an executable rebuild does not upgrade old kernel bundles.
+See the [build and validation instructions](../../.agents/skills/open-qwen38-post-output-integration/SKILL.md).
+
 Nothing here is closed: the container is parsed by [q4nx.py](q4nx.py), the pool
 layouts by the recipe's packing plan (`../recipes/qwen36moe.py`, applied by
 `../recipes/pack.py` -- the same plan `src/open_qwen36/pools.cpp` interprets),
@@ -498,7 +505,8 @@ Other geometries retain their existing storage. The manifest explicitly declares
 `linear_entry_dtype` and `linear_conv_dtype`; the shared checkers select storage
 from these fields while keeping the unrounded FP64 primary reference.
 
-Linear activation scratch is 393216 bytes. State is 3317760 bytes, with
+The entry/history upgrade used 393216 bytes of linear scratch; the integrated
+FP32 post-output region extends it to 417792. State stays 3317760 bytes, with
 recurrent state beginning at byte 122880. Native host prefill follows the same
 history dtype, including short-block carry, and rejects inconsistent manifest
 offsets and sizes. Rebuild the full kernel export and regenerate decode fixtures

@@ -34,3 +34,18 @@ def test_rejects_legacy_recurrence(tmp_path):
     root=fixture(tmp_path)
     (root/'lx/final.prj/dnx_row.o.d').write_text('object: '+str(m.LAYER/'dnx.h'))
     with pytest.raises(ValueError,match='header'):m.audit_compilation(root)
+
+
+def test_isolated_staging_requires_exact_production_headers(tmp_path):
+    root=fixture(tmp_path/'build');stage=tmp_path/'stage'
+    for name in ('lx','ax'):
+        for obj,headers in m.dependencies(name).items():
+            copied=[]
+            for header in headers:
+                target=stage/header.relative_to(m.ROOT/'open_kernels/designs')
+                target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(header.read_bytes());copied.append(target)
+            (root/name/'final.prj'/(obj+'.o.d')).write_text('object: '+' '.join(map(str,copied)))
+    assert m.audit_compilation(root,stage_root=stage)
+    (stage/'gemv_q4/gemv_tab.h').write_text('stale or private arithmetic')
+    with pytest.raises(ValueError,match='header'):m.audit_compilation(root,stage_root=stage)

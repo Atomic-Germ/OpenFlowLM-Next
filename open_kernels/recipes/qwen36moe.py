@@ -354,8 +354,7 @@ class Linear:
     XN_F32: bool = False
     CONV_F32: bool = False
     FACTORED_READOUT: bool = False
-    # Opt-in while the FP32 post-output scratch ABI is validated. Production
-    # recipes retain BF16; private full-layer validation selects this explicitly.
+    # Wide dense Q4 output keeps post-normalization/gating values in FP32.
     POST_F32: bool = False
 
 
@@ -388,6 +387,11 @@ def factored_recurrence(spec: ModelSpec) -> bool:
 def consistent_q4_sum(spec: ModelSpec) -> bool:
     """Validated full-lx Q4 affine terms use the same quantized FP32 activation."""
     return factored_recurrence(spec) and attention_entry_fp32(spec)
+
+
+def linear_post_fp32(spec: ModelSpec) -> bool:
+    """FP32 post/output preparation on the validated wide dense Q4 geometry."""
+    return consistent_q4_sum(spec)
 
 
 @dataclass(frozen=True)
@@ -880,8 +884,12 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         a.add("out2", hid * 4)
         if F.DOWN_SPLIT:
             a.add("out2b", hid * 4)
+        # Preserve all existing offsets and the old BF16 slot. The appended
+        # FP32 region matches the independently validated full-lx experiment.
+        if linear_post_fp32(spec):
+            a.add("og_fp32", vw * 4, ELEM)
         kv.update(A_XN=a.off["xn"], A_QKV=a.off["qkv"], A_Z=a.off["z"], A_VEC=a.off["vec"], A_O=a.off["o"],
-                  A_OG=a.off["og"], A_OUT=a.off["out"], A_RES=a.off["res"], A_XM=a.off["xm"],
+                  A_OG=a.off.get("og_fp32", a.off["og"]), A_OUT=a.off["out"], A_RES=a.off["res"], A_XM=a.off["xm"],
                   A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_OUT2B=a.off.get("out2b", 0),
                   A_BYTES=roundup(a.n, ELEM))
         s_head = C.DN_PAD * C.DN_DIM * 4
@@ -992,7 +1000,7 @@ def linear(spec: ModelSpec) -> Linear | None:
     xn_elems = roundup(spec.hidden * (4 if fp32 else 2), ELEM) // ELEM
     return Linear(
         AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes), XN_F32=fp32, CONV_F32=fp32,
-        FACTORED_READOUT=factored_recurrence(spec),
+        FACTORED_READOUT=factored_recurrence(spec), POST_F32=linear_post_fp32(spec),
         GLUE_HALF_OUTER=glue_fills(xn_elems, False) > LIMITS["shim_fills"],
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=spec.hidden // BAND_ROWS // n,
         QKV_DIM=nch, VW=vw,
@@ -1001,7 +1009,7 @@ def linear(spec: ModelSpec) -> Linear | None:
         KEY_WIDTH=key_width, HEADS_PER_TILE=tile // spec.lin_value_dim, VALUE_TILE0=2 * key_width // tile,
         RECORD_BYTES=DN_RECORD_FLOATS * 4, O_HEAD_BYTES=spec.lin_value_dim * 4,
         OUT_K=vw, QKV_K=spec.hidden,
-        OG_ELEMS=roundup(vw * 2, ELEM) // ELEM,
+        OG_ELEMS=roundup(vw * (4 if linear_post_fp32(spec) else 2), ELEM) // ELEM,
         XN_SIDE_ELEMS=xn_elems,
     )
 
