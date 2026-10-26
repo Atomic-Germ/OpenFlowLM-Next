@@ -160,6 +160,22 @@ If you previously used `oflm add` (before this feature), your old
 - Modified shipped entries are preserved as overrides
 - Stale copies are dropped (backup kept as `model_list.json.bak`)
 
+Automatic migration runs only when `settings.json` does not exist. If both
+files are present, the application uses the shipped registry plus
+`settings.json`; it does not import subsequent edits to the old user
+`model_list.json`. Keep the existing settings file and apply intended changes
+through `oflm config set`, for example:
+
+```bash
+oflm config set --config-model qwen3.8:27b --config-key ctx_len --config-value 32768
+```
+
+Use `oflm config show --config-model qwen3.8:27b` to verify the effective value
+and the configuration paths. Register local models with `oflm add` so their
+entries are written to `settings.json`. A user model with the same tag as a
+shipped model replaces the complete entry in both the model list and settings
+resolution; explicit per-model settings still take precedence over its metadata.
+
 ## File locations
 
 | Platform | settings.json path |
