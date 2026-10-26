@@ -5,6 +5,11 @@ description: Build capture-only shared-runtime CLIs and audit all-layer paired-p
 
 # Integrated paired-prefill all-layer and reset validation
 
+This workflow requires unchanged arithmetic and the recorded BF16 controls.
+For the standard FP32 post-output export, use
+[post-prefill validation](../open-qwen38-post-prefill-validation/SKILL.md),
+which runs fresh unpatched controls against the retained independent CPU oracle.
+
 Use the existing 46-set standard export and a passing unpatched-CLI smoke from
 open-qwen38-paired-prefill-production. Do not patch kernel manifests or insert
 private paired/weighted projection implementations into Core.

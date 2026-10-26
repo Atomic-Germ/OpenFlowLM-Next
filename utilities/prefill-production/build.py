@@ -23,7 +23,11 @@ repeat_tool = load('_production_repeat', ROOT/'utilities/prefill-combined-cli/re
 base, digest = repeat_tool.base, repeat_tool.digest
 
 
-def instrument(cpp, cli, repeat):
+def instrument(cpp, cli, repeat, plain=False):
+    if plain:
+        if repeat:
+            raise ValueError('plain control cannot use repeat instrumentation')
+        return cpp, cli
     cpp, cli = trace.patch(cpp, cli)
     return cpp, repeat_tool.patch(cli) if repeat else cli
 
@@ -31,7 +35,8 @@ def instrument(cpp, cli, repeat):
 def build(a):
     out = a.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
-    r = dict(complete=False, repeat=a.repeat, native_validated=False, model_acceptance=False, commands=[])
+    plain = getattr(a, 'plain', False)
+    r = dict(complete=False, repeat=a.repeat, plain=plain, native_validated=False, model_acceptance=False, commands=[])
     try:
         original = ROOT/'src/open_qwen36'
         dst = out/'source/src/open_qwen36'
@@ -42,7 +47,7 @@ def build(a):
         r['sources'].update({str(p): digest(p) for p in helpers})
         for rel in ('src/include', 'open_kernels', 'specs'):
             (out/'source'/rel).symlink_to(ROOT/rel, target_is_directory=True)
-        cpp, cli = instrument((dst/'core.cpp').read_text(), (dst/'cli.cpp').read_text(), a.repeat)
+        cpp, cli = instrument((dst/'core.cpp').read_text(), (dst/'cli.cpp').read_text(), a.repeat, plain)
         (dst/'core.cpp').write_text(cpp)
         (dst/'cli.cpp').write_text(cli)
         shutil.copy2(trace.HERE/'trace.hpp', dst/'trace.hpp')
@@ -75,9 +80,9 @@ def build(a):
         (out/'build-evidence.json').write_text(json.dumps(r, indent=2)+'\n')
 
 
-def verify(out, repeat):
+def verify(out, repeat, plain=False):
     r = json.loads((out/'build-evidence.json').read_text())
-    if not r['complete'] or r['repeat'] != repeat or not r['compiler_dependencies']:
+    if not r['complete'] or r['repeat'] != repeat or r.get('plain', False) != plain or not r['compiler_dependencies']:
         raise ValueError('incomplete or wrong capture build')
     base.verify(r['sources'])
     base.verify({str(out/p): h for p,h in r['staged_sources'].items()})
@@ -87,7 +92,7 @@ def verify(out, repeat):
     # Reconstruct the permitted instrumentation from the current shared engine.
     # No legacy paired/weighted patch or private kernel-loading logic is allowed.
     original = ROOT/'src/open_qwen36'
-    cpp, cli = instrument((original/'core.cpp').read_text(), (original/'cli.cpp').read_text(), repeat)
+    cpp, cli = instrument((original/'core.cpp').read_text(), (original/'cli.cpp').read_text(), repeat, plain)
     dst = out/'source/src/open_qwen36'
     if (dst/'core.cpp').read_text() != cpp or (dst/'cli.cpp').read_text() != cli:
         raise ValueError('unexpected engine instrumentation')
@@ -103,5 +108,6 @@ if __name__ == '__main__':
     for key in ('out', 'xrt-include', 'xrt-lib'):
         p.add_argument('--'+key, type=Path, required=True)
     p.add_argument('--repeat', action='store_true')
+    p.add_argument('--plain', action='store_true', help='build a byte-unmodified shared CLI control')
     p.add_argument('--jobs', type=int, default=4)
     build(p.parse_args())
