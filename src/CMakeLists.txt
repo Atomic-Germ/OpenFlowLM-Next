@@ -328,6 +328,7 @@ if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest_gguf/manifest_gguf.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
