@@ -710,6 +710,50 @@ the official registry's gaps. What landed:
   runtime (`/usr/lib64/libubsan.so.1.0.0`) is not installed; test/fixture/
   dn_glue are byte-identical to origin/main.
 
+## Adding a size: what the script does now, and what it still does not (2026-10-26)
+
+One command, no hand steps:
+
+```bash
+source utilities/env.sh
+python utilities/build-new-spec.py --repo Qwen/Qwen3-0.6B        # or --spec-name <stem>
+```
+
+| Step | Automated? | Where |
+|---|---|---|
+| the spec JSON from HF config (or a `link_to` when the base already has kernels) | yes | `utilities/gen-kernel-spec.py` |
+| the model name (`extra.model`, the `src/xclbins` directory) | yes, derived; `register-spec.py` records it when the derived name differs | `test_spec_model_names.py` |
+| the **attention** point: run the production worker at the geometry vs an fp64 oracle | yes | `designs/attn/probe_dense.py` (step 3b) |
+| the **other op** points (gemv K, ln width): run each op's own fixture | yes for `gemv_q4` and `ln`; other ops abort with a named reason | `utilities/op-gate.py` |
+| the catalogue edit (values() AND the whole-tuple combination) | yes | `utilities/catalogue-add-point.py` |
+| the build, the manifest, the `gguf` twin | yes | `utilities/export-kernels.py` |
+| the frozen test lists (spec_hash, EXPECTED name) | yes — never hand-edit them | `utilities/register-spec.py` (step 6) |
+
+What is still a design step (the script refuses, with the op and the value):
+
+- **`lm_head_q4` at a new hidden** — no `make_test.py` in `designs/lm_head_q4`.
+  `vocab` is `multiple_of(64)`, so only K misses.
+- **`lm_head_q8` at a new K** — the fixture compiles K as a module constant (2048).
+- **`gemv_q8`, `deltanet`, `short_conv`, `gemv_q4_prep_f32`, `router`, `moe`** —
+  no per-geometry fixture; each was validated through a whole-layer run.
+- **recipe walls** (a width that does not fit L1, cos/sin straddling the
+  attention element): `build-new-spec` moves the spec to
+  `open_kernels/recipes/candidates/` instead of shipping a set that cannot build.
+
+`utilities/op-gate.py` also runs standalone, which is the fix for "the build
+failed on one off-grid width":
+
+```bash
+python utilities/op-gate.py --spec qwen3-8b            # list + gate every missing point
+python utilities/op-gate.py --spec qwen3-8b --op ln    # one op
+python utilities/op-gate.py --spec qwen3-8b --dry-run  # what it would run
+```
+
+Reading a missing point: `recipes/catalogue.py` is a list of what has actually
+been RUN on the hardware. `catalogue.collecting()` (used by both scripts) means
+one `recipe()` pass reports EVERY missing point, not just the first that would
+raise — so a new size never has to be discovered one failure at a time.
+
 ## Still open (Phase-MoE / later)
 
 - qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
