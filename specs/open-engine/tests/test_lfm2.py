@@ -199,6 +199,8 @@ def test_no_shipped_models_hash_moved():
         "qwen3-0.6b.json": "sha256:5d56a494a2801314be998bb9d713e239b74cafa24aeb581c4a8cebb6e84cef96",
         "qwen3-1.7b.json": "sha256:b6f3b56210d57ec088aa458919691989dff21be1b9afd2056a8be60dc3bb8f91",
         "lfm2-2.6b.json": "sha256:c121f01ee33e1c0a2c452ea23e93e87112367945914b2b9f3cb8ca01a39eff61",
+        "llama32-1b.json": "sha256:131a7093af07c5af73222e02979def3fcf66e28ef05a77ba7d35a61240fbf96b",
+        "llama32-3b.json": "sha256:557fcf71747d606e5bc23aaf26ea287f46d06fe58c70ace11d465ae7b9c5c427",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
