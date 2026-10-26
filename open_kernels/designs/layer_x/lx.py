@@ -107,7 +107,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             # ONE stream: qkv | z, DeltaNet, the out projection, then the dense FFN tail.
             X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, QKV_PC + Z_PC, "linear", fp32=D.XN_F32)
             X.dn_body(win, yout, B, K)
-            X.prep_bands(win, xin, yout, B, K, OUT_K, OG_ELEMS, OUT_PC, "linear_out")
+            X.prep_bands(win, xin, yout, B, K, OUT_K, OG_ELEMS, OUT_PC, "linear_out", fp32=D.POST_F32)
             X.ffn_body(win, xin, yout, B, K)
             return
         # part 0: qkv | z against xn, then this core's DeltaNet heads
@@ -197,7 +197,8 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         pipe = Pipeline(3)
         pipe.fill(pin_p, a_consts, bt(C_BYTES, C_NW, ELEM))
         for g in range(NG):
-            pipe.drain(pout_c, a_act, bt(A_BYTES, A_OG + g * G * 2, G * 2))
+            pipe.drain(pout_c, a_act, bt(A_BYTES, A_OG + g * G * (4 if D.POST_F32 else 2),
+                                       G * (4 if D.POST_F32 else 2)))
             pipe.fill(pin_p, a_act, bt(A_BYTES, A_O + g * G * 4, G * 4))
             pipe.fill(pin_p, a_act, bt(A_BYTES, A_Z + g * G * 4, G * 4))
         pipe.finish()                                    # og is in DDR

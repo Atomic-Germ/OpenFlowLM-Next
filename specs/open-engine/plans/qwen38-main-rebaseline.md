@@ -1,5 +1,36 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — shared DeltaNet post-output, 2026-10-26
+
+Moved the private FP32 post-output specialization into the shared post kernel,
+FIFO declarations, dense DMA and output-projection preparation. One explicit
+`Linear.POST_F32` selection controls all four boundaries. The private builder
+now selects that path rather than rewriting arithmetic/stream source strings;
+its scratch append remains private until recipe/manifest promotion.
+
+Fresh BF16 and FP32 full-lx builds reproduce their previously audited binaries:
+`insts.bin` is exact; complete XCLBINs differ only in documented build stamps
+(79 / 77 bytes). Comparison records bind the old passing causal audit, build
+record, binary hashes and all 729 capture files for each mode. This preserves
+historical evidence without treating its source tree as the current source.
+Current sources, compiler dependencies and resource audits are checked separately.
+
+Both builds pass all 11 core budgets. Maximum linked text is 15936 / 16000
+bytes; maximum assigned L1 buffer end is 62336; stacks remain 6144 bytes.
+Each build pins 849 compiler dependency entries. Toolchain: mlir-aie 1.4.2,
+llvm-aie 21.0.0.2026080301+c9c5ecb7. Evidence is in
+`Models/qwen38-27b/deltanet-post-fp32/shared-{control,fp32}-v1` and the matching
+`shared-*-identity-v1.json` reports.
+
+Eight new stream/store cases follow RED-to-GREEN. Thirteen additional cases
+check archive integrity and preserve the published Qwen3.5/Qwen3.6 post ABI.
+Full host suite: **1878 passed, 47 skipped**. Production recipes still select
+BF16 post output. This is shared-code preparation and binary-equivalence
+evidence, not a fresh numerical/performance run or full-model acceptance.
+The next change must promote FP32 scratch and manifest semantics through the
+standard export, then validate full-depth short and long-prefix propagation.
+
+
 ## Latest checkpoint — integrated all-layer validation, 2026-10-26
 
 Added capture-only builders for the shared runtime and a runner/auditor for the

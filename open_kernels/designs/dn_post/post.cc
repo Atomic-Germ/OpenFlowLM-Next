@@ -3,19 +3,25 @@
 // (tools/kernel-interp/decode_step.py: og = (rms(o) * nw).reshape(4096) * z_silu)
 #include "vecmath.h"
 
+#if defined(DN_POST_FP32) && DN_POST_FP32
+using post_output_t = float;
+#else
+using post_output_t = bfloat16;
+#endif
+
 static constexpr unsigned kHD = 128;
 static constexpr unsigned kV = 32;
 static constexpr unsigned kHeads = 8;
 
 extern "C" {
 void post_fn(const float *__restrict o, const float *__restrict z, const bfloat16 *__restrict nw,
-             bfloat16 *__restrict og) {
+             post_output_t *__restrict og) {
   aie::set_rounding(aie::rounding_mode::conv_even);
 #pragma clang loop unroll(disable)
   for (unsigned h = 0; h < kHeads; ++h) {
     const float *oh = o + h * kHD;
     const float *zh = z + h * kHD;
-    bfloat16 *gh = og + h * kHD;
+    post_output_t *gh = og + h * kHD;
     accf32 ss = aie::zeros<accfloat, kV>();
 #pragma clang loop unroll(disable)
     for (unsigned j = 0; j < kHD; j += kV) {
@@ -36,9 +42,13 @@ void post_fn(const float *__restrict o, const float *__restrict z, const bfloat1
       t = mac_vv(t, on.template to_vector<float>(), aie::load_v<kV>(nw + j));   // * nw
       const v32f sz = vsiluN<32>(aie::load_v<kV>(zh + j));
       const v32f r = fmul32(t.template to_vector<float>(), sz);
+#if defined(DN_POST_FP32) && DN_POST_FP32
+      aie::store_v(gh + j, r);
+#else
       accf32 rr;
       rr.from_vector(r);
       aie::store_v(gh + j, rr.template to_vector<bfloat16>());
+#endif
     }
   }
 }

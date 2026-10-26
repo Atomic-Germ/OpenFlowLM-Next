@@ -189,8 +189,11 @@ def glue_post_kernels(inc, g):
         k["conv"] = ExternalFunction("history_conv", source_file=str(GLUE / "glue_conv_fp32.cc"),
             arg_types=[u8_2k]*4 + [u8_4k]*2 + [u8_2k]*3 + [fqk, fvt, np.int32, np.int32, np.int32],
             include_dirs=inc, **GLUE_FLAGS)
-    k["post"] = ExternalFunction("post_fn", source_file=str(POST / "post.cc"), arg_types=[u8_4k, u8_4k, nw_ty, u8_2k],
-                                 include_dirs=inc)
+    post_type = u8_4k if D.POST_F32 else u8_2k
+    post_flags = {"compile_flags": ["-DDN_POST_FP32=1"]} if D.POST_F32 else {}
+    k["post"] = ExternalFunction("post_fn", source_file=str(POST / "post.cc"),
+                                 arg_types=[u8_4k, u8_4k, nw_ty, post_type],
+                                 include_dirs=inc, **post_flags)
     k["post_copy"] = ExternalFunction("post_copy_nw", source_file=str(POST / "post_copy.cc"), arg_types=[u8_4k, nw_ty],
                                       include_dirs=inc)
     return k
@@ -201,7 +204,7 @@ def glue_post_fifos(g):
     of_gact = ObjectFifo(g["u8_2k"], name="gact", depth=5)
     of_gout = ObjectFifo(g["u8_2k"], name="gout", depth=3)
     of_pin = ObjectFifo(g["u8_4k"], name="pin", depth=2)        # [nw][o g][z g]...
-    of_pout = ObjectFifo(g["u8_2k"], name="pout", depth=2)      # og per group
+    of_pout = ObjectFifo(g["u8_4k" if D.POST_F32 else "u8_2k"], name="pout", depth=2)  # og per group
     return of_side, of_gact, of_gout, of_pin, of_pout
 
 
