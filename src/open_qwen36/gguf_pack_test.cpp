@@ -16,7 +16,7 @@
 #include <random>
 #include <vector>
 
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 #include "open_qwen36/pools.hpp"
 
 namespace fs = std::filesystem;

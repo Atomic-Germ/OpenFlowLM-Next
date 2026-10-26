@@ -494,9 +494,17 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     q4k.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("n", 0, [8])]))
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_K")
     assert ok, note
-    # Same bytes, wrong claim: refuse rather than pack the wrong layout.
+    # Same bytes, wrong claim: refuse rather than pack the wrong layout. The
+    # name is a HINT, not a contract (llama.cpp mixes types by importance), so
+    # what must hold is that no tensor is of the claimed family.
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_0")
-    assert not ok and "claims Q4_0" in note
+    assert not ok and "Q4_0" in note and "refusing" in note
+    # A file that MIXES types (a Q4_1 body with a Q6_K output) is fine: the
+    # claimed family is present.
+    mixed = tmp_path / "mix.gguf"
+    mixed.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("o", 14, [8, 8])]))
+    ok, note = oflm_add.verify_gguf_choice(str(mixed), "mix.gguf", "Q4_K")
+    assert ok, note
     # A Q4_0_4_4 tensor (type 31) is refused even when the name said Q4_0.
     trap = tmp_path / "t.gguf"
     trap.write_bytes(_gguf_bytes(_llama_kv(), [("w", 31, [8, 8])]))
@@ -542,3 +550,79 @@ def test_extract_tokenizer_refuses_mergeless_spm(tmp_path):
         assert "no merges" in str(ex)
     else:
         raise AssertionError("mergeless vocab must raise")
+
+
+def test_a_quant_can_be_named_at_the_repo():
+    """`repo:QUANT` picks that file out of a repo that carries one per quant."""
+    assert oflm_add.split_quant_request("mradermacher/Qwen3.5-9B-i1-GGUF:IQ4_NL") == (
+        "mradermacher/Qwen3.5-9B-i1-GGUF", "IQ4_NL")
+    # a URL's port is not a quant request
+    assert oflm_add.split_quant_request("https://example.com:8080/x") == (
+        "https://example.com:8080/x", None)
+    assert oflm_add.split_quant_request("Org/Name") == ("Org/Name", None)
+
+
+def test_the_named_quant_wins_over_the_preference_order():
+    names = ["M-IQ4_XS.gguf", "M-IQ4_NL.gguf", "M-Q5_K_S.gguf", "M-Q4_1.gguf"]
+    # without a request the preference order decides (Q4_1 is byte-exact for the pool)
+    assert oflm_add.choose_gguf_file(names)[0] == "M-Q4_1.gguf"
+    # with one, the exact suffix wins
+    assert oflm_add.choose_gguf_file(names, "IQ4_NL")[0] == "M-IQ4_NL.gguf"
+    assert oflm_add.choose_gguf_file(names, "IQ4_XS")[0] == "M-IQ4_XS.gguf"
+    # a family name takes the first file of that family
+    assert oflm_add.choose_gguf_file(names, "IQ4")[0] in ("M-IQ4_NL.gguf", "M-IQ4_XS.gguf")
+    # a quant the repo does not carry is refused, with what it does carry
+    chosen, refused = oflm_add.choose_gguf_file(names, "Q6_K")
+    assert chosen is None
+    assert "no Q6_K GGUF" in refused["M-Q4_1.gguf"]
+
+
+def test_gguf_repo_without_kernels_fails_directly_instead_of_q4nx_fallback(tmp_path, monkeypatch):
+    """A GGUF repo whose family size has no GGUF-direct open kernels raises a
+    direct error naming build-new-spec.py rather than falling back to model.q4nx."""
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "Llama-3.2-1B-Instruct-GGUF"
+    repo.mkdir()
+    kv = [("general.architecture", (8, "llama"))]
+    gguf = repo / "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+    gguf.write_bytes(_gguf_bytes(kv, [("w", 12, [8, 8]), ("n", 0, [8])]))
+    monkeypatch.setattr(oflm_add, "tree_xclbins", lambda: tmp_path / "no_tree_xclbins")
+    monkeypatch.setattr(oflm_add, "find_system_xclbin_root", lambda: tmp_path / "no_sys_xclbins")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["oflm-add", f"{repo}:Q4_K_M", "--system-list", str(system_list),
+         "--config", str(tmp_path / "user_list.json"),
+         "--models-root", str(tmp_path / "models"),
+         "--xclbin-dir", str(tmp_path / "xclbins"), "--quiet"])
+    try:
+        oflm_add.main()
+    except SystemExit as e:
+        msg = str(e)
+        assert "no GGUF-direct open kernel set found" in msg
+        assert "build-new-spec.py" in msg
+        assert "model.q4nx" not in msg
+    else:
+        raise AssertionError("missing GGUF kernels must raise SystemExit directly")
+
+
+def test_quant_request_on_repo_without_matching_quant_lists_files(tmp_path, monkeypatch):
+    """Asking for repo:QUANT when that quant is absent lists the available quants and files."""
+    repo = tmp_path / "Some-GGUF"
+    repo.mkdir()
+    (repo / "model-Q4_K_M.gguf").write_bytes(b"x")
+    (repo / "model-Q8_0.gguf").write_bytes(b"x")
+    monkeypatch.setattr("sys.argv", ["oflm-add", f"{repo}:Q4_1", "--quiet"])
+    try:
+        oflm_add.main()
+    except SystemExit as e:
+        msg = str(e)
+        assert "no compatible 'Q4_1' GGUF" in msg
+        assert "Q4_K_M, Q8_0" in msg
+        assert "model-Q4_K_M.gguf, model-Q8_0.gguf" in msg
+        assert "model.q4nx" not in msg
+    else:
+        raise AssertionError("missing requested quant must raise SystemExit")
+

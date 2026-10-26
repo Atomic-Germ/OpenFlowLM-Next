@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
 namespace open_qwen36 {

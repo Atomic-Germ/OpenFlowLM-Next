@@ -42,7 +42,7 @@
 #include "xrt/xrt_kernel.h"
 
 #include "open_qwen36/block_host.hpp"
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"

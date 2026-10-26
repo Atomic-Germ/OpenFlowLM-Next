@@ -1,6 +1,6 @@
 ---
 name: open-diffusion-edits
-description: Build, run, verify and extend FLUX.2 [klein] 4B image edits on the XDNA2 NPU -- the VAE encoder schedule (open_kernels/vae_encoder.py: stride-2 downsamples as space-to-depth over existing dit_conv/vae_ew streams), the [text | generated | reference] DiT configuration (klein_pipeline.plan(R, edit=True), streams r<R>e<R>_*), the host reference preparation (src/open_diffusion/reference.cpp, a port of PIL's LANCZOS) and the edit paths of oflm image --image and /v1/images/edits. Use when changing edits, adding an edit size or a non-square/aspect-bucket reference, debugging an edit that ignores its reference or drifts, or regenerating the edit goldens.
+description: Build, run, verify and extend FLUX.2 [klein] 4B image edits on the XDNA2 NPU -- the VAE encoder schedule (open_kernels/vae_encoder.py. stride-2 downsamples as space-to-depth over existing dit_conv/vae_ew streams), the [text | generated | reference] DiT configuration (klein_pipeline.plan(R, edit=True), streams r<R>e<R>_*), the host reference preparation (src/open_diffusion/reference.cpp, a port of PIL's LANCZOS) and the edit paths of oflm image --image and /v1/images/edits. Use when changing edits, adding an edit size or a non-square/aspect-bucket reference, debugging an edit that ignores its reference or drifts, or regenerating the edit goldens.
 ---
 
 # FLUX.2 [klein] edits on the NPU

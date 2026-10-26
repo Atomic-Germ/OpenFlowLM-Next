@@ -1,6 +1,6 @@
 /// \file gguf_file.cpp
 /// \brief GGUF parsing and the per-token embedding dequant (see gguf_file.hpp).
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 
 #include <cstring>
 #include <stdexcept>

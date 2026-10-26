@@ -1,6 +1,6 @@
 ---
 name: open-phi3-nanbeige-kernels
-description: Build, verify and serve the open XDNA2 kernel sets for Phi-4-mini (the phi3 recipe: a 96-of-128 rotation and longrope) and Nanbeige4.1-3B (the llama3 recipe at 20 heads over 4). Use when re-exporting either, adding another Phi-3 or Nanbeige size, when a Phi export dies in Peano on a rename, or when `oflm serve` segfaults on the first request for a model whose adapter still casts to its closed engine class.
+description: Build, verify and serve the open XDNA2 kernel sets for Phi-4-mini (the phi3 recipe, a 96-of-128 rotation and longrope) and Nanbeige4.1-3B (the llama3 recipe at 20 heads over 4). Use when re-exporting either, adding another Phi-3 or Nanbeige size, when a Phi export dies in Peano on a rename, or when `oflm serve` segfaults on the first request for a model whose adapter still casts to its closed engine class.
 ---
 
 # Phi-4-mini and Nanbeige4.1-3B on the dense recipe
