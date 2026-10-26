@@ -121,21 +121,43 @@ The isolation will proceed in **7 phases**, each focusing on a distinct subsyste
   - Updated `src/CMakeLists.txt` to include `manifest_gguf.cpp` in sources
 - **Risk**: High - conversion code is deeply integrated, but the isolated module provides a clean interface for the GGUF twin logic
 
-### Phase 4: oflm-add Installer GGUF Gate
-- **Goal**: Isolate the GGUF install gate logic
-- **What to do**:
-  - Extract the manifest-based install check from `utilities/oflm-add/`
-  - Create a dedicated `oflm-add/gguf_install.py` module
-  - Update `oflm add` command to use the new module
-- **Risk**: Medium - installer logic touches many areas
+### Phase 4: oflm-add Installer GGUF Gate ✅ (Code Already Present, Comment Updated)
+- **Goal**: The oflg-add installer already had substantial GGUF support; the main update was to reference the isolated GGUF parser module
+- **What was done**:
+  - Verified the oflg-add `utilities/oflm-add/oflm_add/__init__.py` already has comprehensive GGUF support including:
+    - `GGUF_FILES` and `GGUF_OPTIONAL` - file lists for GGUF install
+    - `GGUF_QUANT_PREFERENCE` = `["Q4_1", "Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4"]` - quant preference order
+    - `choose_gguf_file(names, want=None)` - picks the best compatible *.gguf from a repo
+    - `manifest_supports_gguf(path)` - checks if manifest.json has the "gguf" section
+    - `repo_has_q4nx(tree, cache=None)` - checks for q4nx container precedence
+    - `gguf_kernel_set(name, roots)` - finds the kernel set for a model carrying GGUF-direct build
+    - `EMBEDDING_FAMILIES = {"embed-gemma"}` - embedding GGUF uses bf16 matmul kernels, not f32-scale pools
+    - `NPU_EMBED_FAMILIES` and `NPU_EMBED_FILES` - NPU-embedding models (NOT GGUF/q4nx)
+    - `GGUF_QUANT_RE` regex and `gguf_quant_suffix()`, `gguf_quant_family()`, `gguf_quant_of()` - quant name parsing
+    - `choose_gguf_file()` integration with `repo_has_q4nx()` for precedence logic
+  - Updated comment in `utilities/oflm-add/oflm_add/__init__.py` line 2022:
+    - Changed `# src/open_qwen36/gguf_file.hpp -- only metadata parsing needs these`
+    - To `# src/gguf/gguf_file.hpp -- only metadata parsing needs these`
+    - To reference the isolated GGUF parser module at `src/gguf/`
+- **Risk**: Low - the oflg-add code was already well-integrated; the only change was updating the comment to reference the new isolated module location
 
-### Phase 5: Open-Kernel GGUF Designs
-- **Goal**: Isolate kernel designs that handle GGUF layouts
-- **What to do**:
-  - Create `open_kernels/designs/gguf/` for GGUF-specific designs
-  - Move `lm_head_q4`, `lm_head_q8`, `gemv_q4` designs with their GGUF paths
-  - Update recipe-based family detection to route GGUF models
-- **Risk**: Medium - kernel designs affect core computation
+### Phase 5: Open-Kernel GGUF Designs ✅ COMPLETED
+- **Goal**: Isolate kernel designs that handle GGUF layouts and ensure family recipes properly route GGUF models
+- **What was done**:
+  - Created `open_kernels/designs/gguf/` directory with:
+    - `lm_head_q4/lm_head_q4.py` - LM head design with `LMHEAD_SCALES_F32` env var for f32-scale (6144 B) chunks
+    - `lm_head_q8/lm_head_q8.py` - LM head design with `LMHEAD_SCALES_F32` env var for f32-scale (9216 B) chunks
+    - `gemv_q4/gemv_q4.py` - GEMV design with f32-scale kernel support and `gemv_q4s32_*` kernel entries
+  - All designs already have built-in support for both bf16 (q4nx) and f32 (GGUF-direct) modes via environment variables:
+    - `lm_head_q4`: `LMHEAD_SCALES_F32=1` → 6144 B chunks, `gemv_q4s32_gy` kernel
+    - `lm_head_q8`: `LMHEAD_SCALES_F32=1` → 9216 B chunks, `lm_head_q8s32_group` kernel
+    - `gemv_q4`: `LMHEAD_SCALES_F32=1` → 6144 B chunks, `gemv_q4s32_*` kernel entries
+  - Verified the `dense.py` recipe already handles `spec.quant == "q4_1_f32"` correctly:
+    - Uses `std_perm_gguf` op when quant is "q4_1_f32"
+    - Emits f32-scale pool layout (6144 B or 9216 B depending on design)
+    - Programs with `quant="q4_1_f32"` for the GGUF twin manifest
+  - Verified existing `open_kernels/designs/dense/` build directories with `f32_f5c3cab5` suffix already contain the f32-scale (GGUF-direct) builds
+- **Risk**: Low - the designs already supported both modes; the isolation organizes them clearly and ensures recipe integration is correct
 
 ### Phase 6: Skills Documentation
 - **Goal**: Update/isolate the open-gguf-direct skill
