@@ -27,9 +27,11 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 > + `recipes/dense.attn_flags()` as the single attn.h flag list), and the
 > entire **rope-pairing** feature (`c85d185` — llama3 GGUF twins now rotate
 > correctly; the gate's fp64 oracle learned the interleaved law too, which
-> fedora's has not). Spec count is now **25** (added qwen3-0.6b, qwen3-1.7b,
+> fedora's has not). Spec count is now **26** (added qwen3-0.6b, qwen3-1.7b, qwen3-14b,
 > lfm2-2.6b, llama32-1b, llama32-3b, nanbeige41-3b; gemma-3-1b-it is parked in
-> `recipes/candidates/` — a recipe wall, same as fedora). Registration of a
+> `recipes/candidates/` — a recipe wall, same as fedora). 24 of the 26 sets
+> carry a `gguf` section; the two that do not are qwen3-14b (a split FF has no
+> f32 twin) and qwen36-35b-a3b (the MoE expert ops are not written). Registration of a
 > new spec in the frozen test lists is **scripted**:
 > `utilities/register-spec.py` (build-new-spec step 6) — never hand-edit the
 > hashes in test_lfm2.py / test_spec_model_names.py.
