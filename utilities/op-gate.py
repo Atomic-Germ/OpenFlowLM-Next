@@ -64,14 +64,19 @@ GATES = {
         "design": "designs/ln/ln.py",
         "compare": [],
     },
+    # The q4 vocab head: logits[N] = W[N, K] @ x[K], N = vocab. A new HIDDEN is a
+    # new K here, and the head is the one op a new size trips after attention.
+    "lm_head_q4": {
+        "dir": "lm_head_q4",
+        "design": "designs/lm_head_q4/lm_head_q4.py",
+        "compare": [],
+    },
 }
 
 # Ops with no runnable fixture in this tree. Naming what is missing is the
 # point: a new spec that needs one of these is a DESIGN task, not a script run.
 NOT_AUTOMATED = {
     "attn": "handled by build-new-spec's own attention gate (designs/attn/probe_dense.py)",
-    "lm_head_q4": "designs/lm_head_q4 has no make_test.py; its points are validated through a "
-                  "whole-layer run, and `vocab` is multiple_of(64) so only K can miss",
     "lm_head_q8": "designs/lm_head_q8/make_test.py compiles K as a module constant (2048), so it "
                   "cannot be pointed at another K; K 4096 / 5120 were validated through the "
                   "family's whole-layer runs",
@@ -275,7 +280,37 @@ def gate_ln(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
     print(f"   PASS ln width={width} (groups={groups})")
 
 
-GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln}
+def gate_lm_head_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
+    """Run designs/lm_head_q4 at this K (the new hidden) and add the point.
+
+    The fixture covers 64-row bands of the head's pool; `--bands 64` is one
+    band per row-group of 64 rows (4096 rows), which exercises the band law and
+    the uneven split over the 8 cores without streaming the whole vocab.
+    """
+    k = int(kw["K"])
+    bands = 64
+    tag = f"k{k}_b{bands}"
+    d = DESIGNS / "lm_head_q4"
+    cc_before = set(d.glob("*.cc"))
+    e = dict(env, LMHEAD_N=str(bands * 64), LMHEAD_K=str(k))
+    cmd_fixture = [py, d / "make_test.py", "--k", k, "--bands", bands]
+    cmd_build = [py, ROOT / "open_kernels" / "build_design.py", d / "lm_head_q4.py", d / f"build_{tag}"]
+    if dry:
+        print(f"   would run: {' '.join(map(str, cmd_fixture))}")
+        print(f"   would build: {' '.join(map(str, cmd_build))}")
+        print(f"   would add:  lm_head_q4 K={k}")
+        return
+    _run(cmd_fixture, env=e, cwd=d)
+    _run(cmd_build, env=e)
+    _run([harness, d / f"run_{tag}.cfg"], env=e, cwd=d, quiet=True)
+    _run([py, d / "compare.py", tag], env=e, cwd=d)
+    for param in _values_params("lm_head_q4", kw):
+        _add_param("lm_head_q4", param, kw[param], note)
+    _cleanup(d, tag, cc_before, keep=dry)
+    print(f"   PASS lm_head_q4 K={k}")
+
+
+GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln, "lm_head_q4": gate_lm_head_q4}
 
 
 def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
@@ -384,7 +419,10 @@ def main() -> int:
     # catalogue-add-point.py edited the source in a subprocess; this process
     # holds the pre-edit module, so re-read it before claiming the points landed.
     _reload_catalogue()
-    again = missing_points(spec)
+    # only this tool's own ops: "attn" is the build-new-spec gate, and --op means
+    # the caller asked about one op and the others are not this run's business.
+    again = [(op, kw) for op, kw in missing_points(spec)
+             if op != "attn" and (not a.op or op == a.op)]
     if again:
         print("op-gate: still missing after the gates: " + ", ".join(f"{o} {k}" for o, k in again),
               file=sys.stderr)

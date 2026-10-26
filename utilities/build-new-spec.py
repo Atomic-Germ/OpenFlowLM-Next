@@ -250,6 +250,8 @@ def main() -> int:
     # Attention is 3b, because its gate builds the model's worker, not a fixture.
     if missing:
         print("-- op gates: run each missing point's fixture before the build", flush=True)
+        sys.path.insert(0, str(ROOT / "open_kernels"))
+        from recipes.load import load_spec
         mod_gate = _load_module("_op_gate", OP_GATE)
         try:
             mod_gate.gate_points(load_spec(spec_path), spec_path, py, env,
