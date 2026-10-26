@@ -133,6 +133,11 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-prefill-production-validation</name>
+    <description>Build capture-only shared-runtime CLIs and audit all-layer paired prefill and resident reset against the standard export.</description>
+    <location>.agents/skills/open-qwen38-prefill-production-validation/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-qwen38-paired-prefill-production</name>
     <description>Build and validate the standard paired-prefill kernel export and shared manifest-v4 runtime.</description>
     <location>.agents/skills/open-qwen38-paired-prefill-production/SKILL.md</location>

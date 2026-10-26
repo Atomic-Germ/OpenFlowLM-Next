@@ -1,5 +1,52 @@
 # Qwen3.8-27B validation report
 
+## Latest checkpoint — integrated all-layer validation, 2026-10-26
+
+Added capture-only builders for the shared runtime and a runner/auditor for the
+standard manifest-v4 export. The builders preserve projection arithmetic and
+`request()`/`Core::reset()`, adding synchronized residual readback and optional
+separate first/repeated capture writers. Verification reconstructs the allowed
+instrumentation and pins original/staged sources, 590 compiler dependencies,
+CMake cache and executable hashes. Both builds use GCC 15.2 and pass CTest 4/4.
+No NPU kernels, weight packing or runtime arithmetic changed in this checkpoint.
+
+The single-request integrated check passes sequential NPU and both hybrid
+schedules over 64 layers, 20 prompt tokens and one continuation. All
+**4032/4032 residual rows** and **63/63 independent logit cases** pass unchanged
+bounds. All **261/261 files** reproduce the retained accepted captures exactly;
+the two hybrid schedules agree on all **86/86 residual/logit files**. Separate
+re-audit recomputes the numerical results and confirms hashes and identities.
+
+| Route | Worst residual maxrel | Minimum logit correlation |
+|---|---:|---:|
+| Sequential | 0.0048820188 (L63/P18) | 0.9999943778 |
+| Hybrid, layer-major | 0.0012128028 (L0/P20) | 0.9999979147 |
+| Hybrid, block-major | 0.0012128028 (L0/P20) | 0.9999979147 |
+
+Resident reset validation and its separate audit also pass. Three resident
+processes execute two requests each with distinct capture writers: **261/261**
+first-request files match the single baseline and **261/261** second-request
+files match the first. Across six requests, **8064/8064 residual rows** and
+**126/126 independent logit cases** pass.
+
+Nine new RED-to-GREEN tests cover permitted instrumentation, complete capture
+inventories, exact reset identity and aggregation that cannot hide a failed
+route or numerical gate. Full host suite: **1857 passed, 47 skipped**.
+Evidence is under `Models/qwen38-27b/prefill-production/`: `trace-v1`,
+`repeat-v1`, `all-layer-v1` and `reset-v1`. The existing `kernels-model-v1` bundle
+and audited short smoke remain pinned inputs. Historical metadata is preserved;
+references are bound to the original preparation, and changed model or binary
+artifacts have no exemption.
+
+This is short-prompt integration evidence. It does not establish long-prefix
+reset, full-buffer zeroing, independent checkpoint/restore semantics or serving
+request isolation. Sequential long-prefix precision still fails its known gate;
+hybrid recurrence and norms still run on the host. Full model acceptance remains
+open, with FP32 DeltaNet post-output promotion a separate change. Performance
+acceptance also remains open: paired projections currently disable stage-major
+submission and paired KV uses host attention. These instrumented runs serialize
+readback and are not production performance benchmarks.
+
 ## Latest checkpoint — standard paired-prefill export, 2026-10-25
 
 The ordinary qwen35 recipe now exports five low-weight GEMM companions for

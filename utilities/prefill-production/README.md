@@ -48,3 +48,51 @@ intermediate layer, establish long-prefix/reset acceptance, exercise serving,
 or demonstrate that hybrid host stages run on the NPU. The full application
 uses the same Core, but needs the new kernel bundle to enable paired prefill;
 an executable rebuild alone does not upgrade an installed older bundle.
+
+## All-layer and resident reset gate
+
+Build a capture-only copy of the shared runtime with `build.py`, supplying
+`--out`, `--xrt-include` and `--xrt-lib`. Build another fresh directory with
+`--repeat`. These builds add the existing synchronized residual writer and
+separate per-request output names. They keep the current shared projection
+implementation and the body of `request()` unchanged. No kernels are rebuilt.
+The verifier reconstructs the permitted changes and checks source/compiler,
+CMake and executable hashes.
+
+With `trace-v1` and `repeat-v1` built under the production evidence directory:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/validate.py run \
+  --build Models/qwen38-27b/prefill-production/trace-v1 \
+  --smoke Models/qwen38-27b/prefill-production/smoke-v2 \
+  --baseline Models/qwen38-27b/prefill-expanded-cli/native-v1 \
+  --kernels Models/qwen38-27b/prefill-production/kernels-model-v1 \
+  --out Models/qwen38-27b/prefill-production/all-layer-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/validate.py audit \
+  --out Models/qwen38-27b/prefill-production/all-layer-v1
+
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/validate.py run \
+  --build Models/qwen38-27b/prefill-production/repeat-v1 \
+  --smoke Models/qwen38-27b/prefill-production/smoke-v2 \
+  --baseline Models/qwen38-27b/prefill-expanded-cli/native-v1 \
+  --kernels Models/qwen38-27b/prefill-production/kernels-model-v1 \
+  --repeat-baseline Models/qwen38-27b/prefill-production/all-layer-v1 \
+  --out Models/qwen38-27b/prefill-production/reset-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/validate.py audit \
+  --out Models/qwen38-27b/prefill-production/reset-v1
+```
+
+Each route (sequential and both hybrid schedules) captures 64 residual arrays,
+22 logit files and the final working-buffer slice. The single request must
+reproduce all historical captures and satisfy independent residual/logit gates.
+Only an independently audited single run can serve as the repeat baseline.
+For reset, each process keeps one model resident for two requests; every first
+capture must reproduce the single run, and every second capture must reproduce
+the first. Ordered raw-log markers bind each request to its separate files.
+Auditing recomputes numerical measurements and identities from the files.
+A missing route or failed numerical gate cannot be hidden by identical repeats.
+
+This validates ordinary request reset with one short prompt. It does not test
+long-prefix reset, full-buffer zeroing, independent checkpoint/restore semantics,
+serving request isolation or full model acceptance. Hybrid host stages remain
+explicit; the known sequential long-prefix accuracy failure remains open.
