@@ -819,6 +819,28 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## The two "impossible" sizes share ONE enabler (2026-10-27)
+
+Measured, not guessed:
+
+* **Qwen2.5-7B** (FF 18944): `_ffn_split` offers (9216, 9728) and the recipe
+  refuses -- "does not fit a main core's L1 in two pieces of whole f32 elements
+  ... a three-way split is not implemented".
+* **Qwen3-32B** (FF 25600): the two-way split is (12288, 13312), and 13312
+  cannot be gated (the standalone gemv fixture holds the K-wide table + the
+  K-wide activation in one core: ~59 KB of 64 KB).
+
+Both want the SAME feature: a **three-way FF split**. 25600 = 9216 + 8192 + 8192
+and 18944 = 6400 + 6272 + 6272 put every piece at or below 12288, i.e. inside
+what the gate can measure. What it needs beyond `down_split`/`ln_add3` is the
+norm helper's third partial output (`ln_add4`) and the split's 3-piece DMA walk.
+So "impossible" here is one kernel piece, not two models' worth of work.
+
+**Granite 4.2's rambly output is (very likely) the chat template**, not the
+numbers: Granite 4.2 wraps a thinking block, and a fixed Qwen3.x template (used
+for tool handling) does not fit it. Retest with Granite's own template before
+suspecting the fold.
+
 ## The install+serve matrix (2026-10-27): what the shipped build needed
 
 A full matrix on an installed build (`cmake --workflow --preset linux-default` +
