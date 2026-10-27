@@ -199,7 +199,11 @@ def attn_point_validated(spec) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--repo", required=True, help="the HuggingFace repo (Qwen/Qwen3-0.6B)")
+    ap.add_argument("--repo", default="", help="the HuggingFace repo (Qwen/Qwen3-0.6B)")
+    ap.add_argument("--spec", default="",
+                    help="an EXISTING spec (stem or path) to build and gate: skips step 1. "
+                         "For a gated HF repo, make the spec with "
+                         "gen-kernel-spec.py --gguf <file> first")
     ap.add_argument("--spec-name", default="", help="the spec's stem (default: from the family and the size)")
     ap.add_argument("--rows", type=int, default=17, help="the attention gate's window length")
     ap.add_argument("--work", default="", help="where the build artifacts go (default: build/attn-gate/<spec>)")
@@ -212,7 +216,20 @@ def main() -> int:
     py = mod.ensure_venv()
     env = toolchain_env(mod)
 
+    if not a.repo and not a.spec:
+        ap.error("--repo or --spec is required")
     name = a.spec_name
+    if a.spec:
+        sp = Path(a.spec)
+        spec_path = sp if sp.is_file() else SPECS / (sp.stem if sp.suffix else f"{a.spec}.json")
+        if not spec_path.is_file():
+            print(f"build-new-spec: no such spec: {a.spec}", file=sys.stderr)
+            return 1
+        name = spec_path.stem
+        print(f"-- spec {name} (given)", flush=True)
+        goto_build = True
+    else:
+        goto_build = False
     if not name:
         sys.path.insert(0, str(ROOT / "utilities" / "oflm-add"))
         try:
@@ -225,7 +242,7 @@ def main() -> int:
     # 1. the spec
     print(f"-- spec {name}", flush=True)
     existed = spec_path.is_file()
-    rc = run([sys.executable, GEN_SPEC, "--repo", a.repo, "--out", spec_path], env=env, check=False)
+    rc = 0 if goto_build else run([sys.executable, GEN_SPEC, "--repo", a.repo, "--out", spec_path], env=env, check=False)
     if rc != 0:
         print("build-new-spec: the spec could not be generated", file=sys.stderr)
         return rc

@@ -185,13 +185,37 @@ def existing_spec_for_family_size(family: str, cfg: dict) -> str | None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", required=True)
+    ap.add_argument("--repo", default="")
+    ap.add_argument("--gguf", default="",
+                    help="derive the spec from a GGUF file's own metadata instead of the "
+                         "repo's config.json (a gated or absent HF config: the llama3 8B "
+                         "repos are gated, and a GGUF always names its geometry)")
+    ap.add_argument("--model-name", default="",
+                    help="extra.model for a --gguf spec (default: from --spec-name/--repo)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--refresh", action="store_true",
                     help="regenerate an existing spec in place (keeps extra.model) instead "
                          "of writing a link file when another spec covers the geometry")
     args = ap.parse_args()
 
+    if args.gguf:
+        # A GGUF names its own geometry: architecture, dimensions, vocab, rope. A gated
+        # base repo (meta-llama/*) leaves oflm add with a stub config and leaves this
+        # script with nothing to read, and the file is the authority anyway.
+        sys.path.insert(0, str(ROOT / "utilities" / "oflm-add"))
+        from oflm_add import read_gguf_inventory
+        inv = read_gguf_inventory(args.gguf, limit_mb=96)
+        if not inv:
+            print(f"ERROR: could not read {args.gguf}", file=sys.stderr)
+            return 1
+        spec = ModelSpec.from_gguf_metadata(inv[0]).to_dict()
+        stem = args.model_name or (args.repo.split("/")[-1] if args.repo else "model") + "-NPU2"
+        spec["extra"] = {**(spec.get("extra") or {}), "model": stem}
+        out = Path(args.out) if args.out else SPECS_DIR / f"{stem.lower()}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+        print(f"Wrote candidate spec to {out} (from the GGUF metadata)")
+        return 0
     cfg, real_vocab = spec_config(args.repo)
     family = family_from_config(cfg)
     if not family:
