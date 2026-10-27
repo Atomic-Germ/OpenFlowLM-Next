@@ -819,6 +819,47 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## Dense: 7 of 8 shipped (2026-10-26, `298ed19`)
+
+Verified end-to-end on the NPU with no environment, one prompt, temperature 0:
+
+| family | model | answer |
+|---|---|---|
+| qwen3 | Qwen3-4B-Base Q4_0 | " Paris. Can you provide ..." |
+| llama3 | Llama-3.2-3B-Instruct Q4_0 | "Paris." |
+| gemma3 | Gemma3-4B-IT Q4_1 | "The capital of France is **Paris**." |
+| k2 | K2-Horizon-7B-i1 | coherent reasoning |
+| qwen2 | Qwen2.5-3B-i1 | "The capital of France is Paris" |
+| granite | granite-4.2-3b-i1 | "Okay, the user said ... Paris is" |
+| hunyuan | Hy-MT2-7B-i1 | "La capitale de la France est" |
+| phi3 | Phi-4-mini-Instruct | **not yet** -- see below |
+
+What each of the three hard ones needed, because the next family will hit one:
+
+* **granite**: `attention_multiplier` must be folded into q_proj. A container is
+  folded by q4nx-build; a GGUF is not. The spec records the PRE-fold value in
+  `extra.granite_attention_multiplier` (from the config, or from
+  `q4nx_folded_multipliers` when a container states it); dense.py puts `fold` on
+  the q_proj op of the **std_perm_gguf** plan only; `std_perm_gguf` forces the
+  requant path when `fold != 1` and scales the decoded block; check_model accepts
+  a LIST of valid values, so one set serves the folded container (0.125) and the
+  unfolded GGUF (0.015625).
+* **hunyuan**: nothing had shipped one, so `model_family_map()` had no entry and
+  the server said "not a chat model". It maps to the Granite adapter (dense,
+  open engine, template-driven). Then `bos_token_id` was `null` with the token
+  string absent from tokenizer.json: oflm-add resolves ids from tokenizer.json OR
+  from the GGUF's `tokenizer.ggml.*_token_id`, treats null as missing, and writes
+  before the "nothing to merge" early return.
+* **qwen2.5**: the HF FF is 11008 and 11264 is the converter's pad. The padded
+  container entry is gone and the spec is the true 11008, whose `gemv_q4` K was
+  gated on the NPU. Build-new-spec skips the attention gate when the tuple is
+  already validated (the probe refuses q/k/v-bias families by design).
+
+**phi3 is the last one**, and it is recipe work, not a spec: llama.cpp's phi3 arch
+stores `blk.N.attn_qkv.weight` FUSED, while our phi3 plan expects separate
+q/k/v. The Instruct GGUF therefore fails at "no tensor ... self_attn.q_proj".
+Needs a fused-qkv plan (split in_dim / chunk0, like the qwen35 gated-q split).
+
 ## The five dense families that were never run: what each one needs (2026-10-26)
 
 Pulled the user's mradermacher i1 repos (Q4_1 first) and served each:
