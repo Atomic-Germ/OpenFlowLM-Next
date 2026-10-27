@@ -772,9 +772,11 @@ std::vector<std::string> Manifest::files() const {
 }
 
 std::string Manifest::host_attention_refusal() const {
-    if (family != "k2")
+    // Granite joins because recipes/spec.py::_granite_scale_check requires its
+    // attention_multiplier to equal head_dim**-0.5, the host's scale.
+    if (family != "k2" && family != "granite")
         return "host attention implements K2's attention (no q/k norm, no bias, no gate, no window, "
-               "full rotation) and nothing else; this kernel set is family '" + family + "'";
+               "full rotation; Granite with attention_multiplier == head_dim**-0.5) and nothing else; this kernel set is family '" + family + "'";
     auto num = [&](const char* key) -> size_t {
         return hf_config_check.contains(key) ? hf_config_check[key].get<size_t>() : 0;
     };

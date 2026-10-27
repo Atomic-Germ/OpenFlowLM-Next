@@ -420,6 +420,122 @@ void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, cons
     }
 }
 
+static float dot_f32(const float* a, const float* b, size_t n) {
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    size_t j = 0;
+    for (; j + 16 <= n; j += 16) {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j + 8), _mm256_loadu_ps(b + j + 8), a1);
+    }
+    for (; j + 8 <= n; j += 8) a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j), a0);
+    a0 = _mm256_add_ps(a0, a1);
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    return _mm_cvtss_f32(s);
+}
+
+// s[r] = (q . K[r]) * scale for r in [0, n), four keys to a pass so the horizontal sums amortise; returns the max
+float scores_f32(const float* K, size_t stride, const float* q, size_t hd, size_t n, float scale, float* s) {
+    float mx = -1e30f;
+    size_t r = 0;
+    for (; r + 4 <= n; r += 4) {
+        const float* k0 = K + r * stride;
+        __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+        for (size_t j = 0; j < hd; j += 8) {
+            const __m256 qj = _mm256_loadu_ps(q + j);
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + j), qj, a0);
+            a1 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + stride + j), qj, a1);
+            a2 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + 2 * stride + j), qj, a2);
+            a3 = _mm256_fmadd_ps(_mm256_loadu_ps(k0 + 3 * stride + j), qj, a3);
+        }
+        const __m256 h = _mm256_hadd_ps(_mm256_hadd_ps(a0, a1), _mm256_hadd_ps(a2, a3));
+        const __m128 d = _mm_add_ps(_mm256_castps256_ps128(h), _mm256_extractf128_ps(h, 1));
+        const __m128 v = _mm_mul_ps(d, _mm_set1_ps(scale));
+        _mm_storeu_ps(s + r, v);
+        for (size_t i = 0; i < 4; ++i) mx = std::max(mx, s[r + i]);
+    }
+    for (; r < n; ++r) {
+        s[r] = dot_f32(K + r * stride, q, hd) * scale;
+        mx = std::max(mx, s[r]);
+    }
+    return mx;
+}
+
+// s[i] = exp(s[i] - mx) in place, Cephes' single-precision polynomial (rel. error ~1e-7); returns the sum in fp64
+double exp_sum_f32(float* s, size_t n, float mx) {
+    const __m256 vmx = _mm256_set1_ps(mx), log2e = _mm256_set1_ps(1.44269504088896341f);
+    const __m256 c1 = _mm256_set1_ps(0.693359375f), c2 = _mm256_set1_ps(-2.12194440e-4f), lo = _mm256_set1_ps(-87.3f);
+    const __m256 p0 = _mm256_set1_ps(1.9875691500E-4f), p1 = _mm256_set1_ps(1.3981999507E-3f),
+                 p2 = _mm256_set1_ps(8.3334519073E-3f), p3 = _mm256_set1_ps(4.1665795894E-2f),
+                 p4 = _mm256_set1_ps(1.6666665459E-1f), p5 = _mm256_set1_ps(5.0000001201E-1f), one = _mm256_set1_ps(1.f);
+    double total = 0;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x = _mm256_max_ps(_mm256_sub_ps(_mm256_loadu_ps(s + i), vmx), lo);
+        const __m256 fx = _mm256_round_ps(_mm256_mul_ps(x, log2e), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        x = _mm256_sub_ps(_mm256_sub_ps(x, _mm256_mul_ps(fx, c1)), _mm256_mul_ps(fx, c2));
+        __m256 y = _mm256_fmadd_ps(p0, x, p1);
+        y = _mm256_fmadd_ps(y, x, p2);
+        y = _mm256_fmadd_ps(y, x, p3);
+        y = _mm256_fmadd_ps(y, x, p4);
+        y = _mm256_fmadd_ps(y, x, p5);
+        y = _mm256_fmadd_ps(_mm256_mul_ps(y, x), x, _mm256_add_ps(x, one));
+        const __m256i e = _mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(fx), _mm256_set1_epi32(127)), 23);
+        y = _mm256_mul_ps(y, _mm256_castsi256_ps(e));
+        _mm256_storeu_ps(s + i, y);
+        alignas(32) float t[8];
+        _mm256_store_ps(t, y);
+        for (int k = 0; k < 8; ++k) total += t[k];
+    }
+    for (; i < n; ++i) {
+        s[i] = std::exp(s[i] - mx);
+        total += s[i];
+    }
+    return total;
+}
+
+void axpy_f32(float* out, float a, const float* v, size_t n) {
+    const __m256 va = _mm256_set1_ps(a);
+    for (size_t j = 0; j < n; j += 8)
+        _mm256_storeu_ps(out + j, _mm256_fmadd_ps(va, _mm256_loadu_ps(v + j), _mm256_loadu_ps(out + j)));
+}
+
+int argmax_bf16_row(const float* p, size_t n) {
+    const __m256i exp_mask = _mm256_set1_epi32(0x7f800000), one = _mm256_set1_epi32(1), bias = _mm256_set1_epi32(0x7fff);
+    const __m256i hi_mask = _mm256_set1_epi32(static_cast<int>(0xffff0000u));
+    __m256 lv = _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+    __m256i li = _mm256_set1_epi32(-1), idx = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    const __m256i eight = _mm256_set1_epi32(8);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        const __m256i u = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
+        const __m256i r = _mm256_and_si256(_mm256_add_epi32(_mm256_add_epi32(u, bias), _mm256_and_si256(_mm256_srli_epi32(u, 16), one)), hi_mask);
+        const __m256i sub = _mm256_cmpeq_epi32(_mm256_and_si256(u, exp_mask), _mm256_setzero_si256());
+        const __m256 x = _mm256_castsi256_ps(_mm256_andnot_si256(sub, r));
+        const __m256 gt = _mm256_cmp_ps(x, lv, _CMP_GT_OQ);
+        lv = _mm256_blendv_ps(lv, x, gt);
+        li = _mm256_blendv_epi8(li, idx, _mm256_castps_si256(gt));
+        idx = _mm256_add_epi32(idx, eight);
+    }
+    alignas(32) float fv[8];
+    alignas(32) int fi[8];
+    _mm256_store_ps(fv, lv);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(fi), li);
+    int best = 0;
+    float bv = -std::numeric_limits<float>::infinity();
+    for (int j = 0; j < 8; ++j)
+        if (fi[j] >= 0 && (fv[j] > bv || (fv[j] == bv && fi[j] < best))) { bv = fv[j]; best = fi[j]; }
+    for (; i < n; ++i) {
+        uint32_t u;
+        std::memcpy(&u, p + i, 4);
+        float x = 0.0f;
+        if (u & 0x7f800000u) { u = (u + 0x7fffu + ((u >> 16) & 1u)) & 0xffff0000u; std::memcpy(&x, &u, 4); }
+        if (x > bv) { bv = x; best = static_cast<int>(i); }
+    }
+    return best;
+}
+
 void attention_block(const AttnGeom& g, const float* q, const float* k, const float* v, const float* gate,
                      const float* qn, const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems,
                      float* og) {

@@ -658,17 +658,15 @@ if(NOT OFLM_USE_HRX)
             target_link_libraries(oflm PRIVATE delayimp)
         endif()
     endif()
-    # Block host stages and core's host-attention / argmax helpers use AVX2
-    # and FMA intrinsics. Keep the flags on those translation units only.
+    # Block host stages and their host-attention / argmax helpers use AVX2 and
+    # FMA intrinsics. Keep the flags on that translation unit only.
     if(MSVC)
         set_source_files_properties(
             "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
-            "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
             PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
         set_source_files_properties(
             "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
-            "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
     endif()
 endif()
