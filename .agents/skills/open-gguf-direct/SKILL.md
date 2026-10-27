@@ -842,12 +842,20 @@ Measured after that port ("The capital of France is", temperature 0):
 `OFLM_GGUF_POOL_Q41=1` (the f32-numerics bisect above) leaves Nanbeige
 unchanged, so its fault is not the f32 chunk law.
 
-**And a shipped-set bug found on the way, before any GGUF question:**
-`oflm pull nanbeige4.1:3b` refuses to load on OUR set because the official
-container's `config.json` says `intermediate_size = 10752` while
-Nanbeige/Nanbeige4.1-3B's HF config (and our spec) say **10496**. The engine is
-right to refuse; the pair is wrong. Decide which FF the container's weights
-really are before judging any Nanbeige GGUF run.
+**AMD's Nanbeige container was a different model, and is gone (`2e9be98`).**
+`oflm pull nanbeige4.1:3b` refused to load on our set: the container's config
+says `intermediate_size = 10752`, the HF checkpoint says **10496**. The
+container's own chunk arithmetic confirms 10752 (`mlp.down_proj` is
+3360 x 5120 chunks = 80 bands x 42 k-tiles), and its tokenizer is a different
+one (vocab 166107, `<|im_start|>`; the 3B-Base GGUF has 166102, `<s>`). So no
+HF-derived spec could serve it. The registry entry is removed rather than our
+spec bent to it -- users pull GGUF now. The set stays and a Nanbeige GGUF links
+it by geometry; `oflm-add` takes the family from the manifest's own spec when
+the registry does not list the set.
+
+That LOOP (Nanbeige GGUF emitting `\x0b`) happens with BOTH the old and the new
+engine, so the container was not its cause -- the container only explains why
+the container could never load. Open question, and the numeric gate is the tool.
 
 ## GGUF-direct NUMERICS: one combination verified (2026-10-26)
 
