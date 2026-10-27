@@ -819,6 +819,42 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## DENSE IS DONE; the f32-scale twin is the trap (2026-10-26, `31d3636` + default flip)
+
+A GGUF now runs on the **q4_1 twin by default** (`OFLM_GGUF_POOL_F32=1` opts into
+the f32 twin as a probe). With no environment at all, temperature 0, one prompt:
+
+| model | dialect | answer |
+|---|---|---|
+| Qwen3-4B-Base (Q4_0) | half-split rope + qk_norm | " Paris. Can you provide ..." |
+| Llama-3.2-3B-Instruct (Q4_0) | interleaved rope | "Paris." |
+| Gemma3-4B-IT (Q4_1) | sandwich norms, partial rope, hd 256, window 1024 | "The capital of France is **Paris**." |
+| Nanbeige4-3B-Base (Q4_1) | llama3, 20/4 heads, FF 10496 | "ital of France is Paris." |
+
+How we got there, because the next family will need the same forensics:
+
+1. `OFLM_OPEN_DUMP_POOLS=<dir>` writes layer 0's packed pool + consts. Under the
+   q4_1 law the engine's chunk for gemma3-4b's layer-0 q_proj is **byte-identical**
+   to AMD's container chunk (0/5120 bytes differ), consts **0/24576**, and the
+   embeddings match the container within bf16 rounding. So the packing, the name
+   map and the quant conversion are right.
+2. `OFLM_OPEN_LAYER_NAN=1` (which also disables the decode pipeline so each layer
+   completes before it is read) showed the **f32 twin** turns layer 0 into all-NaN
+   for gemma3-4b and Nanbeige, while the q4_1 twin reproduces the container's
+   per-layer numbers (13058.38 vs 13058.63 ...).
+3. Therefore the fault is the f32-scale twin's kernels for those shapes, not the
+   pack, not the load path, not the family. The q4_1 twin is what every q4nx
+   container runs, so it is the safer default and numerically the same model.
+
+`OFLM_GGUF_POOL_Q41` is gone; the knob is `OFLM_GGUF_POOL_F32` (probe only). The
+bisect merge also swaps the HEAD and the globals now -- `lmpool` is the head
+pool's offset, so it and everything after it move with the chunk law; without
+that the bisect ran a q4_1-packed head through the f32 kernel and looked broken.
+
+**Still open**: why the f32 twin NaNs at layer 0 for those shapes (gemma3-4b,
+Nanbeige) -- either fix it or stop shipping f32 twins. And Qwen3.5 is unchanged
+by the law (soup on both), so the hybrid family's fault is in its own packing.
+
 ## GGUF-direct NUMERICS: the load path is now fedora's, and what that proved (2026-10-26)
 
 `39b1c26` replaces our older GGUF load path with the one fedora exercised on the
