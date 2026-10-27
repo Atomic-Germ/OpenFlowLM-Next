@@ -162,6 +162,30 @@ class ConfigRewriteTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_granite_fold_to_config({}, self._Reader({}))
 
+    def test_a_gguf_conversion_writes_the_folded_config(self):
+        # Granite converts only from a GGUF, so this assembly is the one that ships its config.json
+        import tempfile
+
+        from q4nx.model_assets import assemble_model_assets
+
+        reader = self._Reader({
+            "granite.attention.head_count": self._Field(40),
+            "granite.embedding_length": self._Field(2560),
+            "granite.rope.dimension_count": self._Field(64),
+            "granite.attention.scale": self._Field(ATTN_MULT),
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp) / "src", Path(tmp) / "out"
+            src.mkdir()
+            (src / "config.json").write_text(json.dumps({"model_type": "granite", "attention_multiplier": ATTN_MULT,
+                                                         "head_dim": HD}))
+            (src / "tokenizer.json").write_text("{}")
+            (src / "tokenizer_config.json").write_text("{}")
+            assemble_model_assets(reader, {}, str(out), source_model=str(src), model_arch=ModelArch.GRANITE)
+            cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["attention_multiplier"], HD ** -0.5)
+        self.assertEqual(cfg["q4nx_folded_multipliers"]["attention_multiplier"], ATTN_MULT)
+
 
 if __name__ == "__main__":
     unittest.main()

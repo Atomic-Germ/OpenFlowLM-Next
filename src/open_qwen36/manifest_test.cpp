@@ -296,14 +296,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = both;
+        Manifest fast = Manifest::parse(g, "lean");  // Manifest is move-only since #180 (its gguf view)
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = both;
+        Manifest lean = Manifest::parse(g, "lean");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -449,6 +449,13 @@ int main(int argc, char** argv) {
                   "qwen3: the dense route's attention products, declared qknorm_rope");
             refused_manifest(argv[2], "is not one this engine computes", "qwen3: an attn_block prep the engine does not compute is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "qknorm_post_rope"; });
+            {
+                std::ifstream rf(argv[2]);
+                json rj = json::parse(rf);
+                rj["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "rope";
+                const Manifest r = Manifest::parse(rj, "edited");
+                check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "k2 shape: prep rope (no q/k norm) parses");
+            }
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
@@ -460,18 +467,7 @@ int main(int argc, char** argv) {
             refused(d, bad, "intermediate_size", "qwen3: an 8B config is refused by name");
             // attnpos alone does not make a kernel the attention-only dispatch: the sequential
             // dx is attnpos-patched too, and would run the whole layer per token of the block
-            {
-        std::ifstream rf(argv[2]);
-        json rj = json::parse(rf);
-        rj["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "rope";
-        try {
-            Manifest r = Manifest::parse(rj, "rope");
-            check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "a dense attn_block prep \"rope\" (the rotation alone) parses");
-        } catch (const std::exception& e) {
-            check(false, std::string("a dense attn_block prep \"rope\" parses: ") + e.what());
-        }
-    }
-    refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
+            refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
             // the dense route runs its GEMMs through its own dispatch, which adds no split halves
             refused_manifest(argv[2], "do not add split halves", "qwen3: a split step on the dense route is refused",
@@ -531,10 +527,17 @@ int main(int argc, char** argv) {
             check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
             // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
             check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
-            // its norm follows the rotation, which the products' host half does not do: the
-            // recipe emits the streams but declares no prep, so the route keeps its dxB dispatches
-            check(!h.layer_types.at("dense").gemm_block.attn_block.present(),
-                  "hunyuan: an attn_block without a prep is left to the dxB route");
+            // its norm follows the rotation, which the products' host half does not do: no prep, so no products
+            check(!h.layer_types.at("dense").gemm_block.attn_block.present(), "hunyuan: no prep, no attn_block");
+            {   // an older kernel set still carries one without a prep: it is not read, the route keeps dxB
+                std::ifstream qf(argv[2]), hf(argv[4]);
+                json qj = json::parse(qf), hj = json::parse(hf);
+                json ab = qj["layer_types"]["dense"]["gemm_block"]["attn_block"];
+                ab.erase("prep");
+                hj["layer_types"]["dense"]["gemm_block"]["attn_block"] = ab;
+                check(!Manifest::parse(hj, "older set").layer_types.at("dense").gemm_block.attn_block.present(),
+                      "hunyuan: an older set's attn_block without a prep is left to the dxB route");
+            }
             check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
             json ok = matching_config(h);
             check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");
@@ -794,6 +797,46 @@ int main(int argc, char** argv) {
             refused(p, noorig, "original_max_position_embeddings", "phi3: dropping the original context (nowhere else to read it from) is refused");
         } catch (const std::exception& e) {
             check(false, std::string("phi3 fixture: ") + e.what());
+        }
+    }
+
+    // ---- OPEN-HOST-ATTN-GUARD: the host attention computes K2's attention and refuses every other family
+    for (int i = 1; i < argc; ++i) {
+        try {
+            Manifest f = Manifest::load(argv[i]);
+            const std::string why = f.host_attention_refusal();
+            check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
+                  "host attention: " + f.family + " is refused by name");
+            if (f.family == "qwen3") {
+                const auto k2_manifest = [&]() {
+                    Manifest k = Manifest::load(argv[i]);
+                    k.family = "k2";
+                    return k;
+                };
+                Manifest k = k2_manifest();
+                check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
+                Manifest half = k2_manifest();
+                half.rotary_dim = half.rotary_dim / 2;
+                check(half.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest with a partial rotation is refused on geometry");
+                Manifest odd = k2_manifest();
+                const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
+                odd.hf_config_check["head_dim"] = hd;
+                odd.rotary_dim = hd;
+                odd.rope_inv_freq.resize(hd / 2);
+                for (auto& [n, t] : odd.layer_types) {
+                    t.gemm_block.qw = odd.hf_config_check["num_attention_heads"].get<size_t>() * hd;
+                    t.gemm_block.kvw = odd.hf_config_check["num_key_value_heads"].get<size_t>() * hd;
+                }
+                check(odd.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest with an odd head_dim is refused on geometry");
+                Manifest wide = k2_manifest();
+                wide.layer_types.begin()->second.gemm_block.qw += 1;
+                check(wide.host_attention_refusal().find("geometry") != std::string::npos,
+                      "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");
+            }
+        } catch (const std::exception& e) {
+            check(false, std::string("host attention guard: ") + e.what());
         }
     }
 

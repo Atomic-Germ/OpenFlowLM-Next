@@ -1,10 +1,9 @@
 /// \file test_downloader_pinning.cpp
 /// \brief Pinned per-file download sources (no network, no NPU)
 /// \author OpenFlowLM Team
-/// \note Covers resolve_file_source / uses_pinned_sources: the table
-///       validation, URL formation, percent-encoding, and the legacy
-///       fallback. The strict download/verify behavior keyed off the pinning
-///       needs a model tree and is exercised by oflm-add's installer tests.
+/// \note Covers source resolution and pull/verify behavior using synthetic
+///       model trees and an HF cache. Unsupported URL schemes prevent network
+///       access even if a cache regression falls through to the transport.
 #include "model_downloader.hpp"
 #include "download_model.hpp"
 
@@ -188,6 +187,171 @@ void test_malformed_tables_throw() {
 void WriteRegistry(const std::filesystem::path& list_path, const std::string& body) {
     std::ofstream out(list_path);
     out << body;
+}
+
+class ScopedEnv {
+    std::string name_;
+    std::string old_;
+    bool present_;
+
+    void set(const char* value) {
+#ifdef _WIN32
+        _putenv_s(name_.c_str(), value ? value : "");
+#else
+        if (value) setenv(name_.c_str(), value, 1);
+        else unsetenv(name_.c_str());
+#endif
+    }
+public:
+    ScopedEnv(const char* name, const std::string& value) : name_(name) {
+        const char* old = std::getenv(name);
+        present_ = old != nullptr;
+        if (old) old_ = old;
+        set(value.c_str());
+    }
+    ~ScopedEnv() { set(present_ ? old_.c_str() : nullptr); }
+};
+
+std::string ReadBytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    TEST_REQUIRE(in.is_open());
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+struct PullFixture {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / "oflm-pull-review-test";
+    const std::filesystem::path model_dir = root / "models" / "PullReview";
+    const std::filesystem::path snapshot = root / "hub" / "models--review--Fixture" / "snapshots" / kRevA;
+    ScopedEnv manifest_env{"OFLM_MODELINFO_PATH", (root / "model_info.json").string()};
+    ScopedEnv cache_env{"HF_HUB_CACHE", (root / "hub").string()};
+    nlohmann::json catalog;
+    pull::Record current_record;
+    pull::Record old_record;
+
+    PullFixture(bool pinned, bool with_config = true, bool outdated = false) {
+        namespace fs = std::filesystem;
+        fs::remove_all(root);
+        fs::create_directories(model_dir);
+        fs::create_directories(snapshot);
+        // The cache resolver accepts this synthetic HF URL; curl cannot use
+        // the scheme, so a cache miss fails locally without a server or port.
+        const std::string url = "offline://huggingface.co/review/Fixture";
+        nlohmann::json info = {
+            {"name", "PullReview"}, {"url", url + "/resolve/" + kRevA},
+            {"file_url", url + "/tree/main"}, {"ms_url", ""},
+            {"oflm_min_version", "0.9.34"}, {"files", {"weights.bin"}},
+        };
+        if (pinned)
+            info["file_sources"] = {{"weights.bin", {{"url", url}, {"revision", kRevA}}}};
+
+        WriteRegistry(model_dir / "weights.bin", "old");
+        WriteRegistry(snapshot / "weights.bin", "new");
+        const std::string new_oid = pull::file_oid(snapshot / "weights.bin", true);
+        current_record["weights.bin"] = new_oid;
+        old_record["weights.bin"] = pull::file_oid(model_dir / "weights.bin", true);
+        nlohmann::json records = nlohmann::json::array({
+            {{"path", "weights.bin"}, {"size", 3}, {"sha256", new_oid}},
+        });
+        if (with_config) {
+            info["files"].insert(info["files"].begin(), "config.json");
+            WriteRegistry(model_dir / "config.json",
+                          outdated ? R"({"oflm_version":"0.9.1"})" : R"({"oflm_version":"0.9.34"})");
+            const auto config_oid = pull::file_oid(model_dir / "config.json", true);
+            current_record["config.json"] = old_record["config.json"] = config_oid;
+            records.push_back({{"path", "config.json"}, {"size", fs::file_size(model_dir / "config.json")},
+                               {"sha256", config_oid}});
+        }
+        catalog = {{"model_path", "models"}, {"models", {{"review", {{"test", info}}}}}};
+        WriteRegistry(root / "model_info.json", nlohmann::json{{"review:test", records}}.dump());
+    }
+
+    ~PullFixture() {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+};
+
+void test_failed_pinned_upgrade_preserves_existing_files() {
+    PullFixture fixture(true);
+    std::string root = fixture.root.string();
+    model_list models(fixture.catalog, root);
+    ModelDownloader downloader(models);
+    pull::write_record(fixture.model_dir, fixture.old_record);
+    std::filesystem::remove(fixture.snapshot / "weights.bin");
+    WriteRegistry(fixture.model_dir / "weights.bin.part", "n");
+    for (bool force : {false, true}) {
+        TEST_REQUIRE(!downloader.pull_model("review:test", false, force));
+        TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "old");
+        TEST_REQUIRE(pull::read_record(fixture.model_dir) == fixture.old_record);
+    }
+    // Once a verified replacement is available, the same upgrade succeeds.
+    WriteRegistry(fixture.snapshot / "weights.bin", "new");
+    TEST_REQUIRE(downloader.pull_model("review:test"));
+    TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "new");
+    TEST_REQUIRE(pull::read_record(fixture.model_dir) == fixture.current_record);
+    TEST_REQUIRE(!std::filesystem::exists(fixture.model_dir / "weights.bin.part"));
+}
+
+void test_pinned_status_preserves_and_pull_repairs_corruption() {
+    for (bool with_config : {false, true}) {
+        PullFixture fixture(true, with_config);
+        std::string root = fixture.root.string();
+        model_list models(fixture.catalog, root);
+        ModelDownloader downloader(models);
+        // Right size and current record, but wrong bytes: full verification
+        // must reject it without deleting it; fast status remains metadata-only.
+        pull::write_record(fixture.model_dir, fixture.current_record);
+        TEST_REQUIRE(downloader.is_model_downloaded("review:test", true, true) ==
+                     ModelDownloader::ModelStatus::Ready);
+        TEST_REQUIRE(downloader.is_model_downloaded("review:test", true) ==
+                     ModelDownloader::ModelStatus::Missing);
+        TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "old");
+        TEST_REQUIRE(downloader.pull_model("review:test"));
+        TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "new");
+        TEST_REQUIRE(pull::read_record(fixture.model_dir) == fixture.current_record);
+    }
+}
+
+void test_outdated_pinned_status_preserves_existing_files() {
+    PullFixture fixture(true, true, true);
+    std::string root = fixture.root.string();
+    model_list models(fixture.catalog, root);
+    ModelDownloader downloader(models);
+    TEST_REQUIRE(downloader.is_model_downloaded("review:test", true) ==
+                 ModelDownloader::ModelStatus::Outdated);
+    TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "old");
+}
+
+void test_unpinned_migration_records_advisory_hash_mismatch() {
+    PullFixture fixture(false);
+    std::string root = fixture.root.string();
+    model_list models(fixture.catalog, root);
+    ModelDownloader downloader(models);
+    // Neither the legacy install nor the served bytes match the registry.
+    // The cache path exercises the actual download-list verification marker.
+    WriteRegistry(fixture.snapshot / "weights.bin", "alt");
+    TEST_REQUIRE(downloader.pull_model("review:test"));
+    TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "alt");
+    TEST_REQUIRE(pull::read_record(fixture.model_dir) == fixture.current_record);
+    TEST_REQUIRE(!std::filesystem::exists(fixture.model_dir / ".oflm-files.json.tmp"));
+    // No source remains: a second pull must trust the recorded registry oid.
+    std::filesystem::remove(fixture.snapshot / "weights.bin");
+    TEST_REQUIRE(downloader.pull_model("review:test"));
+    TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "alt");
+}
+
+void test_pinned_staged_hash_failure_keeps_destination() {
+    PullFixture fixture(true);
+    download_utils::DownloadRequest request{
+        "offline://unavailable", fixture.model_dir / "weights.bin", 3,
+        download_utils::HashAlgorithm::Sha256, fixture.current_record.at("weights.bin")};
+    WriteRegistry(fixture.model_dir / "weights.bin.part", "bad");
+    TEST_REQUIRE(!download_utils::download_file_atomic(request));
+    TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "old");
+    TEST_REQUIRE(!std::filesystem::exists(fixture.model_dir / "weights.bin.part"));
+    WriteRegistry(fixture.model_dir / "weights.bin.part", "new");
+    TEST_REQUIRE(download_utils::download_file_atomic(request));
+    TEST_REQUIRE(ReadBytes(fixture.model_dir / "weights.bin") == "new");
 }
 
 void test_remove_deletes_tree_and_links() {
@@ -409,6 +573,11 @@ int main() {
     RunTest(test_remove_deletes_tree_and_links, "remove deletes tree and links");
     RunTest(test_remove_refuses_unknown_and_escape, "remove refuses unknown and escape");
     RunTest(test_hf_cache_reuse, "hf cache reuse skips the download");
+    RunTest(test_failed_pinned_upgrade_preserves_existing_files, "failed pinned upgrade preserves existing files");
+    RunTest(test_pinned_status_preserves_and_pull_repairs_corruption, "pinned status preserves and pull repairs corruption");
+    RunTest(test_outdated_pinned_status_preserves_existing_files, "outdated pinned status preserves existing files");
+    RunTest(test_unpinned_migration_records_advisory_hash_mismatch, "unpinned migration records advisory hash mismatch");
+    RunTest(test_pinned_staged_hash_failure_keeps_destination, "pinned staged hash failure keeps destination");
     std::cout << "All downloader pinning tests passed\n";
     return 0;
 }
