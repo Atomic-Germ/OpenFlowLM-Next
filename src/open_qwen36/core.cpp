@@ -256,7 +256,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
-    w_->check_model(j, md.filename().string());
+    // A GGUF's config.json is the hub's (if the repo had one) or derived from the
+    // file: its general.architecture is the authority on which model this is, not a
+    // model_type string, so that one key is not compared for a GGUF.
+    w_->check_model(j, md.filename().string(), /*model_type=*/!gguf_);
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);

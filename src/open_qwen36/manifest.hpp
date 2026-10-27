@@ -264,7 +264,8 @@ struct Manifest {
     /// Throws naming the first key of config.json that disagrees with the manifest. A key
     /// config.json lacks takes its hf_config_defaults value when there is one, and is
     /// refused as lacking otherwise.
-    void check_model(const nlohmann::json& config, const std::string& where) const;
+    void check_model(const nlohmann::json& config, const std::string& where,
+                   bool model_type = true) const;
     const LayerType& layer_type(size_t layer) const;
     /// Why the host attention (OPEN-HOST-ATTN-GUARD) cannot compute this model, or "" when it can.
     /// It implements K2's attention only; any other family is refused by name.

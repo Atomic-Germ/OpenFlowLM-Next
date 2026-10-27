@@ -86,9 +86,18 @@ uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
         case 8: return values / 32 * 34;                  // q8_0
         case 12: return values / 256 * 144;               // q4_k
         case 14: return values / 256 * 210;               // q6_k
+        case 13: return values / 256 * 176;               // q5_k
+        case 20: return values / 32 * 18;                 // iq4_nl
+        case 23: return values / 256 * 136;               // iq4_xs
         default: return 0;                                // unsupported
     }
 }
+
+// llama.cpp's iq4_nl codebook: the sixteen values a 4-bit code indexes. iq4_xs
+// uses the same table (it is a finer-grained scale on top of it).
+static const int8_t kIQ4NLValues[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
+};
 
 inline float bf16_to_f32(uint16_t u) {
     uint32_t w = static_cast<uint32_t>(u) << 16;
@@ -185,6 +194,9 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
             tensors_.emplace(name, std::move(t));
         }
         sandwich_ = tensors_.count("blk.0.post_ffw_norm.weight") != 0;
+        // The pre-FFN norm: llama.cpp calls it ffn_norm (llama, qwen3) or
+        // post_attention_norm (gemma, qwen35) -- the file says which.
+        post_norm_ = tensors_.count("blk.0.post_attention_norm.weight") != 0;
         // Alignment is not stored in the header for either version: GGUF v2 and
         // v3 both take it from the optional `general.alignment` metadata key and
         // default to 32. (Only v1 carried a trailing alignment word.) Validate
@@ -242,7 +254,7 @@ void GgufFile::drop_pages() {
 #endif
 }
 
-std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
+std::string GgufFile::gguf_name(const std::string& name, bool sandwich, bool post_norm) {
     // The manifest's packing plan names tensors the q4nx/HF way; a GGUF uses
     // llama.cpp's conventions (utilities/q4nx-build/configs/*.json hold the
     // same map on the conversion side).
@@ -265,53 +277,36 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
         dot("self_attn.q_norm", ".attn_q_norm");
         dot("self_attn.k_norm", ".attn_k_norm");
         dot("input_layernorm", ".attn_norm");
-        // HF's post_attention_layernorm is the pre-FFN norm in Llama but the real post-attention norm in Gemma
-        dot("post_attention_layernorm", sandwich ? ".post_attention_norm" : ".ffn_norm");
+        // The qwen35 family's linear attention (Gated DeltaNet), which llama.cpp
+        // names ssm_*/attn_qkv (the map the conversion side holds in
+        // utilities/q4nx-build/configs/qwen3.5_*.json). The .bf16 spelling is
+        // the container's own (the tensor is bf16 there), so it is mapped first.
+        dot("linear_attn.qkv_proj", ".attn_qkv");
+        dot("self_attn.gate_proj", ".attn_gate");
+        dot("linear_attn.ssm_alpha_proj.bf16", ".ssm_alpha");
+        dot("linear_attn.ssm_alpha_proj", ".ssm_alpha");
+        dot("linear_attn.ssm_beta_proj.bf16", ".ssm_beta");
+        dot("linear_attn.ssm_beta_proj", ".ssm_beta");
+        dot("linear_attn.ssm_a", ".ssm_a");
+        dot("linear_attn.ssm_dt.bias", ".ssm_dt.bias");
+        dot("linear_attn.ssm_conv1d.weight", ".ssm_conv1d.weight");
+        dot("linear_attn.ssm_norm.weight", ".ssm_norm.weight");
+        dot("linear_attn.ssm_out_proj.weight", ".ssm_out.weight");
+        // HF's post_attention_layernorm is the pre-FFN norm in Llama, but the
+        // real post-attention norm in Gemma and in qwen35 -- the file says
+        // which (it has one name or the other, never both).
+        dot("post_attention_layernorm", (post_norm || sandwich) ? ".post_attention_norm" : ".ffn_norm");
         dot("pre_feedforward_layernorm", ".ffn_norm");
         dot("post_feedforward_layernorm", ".post_ffw_norm");
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
         dot("mlp.down_proj", ".ffn_down");
-        // Qwen3.5's HYBRID layers (hybrid linear attention = llama.cpp's "ssm"):
-        // the q4nx container names the DeltaNet block `linear_attn.*` and ships a
-        // bf16 copy of the alpha / beta projections beside the quantized one; a
-        // GGUF has one tensor each, under the arch's own names. The ops that read
-        // them are size-adaptive (pools.cpp), so one mapping serves both files.
-        dot("linear_attn.qkv_proj", ".attn_qkv");
-        dot("self_attn.gate_proj", ".attn_gate");        // the output gate, both layer kinds
-        dot("linear_attn.ssm_alpha_proj.bf16", ".ssm_alpha");
-        dot("linear_attn.ssm_beta_proj.bf16", ".ssm_beta");
-        dot("linear_attn.ssm_alpha_proj", ".ssm_alpha");
-        dot("linear_attn.ssm_beta_proj", ".ssm_beta");
-        dot("linear_attn.ssm_out_proj", ".ssm_out");
-        dot("linear_attn.ssm_conv1d", ".ssm_conv1d");
-        dot("linear_attn.ssm_dt.bias", ".ssm_dt.bias");
-        dot("linear_attn.ssm_norm", ".ssm_norm");
-        dot("linear_attn.ssm_a", ".ssm_a");
-    }
-    return n;
-}
-
-std::string GgufFile::resolve(const std::string& name) const {
-    std::string n = gguf_name(name, sandwich_);
-    if (tensors_.count(n)) return n;
-    static const std::pair<const char*, const char*> siblings[] = {
-        {".ffn_norm.", ".post_attention_norm."},
-        {".post_attention_norm.", ".ffn_norm."},
-    };
-    for (const auto& [from, to] : siblings) {
-        const std::string a = from;
-        const auto pos = n.find(a);
-        if (pos == std::string::npos) continue;
-        std::string alt = n;
-        alt.replace(pos, a.size(), to);
-        if (tensors_.count(alt)) return alt;
     }
     return n;
 }
 
 const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
-    std::string n = resolve(name);
+    std::string n = gguf_name(name, sandwich_, post_norm_);
     auto it = tensors_.find(n);
     if (it == tensors_.end() && n == "output.weight") {
         // tied embeddings: the GGUF has no output.weight; the (untied) rows
@@ -328,6 +323,13 @@ const uint8_t* GgufFile::raw(const std::string& name, size_t* nbytes) const {
     const uint64_t nb = gguf_type_bytes(static_cast<uint32_t>(t.type), t.nvalues());
     if (nbytes) *nbytes = static_cast<size_t>(nb);
     return map_ + data_base_ + t.offset;
+}
+
+std::vector<std::string> GgufFile::tensor_names() const {
+    std::vector<std::string> out;
+    out.reserve(tensors_.size());
+    for (const auto& [name, info] : tensors_) out.push_back(name);
+    return out;
 }
 
 const TensorMeta& GgufFile::meta(const std::string& name) const {
@@ -474,6 +476,44 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             }
             break;
         }
+        case Type::Q5_K: {
+            // super-block of 256: fp16 d, fp16 dmin, 12 B of 6-bit scales (eight
+            // scale/min pairs over eight blocks of 32), 32 B of the FIFTH bit (one
+            // per value), then 128 B of 4-bit codes. The value is
+            // d*scale*(nibble | fifth<<4) - dmin*min.
+            const uint8_t* p = base + row * (dim / 256) * 176;
+            for (size_t sb = 0; sb < dim / 256; ++sb, p += 176) {
+                uint16_t ud, um;
+                std::memcpy(&ud, p, 2);
+                std::memcpy(&um, p + 2, 2);
+                const float d = fp16_to_f32(ud), min = fp16_to_f32(um);
+                const uint8_t* scales = p + 4;
+                const uint8_t* qh = p + 16;                 // the fifth bit, one per value
+                const uint8_t* qs = p + 48;                 // the 4-bit codes
+                float* y = out + sb * 256;
+                int is = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    uint8_t sc, m;
+                    get_scale_min_k4(is + 0, scales, &sc, &m);
+                    const float d1 = d * sc, m1 = min * m;
+                    get_scale_min_k4(is + 1, scales, &sc, &m);
+                    const float d2 = d * sc, m2 = min * m;
+                    for (int l = 0; l < 32; ++l) {
+                        const int v0 = j + l, v1 = j + 32 + l;
+                        const uint8_t byte = qs[j / 2 + l];
+                        const uint8_t n0 = byte & 0xF, n1 = byte >> 4;
+                        // the fifth bit: byte (v % 32) holds the bits of the values
+                        // v, v+32, v+64, ... -- bit (v / 32) of it
+                        const uint8_t h0 = (qh[v0 % 32] >> (v0 / 32)) & 1;
+                        const uint8_t h1 = (qh[v1 % 32] >> (v1 / 32)) & 1;
+                        y[v0] = d1 * static_cast<float>(n0 | (h0 << 4)) - m1;
+                        y[v1] = d2 * static_cast<float>(n1 | (h1 << 4)) - m2;
+                    }
+                    is += 2;
+                }
+            }
+            break;
+        }
         case Type::Q6_K: {
             // super-block of 256: 128 B lower nibbles, 64 B upper 2 bits,
             // 16 int8 scales (per 16 values), fp16 super-block scale
@@ -505,9 +545,55 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             }
             break;
         }
+        case Type::IQ4_NL: {
+            // 4-bit "nibble lookup" (llama.cpp's iq4_nl): each code indexes the
+            // sixteen-entry codebook, scaled by the block's fp16 d. 18 B per 32 values.
+            const uint8_t* p = base + row * (dim / 32) * 18;
+            for (size_t b = 0; b < dim / 32; ++b, p += 18) {
+                uint16_t u;
+                std::memcpy(&u, p, 2);
+                const float d = fp16_to_f32(u);
+                for (size_t j = 0; j < 16; ++j) {
+                    out[b * 32 + j] = d * kIQ4NLValues[p[2 + j] & 0xF];
+                    out[b * 32 + 16 + j] = d * kIQ4NLValues[p[2 + j] >> 4];
+                }
+            }
+            break;
+        }
+        case Type::IQ4_XS: {
+            // llama.cpp's iq4_xs: a super-block of 256 values in 136 B --
+            //   fp16 d | 2 B of 2-bit scale highs | 4 B of 4-bit scale lows | 128 B of codes
+            // Eight groups of 32 values, each with a signed 6-bit scale (the low nibble
+            // | the high two bits << 4, minus 32) times d; the codes index the same
+            // sixteen-entry codebook as iq4_nl.
+            const uint8_t* p = base + row * (dim / 256) * 136;
+            for (size_t sb = 0; sb < dim / 256; ++sb, p += 136) {
+                uint16_t ud, sh;
+                std::memcpy(&ud, p, 2);
+                std::memcpy(&sh, p + 2, 2);
+                const float d = fp16_to_f32(ud);
+                const uint8_t* sl = p + 4;               // four bytes: eight scale lows
+                const uint8_t* qs = p + 8;               // 128 bytes: 256 codes
+                float* y = out + sb * 256;
+                for (int g = 0; g < 8; ++g) {
+                    const uint8_t lo = (g & 1) ? static_cast<uint8_t>(sl[g / 2] >> 4)
+                                               : static_cast<uint8_t>(sl[g / 2] & 0xF);
+                    const uint8_t hi = static_cast<uint8_t>((sh >> (2 * g)) & 0x3);
+                    const float dl = d * static_cast<float>(static_cast<int>(lo | (hi << 4)) - 32);
+                    const uint8_t* q = qs + g * 16;
+                    float* yg = y + g * 32;
+                    for (int j = 0; j < 16; ++j) {
+                        yg[j] = dl * kIQ4NLValues[q[j] & 0xF];
+                        yg[j + 16] = dl * kIQ4NLValues[q[j] >> 4];
+                    }
+                }
+            }
+            break;
+        }
         default:
             fail(std::string("the embedding is ") + type_name(t.type) +
-                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K rows "
+                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K/"
+                 "IQ4_NL/IQ4_XS rows "
                  "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
     }
 }
