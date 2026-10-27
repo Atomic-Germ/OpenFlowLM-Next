@@ -1,5 +1,35 @@
 # Qwen3.8-27B validation report
 
+## FP32 block-boundary preparation — 2026-10-27
+
+Added a preparation/runner/auditor for 255/256/257-token prefill with the standard
+FP32 export and the verified plain/trace shared CLIs. Reference metadata remains
+immutable. The preparation binds it to the passing reference audit, checks the
+model and oracle against the fresh short-run baseline, and revalidates current
+kernel and CLI identities. No production runtime or kernel changes were made.
+
+Preparation and a separate recheck pass: **1155 independent reference files**,
+**1162 input hashes**, **128 residual-array prefixes** and **511 logit prefixes**.
+The CPU-selected continuation IDs are 248046, 198 for each length. Existing
+builds are reused after verification; no new kernel or library build is needed.
+
+The runner requires 18 resident processes: plain/traced controls for all three
+lengths and routes. It checks fresh control identity, independent all-layer
+precision, hybrid schedule identity and causal prefixes excluding continuations.
+A completed numerical failure remains `complete: true, passed: false`, including
+after separate audit. Partial or changed evidence cannot become a passing result.
+TDD covers missing lengths/routes, numerical and identity failures, oracle and
+geometry mismatches, metadata audit binding and prompt/continuation separation.
+Host suite: **1925 passed, 47 skipped**.
+
+**Native execution is pending.** The memory preflight measured **34.1 GiB**
+available, below its unchanged 35 GiB threshold. No model was loaded and no NPU
+boundary-accuracy claim is made. Preparation evidence is retained under
+`Models/qwen38-27b/post-prefill-production/boundaries-prepared-v1`, with its
+separate preparation audit and `boundaries-memory-preflight.json`. Native
+boundary/long-prefix validation, serving and performance gates remain open.
+
+
 ## Resident short-prefill reset on the FP32 export — 2026-10-26
 
 Added a runner and separate auditor for repeated requests against the fresh

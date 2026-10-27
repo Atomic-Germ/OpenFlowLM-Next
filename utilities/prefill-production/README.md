@@ -29,6 +29,41 @@ device check and 35 GiB memory preflight apply to every route. This validates
 ordinary request reset, not different-prompt isolation or full-buffer zeroing.
 Block boundaries, long prefixes, serving and performance remain separate gates.
 
+## FP32 block-boundary validation
+
+Reuse the verified plain/trace builds from the passing FP32 short run. Prepare
+the retained independent 255/256/257-token references without loading the model:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/post_boundaries.py prepare \
+  --baseline Models/qwen38-27b/post-prefill-production/short-v1 \
+  --references Models/qwen38-27b/prefill-full/boundaries \
+  --out Models/qwen38-27b/post-prefill-production/boundaries-prepared-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/post_boundaries.py run \
+  --prepared Models/qwen38-27b/post-prefill-production/boundaries-prepared-v1 \
+  --out Models/qwen38-27b/post-prefill-production/boundaries-native-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-production/post_boundaries.py audit \
+  --out Models/qwen38-27b/post-prefill-production/boundaries-native-v1
+```
+
+Preparation checks all 1155 reference files, CPU-selected continuation tokens,
+their metadata binding to the passing reference audit, unchanged model/oracle
+hashes, shared prompt prefixes and the current FP32 export/build identities.
+Reference metadata remains immutable; runtime commands select the current
+bundle. Successful preparation is not numerical acceptance of native execution.
+
+The native gate executes 18 resident processes: three prompt lengths, three
+routes, and plain/traced controls. Each requires at least 35 GiB available RAM
+and exclusive NPU access under the shared validation lock. Both plain and traced
+outputs are independently scored; every trace must reproduce its fresh plain
+logits and final scratch. All-layer residual/logit bounds stay unchanged.
+Cross-length identity covers prompt logits and every prompt residual row,
+excluding continuations selected from different final prompt tokens. Both
+hybrid schedules must agree. A completed numerical failure is recorded with
+`complete: true, passed: false` and exit status 1; its separate audit must retain
+that failure. Incomplete or changed evidence raises an error and invalidates
+prior audit success. This does not validate long-prefix reset or performance.
+
 The ordinary qwen35 recipe exports manifest v4 and 46 kernel sets for the
 validated dense Q4 H5120/FF17408 geometry. Five GEMM companions compute the
 BF16 residual of dequantized weights; both components read the same packed
