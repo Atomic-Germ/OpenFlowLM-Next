@@ -861,6 +861,12 @@ def family_from_kernels(system_registry, spec, roots):
             fam = family_of_official(system_registry, name)
             if fam:
                 return fam, name
+            # A set the registry does not list (our own conversion of a model we
+            # do not ship as a container) still knows what it is: the manifest's
+            # spec carries the family the kernels were built for.
+            laid = s.get("family") if isinstance(s, dict) else None
+            if laid:
+                return laid, name
     return None, None
 
 

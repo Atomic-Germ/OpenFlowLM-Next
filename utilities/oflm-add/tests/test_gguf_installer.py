@@ -778,3 +778,30 @@ def test_official_repo_id_fills_hf_owner():
     assert oflm_add.official_repo_id(entry, {"hf_owner": "Atomic-Germ"}) == \
         "Atomic-Germ/Nanbeige4.1-3B-NPU2"
     assert oflm_add.official_repo_id({"name": "x", "url": "https://huggingface.co/acme/x"}, {}) == "acme/x"
+
+
+def test_a_set_the_registry_does_not_list_still_names_its_family(tmp_path):
+    """Our own conversion of a model we ship no container for: the manifest's spec
+    says which family the kernels were built for, and that is enough to link."""
+    kdir = tmp_path / "Nanbeige4.1-3B-NPU2" / "open_kernels"
+    kdir.mkdir(parents=True)
+    spec = {"family": "llama3", "hidden": 2560, "intermediate": 10496, "num_layers": 32,
+            "layer_types": ["dense"] * 32, "vocab": 166144, "num_heads": 20, "num_kv_heads": 4,
+            "head_dim": 128, "rotary_dim": 128}
+    (kdir / "manifest.json").write_text(json.dumps({"spec": spec}))
+
+    class _Spec:                       # the model's own spec, same geometry
+        def kernel_hash(self):
+            return "sha256:same"
+
+    model_spec = _Spec()
+    orig = oflm_add._model_spec_class
+    oflm_add._model_spec_class = lambda: type("M", (), {
+        "from_dict": staticmethod(lambda d: _Spec()),
+    })
+    try:
+        fam, name = oflm_add.family_from_kernels({"models": {}}, model_spec, [tmp_path])
+    finally:
+        oflm_add._model_spec_class = orig
+
+    assert (fam, name) == ("llama3", "Nanbeige4.1-3B-NPU2")
