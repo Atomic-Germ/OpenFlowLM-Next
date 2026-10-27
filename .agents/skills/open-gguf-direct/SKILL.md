@@ -819,6 +819,58 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## The install+serve matrix (2026-10-27): what the shipped build needed
+
+A full matrix on an installed build (`cmake --workflow --preset linux-default` +
+`sudo cmake --install build`) found five product-level gaps. All fixed in
+`e2cd48a` / `e0b8fe4` / `04dd123`:
+
+1. **The GGUF section is now the q4_1 law, always.** It used to be the f32-scale
+   twin and was omitted when that twin did not fit -- so `oflm add
+   unsloth/Qwen3-14B-GGUF` refused with "no GGUF-direct open kernel set found"
+   while `Qwen3-14B-NPU2` existed. `GGUF.section()` now returns the quant name the
+   nested manifest is built under (`q4_1_gguf`: the base chunk law, base kernels,
+   GGUF-reading pack ops), and its argument became an explicit "is this family
+   GGUF-ready" (the MoE still passes False). Verified: 14B links again.
+   The f32-scale twins are no longer built at all -- exports are smaller/faster,
+   and `OFLM_GGUF_POOL_F32` has no kernels to reach (kept for old sets).
+
+2. **A GGUF install always ends with a usable config.json.** A gated base
+   (meta-llama/*) left a stub `{"model_type": "mistral"}`, which derives no spec
+   (hence "No open-kernel spec ... closed kernels only" for `MaziyarPanahi/
+   Llama-3.2-3B-Instruct-GGUF` and `mradermacher/gemma-3-4b-it-i1-GGUF`) and built
+   the sampler over zero features (the `Meta-Llama-3-8B` segfault after prefill).
+   `repair_config_from_gguf()` writes the geometry the GGUF itself names, and
+   `spec_from_gguf_source()` derives the spec from the file when the config yields
+   none -- so the geometry match runs and the sampler has its vocab.
+   (Also: the two `from_gguf_metadata(md, names)` calls passed an argument our
+   `spec.py` does not take, so *every* GGUF spec derivation silently failed.)
+
+3. **A baked rope table makes rope_scaling irrelevant.** llama.cpp writes
+   `rope_freqs.weight` when it baked Llama-3's scaling in, and the GGUF's metadata
+   then has no rope_scaling -- which no set could match. `rope_ignore()` drops
+   `rope_scaling` from the comparison for exactly those files. Llama-3.2-3B now
+   links; Meta-Llama-3-8B (no tensor, plain rope) correctly does NOT link the
+   llama3.1-8B set -- it needs a plain-rope spec of its own.
+
+4. **Family names.** `k2-horizon` (K2-Horizon-0.9B said "could not determine
+   details.family"), `hunyuan-dense`, `qwen35`, `qwen3next` added to the GGUF arch
+   and config maps. A missing set now says "no open kernel set matches this
+   model's geometry" instead of blaming the nearest official size.
+
+5. **Load time.** The requant loop is parallel now. It is still slow for a
+   K-quant source (a Q4_K_M 8B: 71 s, warm cache -- CPU, not I/O) because
+   `embed_row` decodes the WHOLE row for every 256-wide chunk: a 4096-wide
+   projection decodes each row 16 times. Decoding a 32-row band once and writing
+   its ncol chunks is the fix that takes it to a few seconds. Quant preference
+   itself already prefers Q4_1 (byte-exact) over the K-quants.
+
+**Sizes still without a set** (all "no open kernel set matches this geometry",
+and each needs `build-new-spec`): Qwen2.5-7B (recipe wall: FF 18944 needs a
+three-way split), Qwen3-32B (K 13313 cannot be gated by the standalone gemv
+fixture), granite-4.2-8b, Hy-MT2-1.8B, K2-Horizon-0.9B, Meta-Llama-3-8B (plain
+rope), Llama-3-8B-Instruct (same). Phi-4-mini still needs the fused-qkv plan.
+
 ## Dense: 7 of 8 shipped (2026-10-26, `298ed19`)
 
 Verified end-to-end on the NPU with no environment, one prompt, temperature 0:
