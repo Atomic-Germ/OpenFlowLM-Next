@@ -558,7 +558,12 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // re-quantized here to the pool's q4 layout with fp16 scales -- the same
         // conversion q4nx-build does offline. The matmul body of the repo stays
         // untouched (Q4_1 etc. go through the byte-exact path below).
-        const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
+        // `fold` != 1 means the plan wants the values scaled before they enter the
+        // pool (Granite's attention_multiplier: a container is folded by q4nx-build,
+        // a raw GGUF is not). Scaling needs the decoded values, so it forces the
+        // requant path even for a Q4_0/Q4_1 source.
+        const bool fold = op.fold != 1.0;
+        const bool kq = fold || t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
                         t.type == GgufFile::Type::Q5_K || t.type == GgufFile::Type::Q6_K ||
                         t.type == GgufFile::Type::IQ4_NL || t.type == GgufFile::Type::IQ4_XS;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
@@ -614,11 +619,13 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                     uint16_t ud, um = 0;
                     if (kq) {
                         // re-quantize the block to the pool's q4_1 law (fp16 d/m, 4-bit codes)
+                        float vs[32];
                         const float* v = rd.data() + (blk0 + kb) * 32;
-                        float lo = v[0], hi = v[0];
+                        for (size_t i = 0; i < 32; ++i) vs[i] = fold ? v[i] * static_cast<float>(op.fold) : v[i];
+                        float lo = vs[0], hi = vs[0];
                         for (size_t i = 0; i < 32; ++i) {
-                            lo = std::min(lo, v[i]);
-                            hi = std::max(hi, v[i]);
+                            lo = std::min(lo, vs[i]);
+                            hi = std::max(hi, vs[i]);
                         }
                         const float mraw = lo, draw = (hi - lo) / 15.f;
                         ud = f32_to_fp16(draw);
@@ -636,8 +643,8 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                         // codes: value i at nibble (kb*32+i, r), i+16 at (p0+256)
                         uint8_t nib[16];
                         for (size_t i = 0; i < 16; ++i) {
-                            const int q0 = std::lround((v[i] - mf) * inv);
-                            const int q1 = std::lround((v[i + 16] - mf) * inv);
+                            const int q0 = std::lround((vs[i] - mf) * inv);
+                            const int q1 = std::lround((vs[i + 16] - mf) * inv);
                             nib[i] = static_cast<uint8_t>(((q1 < 0 ? 0 : q1 > 15 ? 15 : q1) << 4) |
                                                           (q0 < 0 ? 0 : q0 > 15 ? 15 : q0));
                         }

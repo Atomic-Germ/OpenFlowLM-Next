@@ -183,7 +183,7 @@ def test_no_shipped_models_hash_moved():
         "hy-mt2-7b.json": "sha256:857e09843a229d259ec52d5174560e429af3597b446142eab140977a571cd1d7",
         "llama31-8b.json": "sha256:e4baa37e429635bc133b50b9bdac750abb02e6ce58c0d10efcb06bc2bd29a4bb",
         "phi4-mini-4b.json": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
-        "qwen25-3b.json": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
+        "qwen25-3b.json": "sha256:de4056c2532530eac75366b3b5c89b1be841dbcf1d9de04fc02d385abbefe1ba",
         "qwen3-4b.json": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
         "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
         "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",

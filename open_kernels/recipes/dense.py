@@ -440,9 +440,20 @@ def pack_plan(spec: ModelSpec) -> dict:
     L, G = layout(spec), geometry(spec)
     hid, ff = spec.hidden, spec.intermediate
     pre = "model.layers.{l}."
+    # Granite's attention_multiplier is folded into q_proj at conversion time; a raw
+    # GGUF is NOT folded, so the plan carries the fold as a `scale` and the engine
+    # applies it only to a GGUF source (a container is already folded).
+    q_op = proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, hid)
+    _fold = spec.extra.get("granite_attention_multiplier")
+    if _fold and abs(float(_fold) - spec.head_dim ** -0.5) > 1e-12:
+        # only on the op that APPLIES it: the GGUF-direct (f32-law) plan packs a raw
+        # GGUF's weights; a q4nx container was folded by q4nx-build and must not be
+        # scaled again. manifest.cpp refuses the field anywhere else, on purpose.
+        if q_op["op"] == "std_perm_gguf":
+            q_op["fold"] = float(_fold) / (spec.head_dim ** -0.5)
     one = {
             "pool": [
-                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, hid),
+                q_op,
                 proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, hid),
                 proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, hid),
                 proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, G.QW, G.QW),
@@ -945,7 +956,13 @@ def hf_config_check(spec: ModelSpec) -> dict:
         # exactly (0.125 at hd 64, a power of two). Swapping an unfolded
         # model.q4nx under a built kernel set would otherwise run and return
         # plausible garbage. See spec.py's _granite_scale_check.
-        d["attention_multiplier"] = spec.head_dim ** -0.5
+        #
+        # Both spellings are accepted, because the same kernel set now serves a
+        # folded container AND a raw (unfolded) GGUF: the GGUF's q_proj is scaled
+        # at pack time by the plan's `scale`.
+        d["attention_multiplier"] = [spec.head_dim ** -0.5,
+                                     spec.extra.get("granite_attention_multiplier",
+                                                    spec.head_dim ** -0.5)]
     return d
 
 

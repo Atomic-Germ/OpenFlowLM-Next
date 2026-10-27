@@ -3035,49 +3035,6 @@
             "path": "tokenizer_config.json"
         }
     ],
-    "qwen2.5-it:3b": [
-        {
-            "type": "file",
-            "oid": "2ace5b8c3964855369daf18f16907dfdba648708",
-            "size": 1566,
-            "path": ".gitattributes"
-        },
-        {
-            "type": "file",
-            "oid": "0b87f6362ee8ad33b2223afb47134264380f13fe",
-            "size": 4930,
-            "path": "README.md"
-        },
-        {
-            "type": "file",
-            "oid": "07c2500e17ecc9747a7481a2486f223eb334e4d8",
-            "size": 746,
-            "path": "config.json"
-        },
-        {
-            "type": "file",
-            "oid": "138116b8cfa2e985b2f348a4a93bd1e23b070494",
-            "size": 2586811952,
-            "lfs": {
-                "oid": "c2f1dcb6fe1e819cc50547f091096f4849890b2fb170d031ff7d790ea0c5e2ce",
-                "size": 2586811952
-            },
-            "xetHash": "1ddd3d7aa7f032f5900d10f492c730f4083320fa69014c3cde81807d45381409",
-            "path": "model.q4nx"
-        },
-        {
-            "type": "file",
-            "oid": "443909a61d429dff23010e5bddd28ff530edda00",
-            "size": 7031645,
-            "path": "tokenizer.json"
-        },
-        {
-            "type": "file",
-            "oid": "2cf5d9b63e53f0640283057bfa5b05eebe789c72",
-            "size": 7354,
-            "path": "tokenizer_config.json"
-        }
-    ],
     "qwen2.5vl-it:3b": [
         {
             "type": "file",

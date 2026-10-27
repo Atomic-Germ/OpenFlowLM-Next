@@ -57,7 +57,7 @@
   "lin_key_dim": 0,
   "lin_value_dim": 0,
   "conv_kernel": 0,
-  "intermediate": 11264,
+  "intermediate": 11008,
   "activation": "silu",
   "sandwich_norms": false,
   "num_experts": 0,

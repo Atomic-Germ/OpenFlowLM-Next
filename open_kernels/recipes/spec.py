@@ -1298,16 +1298,33 @@ def _granite_scale_check(where: str, attn_mult: float | None, hd: int,
             f"{1.0 / want:g} on every score at head_dim {hd}. A container converted by "
             f"q4nx-build records the post-fold value ({want}) explicitly; convert it, "
             f"or state the multiplier if you know it.")
-    if abs(float(attn_mult) - want) > 1e-9:
-        raise SpecError(
-            f"granite: attention_multiplier {attn_mult} != head_dim**-0.5 {want} "
-            f"(attn.h scales by 1/sqrt(HD)). This container looks UNFOLDED; convert it "
-            f"with q4nx-build, which folds the multiplier into q_proj -- see {where}.")
+    # An UNFOLDED model (a raw GGUF: llama.cpp does not fold) is accepted and the
+    # original multiplier is recorded in `extra`, so the packing plan can carry the
+    # fold as a SCALE on q_proj: the engine applies it to a GGUF source and skips it
+    # for a container (a container was folded by q4nx-build). See dense.py's
+    # pack_plan and pools.cpp's std_perm_gguf.
     for name, v in others.items():
         if v is not None and abs(float(v) - 1.0) > 1e-9:
             raise SpecError(
                 f"granite: {name} {v} != 1.0, so it was not folded into the weights "
                 f"(the recipe has nowhere to apply it) -- convert with q4nx-build.")
+
+
+def _granite_unfolded(cfg: Mapping[str, Any], hd: int) -> float | None:
+    """The attention multiplier BEFORE the fold, or None when nothing to fold.
+
+    q4nx-build folds it into q_proj and records the original under
+    `q4nx_folded_multipliers`; a raw GGUF's config states the unfolded value
+    directly. Either way the packer wants to know it.
+    """
+    want = hd ** -0.5
+    folded = (cfg.get("q4nx_folded_multipliers") or {}).get("attention_multiplier")
+    if folded is not None:
+        return float(folded)
+    cur = cfg.get("attention_multiplier")
+    if cur is not None and abs(float(cur) - want) > 1e-9:
+        return float(cur)          # unfolded (a GGUF)
+    return None
 
 
 def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
@@ -1343,7 +1360,12 @@ def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         intermediate=_need(cfg, "intermediate_size"),
         norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
         quant="q4_1",
-        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+        extra={"model_type": cfg["model_type"], "source": "hf_config",
+               # the attention multiplier BEFORE q4nx-build's fold, when this config
+               # is unfolded (a raw GGUF) or records its pre-fold value. dense.py's
+               # pack plan turns it into a q_proj scale the GGUF packer applies.
+               **({"granite_attention_multiplier": _granite_unfolded(cfg, hd)}
+                  if _granite_unfolded(cfg, hd) is not None else {})},
     )
 
 

@@ -175,6 +175,28 @@ def attn_gate(py: Path, env: dict, spec_path: Path, work: Path, rows: int) -> bo
     return rc == 0
 
 
+def attn_point_validated(spec) -> bool:
+    """True when the spec's attention tuple is already in the catalogue.
+
+    Not every family can be gated: designs/attn/probe_dense.py refuses a family with
+    a q/k/v bias (Qwen2.5), and it should -- the probe compiles the production worker
+    without that element. When the tuple has ALREADY been validated (by whatever
+    procedure entered it), there is nothing for the gate to add, so the workflow
+    skips it instead of failing a spec that is otherwise ready.
+    """
+    sys.path.insert(0, str(ROOT / "open_kernels"))
+    from recipes import dense as D
+    from recipes.catalogue import CATALOGUE
+    from recipes.load import load_spec
+    s = spec if not isinstance(spec, Path) else load_spec(spec)
+    tpl = CATALOGUE["attn"]
+    kw = dict(head_dim=s.head_dim, num_heads=s.num_heads, num_kv_heads=s.num_kv_heads,
+              rotary_dim=s.rotary_dim, qk_norm=s.qk_norm, attn_gate=s.attn_gate,
+              qk_norm_post_rope=s.qk_norm and s.family in D.QKNORM_POST_ROPE,
+              qkv_bias=D.qkv_bias(s))
+    return any(c.value(kw) in c.points for c in tpl.combos)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", required=True, help="the HuggingFace repo (Qwen/Qwen3-0.6B)")
@@ -273,7 +295,12 @@ def main() -> int:
             return rc
 
     # 3. the attention gate
-    if not a.skip_gate:
+    if not a.skip_gate and attn_point_validated(spec_path):
+        # the tuple is already in the catalogue: nothing to run and nothing to add, and
+        # some families (a q/k/v bias) are not expressible in the probe at all
+        print("-- attention gate: this tuple is already validated in the catalogue; skipping",
+              flush=True)
+    elif not a.skip_gate:
         print("-- attention gate: the production worker at this geometry, against an fp64 oracle",
               flush=True)
         if not attn_gate(py, env, spec_path, work, a.rows):

@@ -50,6 +50,10 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"granite", SupportedModelFamily::granite},
         {"deepseek-r1", SupportedModelFamily::deepseek_r1},
         {"deepseek-r1-0528", SupportedModelFamily::deepseek_r1_0528},
+        // Hy-MT2 (dense Hunyuan decoder): served by the open engine, template-driven
+        // like Granite, so it shares that adapter. Nothing shipped a Hunyuan before, so
+        // the map had no entry and the server called it "not a chat model".
+        {"hunyuan", SupportedModelFamily::granite},
         {"qwen2", SupportedModelFamily::qwen2},
         {"qwen3", SupportedModelFamily::qwen3},
         {"qwen3-it", SupportedModelFamily::qwen3_it},

@@ -1204,6 +1204,29 @@ def reconcile_config_json(target, kernel_dir):
     return filled, conflicting
 
 
+def token_id_of(target, token):
+    """The id of a special token by its STRING, from the installed tokenizer.json.
+
+    A tokenizer_config can name `bos_token` / `eos_token` and never give the id
+    (Hy-MT2: `<|startoftext|>` with no bos_token_id), and the engine needs the
+    integer. tokenizer.json has both: the added_tokens list and the base vocab.
+    """
+    if not token or not isinstance(token, str):
+        return None
+    tj = Path(target) / "tokenizer.json"
+    try:
+        t = json.loads(tj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for a in t.get("added_tokens", []) or []:
+        if a.get("content") == token and isinstance(a.get("id"), int):
+            return a["id"]
+    v = (t.get("model") or {}).get("vocab")
+    if isinstance(v, dict) and isinstance(v.get(token), int):
+        return v[token]
+    return None
+
+
 def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
     stock HF repos keep them in generation_config.json -- merge them over."""
@@ -1211,6 +1234,33 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     if not tc.is_file():
         return
     cfg = json.loads(tc.read_text(encoding="utf-8"))
+    # A token NAMED but not numbered: resolve the id from tokenizer.json BEFORE any
+    # early return, so a repo that has the tokenizer but no generation_config still
+    # gets its ids (Hy-MT2: `<|startoftext|>` with no bos_token_id).
+    _ids_fixed = False
+    for _tok_key, _id_key in (("bos_token", "bos_token_id"), ("eos_token", "eos_token_id")):
+        if cfg.get(_id_key) is not None:      # a null id is a MISSING id, not a set one
+            continue
+        _tok = cfg.get(_tok_key)
+        if isinstance(_tok, dict):
+            _tok = _tok.get("content")
+        _tid = token_id_of(target, _tok) if isinstance(_tok, str) else None
+        if _tid is None and (Path(target) / "model.gguf").is_file():
+            # The GGUF's own metadata names the ids (Hy-MT2: bos 127958, and the
+            # string <|startoftext|> is not in tokenizer.json's vocab to look up).
+            inv = read_gguf_inventory(str(Path(target) / "model.gguf"), limit_mb=32)
+            _kv = inv[0] if inv else {}
+            _gg = _kv.get(f"tokenizer.ggml.{_id_key}")
+            if isinstance(_gg, int):
+                _tid = _gg
+        if _tid is not None:
+            cfg[_id_key] = [_tid] if _id_key == "eos_token_id" else _tid
+            _ids_fixed = True
+    if _ids_fixed:
+        # persist BEFORE the need_eos/need_bos early return: a repo whose only gap was
+        # the id (Hy-MT2's null bos_token_id) has nothing left to fetch, and returning
+        # without writing left the engine to refuse the model.
+        tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     need_eos = "eos_token_id" not in cfg or not isinstance(cfg.get("eos_token_id"), list)
     need_bos = cfg.get("bos_token") is not None and "bos_token_id" not in cfg
     if not (need_eos or need_bos):

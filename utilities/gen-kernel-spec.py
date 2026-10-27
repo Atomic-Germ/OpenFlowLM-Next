@@ -275,8 +275,13 @@ def main():
     spec["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config", "model": args.repo.split("/")[-1] + "-NPU2"}
     if cand is not None:
         built = cand.to_dict()
-        built["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config",
-                          "model": args.repo.split("/")[-1] + "-NPU2"}
+        # keep what the FAMILY BUILDER recorded in extra (Granite's pre-fold
+        # attention multiplier, Phi's raw rope_scaling, ...) -- overwriting it dropped
+        # the one fact the pack plan needs to fold a raw GGUF's weights
+        extra = dict(built.get("extra") or {})
+        extra.update({"model_type": cfg.get("model_type"), "source": "hf_config",
+                      "model": args.repo.split("/")[-1] + "-NPU2"})
+        built["extra"] = extra
         spec = built
     out = out_path
     if kept_model and spec.get("extra"):

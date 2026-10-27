@@ -60,6 +60,11 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.dst_rows = j.value("dst_rows", 0ull);
     p.split = j.value("split", "");
     p.via = j.value("via", "");
+    p.fold = j.value("fold", 1.0);
+    if (p.fold != 1.0 && p.op != "std_perm_gguf")
+        fail(where, p.op + " " + p.tensor + ": fold is a std_perm_gguf field (the GGUF packer applies it)");
+    if (!(p.fold > 0.0) || !std::isfinite(p.fold))
+        fail(where, p.op + " " + p.tensor + ": fold must be a positive, finite scale");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
@@ -768,6 +773,19 @@ void Manifest::check_model(const json& config, const std::string& where, bool mo
             const bool present = got_ptr != nullptr;
             if (!present && !hf_config_defaults.contains(key)) lacks(key);
             const json& got = present ? *got_ptr : hf_config_defaults[key];
+            // A key whose value can legitimately be written two ways: Granite's
+            // attention_multiplier is folded into q_proj at conversion (a container
+            // says 1/sqrt(HD)) and NOT folded in a raw GGUF (it says the original).
+            // The kernel set serves both -- the plan folds the GGUF's weights at pack
+            // time -- so the check accepts any value the manifest lists.
+            if (want.is_array()) {
+                bool any = false;
+                for (const auto& w : want) any |= (got == w);
+                if (!any)
+                    fail(where, "config.json " + key + " = " + got.dump() +
+                                     " is none of the values this kernel set accepts (" + want.dump() + ")");
+                continue;
+            }
             if (got != want)
                 fail(where, "config.json " + key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
                                  ", the kernel set was built for " + want.dump());

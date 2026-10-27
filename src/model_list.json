@@ -1104,33 +1104,6 @@
                 "footprint": 14.0
             }
         },
-        "qwen2.5-it": {
-            "3b": {
-                "name": "Qwen2.5-3B-Instruct-NPU2",
-                "url": "https://huggingface.co/{hf_owner}/Qwen2.5-3B-Instruct-NPU2/resolve/main",
-                "file_url": "https://huggingface.co/api/models/{hf_owner}/Qwen2.5-3B-Instruct-NPU2/tree/main",
-                "ms_url": "https://modelscope.cn/models/amd/Qwen2.5-3B-Instruct-NPU2",
-                "modified_at": "2025-05-30T00:00:00Z",
-                "size": 3000000000,
-                "oflm_min_version": "0.9.32",
-                "files": [
-                    "config.json",
-                    "model.q4nx",
-                    "tokenizer.json",
-                    "tokenizer_config.json"
-                ],
-                "default_context_length": 32768,
-                "max_prefill_len": 4096,
-                "details": {
-                    "family": "qwen2",
-                    "think": true,
-                    "think_toggleable": false,
-                    "parameter_size": "3B",
-                    "quantization_level": "Q4_0"
-                },
-                "footprint": 2.5
-            }
-        },
         "qwen2.5vl-it": {
             "3b": {
                 "name": "Qwen2.5-VL-3B-Instruct-NPU2",

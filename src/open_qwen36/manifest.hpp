@@ -44,6 +44,12 @@ struct PackOp {
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)
     std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
+    double fold = 1.0;                                                  ///< std_perm_gguf: multiply the
+                                                                        ///< dequantized values before
+                                                                        ///< requantizing (Granite's
+                                                                        ///< attention_multiplier, which a
+                                                                        ///< container bakes in and a raw
+                                                                        ///< GGUF has not folded)
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed

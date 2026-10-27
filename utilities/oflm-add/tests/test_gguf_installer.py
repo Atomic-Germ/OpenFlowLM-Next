@@ -811,3 +811,30 @@ def test_gguf_kernel_set_with_no_name_is_a_refusal_not_a_crash():
     """No official match and no geometry match: the caller must get None (and say so),
     not `Path / None`."""
     assert oflm_add.gguf_kernel_set(None, ["/nonexistent"]) is None
+
+
+def test_a_token_named_without_an_id_is_resolved_from_the_gguf(tmp_path):
+    """Hy-MT2's tokenizer_config names <|startoftext|> and gives bos_token_id: null,
+    and the string is not in tokenizer.json's vocab to look up."""
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+        "bos_token": "<|startoftext|>", "bos_token_id": None,
+        "eos_token_id": [127960],
+    }))
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"model": {"vocab": {}}}))
+
+    class _G:
+        @staticmethod
+        def read(name, limit_mb=32):
+            return ({"tokenizer.ggml.bos_token_id": 127958}, [])
+
+    orig_inv, orig_tok = oflm_add.read_gguf_inventory, oflm_add.token_id_of
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+    oflm_add.read_gguf_inventory = lambda *a, **k: _G.read(a[0])
+    oflm_add.token_id_of = lambda target, tok: None
+    try:
+        oflm_add.normalize_tokenizer_config(tmp_path, "local", [])
+    finally:
+        oflm_add.read_gguf_inventory, oflm_add.token_id_of = orig_inv, orig_tok
+
+    tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert tc["bos_token_id"] == 127958
