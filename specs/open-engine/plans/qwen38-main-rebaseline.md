@@ -1,6 +1,61 @@
 # Qwen3.8-27B validation report
 
 
+## Current full-ax L3 replay and boundary checks — 2026-10-28
+
+Added a one-layer native replay for current L3 using sequential L2 inputs from
+the audited long-prefix trace. The standard ax binary, weights/manifest ABI and
+arithmetic are unchanged. Native KV advances from zero through P239; RoPE and
+KV offsets are patched for every position. No state reset or CPU state injection
+occurs between tokens. CPU reference build metadata remains immutable.
+
+All **240/240 native residuals match the full-model trace byte-for-byte**.
+Separate native audit confirms **720 captures**, totaling **307,691,520 bytes**:
+residual, complete activation scratch and active KV prefix at every position.
+Logical NPU buffers total **254,072,832 bytes**, with one weight pool resident.
+The existing harness and its 326 compiler dependencies are verified and reused;
+no kernel, harness or library rebuild was needed.
+
+A new boundary scorer requires that independently audited exact control before
+interpretation. It checks unrounded FP64 entry/projection and causal attention
+from actual native layer inputs, then conditioned attention-head and FFN gates.
+The CPU run and a separate recalculation audit both pass and reproduce every
+recorded boundary measurement.
+
+| Boundary coverage | Passed |
+|---|---:|
+| Entry, output projection and causal attention sublayer, P0–239 | 240 / 240 |
+| Attention heads, conditioned on captured Q/K/V/gate | 5760 / 5760 |
+| FFN front and split down, P125/P205/P239 | 3 / 3 |
+
+Worst entry projection maxrel is **0.0002980986** for V at P197; worst entry
+norm maxrel is **0.0000203582** at P113. The conditioned attention-head maximum
+absolute error is **0.0000566654** (P76/H20), below 0.02; all cosine gates pass.
+Independent attention-sublayer residual maxrel peaks at **0.0000391476** at P144.
+At P205, conditioned FFN activation maxrel is **0.0000374043**, while the closing
+residual error conditioned on the captured FFN activation is **7.95406e-8**.
+These metrics use different boundary scales and must not be added or ranked as
+contributions to the final residual. No tolerance was relaxed.
+
+The scorer does not expose separate raw up/gate projections or softmax
+accumulators. KV snapshots are retained for subsequent attribution; independently
+recomputed KV is not a measurement of native KV arithmetic. All local gates
+passing does not remove the known full-model sequential numerical **FAIL**.
+Next perform signed attribution at P125/P205/P239 on a common final-residual
+scale, preserving causal histories and reproducing the retained mixed-oracle
+outputs before replacing entry, attention/output or FFN boundaries. Include
+native KV in the analysis before proposing a precision change.
+
+TDD covers causal position order, persistent KV, active-prefix inventory,
+current ABI validation, exact control binding, stale harness evidence and
+complete boundary coverage. **25 new tests pass**; full host suite:
+**1958 passed, 47 skipped**. Production runtime, installed models and services
+are unchanged. Evidence is retained under
+`Models/qwen38-27b/post-prefill-drift/native-l3-v1` and `l3-boundaries-v1`,
+with RED/GREEN, preparation, native-run and audit logs alongside them.
+
+
+
 ## FP32 causal attribution across all layers — 2026-10-27
 
 Extended the unchanged conditioned replay to every layer at P125/P205/P239.
