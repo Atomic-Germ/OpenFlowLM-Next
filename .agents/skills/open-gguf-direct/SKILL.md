@@ -926,24 +926,65 @@ Verification, both cheap and committed:
   exactly. **Use RMS-relative error, not per-element relative**: near-zero weights make
   the latter read 3% on a tensor that is bit-exact.
 
-### What vision-from-GGUF still needs
+### VISION FROM GGUF IS DONE (2026-10-27) -- and what it took
 
-1. **`oflm add` must fetch the projector.** An i1 repo has no mmproj: strip `-i1` from
-   the repo id and take `*mmproj*.gguf` from the sibling (prefer f16/BF16 -- the tower
-   is CPU bf16, so f16 is lossless), store it as `mmproj.gguf`, set `details.vlm`.
-2. **The LM side.** Qwen3-VL's GGUF arch is `qwen3vl` with `qwen3vl.*` keys and geometry
-   identical to qwen3-4b (hidden 2560, 36 layers, FF 9728, 32/8), so the EXISTING
-   `Qwen3-4B-NPU2` kernels are the right ones -- but `details.family` must stay
-   `qwen3vl` (the VL adapter preprocesses images and calls `prefill(ids, payload)`)
-   while the spec that matches the kernels hashes as `qwen3`. Check `derive_family`'s
-   preference order before wiring that.
-3. **M-RoPE for image tokens.** `core.cpp` implements M-RoPE and `write_record()` writes
-   one ptab record per row -- but `per_row_globals` comes from the MANIFEST and no recipe
-   emits it, so no shipped set can place image tokens yet. The GGUF gives what is needed
-   (`qwen3vl.rope.dimension_sections [24,20,20,0]`, `n_deepstack_layers 3`).
-4. Qwen2.5-VL's windowed projector: the tower code exists (`qwen25_from_*`), the GGUF
-   reader refuses it by name -- `clip.projector_type` is `qwen2.5vl_merger` and its
-   tensors are split q/k/v with RMSNorm, so it is a second mapping, not a tweak.
+End-to-end on the NPU, no environment, `oflm add mradermacher/Qwen3-VL-4B-Instruct-i1-GGUF`
+then `oflm serve qwen3-vl:4b`:
+
+```
+open kernels: <model>/open_kernels      vision tower resident (mmproj.gguf, 24 blocks) in 0.7 s
+image 18x88 patches -> 396 tokens + 3 deepstack in 5.63 s
+REPLY: The image displays a black background with white text stating that Paris is the
+       capital of France and serves as its center for finance, commerce, culture, arts,
+       fashion, and science.
+```
+
+An i1 repo has no projector: strip `-i1` and take `*mmproj*.gguf` from the sibling (f16 --
+the tower is host bf16, so f16 is lossless and needs no dequant). `oflm add --text-only`
+skips it, which is the same code path a text-only checkpoint takes; the engine then simply
+has no tower.
+
+Three pieces made it work beyond the reader:
+
+1. **The arch and the kernels disagree, on purpose.** Qwen3-VL's GGUF arch is `qwen3vl`,
+   and its decoder IS qwen3's (hidden 2560, 36 layers, FF 9728, 32/8) -- the `qwen3`
+   builder reads `qwen3vl.*` keys unchanged. So the SPEC hashes as family `qwen3` (which
+   is what finds the kernels) while `details.family` stays `qwen3vl` (which is what picks
+   the vision adapter, whose `preprocess_image` + `prefill(ids, payload)` do the images).
+   Its rope base is 5e6, not qwen3-4b's 1e6, and `kernel_hash` keeps `rope_theta` (the
+   ptab's `inv_freq` is manifest data), so it needs its OWN set -- `qwen3vl-4b` exports
+   as `Qwen3-VL-4B-Instruct-NPU2`, the official name, which is also how the registry
+   names the family (`family_of_official`).
+2. **The projector describes config.json too.** A GGUF model has no `vision_config`
+   anywhere: `projector_vision_config()` translates `clip.vision.*` back into it (depth,
+   hidden, heads, FFN, projection, patch/merge, in_channels, temporal = the patch_embd
+   slice count, `num_position_embeddings` from the table's own shape, and the deepstack
+   indexes from the tensor names), and the image/vision special-token ids come from
+   tokenizer.json. Without it the adapter's patch size is 0 and no image can be prepared.
+3. **M-RoPE was already done.** Every manifest carries `globals.ptab = {per_row,
+   inv_freq}`, `Core` allocates `max_ctx x per_row` and builds it, and `write_record()`
+   rewrites the rows an image touches with its 3 positions. The only missing piece was
+   `mrope_section`, which the engine reads from config.json -- so the install writes
+   `rope_parameters` from `qwen3vl.rope.dimension_sections` ([24,20,20,0] -> [24,20,20],
+   interleaved, which is Qwen3-VL's law).
+
+### Two bugs that only showed up at load (both pinned by tests now)
+
+1. **`core.cpp` skipped the GGUF section when the chunk laws matched.** It compared
+   `w_->chunk_bytes == man_.chunk_bytes` and, if equal, used the BASE section -- but the
+   base's pack ops read a `.q4nx` (`std_perm`) and only the section has the GGUF-reading
+   ones. Since the section moved to the q4_1 law, "equal" is now always true, so EVERY
+   GGUF model died with "lm_head.weight is not in a q4nx container". The merge must always
+   happen; the shortcut is gone.
+2. **Two recipe decisions still keyed on `q4_1_f32`,** the old twin's name: the lm head's
+   pack op and Gemma3's embedding scale (a container pre-scales token_embd by
+   sqrt(hidden) at conversion; a GGUF's is raw). Both were silently wrong for a
+   `q4_1_gguf` section -- the head refused, and Gemma3 would have answered nonsense.
+   `ModelSpec.reads_gguf` is now the predicate for "these weights are a GGUF FILE" (either
+   law), and `specs/open-engine/tests/test_gguf_section.py` pins both plus the predicate.
+
+Rule of thumb for the next family: `q4_1_f32` means the f32 CHUNK law; `reads_gguf` means
+the weights came from a GGUF. Any `== "q4_1_f32"` that meant the latter is a bug.
 
 ## The install+serve matrix (2026-10-27): what the shipped build needed
 

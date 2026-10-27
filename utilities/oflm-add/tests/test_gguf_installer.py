@@ -894,3 +894,131 @@ def test_the_two_family_maps_keep_their_own_spellings():
     assert oflm_add.family_from_config_dict({"model_type": "hunyuan_v1_dense"}) == "hunyuan"
     # a GGUF arch must not resolve through the config table and vice versa
     assert "hunyuan_v1_dense" not in oflm_add.GGUF_ARCH_FAMILIES
+
+
+def test_an_i1_repo_takes_its_projector_from_the_sibling():
+    """A mradermacher -i1 repo has no mmproj; the non-i1 repo of the same model does, and
+    the only difference in the id is that marker."""
+    assert oflm_add.projector_sibling("mradermacher/Qwen3-VL-4B-Instruct-i1-GGUF") == \
+        "mradermacher/Qwen3-VL-4B-Instruct-GGUF"
+    assert oflm_add.projector_sibling("mradermacher/gemma-3-4b-it-i1-GGUF") == \
+        "mradermacher/gemma-3-4b-it-GGUF"
+    # nothing to strip, and no repo part
+    assert oflm_add.projector_sibling("Qwen/Qwen3-VL-4B-Instruct-GGUF") == ""
+    assert oflm_add.projector_sibling("Qwen3-VL-4B-Instruct") == ""
+    # "-i1" inside a model name is not the marker
+    assert oflm_add.projector_sibling("someone/foo-i10-GGUF") == ""
+
+
+def test_the_projector_prefers_the_lossless_quant(tmp_path):
+    """The tower is host bf16: BF16/F16 needs no dequant at all, an 8-bit projector is
+    smaller AND slower. Picking by file size would choose the Q8_0."""
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+    seen = {}
+
+    def fake_fetch(repo, fname, dest, modelscope=False, force=False):
+        seen["repo"], seen["fname"] = repo, fname
+        Path(dest).write_bytes(b"GGUF")
+        return Path(dest)
+
+    orig_fetch, orig_list, orig_inv = (oflm_add.fetch_from_repo, oflm_add._projectors_in,
+                                       oflm_add.read_gguf_inventory)
+    oflm_add._projectors_in = lambda repo, ms: (
+        ["mmproj-Q8_0.gguf", "mmproj-f16.gguf", "mmproj-BF16.gguf"] if "sibling" in repo else [])
+    oflm_add.fetch_from_repo = fake_fetch
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=8: (
+        {"general.architecture": "clip", "clip.has_vision_encoder": True,
+         "clip.projector_type": "qwen3vl_merger", "clip.vision.embedding_length": 1024,
+         "clip.vision.block_count": 24}, [])
+    try:
+        got = oflm_add.install_projector(tmp_path, "org/model-i1-sibling", quiet=True)
+    finally:
+        (oflm_add.fetch_from_repo, oflm_add._projectors_in, oflm_add.read_gguf_inventory) = (
+            orig_fetch, orig_list, orig_inv)
+    assert got == "mmproj.gguf"
+    assert seen["repo"] == "org/model-i1-sibling"      # it has its own projector, no sibling climb
+    assert seen["fname"] == "mmproj-BF16.gguf"
+
+
+def test_a_file_that_is_not_a_projector_is_dropped(tmp_path):
+    """A language-model GGUF saved as mmproj.gguf would load as a tower and fail far from
+    the install; it is checked BEFORE it is kept."""
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+
+    def fake_fetch(repo, fname, dest, modelscope=False, force=False):
+        Path(dest).write_bytes(b"GGUF")
+        return Path(dest)
+
+    orig = (oflm_add.fetch_from_repo, oflm_add._projectors_in, oflm_add.read_gguf_inventory)
+    oflm_add._projectors_in = lambda repo, ms: ["mmproj-f16.gguf"]
+    oflm_add.fetch_from_repo = fake_fetch
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=8: ({"general.architecture": "qwen3vl"}, [])
+    try:
+        got = oflm_add.install_projector(tmp_path, "org/model-GGUF", quiet=True)
+    finally:
+        (oflm_add.fetch_from_repo, oflm_add._projectors_in, oflm_add.read_gguf_inventory) = orig
+    assert got == ""
+    assert not (tmp_path / "mmproj.gguf").exists()
+
+
+def test_qwen3vl_is_a_vl_model_on_qwen3_kernels():
+    """The GGUF arch names the model (qwen3vl: the vision adapter); the spec that matches
+    the kernels hashes as qwen3, because the decoder IS qwen3's."""
+    assert oflm_add.GGUF_ARCH_FAMILIES["qwen3vl"] == "qwen3vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen3_vl"}) == "qwen3vl"
+
+
+def test_a_gguf_vl_install_describes_its_tower_from_the_projector(tmp_path):
+    """A GGUF VL model has no vision_config anywhere but the mmproj, and the adapter reads
+    patch size / merge / mean from config.json. Translating the projector back into that
+    block is what makes images preparable at all (patch size 0 otherwise)."""
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_vl",
+                                                      "vocab_size": 151936, "hidden_size": 2560,
+                                                      "num_hidden_layers": 36}))
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+    (tmp_path / "mmproj.gguf").write_bytes(b"GGUF")
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": [
+        {"id": 151655, "content": "<|image_pad|>"},
+        {"id": 151652, "content": "<|vision_start|>"},
+        {"id": 151653, "content": "<|vision_end|>"}]}))
+
+    class _Spec:
+        family = "qwen3"; hidden = 2560; num_layers = 36; intermediate = 9728; vocab = 151936
+        num_heads = 32; num_kv_heads = 8; head_dim = 128; rope_theta = 5000000.0; norm_eps = 1e-6
+
+    clip = ({"general.architecture": "clip", "clip.has_vision_encoder": True,
+             "clip.projector_type": "qwen3vl_merger",
+             "clip.vision.block_count": 24, "clip.vision.embedding_length": 1024,
+             "clip.vision.attention.head_count": 16, "clip.vision.feed_forward_length": 4096,
+             "clip.vision.projection_dim": 2560, "clip.vision.patch_size": 16,
+             "clip.vision.spatial_merge_size": 2},
+            [["v.patch_embd.weight", 1, [16, 16, 3, 1024]],
+             ["v.patch_embd.weight.1", 1, [16, 16, 3, 1024]],
+             ["v.position_embd.weight", 0, [1024, 2304]],
+             ["v.deepstack.5.fc1.weight", 1, [4096, 4096]],
+             ["v.deepstack.11.fc1.weight", 1, [4096, 4096]],
+             ["v.deepstack.17.fc1.weight", 1, [4096, 4096]]])
+    mrope = {"general.architecture": "qwen3vl",
+             "qwen3vl.rope.dimension_sections": [24, 20, 20, 0]}
+
+    orig = (oflm_add.read_gguf_inventory, oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout)
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=8: (
+        clip if str(p).endswith("mmproj.gguf") else (mrope, []))
+    oflm_add.spec_from_gguf_source = lambda s: _Spec()
+    oflm_add.open_kernels_checkout = lambda: None
+    try:
+        oflm_add.repair_config_from_gguf(tmp_path)
+    finally:
+        oflm_add.read_gguf_inventory, oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout = orig
+
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    vc = cfg["vision_config"]
+    assert vc["depth"] == 24 and vc["hidden_size"] == 1024 and vc["num_heads"] == 16
+    assert vc["patch_size"] == 16 and vc["spatial_merge_size"] == 2 and vc["in_channels"] == 3
+    assert vc["temporal_patch_size"] == 2            # two patch_embd slices
+    assert vc["num_position_embeddings"] == 2304     # the position table's own shape
+    assert vc["deepstack_visual_indexes"] == [5, 11, 17]
+    assert cfg["vision_model_weight"] == "mmproj.gguf"
+    assert cfg["image_token_id"] == 151655 and cfg["vision_start_token_id"] == 151652
+    assert cfg["rope_parameters"]["mrope_section"] == [24, 20, 20]
+    assert cfg["rope_parameters"]["mrope_interleaved"] is True

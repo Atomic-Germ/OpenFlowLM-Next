@@ -360,6 +360,7 @@ GGUF_ARCH_FAMILIES = {
     "qwen35": "qwen3.5",
     "qwen3next": "qwen3.5",
     "qwen35moe": "qwen3.6-moe",
+    "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -384,6 +385,8 @@ CONFIG_MODEL_FAMILIES = {
     "qwen3_5": "qwen3.5",
     "qwen3_5_text": "qwen3.5",
     "qwen3_next": "qwen3.5",
+    "qwen3_vl": "qwen3vl",
+    "qwen3_vl_text": "qwen3vl",
 }
 
 
@@ -1142,6 +1145,96 @@ def fill_chat_template(target, repo, bases, modelscope=False):
         tmp.unlink(missing_ok=True)
 
 
+# The projector is a llama.cpp `mmproj-*.gguf`. Preference is by COST, not by size:
+# the tower runs on the host as bf16, so BF16/F16 is LOSSLESS and needs no dequant at
+# all, while an 8-bit projector is smaller and slower (requant per tensor). f32 works
+# too, it is just twice the bytes.
+PROJECTOR_PREFERENCE = ["bf16", "f16", "fp16", "f32", "q8_0", "q4"]
+
+
+def _projector_rank(name):
+    low = name.lower()
+    for i, q in enumerate(PROJECTOR_PREFERENCE):
+        if q in low:
+            return i
+    return len(PROJECTOR_PREFERENCE)
+
+
+def projector_sibling(repo):
+    """The repo that carries this quant's mmproj, or "" when the name gives none.
+
+    A mradermacher `-i1` repo does NOT ship the projector; the non-i1 repo of the same
+    model does, and its id differs by exactly that marker. (`Qwen3-VL-4B-Instruct-i1-GGUF`
+    -> `Qwen3-VL-4B-Instruct-GGUF`.) Everything else keeps its own name.
+    """
+    owner, _, name = (repo or "").partition("/")
+    if not owner or not name:
+        return ""
+    m = re.search(r"-i1(?=-|$)", name)
+    if not m:
+        return ""
+    return f"{owner}/{name[:m.start()]}{name[m.end():]}"
+
+
+def _projectors_in(repo, modelscope):
+    """The `*mmproj*.gguf` file names at a repo's root, or [] when it has none."""
+    try:
+        if modelscope:
+            names = list(ms_file_tree(repo)[1])
+        else:
+            names = [e.get("path") or "" for e in hf_file_tree(repo)]
+    except Exception:
+        return []
+    return [n for n in names
+            if n and n.lower().endswith(".gguf") and "mmproj" in os.path.basename(n).lower()]
+
+
+def install_projector(target, repo, modelscope=False, quiet=False, force=False):
+    """Fetch this model's vision projector as `mmproj.gguf`, or return "".
+
+    A GGUF model's tower is a SEPARATE file from the language model, and a quant repo
+    often does not carry it at all -- llama.cpp reads the two side by side. The engine
+    (open_qwen36/vision/vit.cpp, vision_weights_path) takes `mmproj*.gguf` from the model
+    directory when there is no `vision_weight.q4nx`, so this is all the install side has
+    to do. The file is verified to BE a projector before it is kept: a language-model
+    GGUF downloaded under that name would load as a tower and fail far from here.
+    """
+    model = Path(target) / "model.gguf"
+    if not model.is_file():
+        return ""
+    source = repo
+    names = _projectors_in(repo, modelscope)
+    if not names:
+        sib = projector_sibling(repo)
+        if not sib:
+            return ""
+        names = _projectors_in(sib, modelscope)
+        if not names:
+            return ""
+        source = sib
+    names.sort(key=lambda n: (_projector_rank(n), len(n)))
+    pick = names[0]
+    dest = Path(target) / "mmproj.gguf"
+    if not quiet:
+        log(f"[INFO] vision projector: {pick} <- {source}")
+    got = fetch_from_repo(source, pick, dest, modelscope=modelscope, force=force)
+    if not got:
+        return ""
+    inv = read_gguf_inventory(dest, limit_mb=8)
+    kv = (inv[0] if inv else {}) or {}
+    arch = str(kv.get("general.architecture") or "")
+    if arch != "clip" or not kv.get("clip.has_vision_encoder"):
+        log(f"[WARN] {pick} is not a vision projector (arch '{arch}'); ignoring it")
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return ""
+    log(f"[INFO]   {pick} is a '{kv.get('clip.projector_type')}' projector for a "
+        f"{kv.get('clip.vision.embedding_length')}-wide, {kv.get('clip.vision.block_count')}-block tower")
+    return "mmproj.gguf"
+
+
 def spec_from_gguf_source(source):
     """The ModelSpec a GGUF file describes, from its own metadata (path or URL).
 
@@ -1165,6 +1258,83 @@ def spec_from_gguf_source(source):
         return None
 
 
+def projector_vision_config(target):
+    """config.json's `vision_config` for a GGUF install, translated from the projector.
+
+    Qwen3-VL's adapter reads the tower's geometry from config.json's `vision_config` --
+    the container ships one -- while a GGUF model's tower is described in the mmproj, in
+    llama.cpp's `clip.vision.*` names. Without this translation an installed VL GGUF
+    leaves the adapter with zeros (patch size 0) and images cannot be prepared at all.
+    Everything here comes from the file: the metadata for the geometry, the tensor names
+    for which blocks the deepstack mergers hang off, and the position table's own shape.
+    """
+    p = Path(target) / "mmproj.gguf"
+    if not p.is_file():
+        return {}
+    inv = read_gguf_inventory(p, limit_mb=16)
+    if not inv:
+        return {}
+    kv, tensors = inv
+    if str((kv or {}).get("general.architecture") or "") != "clip":
+        return {}
+    names = [t[0] if isinstance(t, (list, tuple)) else t for t in (tensors or [])]
+    dims = {t[0]: t[2] for t in (tensors or []) if isinstance(t, (list, tuple)) and len(t) > 2}
+
+    def n(k, default=None):
+        v = (kv or {}).get(k, default)
+        return int(v) if isinstance(v, (int, float)) else default
+
+    pos = dims.get("v.position_embd.weight") or []
+    pe = dims.get("v.patch_embd.weight") or []          # [P, P, C, hidden]
+    vc = {
+        "model_type": "qwen3_vl",
+        "depth": n("clip.vision.block_count"),
+        "hidden_size": n("clip.vision.embedding_length"),
+        "num_heads": n("clip.vision.attention.head_count"),
+        "intermediate_size": n("clip.vision.feed_forward_length"),
+        "out_hidden_size": n("clip.vision.projection_dim"),
+        "patch_size": n("clip.vision.patch_size"),
+        "spatial_merge_size": n("clip.vision.spatial_merge_size"),
+        "in_channels": int(pe[2]) if len(pe) >= 3 else 3,
+        "hidden_act": "gelu_pytorch_tanh",
+    }
+    if pos:
+        vc["num_position_embeddings"] = int(pos[1])
+    # which blocks the deepstack mergers hang off is in the tensor names
+    taps = set()
+    for nm in names:
+        if nm.startswith("v.deepstack."):
+            try:
+                taps.add(int(nm.split(".")[2]))
+            except (IndexError, ValueError):
+                pass
+    vc["deepstack_visual_indexes"] = sorted(taps)
+    # the temporal patch size is the number of patch_embed slices
+    t = 1
+    while f"v.patch_embd.weight.{t}" in names:
+        t += 1
+    vc["temporal_patch_size"] = t
+    return {k: v for k, v in vc.items() if v is not None}
+
+
+def projector_special_ids(target):
+    """The image/vision special-token ids the adapter needs, from the tokenizer."""
+    p = Path(target) / "tokenizer.json"
+    try:
+        tok = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    want = {"<|image_pad|>": "image_token_id",
+            "<|vision_start|>": "vision_start_token_id",
+            "<|vision_end|>": "vision_end_token_id"}
+    out = {}
+    for a in tok.get("added_tokens") or []:
+        c = a.get("content")
+        if c in want and isinstance(a.get("id"), int):
+            out[want[c]] = a["id"]
+    return out
+
+
 def repair_config_from_gguf(target):
     """Write the geometry keys a GGUF names into a stub/absent config.json.
 
@@ -1178,10 +1348,13 @@ def repair_config_from_gguf(target):
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cfg = {}
-    if cfg.get("vocab_size") and cfg.get("hidden_size") and cfg.get("num_hidden_layers"):
+    has_projector = (Path(target) / "mmproj.gguf").is_file()
+    complete = bool(cfg.get("vocab_size") and cfg.get("hidden_size") and cfg.get("num_hidden_layers"))
+    if complete and (not has_projector or cfg.get("vision_config")):
         return []
     if not (Path(target) / "model.gguf").is_file():
         return []
+    inv = read_gguf_inventory(str(Path(target) / "model.gguf"), limit_mb=96)
     spec = spec_from_gguf_source(str(Path(target) / "model.gguf"))
     if spec is None:
         return []
@@ -1200,6 +1373,26 @@ def repair_config_from_gguf(target):
         "rope_theta": spec.rope_theta,
         "rms_norm_eps": spec.norm_eps,
     }
+    # Qwen3-VL's M-RoPE: a text token has one position, an image token three (t, h, w), so
+    # the decoder needs the section split. The GGUF states it (`rope.dimension_sections`),
+    # and the engine reads it from config.json's rope_parameters (or rope_scaling) -- a
+    # config rebuilt from the GGUF would otherwise lose the only description of it, and an
+    # image prompt then places its tokens at text positions. The 4th element is the unused
+    # tail of rotary_dim/2, which is why mrope_section is the first three.
+    md = (inv[0] if inv else {}) or {}
+    arch = str(md.get("general.architecture") or "")
+    sections = md.get(f"{arch}.rope.dimension_sections")
+    if isinstance(sections, list) and len(sections) >= 3 and sum(int(x) for x in sections[:3]) > 0:
+        built["rope_parameters"] = {"rope_type": "default",
+                                    "mrope_section": [int(x) for x in sections[:3]],
+                                    "mrope_interleaved": True}
+    # A GGUF VL model's tower is the mmproj: translate it into the vision_config the
+    # adapter reads, and name the file so the engine needs no guessing.
+    vc = projector_vision_config(target)
+    if vc:
+        built["vision_config"] = vc
+        built["vision_model_weight"] = "mmproj.gguf"
+        built.update(projector_special_ids(target))
     repaired = [k for k, v in built.items() if v is not None and cfg.get(k) != v]
     cfg.update({k: v for k, v in built.items() if v is not None})
     cfg_path.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
@@ -2787,6 +2980,10 @@ def main():
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
+    ap.add_argument("--text-only", action="store_true",
+                    help="GGUF installs only: do NOT fetch the vision projector (mmproj). The model runs "
+                         "as a text model; images are refused by the engine, which is the same code path a "
+                         "text-only checkpoint takes.")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and exit")
     ap.add_argument("--quiet", action="store_true", help="Less output")
     args = ap.parse_args()
@@ -3191,6 +3388,14 @@ def main():
     if _off_repo and _off_repo not in _chain:
         _chain.append(_off_repo)
     fill_chat_template(target, repo, _chain, modelscope)
+    projector = ""
+    if gguf_mode and not args.text_only:
+        # The tower is a second file, and the engine reads it from the model directory.
+        # BEFORE the config repair: the repair translates the projector into the
+        # vision_config the adapter reads (a GGUF model has no other description of it).
+        projector = install_projector(target, repo, modelscope=modelscope, quiet=args.quiet, force=args.force)
+        if projector and projector not in files:
+            files.append(projector)
     if gguf_mode:
         repair_config_from_gguf(target)
     _kset = gguf_kernel_dir or kernel_manifest_dir(xclbin_source, kernel_roots)
@@ -3211,6 +3416,9 @@ def main():
         size_value = estimate_size(target / "config.json")
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
+    if projector:
+        # build_entry infers this from a `vision*` file name; the projector is mmproj.gguf.
+        entry["vlm"] = True
     if gguf_mode:
         entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (q4_1 pool law)
         entry.setdefault("flm_min_version", "0.9.45")

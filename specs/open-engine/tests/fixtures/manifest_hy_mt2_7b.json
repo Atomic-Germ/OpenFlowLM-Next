@@ -1301,7 +1301,7 @@
     "pool_bytes": 329252864,
     "ops": [
      {
-      "op": "std_perm",
+      "op": "std_perm_gguf",
       "tensor": "lm_head.weight",
       "dst": 0,
       "nch": 64096,

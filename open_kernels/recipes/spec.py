@@ -153,6 +153,20 @@ class ModelSpec:
             return {r: self.quant for r in QUANT_ROLES}
         return {r: self.quant.get(r, DEFAULT_QUANT) for r in QUANT_ROLES}
 
+    @property
+    def reads_gguf(self) -> bool:
+        """True when the weights come from a GGUF FILE rather than a `.q4nx` container.
+
+        TWO quant names say so, and they are not the same thing: `q4_1_f32` is the old
+        f32-scale twin's chunk law, and `q4_1_gguf` is the q4_1 chunk law with the pack
+        ops in their GGUF-reading form. The manifest's `gguf` section moved to
+        `q4_1_gguf` (the law every container uses), so every decision that means "these
+        weights are a GGUF" must ask THIS, not `== "q4_1_f32"` -- the lm_head op and
+        Gemma3's embedding scale were both left behind by that move, and a GGUF then
+        failed at load with "only std_perm_gguf packs GGUF tensors".
+        """
+        return self.quant in ("q4_1_f32", "q4_1_gguf")
+
     def quant_of(self, role: str) -> str:
         if role not in QUANT_ROLES:
             raise SpecError(f"no quant role {role!r} (have {list(QUANT_ROLES)})")
@@ -1533,7 +1547,14 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
-GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
+GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf,
+                 # Qwen3-VL: the same decoder as qwen3, and its GGUF carries the same
+                 # qwen3vl.* keys -- so the qwen3 builder reads it unchanged. The spec is
+                 # family qwen3 (the kernels are qwen3's geometry); the model's own family
+                 # stays qwen3vl, which is what picks the vision adapter. Its rope base is
+                 # 5e6, not qwen3-4b's 1e6, so it needs its own set (the ptab's inv_freq is
+                 # export-time data and kernel_hash keeps rope_theta).
+                 "qwen3vl": _qwen3_gguf, "qwen3_vl": _qwen3_gguf, "llama": _llama3_gguf,
                  "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",

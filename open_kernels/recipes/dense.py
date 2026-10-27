@@ -480,11 +480,13 @@ def pack_plan(spec: ModelSpec) -> dict:
         "pool_bytes": L.POOL_BYTES, "chunk_bytes": chunk_bytes(pool_quant(spec)),
         "layer_types": {lt: one for lt in sorted(set(spec.layer_types))},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                    "ops": [{"op": "std_perm_gguf" if spec.reads_gguf else "std_perm",
                              "tensor": "lm_head.weight", "dst": 0,
                               "nch": q4_chunks(lm_rows(spec), hid, pool_quant(spec)), "in_dim": hid}]},
         "embed": {"tensor": "model.embed_tokens.weight", "dim": hid,
-                  **({"scale": hid ** 0.5} if spec.quant == "q4_1_f32" and spec.family == "gemma3" else {})},
+                  # Gemma3's container pre-scales the table by sqrt(hidden) at conversion;
+                  # a GGUF's token_embd is raw, so the engine applies it here.
+                  **({"scale": hid ** 0.5} if spec.reads_gguf and spec.family == "gemma3" else {})},
         "norm": {"tensor": "model.norm.weight", "bytes": hid * 2},
     }
 

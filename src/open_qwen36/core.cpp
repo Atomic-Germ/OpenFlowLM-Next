@@ -240,11 +240,14 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // packing kind, and the base section's chunk / pool / lx / ax: the packed slots
     // land where the q4_1 designs read them.
     const bool want_f32 = [] { const char* f = std::getenv("OFLM_GGUF_POOL_F32"); return f && *f && *f != '0'; }();
-    // A set exported since 2026-10-27 already carries the q4_1-law section (the same
-    // chunk law, contexts and kernels as the base): nothing to merge, so skip the
-    // rewrite entirely. Older sets still carry the f32-scale section and need it.
-    const bool already_q41 = gguf_ && w_ && w_->chunk_bytes == man_.chunk_bytes;
-    if (gguf_ && w_ && !want_f32 && !already_q41) {
+    // The section must ALWAYS be merged for a GGUF, even though it now names the same
+    // chunk law and kernels as the base: its pack ops are the GGUF-reading ones
+    // (`std_perm_gguf`), and the base's are the container's (`std_perm`). An earlier
+    // shortcut here compared chunk_bytes and skipped the merge when they matched --
+    // which is exactly the case since the section moved to the q4_1 law -- so a GGUF
+    // model then packed through `std_perm` and died with "lm_head.weight is not in a
+    // q4nx container".
+    if (gguf_ && w_ && !want_f32) {
         Manifest& m = *man_.gguf;
         const Manifest& b = man_;
         auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,

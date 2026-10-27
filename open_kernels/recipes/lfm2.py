@@ -224,7 +224,8 @@ def pack_plan(spec: ModelSpec) -> dict:
         "pool_bytes": Lx.POOL_BYTES, "chunk_bytes": CHUNK,
         "layer_types": {FULL: attn, SHORT_CONV: sc},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm", "tensor": "lm_head.weight", "dst": 0,
+                    "ops": [{"op": "std_perm_gguf" if spec.reads_gguf else "std_perm",
+                             "tensor": "lm_head.weight", "dst": 0,
                              "nch": q4_chunks(D.lm_rows(spec), hid), "in_dim": hid}]},
         # LFM2 containers name the table token_embd, not embed_tokens
         "embed": {"tensor": EMBED, "dim": hid},
