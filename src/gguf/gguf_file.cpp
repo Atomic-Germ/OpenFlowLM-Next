@@ -272,12 +272,46 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich) {
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
         dot("mlp.down_proj", ".ffn_down");
+        // Qwen3.5's HYBRID layers (hybrid linear attention = llama.cpp's "ssm"):
+        // the q4nx container names the DeltaNet block `linear_attn.*` and ships a
+        // bf16 copy of the alpha / beta projections beside the quantized one; a
+        // GGUF has one tensor each, under the arch's own names. The ops that read
+        // them are size-adaptive (pools.cpp), so one mapping serves both files.
+        dot("linear_attn.qkv_proj", ".attn_qkv");
+        dot("self_attn.gate_proj", ".attn_gate");        // the output gate, both layer kinds
+        dot("linear_attn.ssm_alpha_proj.bf16", ".ssm_alpha");
+        dot("linear_attn.ssm_beta_proj.bf16", ".ssm_beta");
+        dot("linear_attn.ssm_alpha_proj", ".ssm_alpha");
+        dot("linear_attn.ssm_beta_proj", ".ssm_beta");
+        dot("linear_attn.ssm_out_proj", ".ssm_out");
+        dot("linear_attn.ssm_conv1d", ".ssm_conv1d");
+        dot("linear_attn.ssm_dt.bias", ".ssm_dt.bias");
+        dot("linear_attn.ssm_norm", ".ssm_norm");
+        dot("linear_attn.ssm_a", ".ssm_a");
+    }
+    return n;
+}
+
+std::string GgufFile::resolve(const std::string& name) const {
+    std::string n = gguf_name(name, sandwich_);
+    if (tensors_.count(n)) return n;
+    static const std::pair<const char*, const char*> siblings[] = {
+        {".ffn_norm.", ".post_attention_norm."},
+        {".post_attention_norm.", ".ffn_norm."},
+    };
+    for (const auto& [from, to] : siblings) {
+        const std::string a = from;
+        const auto pos = n.find(a);
+        if (pos == std::string::npos) continue;
+        std::string alt = n;
+        alt.replace(pos, a.size(), to);
+        if (tensors_.count(alt)) return alt;
     }
     return n;
 }
 
 const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
-    std::string n = gguf_name(name, sandwich_);
+    std::string n = resolve(name);
     auto it = tensors_.find(n);
     if (it == tensors_.end() && n == "output.weight") {
         // tied embeddings: the GGUF has no output.weight; the (untied) rows

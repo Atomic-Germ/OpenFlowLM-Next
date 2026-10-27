@@ -50,7 +50,7 @@ public:
     GgufFile(const GgufFile&) = delete;
     GgufFile& operator=(const GgufFile&) = delete;
 
-    bool has(const std::string& name) const override { return tensors_.count(gguf_name(name, sandwich_)) != 0; }
+    bool has(const std::string& name) const override { return tensors_.count(resolve(name)) != 0; }
     /// Raw bytes of a tensor (the GGUF's own block layout; a view into the mapping).
     const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const override;
     /// One embedding row as f32, dequantized from whatever type stores it.
@@ -72,6 +72,10 @@ public:
     /// a GGUF speaks llama.cpp's blk.N.attn_q one). Unknown names pass through.
     /// `sandwich`: the GGUF has Gemma's post_ffw_norm, which changes one norm's meaning.
     static std::string gguf_name(const std::string& name, bool sandwich = false);
+    /// gguf_name(), then a spelling fallback for a name the arch writes differently:
+    /// Qwen3.5 calls the pre-FFN norm `post_attention_norm` where Llama / Qwen3 call
+    /// the same tensor `ffn_norm`.
+    std::string resolve(const std::string& name) const;
     /// GGUF metadata: string / u64 accessors (the config derivation's source).
     bool kv_has(const std::string& key) const { return meta_.count(key) != 0; }
     std::string kv_str(const std::string& key) const;

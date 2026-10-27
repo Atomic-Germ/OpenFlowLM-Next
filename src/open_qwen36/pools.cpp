@@ -434,6 +434,35 @@ void q8_half_tile(const uint8_t* chunk, unsigned half, uint8_t* dst) {
     std::memcpy(dst + Q8H_SCALES, chunk + 512 + static_cast<size_t>(half) * Q8H_CODES, Q8H_CODES);
 }
 
+/// `rows * cols` values of a tensor as BFloat16, whatever the file stores.
+///
+/// The plan asks for a [rows, cols] side tensor (Qwen3.5's DeltaNet alpha / beta
+/// and conv1d). A q4nx container ships a bf16 copy that the plan slices directly;
+/// a GGUF has ONE tensor each, quantized (alpha / beta are Q4_K) or f32 (conv1d),
+/// so the same op has to decode it. The raw size is the test: exactly 2 bytes a
+/// value is the container's copy, anything else goes through the file's own
+/// decode (f32 / f16 / bf16 exact, quantized via the row dequant).
+std::vector<uint16_t> read_bf16(const WeightFile& m, const std::string& name, uint64_t rows, uint64_t cols) {
+    size_t n = 0;
+    const uint8_t* src = m.raw(name, &n);
+    const uint64_t want = rows * cols * 2;
+    std::vector<uint16_t> out(static_cast<size_t>(rows * cols));
+    if (n == want) {
+        for (uint64_t i = 0; i < rows * cols; ++i) {
+            uint16_t v;
+            std::memcpy(&v, src + i * 2, 2);
+            out[i] = v;
+        }
+        return out;
+    }
+    const std::vector<float> f = m.f32(name);
+    if (f.size() < rows * cols)
+        fail(name + " decoded to " + std::to_string(f.size()) + " values, the plan wants " +
+             std::to_string(rows * cols));
+    for (uint64_t i = 0; i < rows * cols; ++i) out[i] = f32_to_bf16(f[i]);
+    return out;
+}
+
 /// [rows, cols] -> [cols, dst_rows], columns `rows`..`dst_rows`-1 zeroed. dst_rows == rows
 /// is the plain transpose; a wider one is the 16-head DeltaNet's alpha / beta going into
 /// dn_glue's 32-lane accumulator (open_kernels/recipes/qwen35.py).
@@ -700,16 +729,20 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         }
     } else if (op.op == "put") {
         const std::string name = with_layer(op.tensor, layer);
-        if (dynamic_cast<const GgufFile*>(&m)) {
-            // a GGUF's small weights may be f32/f16: convert to the blob's bf16 layout
-            bounds(op, op.cap, dst_bytes);
+        size_t n = 0;
+        const uint8_t* src = raw(m, name, 0, &n);
+        bounds(op, std::min(n, op.cap), dst_bytes);
+        if (n == op.cap) {
+            // The source already fills the slot exactly: a bf16 norm weight in a
+            // container AND an f32 side tensor (Qwen3.5's DeltaNet ssm_a /
+            // ssm_dt.bias, whose slot is sized in f32) in either file. Copied
+            // verbatim -- the slot's own layout decides, not the file's kind.
+            std::memcpy(dst + op.dst, src, n);
+        } else if (dynamic_cast<const GgufFile*>(&m)) {
+            // a GGUF's small weights may be f32 / f16 where the blob is bf16
             pack_norm(m, name, op.cap, dst + op.dst);
         } else {
-            size_t n = 0;
-            const uint8_t* src = raw(m, name, 0, &n);
-            if (n > op.cap) fail(name + " is " + std::to_string(n) + " B, its slot holds " + std::to_string(op.cap));
-            bounds(op, n, dst_bytes);
-            std::memcpy(dst + op.dst, src, n);
+            fail(name + " is " + std::to_string(n) + " B, its slot holds " + std::to_string(op.cap));
         }
     } else if (op.op == "lmhead_q8") {
         // 128-row supertile order. nk = K / 256 k-tiles, a band is 4 row quarters x nk k-tiles,
@@ -756,25 +789,46 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (!rows || !cols) fail("transpose " + name + " without rows / cols");
         if (dr < rows) fail("transpose " + name + ": dst_rows " + std::to_string(dr) +
                             " is narrower than rows " + std::to_string(rows));
-        size_t n = 0;
-        const uint8_t* src = raw(m, name, rows * cols * elem, &n);
-        if (n != rows * cols * elem)
-            fail(name + " is " + std::to_string(n) + " B, not a [" + std::to_string(rows) + ", " +
-                 std::to_string(cols) + "] tensor of " + std::to_string(elem) + "-byte values");
         bounds(op, cols * dr * elem, dst_bytes);
-        transpose_bytes(src, rows, cols, elem, dr, dst + op.dst);
+        if (elem == 2) {
+            // bf16 out, whatever the source is (a container's bf16 copy or a GGUF tensor)
+            const std::vector<uint16_t> v = read_bf16(m, name, rows, cols);
+            transpose_bytes(reinterpret_cast<const uint8_t*>(v.data()), rows, cols, 2, dr, dst + op.dst);
+        } else {
+            size_t n = 0;
+            const uint8_t* src = raw(m, name, rows * cols * elem, &n);
+            if (n != rows * cols * elem)
+                fail(name + " is " + std::to_string(n) + " B, not a [" + std::to_string(rows) + ", " +
+                     std::to_string(cols) + "] tensor of " + std::to_string(elem) + "-byte values");
+            transpose_bytes(src, rows, cols, elem, dr, dst + op.dst);
+        }
     } else if (op.op == "conv_transpose") {
         // conv1d bf16 [taps][groups*width] -> [groups][taps][width]
         const std::string name = with_layer(op.tensor, layer);
         const uint64_t taps = op.taps, groups = op.groups, width = op.width;
         if (!taps || !groups || !width) fail("conv_transpose without taps / groups / width");
-        size_t n = 0;
-        const uint8_t* src = raw(m, name, taps * groups * width * 2, &n);
-        if (n != taps * groups * width * 2) fail(name + " is not bf16[" + std::to_string(taps) + ", " + std::to_string(groups * width) + "]");
-        bounds(op, n, dst_bytes);
+        const uint64_t chan = groups * width;
+        bounds(op, taps * chan * 2, dst_bytes);
+        // The file's own orientation. A GGUF lists its dims FASTEST FIRST, so
+        // `ssm_conv1d.weight` [4, 8192] is row-major [channels][taps] (HF's
+        // [hidden, taps]); the q4nx container stores the same kernel taps-major,
+        // [taps][channels], which is what the blob wants. Reading the GGUF the
+        // container's way silently permutes the filter -- the DeltaNet still
+        // produces numbers, just not the model's (Qwen3.5 GGUF: fluent-length
+        // garbage). Pick the orientation from the tensor's shape.
+        const auto& shape = m.meta(name).shape;      // row-major [rows, cols]
+        const bool chan_major = shape.size() == 2 && shape[1] == taps && shape[0] == chan;
+        const std::vector<uint16_t> v = read_bf16(m, name, chan_major ? chan : taps,
+                                                  chan_major ? taps : chan);
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(v.data());
         for (uint64_t g = 0; g < groups; ++g)
             for (uint64_t t = 0; t < taps; ++t)
-                std::memcpy(dst + op.dst + (g * taps + t) * width * 2, src + (t * groups * width + g * width) * 2, width * 2);
+                for (uint64_t w = 0; w < width; ++w) {
+                    const uint64_t from = chan_major ? (g * width + w) * taps + t
+                                                     : t * chan + g * width + w;
+                    std::memcpy(dst + op.dst + (g * taps + t) * width * 2 + w * 2,
+                                src + from * 2, 2);
+                }
     } else {
         fail("unknown pack op " + op.op);
     }
