@@ -762,9 +762,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         out["rows"] = rr["rows"]
     sec = GGUF.section(spec, max_ctx, programs)
     if sec:
-        # the export also builds the f32-scale twins (dx_f32, lm_head_q4_f32); the engine
-        # swaps this section in for GGUF-direct models (same weight file family, f32-scale
-        # pool chunks, open_kernels/gguf_pool.py)
+        # The GGUF-direct view: the SAME q4_1 builds and chunk law, with the pack ops in
+        # their GGUF-reading form (std_perm_gguf). The engine swaps this section in for a
+        # model that ships model.gguf; no f32-scale twins are built any more.
         out["gguf"] = sec
     return out
 

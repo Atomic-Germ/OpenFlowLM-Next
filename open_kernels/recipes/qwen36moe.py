@@ -1510,10 +1510,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                 out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
     sec = GGUF.section(spec, max_ctx, programs, twins_built=GGUF_EXPERT_OPS_READY)
     if sec:
-        # The GGUF-direct twin: the same layer designs against the f32-scale pool
-        # layout (the q4_1 codes with f32 block scales). The engine swaps this whole
-        # section in when the model ships a model.gguf, and the f32-scale kernel sets
-        # are the *_f32 builds the export makes.
+        # The GGUF-direct view: the SAME builds and chunk law, with the pack ops in their
+        # GGUF-reading form. Emitted only once the expert pack ops exist
+        # (GGUF_EXPERT_OPS_READY, the section's argument).
         out["gguf"] = sec
     return out
 
