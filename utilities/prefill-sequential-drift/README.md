@@ -86,6 +86,70 @@ L2 inputs with the current standard ax binary and causal KV before inspecting
 projection, attention and FFN boundaries. Establish exact native residual
 identity first. This is a diagnostic target, not a confirmed root cause.
 
+## Current full-ax L3 native replay
+
+`native_l3.py` reuses the current standard ax binary and manifest ABI. It packs
+only L3 and reads all sequential L2 inputs from the audited 257-token trace.
+KV starts at zero and advances through P239 without resets. Each position saves
+its residual, complete activation scratch and the complete active KV prefix;
+unused capacity is not dumped. The immutable CPU reference retains its original
+build key; current export identity is verified separately against current source.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/native_l3.py prepare \
+  --baseline Models/qwen38-27b/post-prefill-production/boundaries-native-v1 \
+  --out Models/qwen38-27b/post-prefill-drift/native-l3-v1
+XILINX_XRT=/opt/xilinx/xrt LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OPENBLAS_NUM_THREADS=1 \
+  ironvenv/bin/python utilities/prefill-sequential-drift/native_l3.py run \
+  --out Models/qwen38-27b/post-prefill-drift/native-l3-v1 \
+  --harness Models/qwen38-27b/prefill-sequential-drift/harness-l0-v1/run_kernel
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/native_l3.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/native-l3-v1
+```
+
+Use a fresh output directory. The runner checks the harness executable and all
+hashes in its adjacent `build-evidence.json`, including source/header identities.
+The existing harness can be reused only while that check passes. Use the shared
+resident-validation lock; never overlap another NPU job. No kernel rebuild or
+full-model residency is needed. Preserve failed attempts and never replace an
+exact control requirement with a numerical tolerance.
+
+After all 240 residuals match the native trace byte-for-byte and the separate
+audit verifies all 720 files, score independent boundaries:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/l3_boundaries.py run \
+  --capture Models/qwen38-27b/post-prefill-drift/native-l3-v1 \
+  --out Models/qwen38-27b/post-prefill-drift/l3-boundaries-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/l3_boundaries.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/l3-boundaries-v1
+```
+
+The scorer checks FP64 entry and causal attention/output from native layer
+inputs across every position, 5760 attention heads conditioned on captured
+Q/K/V/gate, and FFN front/down at P125/P205/P239. It does not expose separate
+raw up/gate projections or softmax accumulators. Captured KV is retained for
+subsequent diagnosis; ideal recomputed KV is not a native state measurement.
+A separate audit repeats CPU calculations and compares the entire report.
+Passing conditioned gates cannot override the full-model sequential FAIL or
+identify a unique root cause. Signed attribution on a common residual scale
+is required before choosing a precision change.
+
+### Validated L3 checkpoint — 2026-10-28
+
+`native-l3-v1`: all 240 residuals are byte-exact to the full-model trace; separate
+audit verifies all 720 captures (307,691,520 bytes). Logical NPU buffers total
+254,072,832 bytes. Existing harness/build dependencies and kernels were reused.
+`l3-boundaries-v1` and its separate recalculation audit pass all 240 projection/
+attention cases, 5760 conditioned heads and three selected FFN front/down cases.
+Worst entry projection maxrel is 0.0002980986 (V/P197); worst conditioned head
+absolute error is 0.0000566654 (P76/H20). All original thresholds are unchanged.
+
+25 new tests pass; full host suite: 1958 passed, 47 skipped. These local checks
+do not close sequential full-model accuracy. Next attribute signed boundary
+changes on a common residual scale, with exact retained mixed-oracle controls
+and actual native KV, before choosing a precision experiment.
+
 ## Historical expanded export
 
 CPU-only causal attribution at L60/P37–39 and L33/P240–242 using the verified
