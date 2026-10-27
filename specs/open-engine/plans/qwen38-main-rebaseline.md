@@ -1,5 +1,53 @@
 # Qwen3.8-27B validation report
 
+## FP32 full-depth block-boundary results — 2026-10-27
+
+Completed all **18 resident processes** for 255/256/257-token prompts, all 64
+layers and one continuation, using the verified ordinary and capture-only CLIs
+with the standard FP32 post-output export. A separate audit remeasures every
+capture and confirms current source/build/model/reference identity. Run and
+audit both report **complete: true, passed: false**: execution is complete,
+but sequential numerical accuracy remains a blocker. Exit status 1 records
+that numerical failure, not a process or provenance failure.
+
+| Route, all three lengths | Residual rows passed | Logits passed | Worst residual maxrel | Minimum logit correlation |
+|---|---:|---:|---:|---:|
+| Sequential | 49,058 / 49,344 | 759 / 771 | 0.0992221863 | 0.9963255072 |
+| Hybrid, layer-major | 49,344 / 49,344 | 771 / 771 | 0.0025616438 | 0.9999961799 |
+| Hybrid, block-major | 49,344 / 49,344 | 771 / 771 | 0.0025616438 | 0.9999961799 |
+
+Sequential residual/logit passes by length are 16,290/16,384 and 252/256
+(255 tokens), 16,352/16,448 and 253/257 (256), and 16,416/16,512 and 254/258
+(257). Thresholds remain residual maxrel <0.005 and logit correlation >0.9999
+with matching argmax. The ordinary CLI reproduces the traced logit results.
+All argmax values and generated IDs (248046, 198) match the CPU reference.
+All **576 continuation residual rows** pass; failures occur in prompt rows.
+
+All **2331/2331 fresh plain/trace control files**, **966/966 hybrid schedule
+identities**, and **1917/1917 cross-length prompt-prefix identities** pass.
+The latter cover 1533 logits and 384 residual prefixes, excluding continuations.
+The common-prefix error is therefore reproducible across lengths and ordinary
+versus instrumented execution; it already appears before the block boundary.
+
+The earliest temporal residual crossing is **L54/P125**, maxrel 0.0056958381.
+The shallowest failing layer is **L41/P239**, maxrel 0.0067813607. Worst error
+is **L58/P205**, maxrel 0.0992221863. Logit correlation fails at P205, P213,
+P214 and P220 for each length. These are observed crossings, not attribution
+to a particular kernel, arithmetic operation or native state representation.
+
+Next replay the current causal inputs at these targets and their preceding
+layers, with one decoded layer at a time, to separate propagated input/history
+error from local implementation error. Preserve the failed overall acceptance
+while selecting subsequent native sublayer/state captures. Long-prefix reset,
+serving and performance remain unaccepted; hybrid host stages remain explicit.
+
+Evidence: `Models/qwen38-27b/post-prefill-production/boundaries-native-v1`,
+its separate `audit.json`, and `boundaries-native-summary.json`. All 38 focused
+validator tests pass; the unchanged tooling's full host suite passed 1925 tests
+with 47 skips at preparation. No runtime/kernel source, installed bundle or
+service was changed, and no kernel/library rebuild was needed.
+
+
 ## FP32 block-boundary preparation — 2026-10-27
 
 Added a preparation/runner/auditor for 255/256/257-token prefill with the standard
@@ -22,7 +70,7 @@ TDD covers missing lengths/routes, numerical and identity failures, oracle and
 geometry mismatches, metadata audit binding and prompt/continuation separation.
 Host suite: **1925 passed, 47 skipped**.
 
-**Native execution is pending.** The memory preflight measured **34.1 GiB**
+**Native execution was deferred at this preparation checkpoint.** The memory preflight measured **34.1 GiB**
 available, below its unchanged 35 GiB threshold. No model was loaded and no NPU
 boundary-accuracy claim is made. Preparation evidence is retained under
 `Models/qwen38-27b/post-prefill-production/boundaries-prepared-v1`, with its

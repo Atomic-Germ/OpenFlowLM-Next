@@ -64,6 +64,20 @@ hybrid schedules must agree. A completed numerical failure is recorded with
 that failure. Incomplete or changed evidence raises an error and invalidates
 prior audit success. This does not validate long-prefix reset or performance.
 
+Measured on 2026-10-27 in `boundaries-native-v1`: all 18 processes complete,
+and a separate audit confirms the overall numerical FAIL. Both hybrid routes
+pass 98,688/98,688 residual rows and 1542/1542 logits in total. Sequential passes
+49,058/49,344 residuals and 759/771 logits; worst residual maxrel is 0.0992221863
+against 0.005, and minimum logit correlation is 0.9963255072 against 0.9999.
+All 2331 ordinary/trace files, 966 hybrid schedule identities and 1917 causal
+prefix identities match. Argmax and generated tokens match; every continuation
+residual row passes. Do not interpret these identities as numerical acceptance.
+
+The first temporal residual crossing is L54/P125, the shallowest is L41/P239,
+and the worst is L58/P205. Use the current captures for causal conditioned replay
+before attributing drift to a kernel. The full report and a compact summary are
+retained alongside the captures. No native binary or kernel changed in this run.
+
 The ordinary qwen35 recipe exports manifest v4 and 46 kernel sets for the
 validated dense Q4 H5120/FF17408 geometry. Five GEMM companions compute the
 BF16 residual of dequantized weights; both components read the same packed
