@@ -598,8 +598,13 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         bounds(op, op.nch * ch, dst_bytes);
         auto perm = std_perm(op.nch, op.in_dim);
         const size_t ncol = op.in_dim / 256;
-        std::vector<float> rd(kq ? op.in_dim : 0);
+        // The requant path decodes a row at a time: with a K-quant source that is the
+        // whole load-time cost of a GGUF model (a Q4_K_M 8B took minutes). Every chunk
+        // is independent -- it reads its own rows of the mapping and writes its own
+        // slot -- so the loop is parallel; the decode buffer moves inside it.
+#pragma omp parallel for schedule(dynamic) if (kq)
         for (size_t c = 0; c < op.nch; ++c) {
+            std::vector<float> rd(kq ? op.in_dim : 0);   // this chunk's decode buffer
             uint8_t* d = dst + op.dst + c * ch;
             // the file's chunk this pool chunk reads: the op's range (chunk0)
             // and the permutation inside it
