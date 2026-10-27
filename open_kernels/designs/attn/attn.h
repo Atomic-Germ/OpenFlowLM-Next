@@ -406,9 +406,9 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
     const v16f c = aie::load_v<16>(cs + kHalfV);
     const v16f s = aie::load_v<16>(cs + kHalf + kHalfV);
     const v16f a = aie::load_v<16>(dst + kHalfV);
-    const v16f b = aie::load_v<16>(dst + kHalf + kHalfV);
+    const v16f b = aie::load_v<16>(dst + kPair + kHalfV);
     aie::store_v(dst + kHalfV, fsubN<16>(fmulN<16>(a, c), fmulN<16>(b, s)));
-    aie::store_v(dst + kHalf + kHalfV, faddN<16>(fmulN<16>(b, c), fmulN<16>(a, s)));
+    aie::store_v(dst + kPair + kHalfV, faddN<16>(fmulN<16>(b, c), fmulN<16>(a, s)));
   }
 #endif
 #if ATTN_QKNORM_POST
