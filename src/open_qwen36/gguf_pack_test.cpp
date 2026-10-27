@@ -13,7 +13,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "open_qwen36/gguf_file.hpp"
@@ -259,6 +262,31 @@ uint32_t f32_bits(float f) {
     return u;
 }
 
+// A container in memory: just the tensors' bytes, as a .q4nx stores small weights (bf16 or f32).
+class MemFile : public WeightFile {
+public:
+    std::map<std::string, std::vector<uint8_t>> t;
+    bool has(const std::string& name) const override { return t.count(name) != 0; }
+    const uint8_t* raw(const std::string& name, size_t* nbytes) const override {
+        const auto& b = t.at(name);
+        if (nbytes) *nbytes = b.size();
+        return b.data();
+    }
+    void embed_row(const std::string&, size_t, size_t, float*) const override { throw std::logic_error("unused"); }
+    std::vector<float> bf16(const std::string&) const override { throw std::logic_error("unused"); }
+    std::vector<float> f32(const std::string&) const override { throw std::logic_error("unused"); }
+    const TensorMeta& meta(const std::string&) const override { throw std::logic_error("unused"); }
+    void bf16_row(const std::string&, size_t, size_t, float*) const override { throw std::logic_error("unused"); }
+    void drop_pages() override {}
+};
+
+template <typename T>
+std::vector<uint8_t> bytes_of(const std::vector<T>& v) {
+    std::vector<uint8_t> b(v.size() * sizeof(T));
+    std::memcpy(b.data(), v.data(), b.size());
+    return b;
+}
+
 }  // namespace
 
 int main() {
@@ -375,6 +403,27 @@ int main() {
             }
         }
         std::printf("ok    pack_norm f32 -> bf16 (RNE)\n");
+    }
+
+    // ---- pack_norm with div_running's product (Gemma 4's layer_output_scale). The same case,
+    // and the same expected bits, as test_gemma4.py's test_put_div_running_matches_pools_cpp.
+    {
+        const std::vector<uint16_t> norm16 = {0x3F80, 0x3FC0, 0xC030, 0x3DCD, 0x4049, 0x3F81};
+        const std::vector<uint16_t> want = {0x4099, 0x40E5, 0xC152, 0x3EF4, 0x4170, 0x409A};
+        MemFile mf;
+        mf.t["norm"] = bytes_of(norm16);
+        mf.t["scale.0"] = bytes_of(std::vector<uint16_t>{0x3F33});   // bf16
+        mf.t["scale.1"] = bytes_of(std::vector<float>{0.3f});         // f32
+        double div = 1.0;
+        for (int j = 0; j < 2; ++j) div *= pools::scalar_value(mf, "scale." + std::to_string(j));
+        std::vector<uint16_t> got(norm16.size());
+        pools::pack_norm(mf, "norm", got.size() * 2, reinterpret_cast<uint8_t*>(got.data()), div);
+        if (got != want) {
+            for (size_t i = 0; i < got.size(); ++i)
+                std::printf("FAIL pack_norm div[%zu]: got %04x want %04x\n", i, got[i], want[i]);
+            return 1;
+        }
+        std::printf("ok    pack_norm divided by the running scale product\n");
     }
 
     // ---- embed_row (Q8_0, bit-exact)

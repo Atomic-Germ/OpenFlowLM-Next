@@ -99,6 +99,29 @@ def test_global_pack_plan_duplicates_k_into_both_slots(unvalidated):
     assert run == ["post_attention_layernorm", "post_feedforward_layernorm"]
 
 
+# The div_running case gguf_pack_test.cpp also packs through pools.cpp: the same bf16 norm,
+# the same two layer scales (one bf16, one f32), the same expected bits.
+DIV_NORM = [0x3F80, 0x3FC0, 0xC030, 0x3DCD, 0x4049, 0x3F81]
+DIV_SCALES = [np.array([0x3F33], np.uint16).view(np.uint8), np.array([0.3], np.float32).view(np.uint8)]
+DIV_WANT_L2 = [0x4099, 0x40E5, 0xC152, 0x3EF4, 0x4170, 0x409A]
+
+
+def test_put_div_running_matches_pools_cpp():
+    from recipes import pack
+
+    class Container:
+        def raw(self, name):
+            if name.startswith("norm."):
+                return np.array(DIV_NORM, np.uint16).view(np.uint8)
+            return DIV_SCALES[int(name.split(".")[1])]
+
+    op = {"op": "put", "tensor": "norm.{l}", "dst": 0, "cap": 2 * len(DIV_NORM), "div_running": "scale.{j}"}
+    for layer, want in ((0, DIV_NORM), (2, DIV_WANT_L2)):
+        dst = np.zeros(2 * len(DIV_NORM), np.uint8)
+        pack.apply_op(op, Container(), layer, dst)
+        assert dst.view(np.uint16).tolist() == want, layer
+
+
 def test_manifest_rows_are_per_kernel(unvalidated):
     m = manifest(spec())["gguf"]
     k = m["kernels"]
