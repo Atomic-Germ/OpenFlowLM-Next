@@ -3059,7 +3059,7 @@ def main():
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
         if gguf_mode:
-            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
+            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
@@ -3208,7 +3208,7 @@ def main():
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
     if gguf_mode:
-        entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
+        entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (q4_1 pool law)
         entry.setdefault("flm_min_version", "0.9.45")
     if npue_embed:
         # build_entry copies npue_design_family / details / label from the official
