@@ -819,6 +819,36 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## GGUF-direct NUMERICS: the load path is now fedora's, and what that proved (2026-10-26)
+
+`39b1c26` replaces our older GGUF load path with the one fedora exercised on the
+NPU: Q5_K/IQ4_NL/IQ4_XS block sizes + the IQ4 codebook, the qwen35 ssm_* name
+identities, `post_norm_` (the pre-FFN norm is whichever name the file has),
+`consts_as_bf16`, the f32-slot `pack_norm`, `std_perm_gguf` serving both pool
+laws keyed off `chunk_bytes` with per-row requant of Q8_0/Q4_K/Q5_K/Q6_K/IQ4,
+the `lmhead_q8` Q6_K requant, `check_model`'s text_config lookup, and
+`lm_config`'s text_config lift (without which a Qwen3.5 GGUF's sampler is built
+over zero features and segfaults right after prefill).
+
+Measured after that port ("The capital of France is", temperature 0):
+
+| model | source | result |
+|---|---|---|
+| Qwen3-4B-Base | Q4_0 + tied Q6_K head | **coherent** |
+| Qwen3.5-4B-i1 | Q4_1 | generates, multilingual soup (was a segfault) |
+| Qwen3.8-4B-Distill | Q4_K/Q6_K | generates, soup |
+| Nanbeige4-3B-Base-i1 | llama3, Q4_1 + Q6_K head | repeats `\x0b` |
+
+`OFLM_GGUF_POOL_Q41=1` (the f32-numerics bisect above) leaves Nanbeige
+unchanged, so its fault is not the f32 chunk law.
+
+**And a shipped-set bug found on the way, before any GGUF question:**
+`oflm pull nanbeige4.1:3b` refuses to load on OUR set because the official
+container's `config.json` says `intermediate_size = 10752` while
+Nanbeige/Nanbeige4.1-3B's HF config (and our spec) say **10496**. The engine is
+right to refuse; the pair is wrong. Decide which FF the container's weights
+really are before judging any Nanbeige GGUF run.
+
 ## GGUF-direct NUMERICS: one combination verified (2026-10-26)
 
 Measured on the NPU by serving each installed model and asking a question:
