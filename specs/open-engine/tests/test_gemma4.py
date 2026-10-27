@@ -122,6 +122,22 @@ def test_put_div_running_matches_pools_cpp():
         assert dst.view(np.uint16).tolist() == want, layer
 
 
+def test_the_load_check_covers_both_rope_tables(unvalidated):
+    """check_model compares rope_parameters whole: the 12B's own config passes, and a config
+    that moves either theta or the global rotation width no longer matches."""
+    import copy
+    want = manifest(spec())["hf_config_check"]["rope_parameters"]
+    assert want == TC["rope_parameters"]
+    for path, value in ((("full_attention", "rope_theta"), 500000.0),
+                        (("sliding_attention", "rope_theta"), 20000.0),
+                        (("full_attention", "partial_rotary_factor"), 0.5)):
+        tc = copy.deepcopy(TC)
+        tc["rope_parameters"][path[0]][path[1]] = value
+        moved = ModelSpec.from_hf_config({"model_type": "gemma4_unified", "text_config": tc})
+        assert manifest(moved)["hf_config_check"]["rope_parameters"] != want, path
+        assert tc["rope_parameters"] != want, path
+
+
 def test_manifest_rows_are_per_kernel(unvalidated):
     m = manifest(spec())["gguf"]
     k = m["kernels"]

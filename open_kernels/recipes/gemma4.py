@@ -262,7 +262,14 @@ def hf_config_check(spec: ModelSpec) -> dict:
             "intermediate_size": spec.intermediate, "head_dim": spec.head_dim,
             "global_head_dim": spec.global_head_dim or spec.head_dim,
             "num_global_key_value_heads": spec.global_kv_heads, "attention_k_eq_v": spec.attn_k_eq_v,
-            "sliding_window": spec.sliding_window, "final_logit_softcapping": spec.final_softcap or None}
+            "sliding_window": spec.sliding_window, "final_logit_softcapping": spec.final_softcap or None,
+            # Both position tables and the global rotation width are baked in at export time, so a
+            # same-shaped config with other RoPE settings must refuse. Emitted whole, from the spec's
+            # values; check_model compares the sub-object as it compares K2's.
+            "rope_parameters": {
+                "full_attention": {"partial_rotary_factor": spec.global_rotary_dim / (spec.global_head_dim or spec.head_dim),
+                                   "rope_theta": spec.rope_theta, "rope_type": "proportional"},
+                "sliding_attention": {"rope_theta": spec.rope_local_theta, "rope_type": "default"}}}
 
 
 GEN_KERNELS = D.GEN_KERNELS
