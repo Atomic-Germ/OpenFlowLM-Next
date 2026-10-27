@@ -225,6 +225,10 @@ def gguf_kernel_set(name, roots):
     may predate the f32-scale twins, so this is how a fresh set is found rather
     than refusing the GGUF.
     """
+    if not name:
+        # No official match and no geometry match: the caller wants the "no
+        # GGUF-direct set" refusal, not a TypeError from Path / None.
+        return None
     for root in roots:
         if not root:
             continue

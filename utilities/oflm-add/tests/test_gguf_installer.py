@@ -805,3 +805,9 @@ def test_a_set_the_registry_does_not_list_still_names_its_family(tmp_path):
         oflm_add._model_spec_class = orig
 
     assert (fam, name) == ("llama3", "Nanbeige4.1-3B-NPU2")
+
+
+def test_gguf_kernel_set_with_no_name_is_a_refusal_not_a_crash():
+    """No official match and no geometry match: the caller must get None (and say so),
+    not `Path / None`."""
+    assert oflm_add.gguf_kernel_set(None, ["/nonexistent"]) is None
