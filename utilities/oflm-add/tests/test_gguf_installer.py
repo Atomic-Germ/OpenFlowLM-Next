@@ -626,3 +626,106 @@ def test_quant_request_on_repo_without_matching_quant_lists_files(tmp_path, monk
     else:
         raise AssertionError("missing requested quant must raise SystemExit")
 
+
+
+# ---- config.json construction: the multimodal wrapper and the missing keys ----
+
+
+def _kernel_set(tmp_path, check, defaults=None):
+    kdir = tmp_path / "Qwen3.5-4B-NPU2" / "open_kernels"
+    kdir.mkdir(parents=True)
+    (kdir / "manifest.json").write_text(json.dumps({
+        "hf_config_check": check,
+        "hf_config_defaults": defaults or {},
+    }), encoding="utf-8")
+    return kdir.parent
+
+
+LAYER_TYPES = ["linear_attention"] * 3 + ["full_attention"]
+
+
+def _tower_config():
+    """The shape empero-ai/Qwen3.8-4B and Qwen/Qwen3.5-4B ship: a VLM wrapper."""
+    return {
+        "model_type": "qwen3_5",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "hidden_size": 2560,
+            "num_hidden_layers": 4,
+            "vocab_size": 248320,
+            "intermediate_size": 9216,
+            "head_dim": 256,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "linear_num_value_heads": 32,
+            "layer_types": list(LAYER_TYPES),
+        },
+        "vision_config": {"depth": 27},
+    }
+
+
+def _check_for(cfg):
+    tower = cfg.get("text_config", cfg)
+    return {k: v for k, v in tower.items() if k != "model_type"}
+
+
+def test_a_multimodal_config_is_flattened_for_the_engines_top_level_checks(tmp_path):
+    """The install used to succeed and the LOAD fail: 'config.json lacks layer_types'."""
+    cfg = _tower_config()
+    kdir = _kernel_set(tmp_path, _check_for(cfg))
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    oflm_add.reconcile_config_json(model, kdir)
+
+    out = json.loads((model / "config.json").read_text(encoding="utf-8"))
+    assert out["layer_types"] == LAYER_TYPES          # lifted out of text_config
+    assert out["hidden_size"] == 2560
+    assert out["text_config"]["layer_types"] == LAYER_TYPES   # the wrapper is kept
+    assert out["vision_config"] == {"depth": 27}
+
+
+def test_a_key_the_config_omits_entirely_comes_from_the_kernel_set(tmp_path):
+    cfg = _tower_config()
+    del cfg["text_config"]["layer_types"]
+    kdir = _kernel_set(tmp_path, _check_for(_tower_config()))
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    filled, conflicting = oflm_add.reconcile_config_json(model, kdir)
+
+    assert filled == ["layer_types"] and conflicting == []
+    out = json.loads((model / "config.json").read_text(encoding="utf-8"))
+    assert out["layer_types"] == LAYER_TYPES
+
+
+def test_a_contradicting_config_is_reported_not_overwritten(tmp_path):
+    """A different model must still be refused at load; add only says so earlier."""
+    cfg = _tower_config()
+    cfg["text_config"]["layer_types"] = ["full_attention"] * 4
+    kdir = _kernel_set(tmp_path, _check_for(_tower_config()))
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    filled, conflicting = oflm_add.reconcile_config_json(model, kdir)
+
+    assert conflicting == ["layer_types"] and filled == []
+    out = json.loads((model / "config.json").read_text(encoding="utf-8"))
+    assert out["text_config"]["layer_types"] == ["full_attention"] * 4
+
+
+def test_a_key_with_a_manifest_default_may_stay_absent(tmp_path):
+    cfg = _tower_config()
+    del cfg["text_config"]["vocab_size"]
+    kdir = _kernel_set(tmp_path, _check_for(_tower_config()), defaults={"vocab_size": 248320})
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    filled, conflicting = oflm_add.reconcile_config_json(model, kdir)
+
+    assert filled == [] and conflicting == []
+    assert "vocab_size" not in json.loads((model / "config.json").read_text())

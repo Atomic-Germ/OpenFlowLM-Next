@@ -231,6 +231,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        // A MULTIMODAL config wraps the text tower: hidden_size, layer_types,
+        // full_attention_interval ... live under `text_config` and the top level
+        // carries the vision keys. The checks below are top-level, and the GGUF's
+        // derived metadata fills only what it has (it has no layer_types), so an
+        // empero-ai/Qwen3.8-4B install failed with "config.json lacks
+        // 'layer_types'" although the tower's config had it all along. Lift the
+        // tower's keys where the top level has none; the wrapper stays intact.
+        for (const char* wrapper : {"text_config", "llm_config", "language_config"}) {
+            auto it = j.find(wrapper);
+            if (it == j.end() || !it->is_object()) continue;
+            for (auto& [key, value] : it->items())
+                if (!j.contains(key)) j[key] = value;
+            break;
+        }
         if (gguf_) {
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())

@@ -1012,6 +1012,122 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def kernel_manifest_dir(name, roots):
+    """The kernel set directory called `name` in any root, or None."""
+    if not name:
+        return None
+    for root in roots:
+        if not root:
+            continue
+        d = Path(root) / name
+        if (d / "open_kernels" / "manifest.json").is_file():
+            return d
+    return None
+
+
+def reconcile_config_json(target, kernel_dir):
+    """Make config.json carry the keys the KERNEL SET validates against.
+
+    A GGUF repo's config.json -- or the finetune base's, which is where add
+    takes it from -- is often not the full HF config: empero-ai/Qwen3.8-4B
+    ships one without `layer_types` and without `full_attention_interval`, so
+    the model INSTALLS (the geometry matched by kernel_hash) and then the
+    engine refuses it at load, after the multi-GB download:
+
+        open_qwen36: <model>: config.json lacks 'layer_types'
+
+    The kernel set's manifest already holds the exact values the engine will
+    compare against (`hf_config_check`, plus `hf_config_defaults` for a key
+    whose absence is legal). A key the config OMITS and the set REQUIRES is
+    filled from there: the install already matched this model's geometry, so
+    the set is the authority on what it can serve -- and `layer_types` is
+    exactly the key a finetune's config drops, because it is redundant for a
+    loader that infers the pattern from `full_attention_interval`.
+
+    A key the config CONTRADICTS is never overwritten: that is a different
+    model, and the engine must still refuse it. Those are reported instead, at
+    install time rather than at the first `oflm run`.
+
+    Returns (filled, conflicting) key lists.
+    """
+    cfg_path = Path(target) / "config.json"
+    mj = Path(kernel_dir) / "open_kernels" / "manifest.json" if kernel_dir else None
+    if not cfg_path.is_file() or mj is None or not mj.is_file():
+        return [], []
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        man = json.loads(mj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    check = man.get("hf_config_check") or {}
+    defaults = man.get("hf_config_defaults") or {}
+    if not isinstance(cfg, dict):
+        return [], []
+
+    # 1. A MULTIMODAL config wraps the text tower: empero-ai/Qwen3.8-4B (and
+    # Qwen/Qwen3.5-4B itself) keep hidden_size, layer_types,
+    # full_attention_interval ... under `text_config`, and the engine merges the
+    # GGUF's FLAT metadata over the TOP level -- which supplies hidden_size but
+    # has no layer_types to supply ("config.json lacks 'layer_types'" at load,
+    # after a 2.8 GB install). Lift the tower's keys up where the top level has
+    # none; the wrapper is left intact, so a vision engine still finds it.
+    flattened = []
+    for wrapper in ("text_config", "llm_config", "language_config"):
+        inner = cfg.get(wrapper)
+        if not isinstance(inner, dict):
+            continue
+        for k, v in inner.items():
+            if k not in cfg:
+                cfg[k] = v
+                flattened.append(k)
+        break
+
+    def expected(key):
+        want = check[key]
+        return want[0] if isinstance(want, list) else want
+
+    filled, conflicting = [], []
+    for key, want in check.items():
+        if key == "layer_types":
+            got = cfg.get("layer_types")
+            if got is None and cfg.get("full_attention_interval") and cfg.get("num_hidden_layers"):
+                iv = int(cfg["full_attention_interval"])
+                n = int(cfg["num_hidden_layers"])
+                if iv > 0:
+                    got = ["full_attention" if (l + 1) % iv == 0 else "linear_attention"
+                           for l in range(n)]
+            if got is None:
+                cfg[key] = list(want)
+                filled.append(key)
+            elif list(got) != list(want):
+                conflicting.append(key)
+            continue
+        if key in cfg:
+            got = cfg[key]
+            ok = got in want if isinstance(want, list) else got == want
+            if not ok:
+                conflicting.append(key)
+            continue
+        if key in defaults:                # absence is legal (the manifest names a default)
+            continue
+        cfg[key] = expected(key)
+        filled.append(key)
+
+    if filled or flattened:
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    if flattened:
+        log(f"[INFO] config.json: flattened {len(flattened)} key(s) from text_config "
+            f"(the engine validates at the top level)")
+    if filled:
+        log(f"[INFO] config.json: filled {', '.join(filled)} from the kernel set "
+            f"(the model's config omits it; the engine validates against the set)")
+    if conflicting:
+        log(f"[WARN] config.json disagrees with the kernel set on {', '.join(conflicting)}; "
+            f"the engine will refuse this model at load. The set was built for another "
+            f"configuration -- check the base model and the quant repo.")
+    return filled, conflicting
+
+
 def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
     stock HF repos keep them in generation_config.json -- merge them over."""
@@ -2825,6 +2941,9 @@ def main():
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
+    _kset = gguf_kernel_dir or kernel_manifest_dir(xclbin_source, kernel_roots)
+    if _kset is not None and (Path(target) / "config.json").is_file():
+        reconcile_config_json(target, _kset)
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []
