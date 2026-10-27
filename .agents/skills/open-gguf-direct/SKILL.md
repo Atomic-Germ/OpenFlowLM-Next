@@ -819,6 +819,28 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## The spec batch: one easy, three named pieces (2026-10-27, `5e95f7f`)
+
+Ran the sizes that "only lacked a spec". Result:
+
+| model | outcome |
+|---|---|
+| **Llama-3-8B** (plain rope) | **shipped** — `Llama-3-8B-NPU2`, spec derived from the GGUF (`gen-kernel-spec.py --gguf`, the HF repo is gated), then `build-new-spec.py --spec llama3-8b` |
+| granite-4.2-8b (FF 12800) | gate: `gemv_q4 K=12800`. The FF fits the *recipe's* L1 model so it is not split, and the standalone fixture cannot hold a K above ~12288 |
+| Hy-MT2-1.8B (128, 16, 4, post-rope qk norm) | the **attention probe** does not cover this shape: its k output is wrong even for a ZERO input (k rel 0.68), while `groups` passes — look at attn_meta/attn_k element slicing at kvh=4 before suspecting the kernel |
+| K2-Horizon-0.9B | `ln width=1536 groups=2` does not build; gemv K=1536 and lm_head K=1536/vocab 64256 ungated; and its config nests rope under `rope_parameters.rope_theta`, which the k2 family builder refuses (the spec is the template fallback) |
+
+All three parked in `recipes/candidates/` with `extra.blocked_on` recording the
+above, so nobody re-derives it.
+
+Two workflow additions made this batch possible and are worth remembering:
+`gen-kernel-spec.py --gguf <file>` (a gated/absent HF config, geometry from the
+file) and `build-new-spec.py --spec <stem>` (build/gate/register an existing spec).
+
+Also fixed: the GGUF **arch** map and the HF **model_type** map had been mixed
+together, so `k2_horizon` / `hunyuan_v1_dense` stopped deriving a family. They are
+separate vocabularies (k2-horizon vs k2_horizon); a test now pins both.
+
 ## The two "impossible" sizes share ONE enabler (2026-10-27)
 
 Measured, not guessed:
