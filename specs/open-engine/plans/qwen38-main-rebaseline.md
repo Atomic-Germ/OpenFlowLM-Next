@@ -1,5 +1,46 @@
 # Qwen3.8-27B validation report
 
+
+## FP32 sequential causal attribution — 2026-10-27
+
+Added CPU conditioned replay for the audited standard FP32 boundary captures.
+The adapter remeasures all three prompt lengths and ordinary/traced routes,
+pins 6686 input files, and preserves the native baseline's numerical FAIL.
+It caches only one decoded layer at a time (peak weight cache 1.42578125 GiB).
+No production arithmetic, native captures or installed runtime was changed.
+
+Run and separate audit complete: **9/9 exact reference reconstructions** and
+**18/18 byte-exact NPZ replays**, covering both routes at L0/P125,205,239,
+L40–41/P239, L53–54/P125 and L57–58/P205. L0 input/history effects are zero.
+All signed decompositions close; reference-rounding effects are zero.
+
+| Sequential target | Current input | Input history | Implementation gap | Total maxrel |
+|---|---:|---:|---:|---:|
+| L41/P239 | 0.0067798097 | 0.0000183318 | 0.0000143036 | 0.0067813607 |
+| L54/P125 | 0.0056910580 | 0.0000078442 | 0.0000126243 | 0.0056958381 |
+| L58/P205 | 0.0992276775 | 0.0000043239 | 0.0000081645 | 0.0992221863 |
+
+Components share the output reference scale, but their scalar maxima cannot be
+added: signed vectors can cancel. The ideal layer driven by native inputs
+already reproduces the failing magnitude at these targets. The largest selected
+sequential implementation gap is **1.43036e-5**. L57/P205 already has total
+maxrel 0.0926540506. Selected total-output gates pass 5/9 sequential and 9/9
+hybrid cases; hybrid worst maxrel is 0.0025616438.
+
+This localizes the dominant effect to incoming errors at the selected targets,
+not their original source. The implementation gap includes native arithmetic
+and accumulated native state error; ideal replay state is not a native state
+capture. Next extend conditioned replay through all layers at P125/P205/P239
+to locate earlier contributions before choosing sublayer captures or a fix.
+Overall numerical acceptance remains **FAIL**, with unchanged thresholds.
+
+TDD: eight new tests fail before implementation and pass afterward; 35 focused
+tests pass. Full host suite: **1933 passed, 47 skipped**. Evidence is retained
+under `Models/qwen38-27b/post-prefill-drift/targets-v1` with a separate audit,
+`targets-summary.json`, and test logs. No kernel/library build or NPU run was
+needed for this diagnosis. Long-prefix reset, serving and performance remain open.
+
+
 ## FP32 full-depth block-boundary results — 2026-10-27
 
 Completed all **18 resident processes** for 255/256/257-token prompts, all 64

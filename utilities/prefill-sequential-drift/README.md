@@ -1,5 +1,51 @@
 # Sequential long-prefix drift diagnosis
 
+## Current standard FP32 export
+
+Use `post_targets.py` with the audited `post_boundaries.py` result. It validates
+all three prompt lengths and all ordinary/traced routes again, including source,
+build, model, reference, raw capture and prefix identities. A completed numerical
+FAIL is a valid diagnostic input; its acceptance result must remain unchanged.
+The previous tools and their historical artifacts are retained without edits.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/post_targets.py run \
+  --baseline Models/qwen38-27b/post-prefill-production/boundaries-native-v1 \
+  --target 0:125,205,239 --target 40:239 --target 41:239 \
+  --target 53:125 --target 54:125 --target 57:205 --target 58:205 \
+  --out Models/qwen38-27b/post-prefill-drift/targets-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/post_targets.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/targets-v1
+```
+
+This selection covers the first temporal crossing L54/P125, shallowest failing
+layer L41/P239, worst residual L58/P205, their preceding layers and a shared-input
+L0 control. Only one layer's decoded weights is cached at a time. No NPU dispatch,
+kernel build, model repacking or full-model residency is required. Use a fresh
+output directory, and do not overlap weight replay with resident NPU validation.
+
+The replay reuses the independent oracle and causal state/counterfactual helpers.
+Every selected reference must first reproduce the retained FP32 reference bytes.
+Both sequential and hybrid native histories are evaluated independently. Signed
+error components must close; scalar maxima cannot be added. The gap between
+native and ideal output driven by native inputs includes local arithmetic AND
+accumulated native state error. Ideal replay state is not a native state capture.
+The separate audit replays the oracle and requires byte-exact NPZ arrays and
+identical measurements. Exit zero means diagnosis completed, not model acceptance.
+
+### Validated FP32 checkpoint — 2026-10-27
+
+`targets-v1` and its separate audit complete with 6686 bound input files,
+9 exact reference reconstructions and 18 byte-exact NPZ replays. Peak decoded
+weight cache: 1.42578125 GiB. The three selected failure targets are dominated
+by current-input effects; the largest sequential implementation gap over the
+selection is 1.43036e-5. Sequential total gates pass 5/9 and hybrid 9/9.
+The original sequential numerical FAIL remains unchanged. Earlier layers must
+be examined to locate the initial source; this result does not establish a fix.
+Eight new TDD tests; full host suite: 1933 passed, 47 skipped.
+
+## Historical expanded export
+
 CPU-only causal attribution at L60/P37–39 and L33/P240–242 using the verified
 expanded 257-token native run. These include the first temporal residual failure
 and the shallowest failing layer, plus neighboring positions. Compare sequential
