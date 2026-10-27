@@ -792,6 +792,33 @@ been RUN on the hardware. `catalogue.collecting()` (used by both scripts) means
 one `recipe()` pass reports EVERY missing point, not just the first that would
 raise — so a new size never has to be discovered one failure at a time.
 
+## The config.json trap in `oflm add` (found 2026-10-26, `108391f`)
+
+`oflm add empero-ai/Qwen3.8-4B-Distill-GGUF` installed fine (geometry matched
+`Qwen3.5-4B-NPU2`) and then `oflm bench` refused it:
+
+    open_qwen36: Qwen3.8-4B-Distill-GGUF: config.json lacks 'layer_types'
+
+The repo's config is a MULTIMODAL wrapper -- `hidden_size`, `num_hidden_layers`,
+`layer_types`, `full_attention_interval` under `text_config`, the top level
+holding the vision keys (Qwen/Qwen3.5-4B's own config is the same shape). The
+engine's checks are top-level, and it merges the GGUF's DERIVED metadata only
+for keys config.json lacks: that supplies `hidden_size` and friends, but the
+GGUF has no `layer_types`, so the check walks all the way to it and refuses.
+
+`reconcile_config_json()` now makes the installed config self-contained:
+flatten `text_config`/`llm_config`/`language_config` into the top level (the
+wrapper is kept), fill anything still omitted from the kernel set's
+`hf_config_check` (skipping keys with a manifest default), and REPORT a key the
+config contradicts. The engine flattens at load too, so an install from before
+this fix still loads.
+
+Generalisable lesson: a GGUF install is only as good as the config.json beside
+it, and neither the repo's nor its base's config is guaranteed to be in the
+shape the engine validates. Anything `hf_config_check` names must be present
+after the install -- `config.json` is part of the kernel set's contract, not
+commentary.
+
 ## The wrong-kernels trap in `oflm add` (found 2026-10-26)
 
 `resolve_official()` ends with "no exact size match for X B; using Y B kernels",
