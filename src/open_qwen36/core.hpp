@@ -350,6 +350,10 @@ private:
     /// OFLM_OPEN_SUBMIT_AHEAD sets it.
     int submit_ahead_ = 0;
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
+    bool merged_q41_ = false;
+    bool layer_nan_ = false;                   ///< OFLM_OPEN_LAYER_NAN: per-layer xres census
+    size_t dump_seq_ = 0;
+    void layer_nan_check(xrt::bo& xres, int layer);                  ///< OFLM_GGUF_POOL_Q41 rewrote the gguf section onto the q4_1 twin
     /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
     /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
     /// this box's NPU clock down through the shared package budget.

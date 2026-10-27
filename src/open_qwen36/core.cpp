@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <functional>
 #include <limits>
 #include <map>
@@ -220,6 +221,110 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
                                  "(manifest.json has no gguf section; re-export the kernels)");
+    // ---- OFLM_GGUF_POOL_Q41: run the GGUF-sourced weights through the q4_1
+    // twin instead of the f32-scale one. Every shipped q4nx model runs on the
+    // q4_1 builds, so this separates the f32-scale CHUNK handling in the
+    // layer_x builds from everything else: same source file, same family
+    // geometry, the same kernels the q4nx model answers on. The two sections'
+    // pack ops pair one to one (the same tensors, the same chunk counts --
+    // only the byte offsets move with the chunk law), so each op takes the
+    // base section's geometry under the GGUF packing kind, and the base
+    // section's chunk / pool / lx / ax: the packed slots land where the q4_1
+    // designs read them. Whatever still misbehaves is then not the f32 chunk.
+    if (const char* q = std::getenv("OFLM_GGUF_POOL_Q41"); gguf_ && w_ && q && *q && *q != '0') {
+        Manifest& m = *man_.gguf;
+        const Manifest& b = man_;
+        auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
+                        const std::string& lt) {
+            if (go.size() != bo.size())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt +
+                                         ": the sections' pack ops do not pair (" +
+                                         std::to_string(go.size()) + " vs " + std::to_string(bo.size()) + ")");
+            for (size_t i = 0; i < go.size(); ++i) {
+                if (go[i].tensor != bo[i].tensor)
+                    throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " op " + std::to_string(i) +
+                                             ": tensors differ (" + go[i].tensor + " vs " + bo[i].tensor + ")");
+                // Only the projection pairs move: the base's std_perm becomes the
+                // GGUF-reading kind under the base's geometry. The ops whose kind
+                // is NOT a chunk law question (put, conv, lm head...) stay exactly
+                // as the GGUF section has them -- they work there today.
+                if (bo[i].op != "std_perm" || go[i].op != "std_perm_gguf") continue;
+                go[i].nch = bo[i].nch;
+                go[i].in_dim = bo[i].in_dim;
+                go[i].chunk0 = bo[i].chunk0;
+                go[i].dst = bo[i].dst;
+                go[i].split.clear();
+                go[i].via.clear();
+            }
+        };
+        for (auto& [lt, g] : m.layer_types) {
+            const auto it = b.layer_types.find(lt);
+            if (it == b.layer_types.end())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " is not in the base section");
+            const LayerType& bl = it->second;
+            merge(g.pool, bl.pool, lt);
+            merge(g.consts, bl.consts, lt);
+            g.consts_bytes = bl.consts_bytes;
+            g.act_bytes = bl.act_bytes;
+            g.state_kind = bl.state_kind;
+            g.state_bytes = bl.state_bytes;
+            g.state_row = bl.state_row;
+            g.program = bl.program;                  // the base builds' step
+            g.gemm_block = GemmBlockProgram{};       // the q4nx prefill route stays off for a GGUF
+        }
+        m.chunk_bytes = b.chunk_bytes;
+        m.pool_bytes = b.pool_bytes;
+        // the decode builds: name lx / ax through the base section's kernels;
+        // the head (lm) and the norm (ln) stay the GGUF section's f32 ones
+        // the kernels to swap are whatever the LAYER programs name -- derived,
+        // not a list: the steps' kernels pair one to one across the sections,
+        // and anything else (the tail's norm and head, the prefill GEMM route
+        // this section does not have) stays what the GGUF section names. When a
+        // name exists in both sections and its context differs, it drives the
+        // pool slot law, so it takes the base section's build.
+        std::set<std::string> swap_names;
+        for (const auto& name_step : m.layer_types)
+            for (const auto& s : name_step.second.program)
+                swap_names.insert(s.kernel);
+        for (const std::string& n : swap_names) {
+            const auto kt = m.kernels.find(n);
+            if (kt == m.kernels.end()) continue;
+            const auto bt = b.kernels.find(n);
+            if (bt == b.kernels.end()) continue;
+            m.contexts[bt->second.context] = b.contexts.at(bt->second.context);
+            kt->second = bt->second;             // the base's context and instruction stream
+        }
+        // ---- the HEAD is part of the law too. It stays "lm" in the kernels map but
+        // the two sections name different BUILDS there (lm_head_q4_f32 vs lm_head_q4),
+        // and its pack op carries the chunk geometry -- so swap the build, the op's
+        // geometry and the pool size, or the bisect runs a q4_1-packed head through
+        // the f32 kernel and every answer is garbage for a reason that is not the
+        // layer path. The globals come along: `lmpool` is the head pool's offset, so
+        // it (and everything after it) moves with the law.
+        {
+            const auto kg = m.kernels.find("lm");
+            const auto kb = b.kernels.find("lm");
+            if (kg != m.kernels.end() && kb != b.kernels.end()) {
+                m.contexts[kb->second.context] = b.contexts.at(kb->second.context);
+                kg->second = kb->second;
+            }
+            if (m.lmhead_ops.size() == b.lmhead_ops.size()) {
+                for (size_t i = 0; i < m.lmhead_ops.size(); ++i) {
+                    m.lmhead_ops[i].nch = b.lmhead_ops[i].nch;
+                    m.lmhead_ops[i].in_dim = b.lmhead_ops[i].in_dim;
+                    m.lmhead_ops[i].chunk0 = b.lmhead_ops[i].chunk0;
+                    m.lmhead_ops[i].dst = b.lmhead_ops[i].dst;
+                }
+            }
+            m.lmhead_pool_bytes = b.lmhead_pool_bytes;
+            m.lmhead_chunk_bytes = b.lmhead_chunk_bytes;
+            m.globals = b.globals;
+        }
+        merged_q41_ = true;
+        log("OFLM_GGUF_POOL_Q41: GGUF weights on the q4_1 twin (chunk " +
+            std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
+            "for the f32-numerics bisect");
+    }
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
     // there); anything GGUF does not carry is refused with its name.
@@ -439,6 +544,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_READ_FENCE")) g_read_fence = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_STEP_TRACE")) step_trace_ = std::atoi(env);
+    if (const char* env = std::getenv("OFLM_OPEN_LAYER_NAN")) layer_nan_ = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_SPIN_US")) spin_us_ = std::atoi(env);
     // OPEN-DECODE-PIPELINE. Level 1 keeps the next layer's first dispatch in flight behind
     // this layer's last one only when the two share a hardware context; level 2 crosses
@@ -614,6 +720,15 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         xrt::bo pool = xrt::ext::bo(*dev_, w_->pool_bytes);
         uint8_t* pool_host = pool.map<uint8_t*>();
         pools::pack_pool(*w_, lt, *file_, l, pool_host);
+        // Bring-up probe (OFLM_OPEN_DUMP_POOLS=<dir>): layer 0's packed pool, so it can
+        // be diffed byte-for-byte against a container's chunks for the same model. The
+        // packer agrees with its NumPy reference; this is the other end of that check --
+        // the bytes the KERNELS actually read.
+        if (const char* dp = std::getenv("OFLM_OPEN_DUMP_POOLS"); dp && *dp && l == 0) {
+            const std::string tag = gguf_ ? (std::getenv("OFLM_GGUF_POOL_Q41") ? "q41" : "f32") : "q4nx";
+            std::ofstream f(std::filesystem::path(dp) / (tag + "_pool0.bin"), std::ios::binary);
+            f.write(reinterpret_cast<const char*>(pool_host), static_cast<std::streamsize>(w_->pool_bytes));
+        }
         build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
@@ -621,6 +736,11 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(*w_, lt, *file_, l, c_host);
+        if (const char* dp = std::getenv("OFLM_OPEN_DUMP_POOLS"); dp && *dp && l == 0) {
+            const std::string tag = gguf_ ? (std::getenv("OFLM_GGUF_POOL_Q41") ? "q41" : "f32") : "q4nx";
+            std::ofstream f(std::filesystem::path(dp) / (tag + "_consts0.bin"), std::ios::binary);
+            f.write(reinterpret_cast<const char*>(c_host), static_cast<std::streamsize>(lt.consts_bytes));
+        }
         build_weights(lt, l, "consts", c_host);
         build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
@@ -1851,6 +1971,31 @@ void Core::write_record(size_t row, const double pos[3]) {
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
 }
 
+void Core::layer_nan_check(xrt::bo& xres, int layer) {
+    xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+    const float* x = xres.map<float*>();
+    int nnan = 0;
+    float mx = 0.f;
+    for (size_t i = 0; i < w_->hidden; ++i) {
+        if (!std::isfinite(x[i])) ++nnan;
+        else mx = std::max(mx, std::fabs(x[i]));
+    }
+    char detail[24] = "";
+    if (nnan == 0 && mx < 1.f) std::snprintf(detail, sizeof detail, " (small)");
+    log("layer " + std::to_string(layer) + " (" + types_[layer]->name + ") xres nan=" +
+        std::to_string(nnan) + " maxabs=" + std::to_string(mx) + detail);
+    // bring-up (OFLM_OPEN_LAYER_DUMP=<prefix>): also write the layer's xres row
+    // as raw f32 hidden floats, one file per (step, layer) — the step index is
+    // the dump sequence, so the first prompt token's layer 0 is _0_l0 etc.
+    if (const char* pfx = std::getenv("OFLM_OPEN_LAYER_DUMP")) {
+        char path[512];
+        std::snprintf(path, sizeof path, "%s_%zu_l%d.bin", pfx, dump_seq_++, layer);
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(x), w_->hidden * 4);
+        f.close();
+    }
+}
+
 void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                      const float* deepstack, int n_deepstack) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
@@ -1942,7 +2087,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !deepstack;
+    const bool pipe = submit_ahead_ > 0 && !layer_nan_ && !deepstack;
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
@@ -1972,6 +2117,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
+            if (layer_nan_) layer_nan_check(xres, l);
             continue;
         }
         // (1) the previous layer's last dispatch, so its instruction BO is free to patch and
