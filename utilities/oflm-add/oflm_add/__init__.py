@@ -355,11 +355,6 @@ GGUF_ARCH_FAMILIES = {
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
-    "hunyuan_v1_dense": "hunyuan",
-    "k2_horizon": "k2",
-    "qwen3_5": "qwen3.5",
-    "qwen3_5_text": "qwen3.5",
-    "qwen3_next": "qwen3.5",
     "hunyuan-dense": "hunyuan",     # Hy-MT2's own arch name
     "k2-horizon": "k2",             # IFM K2-Horizon (0.9B / 3.7B / 7B)
     "qwen35": "qwen3.5",
@@ -376,10 +371,19 @@ CONFIG_MODEL_FAMILIES = {
     "qwen2": "qwen2",
     "llama": "llama3",
     "gemma3": "gemma3",
+    "gemma3_text": "gemma3",
     "phi4": "phi4",
+    "phi3": "phi3",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "hunyuan_v1_dense": "hunyuan",
+    "k2_horizon": "k2",
+    "lfm2": "lfm2",
     "gpt_oss": "gpt-oss",
+    # Qwen3.5 / 3.8's own model_type (the tag is still qwen3.5)
+    "qwen3_5": "qwen3.5",
+    "qwen3_5_text": "qwen3.5",
+    "qwen3_next": "qwen3.5",
 }
 
 

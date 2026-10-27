@@ -882,3 +882,15 @@ def test_a_stub_config_is_rebuilt_from_the_gguf(tmp_path):
     cfg = json.loads((tmp_path / "config.json").read_text())
     assert cfg["hidden_size"] == 3072 and cfg["vocab_size"] == 128256
     assert cfg["model_type"] == "llama"
+
+
+def test_the_two_family_maps_keep_their_own_spellings():
+    """GGUF arch names and HF model_type names are different vocabularies (k2-horizon vs
+    k2_horizon, hunyuan-dense vs hunyuan_v1_dense). Mixing them into one map is how a
+    correct config stops deriving a family."""
+    assert oflm_add.GGUF_ARCH_FAMILIES["k2-horizon"] == "k2"
+    assert oflm_add.family_from_config_dict({"model_type": "k2_horizon"}) == "k2"
+    assert oflm_add.GGUF_ARCH_FAMILIES["hunyuan-dense"] == "hunyuan"
+    assert oflm_add.family_from_config_dict({"model_type": "hunyuan_v1_dense"}) == "hunyuan"
+    # a GGUF arch must not resolve through the config table and vice versa
+    assert "hunyuan_v1_dense" not in oflm_add.GGUF_ARCH_FAMILIES
