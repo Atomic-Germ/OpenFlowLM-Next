@@ -82,7 +82,7 @@ AB_LANES = 32                # dn_glue.h's kV: the lanes of one alpha/beta W row
 
 def chunk_bytes(quant: str) -> int:
     """The q4 pool chunk bytes for a scale layout: q4nx bf16 (5120) or GGUF-direct f32 (6144)."""
-    if quant == "q4_1":
+    if quant in ("q4_1", "q4_1_gguf"):     # q4_1_gguf: GGUF-reading ops, same chunk law
         return CHUNK
     if quant == "q4_1_f32":
         return CHUNK_F32
@@ -215,7 +215,7 @@ def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: 
     q8 (twice the pool elements, 16-row half-tiles). `chunk0` is a SOURCE file-chunk offset
     in either format, so the fused [q | gate] split reads the same way."""
     q = spec.quant_of(role)
-    if q == "q4_1_f32":
+    if q in ("q4_1_f32", "q4_1_gguf"):    # both read a GGUF source; the chunk law differs
         pop = "std_perm_gguf"
     elif q == "q8":
         pop = "q8_perm"
@@ -1570,13 +1570,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(LIMITS["n_cols"])}}
-    if spec.quant == "q4_1":
-        # The GGUF-direct twins: the same layer designs against the f32-scale pool
-        # layout (the q4_1 codes with f32 block scales). The env says which variant
-        # to build (designs/layer_x/layout.py reads it); the q4_1 builds above are
-        # untouched, so a shipped model keeps the kernels it has.
-        if GGUF_EXPERT_OPS_READY:
-            b.update(GGUF.twin_builds(b, skip=("ln", "lm_head_q8")))
+    # No f32-scale twins: a GGUF model runs on the q4_1 builds above (recipes/gguf.py).
+    # The GGUF section still waits on the expert pack ops (GGUF_EXPERT_OPS_READY).
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

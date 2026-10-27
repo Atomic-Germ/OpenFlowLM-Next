@@ -43,7 +43,10 @@ QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
 # way llama's were (Phi-3 also rotates only rotary_dim of a head, and llama.cpp keeps that
 # tail in the un-rotated neox-style position: verify before moving either family).
 ROPE_INTERLEAVED_FAMILIES = ("llama3",)
-QUANT_FORMATS = ("q4_1", "q4_1_f32", "q8", "mxfp4")
+# q4_1_gguf: the manifest SECTION a GGUF model loads (the q4_1 chunk law, with the
+# pack ops in their GGUF-reading form). Not a weight format a container carries --
+# see recipes/gguf.py.
+QUANT_FORMATS = ("q4_1", "q4_1_f32", "q4_1_gguf", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
 NORM_GROUPS = (1, 2, 4)   # the GroupRMSNorm counts the `ln` kernels build (ln.h LN_GROUPS)
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
@@ -296,7 +299,7 @@ class ModelSpec:
     # informational extras.
     _KERNEL_INDEPENDENT = ("num_layers", "real_vocab", "extra", "layer_types")
 
-    def kernel_hash(self) -> str:
+    def kernel_hash(self, ignore: tuple[str, ...] = ()) -> str:
         """The hash of the geometry the KERNELS depend on.
 
         Two specs with the same kernel hash need the same compiled xclbins. The
@@ -308,7 +311,7 @@ class ModelSpec:
         exactly; this is the coarser key that says "these kernels serve you".
         """
         d = self.to_dict()
-        for k in self._KERNEL_INDEPENDENT:
+        for k in (*self._KERNEL_INDEPENDENT, *ignore):
             d.pop(k, None)
         d["layer_types"] = sorted(set(self.layer_types))   # which designs, not how many
         # The eps rides in the norm design's env as f"{eps:g}", so the two
@@ -1531,6 +1534,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
+                 "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",

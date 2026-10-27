@@ -55,7 +55,7 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
     F = for_spec(spec)
     F.recipe(spec, max_ctx)                 # refuses a spec outside the validated points
     prog = F.programs(spec, max_ctx)
-    gguf = prog.pop("gguf", None)           # the f32-scale twin program (dense recipe), for GGUF-direct
+    gguf = prog.pop("gguf", None)           # the quant a GGUF-direct model's section is built under
     check = {"model_type": hf_model_types(spec.family)}
     check.update(F.hf_config_check(spec))
     m = {
@@ -83,11 +83,12 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["layer_types"][lt]["pack"] = d
     m["pack"] = plan          # pool_bytes, chunk_bytes, lm_head {pool_bytes, ops}, embed, norm
     if gguf:
-        # A COMPLETE manifest for the f32-scale twin (GGUF-direct weight files): the
-        # engine parses it with the same code and swaps the whole view at load. The
+        # A COMPLETE manifest for a GGUF-direct weight file: the engine parses it with
+        # the same code and swaps the whole view at load. The recipe names the quant it
+        # wants (gguf.py's GGUF_QUANT: the q4_1 law with GGUF-reading pack ops), and the
         # quant guard keeps the nested manifest from carrying its own gguf section.
         from dataclasses import replace
-        m["gguf"] = manifest(replace(spec, quant="q4_1_f32"), max_ctx, key)
+        m["gguf"] = manifest(replace(spec, quant=gguf), max_ctx, key)
     if has_split_step(m["layer_types"]):
         m["manifest_version"] = SPLIT_MANIFEST_VERSION
     if has_gemm_pool_op(m["layer_types"]):

@@ -592,23 +592,6 @@
     "LMHEAD_CORES": "8"
    }
   },
-  "dx_f32": {
-   "design": "dense/dx.py",
-   "build_dir": "dense/build_hunyuan_h4096_f32",
-   "env": {
-    "GEMV_SCALES_F32": "1"
-   }
-  },
-  "lm_head_q4_f32": {
-   "design": "lm_head_q4/lm_head_q4.py",
-   "build_dir": "lm_head_q4/build_128192_f32",
-   "env": {
-    "LMHEAD_N": "128192",
-    "LMHEAD_K": "4096",
-    "LMHEAD_CORES": "8",
-    "LMHEAD_SCALES_F32": "1"
-   }
-  },
   "dx_attn": {
    "design": "dense/dx_attn.py",
    "build_dir": "dense/build_dxa_hunyuan_h4096",
@@ -741,14 +724,14 @@
    "moe_intermediate": 0,
    "shared_expert_intermediate": 0,
    "norm_eps": 1e-05,
-   "quant": "q4_1_f32",
+   "quant": "q4_1_gguf",
    "extra": {
     "model_type": "hunyuan_v1_dense",
     "source": "hf_config",
     "model": "Hy-MT2-7B-NPU2"
    }
   },
-  "spec_hash": "sha256:e1f8c95a16ec8cd3089ea3ccd792080e80720eabe6e99291f4fe22fc939cef1b",
+  "spec_hash": "sha256:675074b8236d729b4c3a3a9dd3474eba6d5c9c9f23285f3e687a7f3a942d7c33",
   "build_key": "sha256:fixture",
   "max_ctx_default": 4096,
   "hf_config_check": {
@@ -768,9 +751,9 @@
    "hidden": 4096,
    "vocab": 128192,
    "real_vocab": 128166,
-   "chunk_bytes": 6144,
-   "pool_bytes": 163577856,
-   "lmhead_pool_bytes": 395313152,
+   "chunk_bytes": 5120,
+   "pool_bytes": 136314880,
+   "lmhead_pool_bytes": 329252864,
    "kv_row": 4096,
    "ptab_row": 2048,
    "rotary_dim": 128,
@@ -878,9 +861,11 @@
    "dense"
   ],
   "contexts": {
-   "dx": "dx_f32/final.xclbin",
+   "dx": "dx/final.xclbin",
    "ln": "ln/final.xclbin",
-   "lm": "lm_head_q4_f32/final.xclbin"
+   "lm": "lm_head_q4/final.xclbin",
+   "dxa": "dx_attn/final.xclbin",
+   "gemm": "gemm_n4096_k4096/final.xclbin"
   },
   "kernels": {
    "ln": {
@@ -890,15 +875,42 @@
    },
    "lm": {
     "context": "lm",
-    "insts": "lm_head_q4_f32/insts.bin",
-    "build": "lm_head_q4_f32"
+    "insts": "lm_head_q4/insts.bin",
+    "build": "lm_head_q4"
    },
    "dx": {
     "context": "dx",
-    "insts": "dx_f32/insts.bin",
+    "insts": "dx/insts.bin",
     "patch": "attnpos",
-    "build": "dx_f32",
+    "build": "dx",
     "window": 0
+   },
+   "dxB": {
+    "context": "dxa",
+    "insts": "dx_attn/insts.bin",
+    "patch": "attnpos",
+    "build": "dx_attn",
+    "window": 0
+   },
+   "gemm_n4096_k4096": {
+    "context": "gemm",
+    "insts": "gemm_n4096_k4096/insts.bin",
+    "build": "gemm_n4096_k4096"
+   },
+   "gemm_n4096_k14336": {
+    "context": "gemm",
+    "insts": "gemm_n4096_k14336/insts.bin",
+    "build": "gemm_n4096_k14336"
+   },
+   "gemm_n6144_k4096": {
+    "context": "gemm",
+    "insts": "gemm_n6144_k4096/insts.bin",
+    "build": "gemm_n6144_k4096"
+   },
+   "gemm_n14336_k4096": {
+    "context": "gemm",
+    "insts": "gemm_n14336_k4096/insts.bin",
+    "build": "gemm_n14336_k4096"
    }
   },
   "layer_types": {
@@ -925,6 +937,110 @@
       ]
      }
     ],
+    "gemm_block": {
+     "kind": "dense",
+     "t": 256,
+     "eps": 1e-05,
+     "program": [
+      {
+       "op": "run",
+       "kernel": "gemm_n6144_k4096",
+       "args": [
+        "gqkv3_w",
+        "gemm_x_k4096",
+        "gemm_y_n6144"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n4096_k4096",
+       "args": [
+        "go_w",
+        "gemm_x_k4096",
+        "gemm_y_n4096"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n14336_k4096",
+       "args": [
+        "ggate_w",
+        "gemm_x_k4096",
+        "gemm_y_n14336"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n14336_k4096",
+       "args": [
+        "gup_w",
+        "gemm_x_k4096",
+        "gemm_y_n14336"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n4096_k14336",
+       "args": [
+        "gdown_w",
+        "gemm_x_k14336",
+        "gemm_y_n4096"
+       ]
+      }
+     ],
+     "weights": {
+      "gqkv3_w": {
+       "from": "pool",
+       "ops": [
+        0,
+        1,
+        2
+       ]
+      },
+      "go_w": {
+       "from": "pool",
+       "ops": [
+        3
+       ]
+      },
+      "ggate_w": {
+       "from": "pool",
+       "ops": [
+        5
+       ]
+      },
+      "gup_w": {
+       "from": "pool",
+       "ops": [
+        4
+       ]
+      },
+      "gdown_w": {
+       "from": "pool",
+       "ops": [
+        6
+       ]
+      }
+     },
+     "qw": 4096,
+     "kvw": 1024,
+     "ff": 14336,
+     "ad_q": 8192,
+     "ad_kvn": 24576,
+     "ad_og": 32768,
+     "attn_kernel": "dxB",
+     "attn_args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ],
+     "sandwich": false,
+     "act": "silu",
+     "norm_groups": 1
+    },
     "pack": {
      "pool": [
       {
@@ -937,42 +1053,42 @@
       {
        "op": "std_perm_gguf",
        "tensor": "model.layers.{l}.self_attn.k_proj.weight",
-       "dst": 12582912,
+       "dst": 10485760,
        "nch": 512,
        "in_dim": 4096
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layers.{l}.self_attn.v_proj.weight",
-       "dst": 15728640,
+       "dst": 13107200,
        "nch": 512,
        "in_dim": 4096
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layers.{l}.self_attn.o_proj.weight",
-       "dst": 18874368,
+       "dst": 15728640,
        "nch": 2048,
        "in_dim": 4096
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layers.{l}.mlp.up_proj.weight",
-       "dst": 31457280,
+       "dst": 26214400,
        "nch": 7168,
        "in_dim": 4096
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layers.{l}.mlp.gate_proj.weight",
-       "dst": 75497472,
+       "dst": 62914560,
        "nch": 7168,
        "in_dim": 4096
       },
       {
        "op": "std_perm_gguf",
        "tensor": "model.layers.{l}.mlp.down_proj.weight",
-       "dst": 119537664,
+       "dst": 99614720,
        "nch": 7168,
        "in_dim": 14336
       }
@@ -1035,7 +1151,7 @@
    "xresf": 16384,
    "hn": 8192,
    "logits": 512768,
-   "lmpool": 395313152,
+   "lmpool": 329252864,
    "ptab": {
     "per_row": 2048,
     "inv_freq": [
@@ -1105,7 +1221,13 @@
      1.1547819846894587e-07
     ],
     "window": 0
-   }
+   },
+   "gact": 50331648,
+   "gemm_x_k4096": 2097152,
+   "gemm_y_n4096": 4194304,
+   "gemm_x_k14336": 7340032,
+   "gemm_y_n6144": 6291456,
+   "gemm_y_n14336": 14680064
   },
   "builds": {
    "dx": {
@@ -1128,23 +1250,6 @@
      "LMHEAD_N": "128192",
      "LMHEAD_K": "4096",
      "LMHEAD_CORES": "8"
-    }
-   },
-   "dx_f32": {
-    "design": "dense/dx.py",
-    "build_dir": "dense/build_hunyuan_h4096_f32",
-    "env": {
-     "GEMV_SCALES_F32": "1"
-    }
-   },
-   "lm_head_q4_f32": {
-    "design": "lm_head_q4/lm_head_q4.py",
-    "build_dir": "lm_head_q4/build_128192_f32",
-    "env": {
-     "LMHEAD_N": "128192",
-     "LMHEAD_K": "4096",
-     "LMHEAD_CORES": "8",
-     "LMHEAD_SCALES_F32": "1"
     }
    },
    "dx_attn": {
@@ -1190,13 +1295,13 @@
    }
   },
   "pack": {
-   "pool_bytes": 163577856,
-   "chunk_bytes": 6144,
+   "pool_bytes": 136314880,
+   "chunk_bytes": 5120,
    "lm_head": {
-    "pool_bytes": 395313152,
+    "pool_bytes": 329252864,
     "ops": [
      {
-      "op": "std_perm_gguf",
+      "op": "std_perm",
       "tensor": "lm_head.weight",
       "dst": 0,
       "nch": 64096,

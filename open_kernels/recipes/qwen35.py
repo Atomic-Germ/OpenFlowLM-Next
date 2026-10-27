@@ -356,12 +356,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                        "build_dir": f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(n)}}
-    if spec.quant == "q4_1":
-        # The GGUF-direct twins: the same layer designs against the f32-scale pool
-        # layout (the q4_1 codes with f32 block scales). The env says which variant
-        # to build (designs/layer_x/layout.py reads it); the q4_1 builds above are
-        # untouched, so a shipped model keeps the kernels it has.
-        b.update(GGUF.twin_builds(b, skip=("ln", "lm_head_q8")))
+    # No f32-scale twins: a GGUF model runs on the q4_1 builds above (recipes/gguf.py).
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

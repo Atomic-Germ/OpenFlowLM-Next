@@ -760,7 +760,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         out["contexts"].update(rr["contexts"])
         out["kernels"].update(rr["kernels"])
         out["rows"] = rr["rows"]
-    sec = GGUF.section(spec, max_ctx, programs, twins_built=f32_twin_fits(spec))
+    sec = GGUF.section(spec, max_ctx, programs)
     if sec:
         # the export also builds the f32-scale twins (dx_f32, lm_head_q4_f32); the engine
         # swaps this section in for GGUF-direct models (same weight file family, f32-scale
@@ -769,19 +769,6 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     return out
 
 
-def f32_twin_fits(spec: ModelSpec) -> bool:
-    """Whether the f32-scale twin of the layer design fits a core at this shape.
-
-    It does not at a wide FF: the split's piece table plus the wider weight
-    elements overflow a main core's allocation ("allocated buffers exceeded
-    available memory"), and without the split the f32 build is 36 B of program
-    memory over at HID 5120. So a split FF has no twin -- and then the
-    manifest must not advertise a "gguf" section that names one (the engine
-    would look for a kernel that was never built)."""
-    return not geometry(spec).DOWN_SPLIT
-
-
-# Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
 ROWS_FAMILIES = ("k2", "granite")
 ROWS_L = 4
 
@@ -838,24 +825,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}", **genv}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
-        "dx_f32": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}_f32",
-                   "env": {"GEMV_SCALES_F32": "1"}},
-        "lm_head_q4_f32": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}_f32",
-                           "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden),
-                                   "LMHEAD_CORES": str(n), "LMHEAD_SCALES_F32": "1"}},
     }
-    if not f32_twin_fits(spec):
-        # The GGUF-direct twin (the f32-scale chunks) is NOT built for a split FF: the
-        # piece's table plus the wider weight elements overflow a main core's allocation
-        # (aiecc: "allocated buffers exceeded available memory"). It does not fit at this
-        # HID either way -- without the split the f32 build is 36 B of program memory over
-        # at HID 5120 -- so the shape has never been built that way (the qwen35 family at
-        # HID 5120 has no twin at all). The q4_1 set is the one a converted container uses
-        # today, so the twin is left out; say so, rather than leaving a silent gap.
-        print(f"-- {spec.extra.get('model', spec.family)}: no GGUF-direct twin (dx_f32): the "
-              f"f32-scale build does not fit a core at this shape", flush=True)
-        del b["dx_f32"]
-        del b["lm_head_q4_f32"]     # the head's twin has no section to serve either
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

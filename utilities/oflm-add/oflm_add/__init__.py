@@ -237,7 +237,7 @@ def gguf_kernel_set(name, roots):
             return mj.parent
     return None
 
-def _require_same_geometry(kdir, spec, respec, model_name):
+def _require_same_geometry(kdir, spec, respec, model_name, source=None):
     """Refuse a GGUF install whose kernel set is a DIFFERENT geometry.
 
     The set is found by directory name (the official entry's, or the model's),
@@ -254,15 +254,19 @@ def _require_same_geometry(kdir, spec, respec, model_name):
     try:
         d = json.loads(mj.read_text(encoding="utf-8"))
         laid = d.get("spec")
-        if not laid or ModelSpec.from_dict(laid).kernel_hash() == spec.kernel_hash():
+        ignore = rope_ignore(source)
+        if not laid or ModelSpec.from_dict(laid).kernel_hash(ignore) == spec.kernel_hash(ignore):
             return
     except (OSError, ValueError):
         return
+    base = (get_base_chain() or [""])[0] if "get_base_chain" in globals() else ""
+    hint = f" --repo {base}" if base else " --repo <this model's base repo>"
     raise SystemExit(
-        f"{model_name}: the GGUF-direct kernel set at {kdir} is a DIFFERENT geometry "
-        f"({Path(kdir).parent.name}), so it cannot run this model.\n"
+        f"{model_name}: no open kernel set matches this model's geometry.\n"
+        f"  the nearest official set ({Path(kdir).parent.name}) is a DIFFERENT geometry, "
+        f"so it cannot run this model.\n"
         f"Build this size's kernels first:\n"
-        f"  python utilities/build-new-spec.py --repo <this model's base repo>")
+        f"  python utilities/build-new-spec.py{hint}")
 
 
 SYSTEM_LIST_CANDIDATES = [
@@ -351,6 +355,16 @@ GGUF_ARCH_FAMILIES = {
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "hunyuan_v1_dense": "hunyuan",
+    "k2_horizon": "k2",
+    "qwen3_5": "qwen3.5",
+    "qwen3_5_text": "qwen3.5",
+    "qwen3_next": "qwen3.5",
+    "hunyuan-dense": "hunyuan",     # Hy-MT2's own arch name
+    "k2-horizon": "k2",             # IFM K2-Horizon (0.9B / 3.7B / 7B)
+    "qwen35": "qwen3.5",
+    "qwen3next": "qwen3.5",
+    "qwen35moe": "qwen3.6-moe",
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -835,7 +849,29 @@ def _model_spec_class():
                 pass
 
 
-def family_from_kernels(system_registry, spec, roots):
+def rope_ignore(source) -> tuple[str, ...]:
+    """The kernel_hash fields to ignore for THIS model, given its weight file.
+
+    llama.cpp BAKES Llama-3's wavelength scaling into `rope_freqs.weight`; the GGUF's
+    metadata then has no rope_scaling at all (and the HF config it was converted from
+    is not in the file). The set's position table is the same law, so the geometry
+    matches -- comparing the rope_scaling GROUP would only refuse a model the set
+    serves. A GGUF WITHOUT the tensor (Meta-Llama-3-8B, plain rope) keeps the field in
+    the hash, because then it is the set's table that must be the plain one.
+    """
+    if source is None:
+        return ()
+    try:
+        inv = read_gguf_inventory(source, limit_mb=96)
+        names = [x[0] if isinstance(x, (list, tuple)) else x for x in (inv[1] if inv else [])]
+        if any("rope_freqs" in str(n) for n in names):
+            return ("rope_scaling",)
+    except Exception:
+        pass
+    return ()
+
+
+def family_from_kernels(system_registry, spec, roots, source=None):
     """The family of the installed kernel set whose GEOMETRY this model needs.
 
     The kernels decide the engine, and so the family: a fine-tune of a
@@ -849,7 +885,8 @@ def family_from_kernels(system_registry, spec, roots):
     ModelSpec = _model_spec_class()
     if spec is None or ModelSpec is None:
         return None, None
-    want = spec.kernel_hash()
+    ignore = rope_ignore(source)
+    want = spec.kernel_hash(ignore)
     for root in roots:
         if not root:
             continue
@@ -857,7 +894,7 @@ def family_from_kernels(system_registry, spec, roots):
             try:
                 d = json.loads(m.read_text(encoding="utf-8"))
                 s = d.get("spec")
-                if not s or ModelSpec.from_dict(s).kernel_hash() != want:
+                if not s or ModelSpec.from_dict(s).kernel_hash(ignore) != want:
                     continue
             except Exception:
                 continue
@@ -1099,6 +1136,73 @@ def fill_chat_template(target, repo, bases, modelscope=False):
         return None
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def spec_from_gguf_source(source):
+    """The ModelSpec a GGUF file describes, from its own metadata (path or URL).
+
+    A gated base repo (meta-llama/*, google/gemma-*) leaves oflm add with a stub
+    config.json -- observed: {"model_type": "mistral"} -- which derives no spec, so
+    the open kernels cannot be matched and the engine's sampler is built over
+    nothing. The GGUF always names its architecture and geometry, so read it.
+    """
+    if source is None:
+        return None
+    ModelSpec = _model_spec_class()
+    if ModelSpec is None:
+        return None
+    inv = read_gguf_inventory(source, limit_mb=96)
+    if not inv:
+        return None
+    names = [x[0] if isinstance(x, (list, tuple)) else x for x in inv[1]]
+    try:
+        return ModelSpec.from_gguf_metadata(inv[0])
+    except Exception:
+        return None
+
+
+def repair_config_from_gguf(target):
+    """Write the geometry keys a GGUF names into a stub/absent config.json.
+
+    Done BEFORE the kernel-set reconciliation, because the engine's sampler reads
+    vocab_size / hidden_size from config.json: a stub ({"model_type": "mistral"})
+    built the sampler over zero features and segfaulted after prefill
+    (Meta-Llama-3-8B-Instruct), and derived no spec so no open kernels were linked.
+    """
+    cfg_path = Path(target) / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    if cfg.get("vocab_size") and cfg.get("hidden_size") and cfg.get("num_hidden_layers"):
+        return []
+    if not (Path(target) / "model.gguf").is_file():
+        return []
+    spec = spec_from_gguf_source(str(Path(target) / "model.gguf"))
+    if spec is None:
+        return []
+    sys.path.insert(0, str(open_kernels_checkout() or ""))
+    from recipes.spec import hf_model_types
+    types = hf_model_types(spec.family)
+    built = {
+        "model_type": (types[0] if types else None) or cfg.get("model_type") or "unknown",
+        "hidden_size": spec.hidden,
+        "num_hidden_layers": spec.num_layers,
+        "intermediate_size": spec.intermediate,
+        "vocab_size": spec.vocab,
+        "num_attention_heads": spec.num_heads,
+        "num_key_value_heads": spec.num_kv_heads,
+        "head_dim": spec.head_dim,
+        "rope_theta": spec.rope_theta,
+        "rms_norm_eps": spec.norm_eps,
+    }
+    repaired = [k for k, v in built.items() if v is not None and cfg.get(k) != v]
+    cfg.update({k: v for k, v in built.items() if v is not None})
+    cfg_path.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+    if repaired:
+        log(f"[INFO] config.json: rebuilt from the GGUF metadata ({len(repaired)} key(s); "
+            f"the repo's config was absent or a stub)")
+    return repaired
 
 
 def reconcile_config_json(target, kernel_dir):
@@ -2084,7 +2188,7 @@ def model_spec(model_dir):
                 inv = read_gguf_inventory(str(gguf))
                 if inv:
                     names = [x[0] if isinstance(x, (list, tuple)) else x for x in inv[1]]
-                    spec = ModelSpec.from_gguf_metadata(inv[0], names)
+                    spec = ModelSpec.from_gguf_metadata(inv[0])
                     # the tokenizer's id count (the logits above it are undefined)
                     try:
                         spec = dataclasses.replace(spec, real_vocab=spec_from_model_dir(Path(model_dir)).real_vocab)
@@ -2812,6 +2916,9 @@ def main():
     geom_set = None                     # the set whose GEOMETRY this model needs
     if args.family is None:
         spec = spec_from_config_dict(get_peeked_config())
+        if spec is None and gguf_mode and gguf_source is not None:
+            # a gated base leaves a stub config; the GGUF names its own geometry
+            spec = spec_from_gguf_source(gguf_source)
         fam, set_name = family_from_kernels(system_registry, spec, kernel_roots)
         if fam:
             log(f"[INFO] family '{fam}' from the kernel set '{set_name}' (the same geometry)")
@@ -2933,7 +3040,7 @@ def main():
                     f"  python utilities/build-new-spec.py{base_hint}")
             if not args.open_kernels:
                 _require_same_geometry(kdir, spec, spec_from_config_dict(get_peeked_config()),
-                                       dir_name)
+                                       dir_name, gguf_source)
             gguf_kernel_dir = kdir
             if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
                 log(f"[INFO] GGUF-direct kernels: {kdir}")
@@ -3080,6 +3187,8 @@ def main():
     if _off_repo and _off_repo not in _chain:
         _chain.append(_off_repo)
     fill_chat_template(target, repo, _chain, modelscope)
+    if gguf_mode:
+        repair_config_from_gguf(target)
     _kset = gguf_kernel_dir or kernel_manifest_dir(xclbin_source, kernel_roots)
     if _kset is not None and (Path(target) / "config.json").is_file():
         reconcile_config_json(target, _kset)

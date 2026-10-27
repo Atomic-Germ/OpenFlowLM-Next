@@ -791,7 +791,7 @@ def test_a_set_the_registry_does_not_list_still_names_its_family(tmp_path):
     (kdir / "manifest.json").write_text(json.dumps({"spec": spec}))
 
     class _Spec:                       # the model's own spec, same geometry
-        def kernel_hash(self):
+        def kernel_hash(self, ignore=()):
             return "sha256:same"
 
     model_spec = _Spec()
@@ -838,3 +838,47 @@ def test_a_token_named_without_an_id_is_resolved_from_the_gguf(tmp_path):
 
     tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
     assert tc["bos_token_id"] == 127958
+
+
+def test_a_baked_rope_table_makes_rope_scaling_irrelevant(tmp_path):
+    """llama.cpp bakes Llama-3's scaling into rope_freqs.weight; the GGUF's metadata then
+    has no rope_scaling, and the set that serves it is the scaled one."""
+    src = tmp_path / "m.gguf"
+    src.write_bytes(b"GGUF")
+    orig = oflm_add.read_gguf_inventory
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=96: ({"general.architecture": "llama"},
+                                                          [("rope_freqs.weight", 0, [64])])
+    try:
+        assert oflm_add.rope_ignore(str(src)) == ("rope_scaling",)
+    finally:
+        oflm_add.read_gguf_inventory = orig
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=96: ({"general.architecture": "llama"},
+                                                          [("token_embd.weight", 0, [128])])
+    try:
+        assert oflm_add.rope_ignore(str(src)) == ()
+    finally:
+        oflm_add.read_gguf_inventory = orig
+
+
+def test_a_stub_config_is_rebuilt_from_the_gguf(tmp_path):
+    """A gated base leaves {"model_type": "mistral"}; the GGUF names the geometry, and the
+    engine's sampler segfaults without it."""
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "mistral"}))
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+
+    class _Spec:
+        family = "llama3"; hidden = 3072; num_layers = 28; intermediate = 8192
+        vocab = 128256; num_heads = 24; num_kv_heads = 8; head_dim = 128
+        rope_theta = 10000.0; norm_eps = 1e-5
+
+    orig_spec, orig_checkout = oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout
+    oflm_add.spec_from_gguf_source = lambda s: _Spec()
+    oflm_add.open_kernels_checkout = lambda: None
+    try:
+        oflm_add.repair_config_from_gguf(tmp_path)
+    finally:
+        oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout = orig_spec, orig_checkout
+
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert cfg["hidden_size"] == 3072 and cfg["vocab_size"] == 128256
+    assert cfg["model_type"] == "llama"
