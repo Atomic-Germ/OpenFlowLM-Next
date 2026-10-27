@@ -819,6 +819,22 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## The five dense families that were never run: what each one needs (2026-10-26)
+
+Pulled the user's mradermacher i1 repos (Q4_1 first) and served each:
+
+| family | repo | result | what it needs |
+|---|---|---|---|
+| k2 | K2-Horizon-7B-i1 | **works** — coherent reasoning output | nothing |
+| hunyuan | Hy-MT2-7B-i1 | installs and packs; the server refuses "not a chat model" | the engine's `model_family_map()` has no `hunyuan`, and there is no adapter class: nothing has ever shipped it as a chat model. Needs a family entry + prompt format |
+| qwen2 | Qwen2.5-3B-i1 | geometry mismatch (FF) | HF/GGUF `intermediate_size` is **11008**; our spec (and AMD's container) are **11264** — the container is padded by one k-tile. A GGUF needs a spec at 11008, or the padded container entry goes and the spec is rebuilt at the true FF |
+| phi3 | Phi-4-mini-reasoning-i1 | geometry mismatch (rope) | the **reasoning** variant's longrope `short_factor` equals its long factors; our phi4-mini spec is the **Instruct** one (short = 1.0). Same kernels, different ptab table -> its own spec/set. Phi-4-mini-**Instruct** GGUFs ride the existing set |
+| granite | granite-4.2-3b-i1 | refused: our family builder rejects it | `attention_multiplier = 0.015625` != 1/sqrt(head_dim 64) = 0.125. AMD's container is **folded** (q_proj pre-scaled); a llama.cpp GGUF is **not**. Needs a pack-time fold of q_proj by multiplier/ (1/sqrt hd) |
+
+Dense verified end-to-end: **qwen3, llama3, gemma3, k2** (4 of 8). Two of the four
+remaining are just specs to generate (qwen2 at 11008, phi3-reasoning); the other
+two are engine pieces (the hunyuan adapter, the granite fold).
+
 ## DENSE IS DONE; the f32-scale twin is the trap (2026-10-26, `31d3636` + default flip)
 
 A GGUF now runs on the **q4_1 twin by default** (`OFLM_GGUF_POOL_F32=1` opts into
