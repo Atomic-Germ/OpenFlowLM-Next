@@ -125,9 +125,16 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
     // The open engine runs the decoder only; every image/audio path below reads the closed
     // engine's front-end constants through a cast that is null there.
     if (dynamic_cast<gemma4_12b_npu*>(this->lm_engine.get()) == nullptr) {
+        // A key is not media: the server's own text replies carry "images": null, and a
+        // client sends them back with the conversation.
+        const auto carries = [](const nlohmann::json& message, const char* key) {
+            if (!message.contains(key)) return false;
+            const auto& v = message[key];
+            return !(v.is_null() || (v.is_array() && v.empty()));
+        };
         bool media = !input.images.empty() || !input.audios.empty();
         for (const auto& message : input.messages)
-            media = media || message.contains("images") || message.contains("audios");
+            media = media || carries(message, "images") || carries(message, "audios");
         if (media) {
             header_print("ERROR", "Gemma 4 12B on the open kernels is text only: images and audio need the "
                                   "closed engine (OFLM_GEMMA4_ENGINE=closed)");
