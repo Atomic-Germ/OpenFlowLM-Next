@@ -819,6 +819,41 @@ shape the engine validates. Anything `hf_config_check` names must be present
 after the install -- `config.json` is part of the kernel set's contract, not
 commentary.
 
+## GGUF-direct NUMERICS: one combination verified (2026-10-26)
+
+Measured on the NPU by serving each installed model and asking a question:
+
+| model | quant | result |
+|---|---|---|
+| Qwen3-4B-Base-GGUF (Antigma) | Q4_0 | **coherent text** |
+| Nanbeige4-3B-Base-i1 | Q4_1 | loads, emits `\x0b` repeats |
+| Qwen3.8-4B-Distill (empero) | Q4_K/Q6_K | loads, garbage |
+| Qwen3.5-4B-i1 | Q4_1 | **segfaults in prefill, layer 0** |
+
+The pack path runs for all of them (pools pack, layers go resident), so this is
+not a mapping/plumbing failure any more -- it is arithmetic. The Qwen3.5
+hybrid tensors needed the name identities and the size-adaptive side reads
+(`e90246c`); they are necessary but not sufficient.
+
+**The missing instrument is a numeric gate.** Nothing compares a GGUF model's
+logits with its q4nx twin's (or with a CPU reference). Every other geometry in
+this repo has one -- the attention gate, the per-op fixtures, `make_fixtures.py`
+-- and GGUF-direct has none, which is why four families shipped "installed and
+linked" without anyone noticing that only one of them runs. Build that gate
+before more GGUF breadth: one layer, one prompt, `OFLM_OPEN_LAYER_NAN=1` /
+`OFLM_OPEN_DUMP_POOLS=<dir>` to compare the packed pool against a NumPy pack of
+the same GGUF tensor, then bisect per op.
+
+Useful debugging facts found on the way:
+
+- `OFLM_OPEN_LAYER_NAN=1` prints per-layer xres stats; a crash **before** the
+  first layer trace is in layer 0's dispatch, not in the model loop.
+- `OFLM_OPEN_DUMP_POOLS=<dir>` dumps layer 0's packed pool + consts, which is
+  the comparison point for a NumPy pack of the same tensors.
+- A GGUF's dims are FASTEST FIRST: `ssm_conv1d.weight` [4, 8192] is row-major
+  [channels][taps] (HF's layout), while the q4nx container stores the filter
+  taps-major. `transpose` / `conv_transpose` now pick by the tensor's shape.
+
 ## The wrong-kernels trap in `oflm add` (found 2026-10-26)
 
 `resolve_official()` ends with "no exact size match for X B; using Y B kernels",
