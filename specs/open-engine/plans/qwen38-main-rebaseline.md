@@ -1,6 +1,64 @@
 # Qwen3.8-27B validation report
 
 
+## FP32 causal attribution across all layers — 2026-10-27
+
+Extended the unchanged conditioned replay to every layer at P125/P205/P239.
+Each trajectory starts from zero state and consumes every causal input through
+P239; this is a three-position output sweep, not attribution of all prompt rows.
+The run reconstructs **192/192 independent reference outputs exactly** and saves
+**384** sequential/hybrid array sets. A separate audit repeats every calculation
+and confirms all **384/384** saved array sets byte-for-byte.
+All **18/18** overlapping array sets and measurements from the previous targeted
+run match byte-for-byte, with identical input and source inventories.
+
+| Route | Selected total-output gates | First failing layer at P125 / P205 / P239 | Worst total maxrel |
+|---|---:|---|---:|
+| Sequential | 168 / 192 | 54 / 50 / 41 | 0.0992221863 at L58/P205 |
+| Hybrid | 192 / 192 | None | 0.0025616438 at L58/P205 |
+
+In all 24 failing sequential cases, the current-input contribution has greater
+maxrel than both input-history and implementation-gap contributions. The largest
+sequential implementation gap is **0.0000631635 at L63/P239**, and the largest
+input-history contribution is **0.0002090308 at L63/P239**. Both are below the
+unchanged 0.005 output bound at every selected point. The corresponding hybrid
+maxima are 0.0000107918 and 0.0000088873. These are conditioned diagnostics;
+they do not override the native baseline's overall numerical **FAIL**.
+
+| Sequential point | Current input | Input history | Implementation gap | Total maxrel |
+|---|---:|---:|---:|---:|
+| L3/P205 | 0.0000084441 | 0.0000008735 | 0.0000185624 | 0.0000109918 |
+| L31/P125 | 0.0000241155 | 0.0000588564 | 0.0000019329 | 0.0000719554 |
+| L50/P205 | 0.0282954522 | 0.0000431698 | 0.0000564713 | 0.0283734452 |
+| L63/P239 | 0.0080316072 | 0.0002090308 | 0.0000631635 | 0.0080632683 |
+
+L3 contains the three largest selected implementation gaps before L41, at all
+three positions. This makes it a useful early capture target, not a proven root
+cause. Its signed components partially cancel: decreasing one component alone
+does not guarantee a smaller total error. The sweep also observes history effects
+at L31/P125 and L39/P125, and predominantly input-driven failure at L50/P205.
+Each layer uses its own reference scale; cross-layer maxrel ratios are not causal
+amplification measurements. Unselected positions may contain other contributors.
+
+Next prepare a current-standard full-ax L3 replay from the retained sequential
+L2 residual prefix, advancing native KV from zero through P239. Require exact
+native residual identity before interpreting scratch, Q/KV/attention, output
+projection and FFN boundaries at P125/P205/P239. Reuse the current production ax
+binary and manifest ABI; historical attention experiments are not valid controls
+for this export. The implementation gap includes native accumulated state error,
+which cannot be identified from ideal replay state alone. Do not change arithmetic
+or relax thresholds before obtaining those boundary measurements.
+
+The evaluator and production code are unchanged. The 35 existing focused tests
+pass again; the last full host suite remains 1933 passed / 47 skipped from the
+preceding implementation stage. The replay pins 6686 input files and caches one
+decoded layer at a time (peak weight cache 1.42578125 GiB). No NPU execution,
+kernel/library build, installed model or service change occurred. Evidence:
+`Models/qwen38-27b/post-prefill-drift/all-layers-v1`, the run/audit logs,
+`all-layers-prior-identity.json`, and `all-layers-components.csv`.
+
+
+
 ## FP32 sequential causal attribution — 2026-10-27
 
 Added CPU conditioned replay for the audited standard FP32 boundary captures.

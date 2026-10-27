@@ -44,6 +44,48 @@ The original sequential numerical FAIL remains unchanged. Earlier layers must
 be examined to locate the initial source; this result does not establish a fix.
 Eight new TDD tests; full host suite: 1933 passed, 47 skipped.
 
+### Sweep every layer at selected positions
+
+The same evaluator can attribute P125/P205/P239 through all 64 layers. It still
+replays every causal input row up to P239; these are selected output positions,
+not a scan of every possible output. Use a new directory and a separate audit:
+
+```bash
+replay_targets=()
+for layer in {0..63}; do replay_targets+=(--target "$layer:125,205,239"); done
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/post_targets.py run \
+  --baseline Models/qwen38-27b/post-prefill-production/boundaries-native-v1 \
+  "${replay_targets[@]}" \
+  --out Models/qwen38-27b/post-prefill-drift/all-layers-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/post_targets.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/all-layers-v1
+```
+
+Require exactly 192 reference reconstructions and 384 replayed array sets.
+Rank implementation-gap and input-history contributions separately from total
+error. Each layer has its own reference scale: ratios between layers' `maxrel`
+values do not measure causal amplification. Confirm any proposed native replay
+target from its signed vectors and causal history before changing arithmetic.
+
+### Validated all-layer checkpoint — 2026-10-27
+
+`all-layers-v1` and its separate audit complete: 192 exact reference outputs,
+384 byte-exact array-set replays, 6686 bound inputs, and 18/18 exact overlaps
+with `targets-v1`. Peak decoded-weight cache remains 1.42578125 GiB. All 35
+focused tests pass again; no evaluator or production code changed.
+
+Sequential selected total-output gates pass 168/192; hybrid passes 192/192.
+First failures at P125/P205/P239 are L54/L50/L41. The maximum sequential
+implementation gap is 0.0000631635 (L63/P239); the maximum history effect is
+0.0002090308 at the same point. Current-input effects dominate each of the 24
+failing selected cases. The native baseline's overall numerical FAIL remains.
+
+Before L41, the three largest selected implementation gaps are at L3, making
+that full-attention layer an early capture candidate. Replay its real sequential
+L2 inputs with the current standard ax binary and causal KV before inspecting
+projection, attention and FFN boundaries. Establish exact native residual
+identity first. This is a diagnostic target, not a confirmed root cause.
+
 ## Historical expanded export
 
 CPU-only causal attribution at L60/P37–39 and L33/P240–242 using the verified
