@@ -863,6 +863,88 @@ numbers: Granite 4.2 wraps a thinking block, and a fixed Qwen3.x template (used
 for tool handling) does not fit it. Retest with Granite's own template before
 suspecting the fold.
 
+## Vision from GGUF: the projector is the whole tower (2026-10-27, `669aba8`)
+
+Every non-text modality was closed-kernel before this: of the 54 sets in `src/xclbins`,
+28 have `open_kernels/` and all 28 are text. Vision is the one that needs **no NPU
+kernel work at all**, because the tower is host CPU (`open_qwen36/vision/vit.cpp`) and
+a llama.cpp projector is plain (not pre-tiled for the closed engine's `vision_mm`).
+
+What a `mmproj-*.gguf` actually contains (read from
+`mradermacher/Qwen3-VL-4B-Instruct-GGUF`, the NON-i1 sibling -- an i1 repo does not
+carry it):
+
+```
+general.architecture = clip            clip.projector_type = qwen3vl_merger
+clip.vision.block_count 24   embedding_length 1024   attention.head_count 16
+clip.vision.feed_forward_length 4096   projection_dim 2560
+clip.vision.patch_size 16    spatial_merge_size 2    attention.layer_norm_epsilon 1e-6
+clip.vision.is_deepstack_layers [ ..., 5, 11, 17 ]
+tensors (316 = 12*24 + 6*3 + 10):
+  v.blk.N.{attn_qkv,attn_out,ffn_up,ffn_down,ln1,ln2}{,.weight,.bias}
+  v.patch_embd.weight + .weight.1 + .bias   v.position_embd.weight
+  v.post_ln.{weight,bias}                   mm.0 / mm.2 {weight,bias}
+  v.deepstack.{5,11,17}.{norm,fc1,fc2}
+```
+
+Three consequences, each of which saved a piece of work:
+
+1. **The file states the geometry.** `clip.vision.*` carries what the container made
+   `oflm add` write into a side `vision.json` (block count, widths, heads, the deepstack
+   indexes). `VitConfig::from_gguf` reads it and cross-checks the shapes, so that
+   hard-coded side file is no longer needed for a GGUF model.
+2. **The deepstack indexes are in the tensor NAMES** (`v.deepstack.5.*`), so they
+   survive every writer even when the metadata array does not.
+3. **The temporal split is the slice count**: `v.patch_embd.weight` + `.weight.1` is how
+   llama.cpp splits the Conv3d, so 2 tensors = temporal patch 2.
+
+The mapping (`load_vit_gguf`), and the traps:
+
+* every matmul is ggml `[in, out]` (fastest dim = input) -> tower `[out, in]`; get this
+  backwards and the numbers still look plausible;
+* the fused `attn_qkv` maps straight onto the tower's existing `B.qkv` (the container
+  path already reads fused qkv);
+* the patch embed becomes `(C, T, P_h, P_w)` -- the order `reorder_patches_inplace`
+  emits (`imageproc.cpp`), which is HF's Conv3d input order;
+* `v.post_ln` normalises over `hidden` (before the 2x2 concat) but a deepstack merger
+  normalises over `hidden * merge^2` -- the widths differ, which is what stops them
+  being swapped silently.
+
+**`GgufFile::f32()` is not for this.** It assumes `[rows, cols]` with `rows = dims[1]`;
+on the 4-D patch embed that decodes 256 of 1,572,864 values. `f32_all()` is the any-rank
+form (`dequant_row` refactored out of `embed_row`).
+
+Verification, both cheap and committed:
+
+* `vit_gguf_test` (`ctest OPEN-VISION-VIT-GGUF`): writes its own projector with
+  position-revealing values, checks the patch split, the qkv/merger transposes, the
+  deepstack norm width, and the three refusals (not a projector; a projector this
+  reader does not run; one extra tensor). No device, no weights, no network.
+* `utilities/check-mmproj.py --mmproj <url> --safetensors <repo>`: compares a REAL
+  projector against the checkpoint it was converted from using byte ranges only. On
+  Qwen3-VL-4B's mmproj-f16 every mapping agrees to max|d|/rms ~1e-6, the position table
+  exactly. **Use RMS-relative error, not per-element relative**: near-zero weights make
+  the latter read 3% on a tensor that is bit-exact.
+
+### What vision-from-GGUF still needs
+
+1. **`oflm add` must fetch the projector.** An i1 repo has no mmproj: strip `-i1` from
+   the repo id and take `*mmproj*.gguf` from the sibling (prefer f16/BF16 -- the tower
+   is CPU bf16, so f16 is lossless), store it as `mmproj.gguf`, set `details.vlm`.
+2. **The LM side.** Qwen3-VL's GGUF arch is `qwen3vl` with `qwen3vl.*` keys and geometry
+   identical to qwen3-4b (hidden 2560, 36 layers, FF 9728, 32/8), so the EXISTING
+   `Qwen3-4B-NPU2` kernels are the right ones -- but `details.family` must stay
+   `qwen3vl` (the VL adapter preprocesses images and calls `prefill(ids, payload)`)
+   while the spec that matches the kernels hashes as `qwen3`. Check `derive_family`'s
+   preference order before wiring that.
+3. **M-RoPE for image tokens.** `core.cpp` implements M-RoPE and `write_record()` writes
+   one ptab record per row -- but `per_row_globals` comes from the MANIFEST and no recipe
+   emits it, so no shipped set can place image tokens yet. The GGUF gives what is needed
+   (`qwen3vl.rope.dimension_sections [24,20,20,0]`, `n_deepstack_layers 3`).
+4. Qwen2.5-VL's windowed projector: the tower code exists (`qwen25_from_*`), the GGUF
+   reader refuses it by name -- `clip.projector_type` is `qwen2.5vl_merger` and its
+   tensors are split q/k/v with RMSNorm, so it is a second mapping, not a tweak.
+
 ## The install+serve matrix (2026-10-27): what the shipped build needed
 
 A full matrix on an installed build (`cmake --workflow --preset linux-default` +
