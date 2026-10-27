@@ -1025,6 +1025,72 @@ def kernel_manifest_dir(name, roots):
     return None
 
 
+def official_repo_id(entry, registry=None):
+    """The Hugging Face repo id of an official entry ("Atomic-Germ/Nanbeige4.1-3B-NPU2").
+
+    The registry writes its own repositories' urls with `{hf_owner}`; the engine
+    fills it from the list's "hf_owner" (or OFLM_HF_OWNER). oflm add has the same
+    registry in hand, so the same substitution names the repo to climb to.
+    """
+    if not entry:
+        return None
+    url = entry.get("url") or ""
+    owner = os.environ.get("OFLM_HF_OWNER") or (registry or {}).get("hf_owner", "")
+    url = url.replace("{hf_owner}", owner or "")
+    if "huggingface.co/" in url:
+        return url.split("huggingface.co/", 1)[1].strip("/")
+    return entry.get("name") or None
+
+
+def fill_chat_template(target, repo, bases, modelscope=False):
+    """Merge a chat template in from the model's chain when the installed
+    tokenizer_config.json has none.
+
+    A quant repo's tokenizer_config.json is often minimal (Nanbeige's has no
+    chat_template; its sibling Nanbeige4.2-3B-Base does), and `oflm serve` refuses
+    a model with no template -- after the weights have loaded. The aux fetch stops
+    at the FIRST base that has the file, which is not necessarily the one with the
+    template, so look further only for this one field.
+    """
+    tc = Path(target) / "tokenizer_config.json"
+    if not tc.is_file() or (Path(target) / "chat_template.jinja").is_file():
+        return None
+    try:
+        cfg = json.loads(tc.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if cfg.get("chat_template"):
+        return None
+    tmp = Path(target) / ".tokenizer_config.from_base.json"
+    try:
+        for src in [repo] + list(bases):
+            if Path(src).is_dir():
+                continue
+            tmp.unlink(missing_ok=True)     # fetch_from_repo skips an existing destination
+            try:
+                got = fetch_from_repo(src, "tokenizer_config.json", tmp, modelscope=modelscope,
+                                      force=True)
+            except Exception:
+                continue
+            if not got or not tmp.is_file():
+                continue
+            try:
+                d = json.loads(tmp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            t = d.get("chat_template")
+            if t:
+                cfg["chat_template"] = t
+                tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+                log(f"[INFO] chat_template from {src} (the installed tokenizer_config had none)")
+                return src
+        log("[WARN] no chat_template in this model's chain; `oflm serve` will refuse it "
+            "(add one to tokenizer_config.json or a chat_template.jinja)")
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def reconcile_config_json(target, kernel_dir):
     """Make config.json carry the keys the KERNEL SET validates against.
 
@@ -1169,8 +1235,12 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
                       need_bos and isinstance(g.get("bos_token_id"), int)):
                 break
     source = "generation_config.json"
-    if not g:
-        g = {}
+    # "found a generation_config.json" is not the same as "found the id": Qwen3-4B-Base
+    # ships one WITHOUT eos_token_id, so the loop kept the file, the fallback never ran,
+    # and the engine refused the model ("eos_token_id is missing or not an array").
+    need_fallback = not g or (need_eos and not isinstance(g.get("eos_token_id"), list))
+    if need_fallback:
+        g = dict(g or {})
         source = "config.json"
         # No generation_config.json anywhere in the chain (the Qwen3.5 line ships
         # none). The config.json names the same ids: the model's own eos and the
@@ -2941,6 +3011,15 @@ def main():
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
+    # The chain ends at the OFFICIAL converted repo: a quant of a base whose own
+    # tokenizer_config has no chat_template (Nanbeige 4.3-Base) still finds one in
+    # the family's converted container (Nanbeige4.1-3B-NPU2), which is the repo
+    # the kernels came from.
+    _chain = list(get_base_chain())
+    _off_repo = official_repo_id(base_entry, system_registry)
+    if _off_repo and _off_repo not in _chain:
+        _chain.append(_off_repo)
+    fill_chat_template(target, repo, _chain, modelscope)
     _kset = gguf_kernel_dir or kernel_manifest_dir(xclbin_source, kernel_roots)
     if _kset is not None and (Path(target) / "config.json").is_file():
         reconcile_config_json(target, _kset)

@@ -729,3 +729,52 @@ def test_a_key_with_a_manifest_default_may_stay_absent(tmp_path):
 
     assert filled == [] and conflicting == []
     assert "vocab_size" not in json.loads((model / "config.json").read_text())
+
+
+# ---- tokenizer_config: an eos id the engine can read, and a chat template ----
+
+
+def test_eos_falls_back_when_generation_config_exists_but_has_no_id(tmp_path):
+    """Qwen3-4B-Base ships a generation_config.json WITHOUT eos_token_id; the file
+    being found must not suppress the config.json fallback."""
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"model_max_length": 4096, "bos_token": "<|endoftext|>"}))
+    (tmp_path / "generation_config.json").write_text(json.dumps({"do_sample": True}))
+    (tmp_path / "config.json").write_text(json.dumps({"eos_token_id": 151643, "bos_token_id": 151643}))
+
+    oflm_add.normalize_tokenizer_config(tmp_path, str(tmp_path), [])
+
+    tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert tc["eos_token_id"] == [151643]
+    assert tc["bos_token_id"] == 151643
+
+
+def test_chat_template_is_climbed_from_the_chain(tmp_path):
+    """The first repo with a tokenizer_config may have no template; a later one does."""
+    calls = []
+
+    def fake_fetch(repo, fname, dest, modelscope=False, force=False):
+        calls.append(repo)
+        templates = {"first/model": None, "second/model": "{% for m in messages %}{{ m['content'] }}{% endfor %}"}
+        dest.write_text(json.dumps({"chat_template": templates.get(repo)}))
+        return dest
+
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 4096}))
+    orig = oflm_add.fetch_from_repo
+    oflm_add.fetch_from_repo = fake_fetch
+    try:
+        src = oflm_add.fill_chat_template(tmp_path, "first/model", ["second/model"])
+    finally:
+        oflm_add.fetch_from_repo = orig
+
+    assert src == "second/model"
+    assert calls == ["first/model", "second/model"]
+    assert "chat_template" in json.loads((tmp_path / "tokenizer_config.json").read_text())
+
+
+def test_official_repo_id_fills_hf_owner():
+    entry = {"name": "Nanbeige4.1-3B-NPU2",
+             "url": "https://huggingface.co/{hf_owner}/Nanbeige4.1-3B-NPU2"}
+    assert oflm_add.official_repo_id(entry, {"hf_owner": "Atomic-Germ"}) == \
+        "Atomic-Germ/Nanbeige4.1-3B-NPU2"
+    assert oflm_add.official_repo_id({"name": "x", "url": "https://huggingface.co/acme/x"}, {}) == "acme/x"
