@@ -221,17 +221,26 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
                                  "(manifest.json has no gguf section; re-export the kernels)");
-    // ---- OFLM_GGUF_POOL_Q41: run the GGUF-sourced weights through the q4_1
-    // twin instead of the f32-scale one. Every shipped q4nx model runs on the
-    // q4_1 builds, so this separates the f32-scale CHUNK handling in the
-    // layer_x builds from everything else: same source file, same family
-    // geometry, the same kernels the q4nx model answers on. The two sections'
-    // pack ops pair one to one (the same tensors, the same chunk counts --
-    // only the byte offsets move with the chunk law), so each op takes the
-    // base section's geometry under the GGUF packing kind, and the base
-    // section's chunk / pool / lx / ax: the packed slots land where the q4_1
-    // designs read them. Whatever still misbehaves is then not the f32 chunk.
-    if (const char* q = std::getenv("OFLM_GGUF_POOL_Q41"); gguf_ && w_ && q && *q && *q != '0') {
+    // ---- a GGUF runs on the q4_1 twin by DEFAULT.
+    //
+    // The GGUF-direct design gave each set an f32-scale twin so a GGUF's weights
+    // could be packed with their block scales widened EXACTLY to f32. Measured on
+    // the NPU, that twin is not reliable: with weights that pack byte-identically
+    // to a container's chunks (verified: 0/5120 bytes differ for gemma3-4b's
+    // layer-0 q_proj, consts 0/24576), the f32 twin turns layer 0 into all-NaN for
+    // gemma3-4b and Nanbeige, while the q4_1 twin reproduces the container's own
+    // per-layer numbers to ~4 significant figures. qwen3 and llama3.2 work on
+    // either. The q4_1 twin is also what every shipped q4nx container runs, so a
+    // GGUF on it is numerically the same model those containers serve.
+    //
+    // OFLM_GGUF_POOL_F32=1 opts back into the f32 twin -- the probe that isolates
+    // the f32-scale chunk handling from everything else. The two sections' pack ops
+    // pair one to one (same tensors, same chunk counts -- only the byte offsets move
+    // with the law), so each op takes the base section's geometry under the GGUF
+    // packing kind, and the base section's chunk / pool / lx / ax: the packed slots
+    // land where the q4_1 designs read them.
+    const bool want_f32 = [] { const char* f = std::getenv("OFLM_GGUF_POOL_F32"); return f && *f && *f != '0'; }();
+    if (gguf_ && w_ && !want_f32) {
         Manifest& m = *man_.gguf;
         const Manifest& b = man_;
         auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
@@ -321,9 +330,9 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             m.globals = b.globals;
         }
         merged_q41_ = true;
-        log("OFLM_GGUF_POOL_Q41: GGUF weights on the q4_1 twin (chunk " +
+        log("GGUF weights on the q4_1 twin (chunk " +
             std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
-            "for the f32-numerics bisect");
+            "; OFLM_GGUF_POOL_F32=1 runs the f32-scale twin instead");
     }
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
@@ -725,7 +734,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         // packer agrees with its NumPy reference; this is the other end of that check --
         // the bytes the KERNELS actually read.
         if (const char* dp = std::getenv("OFLM_OPEN_DUMP_POOLS"); dp && *dp && l == 0) {
-            const std::string tag = gguf_ ? (std::getenv("OFLM_GGUF_POOL_Q41") ? "q41" : "f32") : "q4nx";
+            const std::string tag = gguf_ ? (merged_q41_ ? "q41" : "f32") : "q4nx";
             std::ofstream f(std::filesystem::path(dp) / (tag + "_pool0.bin"), std::ios::binary);
             f.write(reinterpret_cast<const char*>(pool_host), static_cast<std::streamsize>(w_->pool_bytes));
         }
@@ -737,7 +746,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(*w_, lt, *file_, l, c_host);
         if (const char* dp = std::getenv("OFLM_OPEN_DUMP_POOLS"); dp && *dp && l == 0) {
-            const std::string tag = gguf_ ? (std::getenv("OFLM_GGUF_POOL_Q41") ? "q41" : "f32") : "q4nx";
+            const std::string tag = gguf_ ? (merged_q41_ ? "q41" : "f32") : "q4nx";
             std::ofstream f(std::filesystem::path(dp) / (tag + "_consts0.bin"), std::ios::binary);
             f.write(reinterpret_cast<const char*>(c_host), static_cast<std::streamsize>(lt.consts_bytes));
         }
