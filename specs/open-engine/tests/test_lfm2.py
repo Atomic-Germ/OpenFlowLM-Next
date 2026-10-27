@@ -191,7 +191,11 @@ def test_no_shipped_models_hash_moved():
         "lfm2-1.2b.json": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
         "minicpm5-2b.json": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
         "k2-horizon-3.7b.json": "sha256:18952d15a05780550c7d469b728fd6c686b6cb4c23635257e82c842aecd8e50a",
+        "k2-horizon-7b.json": "sha256:d6ee7f414ae5095551075722947ce8122f01b2d1e8c5be7c721ea5f0ba1b9778",
         "qwen35-27b.json": "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458",
+        "qwen35-0.8b.json": "sha256:f898e975f56aa24616a8841a31085c52a16d7215e681e1542d80dff57e856155",
+        "qwen35-2b.json": "sha256:619eb2dae91329a88a725bedffcbcc32a1050cca5d9836ceedc237d8b36404a7",
+        "qwen35-4b.json": "sha256:06e3163fc4e66163c1e2ee7ea97759f1dc7ce23cfa3440c4969418d2f06af7e5",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

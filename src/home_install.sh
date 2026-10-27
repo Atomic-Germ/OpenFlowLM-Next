@@ -20,6 +20,10 @@ BUILD_DIR="${BUILD_DIR:-$REPO_DIR/build}"
 PRESET="${PRESET:-linux-default}"
 # Where XRT (the AMD NPU runtime) is installed. Override if non-standard.
 XRT_DIR="${XRT_DIR:-/opt/xilinx/xrt}"
+# Where the models and the user's settings live: the oflm directory, which
+# HOLDS the models/ tree. The same value oflm itself uses, and the one
+# oflm-add writes the settings next to.
+OFLM_MODELS_DIR="${OFLM_MODEL_PATH:-$HOME/.config/oflm}"
 
 DO_BUILD=1
 for arg in "$@"; do
@@ -96,7 +100,11 @@ export LD_LIBRARY_PATH="\$OFLM_PREFIX/lib/oflm:\${LD_LIBRARY_PATH:-}"
 
 # 3. Put oflm on PATH.
 export PATH="\$OFLM_PREFIX/bin:\$PATH"
-export OFLM_MODEL_PATH="/scratch/alfxu"
+
+# 4. The models and the user's settings: the oflm directory, which holds
+#    the models/ tree. The settings are written and read next to it, so
+#    `oflm config set` and `oflm add` agree on where they are.
+export OFLM_MODEL_PATH="$OFLM_MODELS_DIR"
 
 echo "[oflm_env] OpenFlowLM environment ready (prefix: \$OFLM_PREFIX)"
 EOF

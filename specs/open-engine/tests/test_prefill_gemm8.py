@@ -43,12 +43,16 @@ def test_qwen3_8b_runs_the_8bit_route_by_default_and_keeps_q4_as_lean():
 
 
 def test_no_8bit_route_where_a_shape_does_not_fit_or_the_attention_is_not_products():
-    # Qwen3-4B's o_proj is 2560 wide (dit_gemm wants N % 1024); Llama 3.1 and K2 declare no products prep
-    for name in ("qwen3-4b.json", "llama31-8b.json", "k2-horizon-3.7b.json"):
+    # Qwen3-4B's o_proj is 2560 wide (dit_gemm wants N % 1024); Llama 3.1 has no
+    # products prep. K2 now has rope-only products, but no validated GEMM8 route.
+    for name in ("qwen3-4b.json", "llama31-8b.json", "k2-horizon-3.7b.json", "k2-horizon-7b.json"):
         m = _manifest(name)
         gb = m["layer_types"]["dense"]["gemm_block"]
         assert gb.get("gemm", "q4") == "q4" and "gemm_block_variants" not in m["layer_types"]["dense"], name
         assert not [k for k in m["kernels"] if k.startswith("dit")] and m["manifest_version"] < 4, name
+        if name.startswith("k2-"):
+            assert gb["attn_block"]["prep"] == "rope" and gb["t"] == 256
+            assert m["rows"]["l"] == 4
 
 
 def test_bfp16_dit_packs_byte_identical_to_pools_test():

@@ -100,14 +100,16 @@ class DenseRecipe:
 QKNORM_POST_ROPE = ("hunyuan",)
 # families whose block prefill runs its attention as the two NPU products (OPEN-PREFILL-ATTN)
 # rather than T single-token dxB dispatches. The engine's host half (block_host.cpp
-# attention_prep) does exactly one thing before the products: q/k RMSNorm, then the half-split
-# rotation over rotary_dim, with no bias, no output gate and no sliding window -- so a family
+# attention_prep) does exactly one thing before the products: q/k RMSNorm (or none), then the
+# half-split rotation over rotary_dim, with no bias, no output gate and no sliding window -- so a family
 # joins only if that is its attention, and by measurement against its dxB route, as
 # FAST_ATTENTION does. The manifest says so as attn_block.prep, which the engine refuses to
 # guess: a dense attn_block without it is left to the dxB route.
 BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
 # OPEN-PREFILL-GEMM8: the 8-bit route's block (designs/dit_gemm streams are built per M)
 DIT_T = 1024
+# the same with no q/k norm: the rotation alone (attn_block.prep "rope")
+BLOCK_ATTN_ROPE = ("k2",)
 # families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
@@ -441,13 +443,17 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     ag_args = ["ag_a", "ag_b", "ag_c"]
     check_buffer_args("attn_block", ag_args)
     attn_block = None
-    if set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
+    prep = None
+    if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
+            and not spec.attn_gate):
+        prep = "qknorm_rope"
+    elif spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate:
+        prep = "rope"
+    # without a prep the engine never reads it, and its products need not even tile (Granite's 5 row blocks)
+    if prep and set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
         attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
                       "kernels_s": {str(Lw): f"ag_s{Lw}" for Lw in ag_tiers},
-                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}}
-        if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
-                and not spec.attn_gate):
-            attn_block["prep"] = "qknorm_rope"
+                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}, "prep": prep}
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
@@ -529,12 +535,18 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         # serves every tier. ag_s / ag_pv, each kernel wired to its family.
         out["contexts"]["ag_s"] = f"ag_s{ag_tiers[0]}/final.xclbin"
         out["contexts"]["ag_pv"] = f"ag_pv{ag_tiers[0]}/final.xclbin"
+        # AG_M is a compile-time knob of the design, so it belongs in the build
+        # dir name: two dense specs whose head config gives a different ag_m
+        # need different kernels, and without this they shared one directory
+        # and one overwrote the other's xclbin. The qwen36moe recipe already
+        # spelled it this way.
+        msfx = "" if ag_m == 2048 else f"_m{ag_m}"
         for Lw in ag_tiers:
             for tag, K, N, cols in (("s", hd, Lw, 8), ("pv", Lw, hd, pv_cols)):
                 name = f"ag_{tag}{Lw}"
                 out["kernels"][name] = {"context": f"ag_{tag}", "insts": f"{name}/insts.bin", "build": name}
                 out["builds"][name] = {"design": "attn_block/attn_gemm.py",
-                                       "build_dir": f"attn_block/build_{tag}{Lw}{sfx}",
+                                       "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K),
                                                 "AG_N": str(N), "AG_COLS": str(cols)}}
         # a: the Q or P rows [M, K] bf16 (plain, the design streams A); b: the tiled
@@ -567,7 +579,7 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                     name = f"ag16_{tag}{Lw}"
                     out["kernels"][name] = {"context": "ag16", "insts": f"{name}/insts.bin", "build": name}
                     out["builds"][name] = {"design": "attn_block/attn_gemm.py",
-                                       "build_dir": f"attn_block/build16_{tag}{Lw}{sfx}",
+                                       "build_dir": f"attn_block/build16_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K),
                                                 "AG_N": str(N), "AG_COLS": "8", "AG_N_TILE": "16"}}
 
@@ -596,7 +608,9 @@ def dit_route(spec: ModelSpec, q4: dict, plans: dict) -> dict | None:
     hid, ff = spec.hidden, spec.intermediate
     out: dict = {"layer_types": {}, "contexts": {}, "kernels": {}, "builds": {}, "globals": {}}
     for lt, gb in q4["layer_types"].items():
-        if not gb.get("attn_block", {}).get("prep"):
+        # Keep the measured GEMM8 scope when another family gains block attention.
+        # In particular, K2's new rope-only products do not validate its DIT route.
+        if gb.get("attn_block", {}).get("prep") != "qknorm_rope":
             return None
         qw, kvw = gb["qw"], gb["kvw"]
         shapes = [(qw + 2 * kvw, hid), (hid, qw), (ff, hid), (ff, hid), (hid, ff)]
@@ -699,6 +713,11 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         for name, types in r.get("variants", {}).items():
             for lt, gb in types.items():
                 out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
+    rr = None if f32 else rows_route(spec)
+    if rr:
+        out["contexts"].update(rr["contexts"])
+        out["kernels"].update(rr["kernels"])
+        out["rows"] = rr["rows"]
     if spec.quant == "q4_1":
         # the export also builds the f32-scale twins (dx_f32, lm_head_q4_f32); the engine
         # swaps this section in for GGUF-direct models (same weight file family, f32-scale
@@ -707,6 +726,44 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
                        "layer_types": f32["layer_types"], "tail": f32["tail"], "globals": f32["globals"]}
     return out
+
+
+# Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
+ROWS_FAMILIES = ("k2", "granite")
+ROWS_L = 4
+
+
+def rows_route(spec: ModelSpec) -> dict | None:
+    """The L-row pass's kernels (dxl, lmhl) and the manifest's `rows` section for a ROWS_FAMILIES spec, else None."""
+    if spec.family not in ROWS_FAMILIES:
+        return None
+    from .dxl import head_act_bytes, layout as dxl_layout, lora_pack_plan
+    try:
+        X = dxl_layout(spec, ROWS_L)
+    except OpRangeError:
+        return None
+    n_head = 8
+    bd = f"dxl/build_{spec.family}_h{spec.hidden}_l{ROWS_L}"
+    # dxl_lora is the draft pass's stream for the same core programs: it runs in dxl's context
+    return {
+        "contexts": {"dxl": "dxl/final.xclbin", "lmhl": "lmhl/final.xclbin"},
+        "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl"},
+                    "dxl_lora": {"context": "dxl", "insts": "dxl_lora/insts.bin", "patch": "attnrows",
+                                 "build": "dxl_lora"},
+                    "lmhl": {"context": "lmhl", "insts": "lmhl/insts.bin", "build": "lmhl"}},
+        "rows": {"l": ROWS_L, "kernel": "dxl", "head": "lmhl", "act_bytes": X.AD_BYTES,
+                 "head_act_bytes": head_act_bytes(spec, ROWS_L), "head_cores": n_head,
+                 "head_out_floats": ROWS_L * lm_rows(spec) + n_head * ROWS_L * 64,
+                 "lora_kernel": "dxl_lora", "lora_file": "uno.q4nx", "lora_pool_bytes": X.LORA_BYTES,
+                 "lora_pack": lora_pack_plan(spec, ROWS_L)},
+        "builds": {"dxl": {"design": "dxl/dxl.py", "build_dir": bd, "env": {"DXL_L": str(ROWS_L)}},
+                   "dxl_lora": {"design": "dxl/dxl.py", "build_dir": bd + "_draft",
+                                "env": {"DXL_L": str(ROWS_L), "DXL_DRAFT": "1"}},
+                   # the hidden too: K2-3.7B and K2-7B share the vocab, and one export would overwrite the other's head
+                   "lmhl": {"design": "dxl/lmhl.py",
+                            "build_dir": f"dxl/build_lmhl_{lm_rows(spec)}_h{spec.hidden}_l{ROWS_L}",
+                            "env": {"DXL_L": str(ROWS_L)}}},
+    }
 
 
 def builds(spec: ModelSpec) -> dict[str, dict]:
@@ -737,6 +794,9 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
+    rr = rows_route(spec)
+    if rr:
+        b.update(rr["builds"])
     return b
 
 
