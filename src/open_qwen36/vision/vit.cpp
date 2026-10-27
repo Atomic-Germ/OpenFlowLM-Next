@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
@@ -19,6 +20,7 @@
 #endif
 #endif
 
+#include "gguf/gguf_file.hpp"
 #include "nlohmann/json.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
@@ -678,11 +680,135 @@ VitConfig VitConfig::qwen3vl_from_tensors(const std::string& vision_q4nx_path, i
     return c;
 }
 
+/// The tower a llama.cpp `mmproj` describes, from the FILE.
+///
+/// Every number this reader needs is in the file: `clip.vision.*` states the geometry
+/// (which is why the container path needed a hand-written `vision.json`), the patch
+/// embed's shape states the channels and the temporal split, the position table states
+/// its own row count, and the deepstack indexes are in the tensor names themselves.
+/// Each is cross-checked against the others, so a projector that does not describe the
+/// tower this reader runs is refused rather than believed.
+VitConfig VitConfig::from_gguf(const std::string& mmproj_path) {
+    GgufFile g(mmproj_path);
+    const std::string arch = g.kv_has("general.architecture") ? g.kv_str("general.architecture") : std::string();
+    if (arch != "clip")
+        throw std::runtime_error("vit: " + mmproj_path + " is a '" + arch + "' file, not a vision projector ('clip')");
+    if (!g.kv_has("clip.has_vision_encoder") || g.kv_u64("clip.has_vision_encoder") == 0)
+        throw std::runtime_error("vit: " + mmproj_path +
+                                 " carries no vision encoder (clip.has_vision_encoder is false)");
+    const std::string proj = g.kv_has("clip.projector_type") ? g.kv_str("clip.projector_type") : std::string();
+    if (proj != "qwen3vl_merger")
+        throw std::runtime_error("vit: " + mmproj_path + " is a '" + proj +
+                                 "' projector; this reader runs 'qwen3vl_merger' only. (Qwen2.5-VL's "
+                                 "windowed projector is not implemented here.)");
+
+    auto num = [&](const char* k) {
+        if (!g.kv_has(k)) throw std::runtime_error("vit: " + mmproj_path + " has no " + k);
+        return g.kv_u64(k);
+    };
+    VitConfig c;
+    c.family = VitFamily::Qwen3VL;
+    c.depth = static_cast<int>(num("clip.vision.block_count"));
+    c.hidden = static_cast<int>(num("clip.vision.embedding_length"));
+    c.heads = static_cast<int>(num("clip.vision.attention.head_count"));
+    c.inter = static_cast<int>(num("clip.vision.feed_forward_length"));
+    c.out = static_cast<int>(num("clip.vision.projection_dim"));
+    c.patch = static_cast<int>(num("clip.vision.patch_size"));
+    c.merge = static_cast<int>(num("clip.vision.spatial_merge_size"));
+    c.eps = g.kv_has("clip.vision.attention.layer_norm_epsilon")
+                ? static_cast<float>(g.kv_f64("clip.vision.attention.layer_norm_epsilon"))
+                : 1e-6f;
+    if (c.hidden <= 0 || c.heads <= 0 || c.hidden % c.heads)
+        throw std::runtime_error("vit: clip.vision.embedding_length " + std::to_string(c.hidden) +
+                                 " is not a multiple of attention.head_count " + std::to_string(c.heads));
+    c.head_dim = c.hidden / c.heads;
+    if (c.depth <= 0 || c.patch <= 0 || c.merge <= 0 || c.out <= 0 || c.inter <= 0)
+        throw std::runtime_error("vit: " + mmproj_path + " states a tower with a zero dimension");
+
+    // The patch embed is one [P, P, C, hidden] conv per temporal slice: how llama.cpp
+    // splits this tower's Conv3d, so the slice count IS the temporal patch size.
+    const GgufFile::TensorInfo& pe = g.tensor("v.patch_embd.weight");
+    if (pe.dims.size() != 4)
+        throw std::runtime_error("vit: " + mmproj_path + ": v.patch_embd.weight is not [P, P, C, hidden]");
+    c.temporal = 1;
+    while (g.has("v.patch_embd.weight." + std::to_string(c.temporal))) ++c.temporal;
+    c.channels = static_cast<int>(pe.dims[2]);
+    if (static_cast<int>(pe.dims[0]) != c.patch || static_cast<int>(pe.dims[1]) != c.patch ||
+        static_cast<int>(pe.dims[3]) != c.hidden)
+        throw std::runtime_error("vit: v.patch_embd.weight is [" + std::to_string(pe.dims[0]) + ", " +
+                                 std::to_string(pe.dims[1]) + ", " + std::to_string(pe.dims[2]) + ", " +
+                                 std::to_string(pe.dims[3]) + "] where clip.vision says patch " +
+                                 std::to_string(c.patch) + " and hidden " + std::to_string(c.hidden));
+    const GgufFile::TensorInfo& pos = g.tensor("v.position_embd.weight");
+    if (pos.dims.size() != 2 || static_cast<int>(pos.dims[0]) != c.hidden)
+        throw std::runtime_error("vit: v.position_embd.weight is not [hidden, positions]");
+    c.npos = static_cast<int>(pos.dims[1]);
+
+    // Which blocks the deepstack mergers hang off is in the tensor NAMES
+    // (v.deepstack.5.*) -- the same statement clip.vision.is_deepstack_layers makes,
+    // and unlike that metadata array it survives every writer.
+    std::vector<int> taps;
+    for (const std::string& n : g.tensor_names()) {
+        const std::string pre = "v.deepstack.";
+        if (n.size() <= pre.size() || n.compare(0, pre.size(), pre) != 0) continue;
+        const std::string rest = n.substr(pre.size());
+        const auto dot = rest.find('.');
+        if (dot == std::string::npos) continue;
+        int idx = -1;
+        try {
+            idx = std::stoi(rest.substr(0, dot));
+        } catch (const std::logic_error&) {
+            continue;
+        }
+        if (std::find(taps.begin(), taps.end(), idx) == taps.end()) taps.push_back(idx);
+    }
+    std::sort(taps.begin(), taps.end());
+    for (int i : taps)
+        if (i < 0 || i >= c.depth)
+            throw std::runtime_error("vit: deepstack index " + std::to_string(i) + " is outside the tower's " +
+                                     std::to_string(c.depth) + " blocks");
+    c.deepstack = taps;
+    return c;
+}
+
+std::string vision_weights_path(const std::string& model_dir) {
+    std::string file = "vision_weight.q4nx";
+    {
+        std::ifstream cf(model_dir + "/config.json");
+        auto j = nlohmann::json::parse(cf, nullptr, false);
+        if (j.is_object()) file = j.value("vision_model_weight", file);
+    }
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(model_dir + "/" + file, ec)) return file;
+    // A GGUF install has no container: the projector arrives as llama.cpp's mmproj*.gguf
+    // beside the language model (oflm-add fetches it). Any OTHER gguf here is the model.
+    std::filesystem::directory_iterator it(model_dir, ec), end;
+    if (!ec) {
+        std::vector<std::string> found;
+        for (const auto& e : it) {
+            const std::string n = e.path().filename().string();
+            if (e.path().extension() == ".gguf" && n.rfind("mmproj", 0) == 0) found.push_back(n);
+        }
+        if (found.size() == 1) return found.front();
+        if (found.size() > 1)
+            throw std::runtime_error("vit: " + model_dir + " holds " + std::to_string(found.size()) +
+                                     " mmproj GGUFs; name the one to use in config.json's vision_model_weight");
+    }
+    return file;   // whatever config.json asked for; the loader names it when it is missing
+}
+
 VitConfig VitConfig::for_model_dir(const std::string& model_dir) {
     std::ifstream f(model_dir + "/config.json");
     if (!f) throw std::runtime_error("vit: cannot open " + model_dir + "/config.json");
     const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     const nlohmann::json j = nlohmann::json::parse(text);
+    // A GGUF install's projector describes itself; there is no container to read and no
+    // side file to find. Checked first because such a model's config.json has no
+    // vision_config either.
+    {
+        const std::string wf = vision_weights_path(model_dir);
+        if (wf.size() > 5 && wf.compare(wf.size() - 5, 5, ".gguf") == 0) return from_gguf(model_dir + "/" + wf);
+    }
     const std::string mt = j.value("model_type", std::string());
     // Qwen2.5-VL's decoder derives as plain qwen2, so the kernel set's family cannot tell
     // the two apart - only the container's own model_type does.
@@ -831,7 +957,122 @@ static VitWeights load_vit_qwen25(const Q4nxFile& f, const VitConfig& cfg) {
     return w;
 }
 
+namespace {
+
+/// The whole tensor, as a tower Linear: llama.cpp stores a matmul weight [in, out]
+/// (its fastest dim is the input), the tower keeps [out, in] bf16.
+Linear gguf_linear(const GgufFile& g, const std::string& base, int out, int in) {
+    Linear L;
+    L.out = out;
+    L.in = in;
+    const GgufFile::TensorInfo& t = g.tensor(base + ".weight");
+    if (t.dims.size() != 2 || static_cast<int>(t.dims[0]) != in || static_cast<int>(t.dims[1]) != out)
+        throw std::runtime_error("vit: " + base + ".weight is not [" + std::to_string(in) + ", " +
+                                 std::to_string(out) + "] (the GGUF stores [in, out])");
+    const std::vector<float> src = g.f32_all(base + ".weight");
+    L.w.resize(static_cast<size_t>(out) * in);
+    for (int o = 0; o < out; ++o)
+        for (int i = 0; i < in; ++i) L.w[static_cast<size_t>(o) * in + i] = f32_to_bf16(src[static_cast<size_t>(i) + static_cast<size_t>(in) * o]);
+    L.b = g.f32_all(base + ".bias");
+    if (L.b.size() != static_cast<size_t>(out))
+        throw std::runtime_error("vit: " + base + ".bias is [" + std::to_string(L.b.size()) + "] where " +
+                                 std::to_string(out) + " is needed");
+    return L;
+}
+
+}  // namespace
+
+/// The same tower, from a llama.cpp mmproj. The names are llama.cpp's (`v.blk.N.attn_qkv`,
+/// `mm.0`, `v.deepstack.N.fc1`) and the tensors are PLAIN -- no 64x256 pre-tiling, because
+/// nothing downstream of this is the closed engine's vision_mm. So the only work beyond
+/// reading is a transpose for every matmul, and the patch embed's split back into the
+/// Conv3d this tower expects.
+VitWeights load_vit_gguf(const std::string& path, const VitConfig& cfg) {
+    if (cfg.family != VitFamily::Qwen3VL)
+        throw std::runtime_error("vit: a GGUF projector is read for the Qwen3-VL tower only "
+                                 "(Qwen2.5-VL's windowed tower is not implemented here)");
+    GgufFile g(path);
+    const int H = cfg.hidden, I = cfg.inter, M = cfg.merge * cfg.merge, P = cfg.patch, C = cfg.channels,
+              T = cfg.temporal;
+    VitWeights w;
+    {
+        // patch_embd is one [P, P, C, H] conv per temporal slice (fastest dim = patch
+        // WIDTH); this tower's patch vector is (C, T, P_h, P_w), the Conv3d input order
+        // the processor's reorder_patches emits (imageproc.cpp).
+        w.patch.out = H;
+        w.patch.in = cfg.patch_dim();
+        w.patch.w.assign(static_cast<size_t>(H) * w.patch.in, 0);
+        for (int t = 0; t < T; ++t) {
+            const std::string nm = t == 0 ? std::string("v.patch_embd.weight")
+                                          : "v.patch_embd.weight." + std::to_string(t);
+            const GgufFile::TensorInfo& ti = g.tensor(nm);
+            if (ti.dims.size() != 4 || static_cast<int>(ti.dims[0]) != P || static_cast<int>(ti.dims[1]) != P ||
+                static_cast<int>(ti.dims[2]) != C || static_cast<int>(ti.dims[3]) != H)
+                throw std::runtime_error("vit: " + nm + " is not [" + std::to_string(P) + ", " + std::to_string(P) +
+                                         ", " + std::to_string(C) + ", " + std::to_string(H) + "]");
+            const std::vector<float> src = g.f32_all(nm);
+            for (int h = 0; h < H; ++h)
+                for (int c = 0; c < C; ++c)
+                    for (int ph = 0; ph < P; ++ph)
+                        for (int pw = 0; pw < P; ++pw)
+                            w.patch.w[((static_cast<size_t>(h) * C + c) * T + t) * P * P + ph * P + pw] =
+                                f32_to_bf16(src[static_cast<size_t>(pw) + P * (ph + static_cast<size_t>(P) * (c + static_cast<size_t>(C) * h))]);
+        }
+        w.patch.b = g.f32_all("v.patch_embd.bias");
+        if (w.patch.b.size() != static_cast<size_t>(H))
+            throw std::runtime_error("vit: v.patch_embd.bias is not [hidden]");
+    }
+    w.pos = g.f32_all("v.position_embd.weight");
+    if (w.pos.size() != static_cast<size_t>(cfg.npos) * H)
+        throw std::runtime_error("vit: v.position_embd.weight has the wrong shape");
+
+    w.blocks.resize(cfg.depth);
+    for (int i = 0; i < cfg.depth; ++i) {
+        const std::string b = "v.blk." + std::to_string(i) + ".";
+        VitBlock& B = w.blocks[i];
+        B.ln1_w = g.f32_all(b + "ln1.weight");
+        B.ln1_b = g.f32_all(b + "ln1.bias");
+        B.ln2_w = g.f32_all(b + "ln2.weight");
+        B.ln2_b = g.f32_all(b + "ln2.bias");
+        B.qkv = gguf_linear(g, b + "attn_qkv", 3 * H, H);   // [q | k | v] along the output
+        B.proj = gguf_linear(g, b + "attn_out", H, H);
+        B.fc1 = gguf_linear(g, b + "ffn_up", I, H);
+        B.fc2 = gguf_linear(g, b + "ffn_down", H, I);
+    }
+    w.merger_ln_w = g.f32_all("v.post_ln.weight");   // over `hidden`, BEFORE the 2x2 concat
+    w.merger_ln_b = g.f32_all("v.post_ln.bias");
+    w.merger_fc1 = gguf_linear(g, "mm.0", H * M, H * M);
+    w.merger_fc2 = gguf_linear(g, "mm.2", cfg.out, H * M);
+
+    for (int idx : cfg.deepstack) {
+        const std::string d = "v.deepstack." + std::to_string(idx) + ".";
+        Merger m;
+        m.ln_w = g.f32_all(d + "norm.weight");
+        m.ln_b = g.f32_all(d + "norm.bias");
+        if (m.ln_w.size() != static_cast<size_t>(H) * M)
+            throw std::runtime_error("vit: " + d + "norm.weight is [" + std::to_string(m.ln_w.size()) +
+                                     "] where a post-shuffle norm is [" + std::to_string(H * M) + "]");
+        m.fc1 = gguf_linear(g, d + "fc1", H * M, H * M);
+        m.fc2 = gguf_linear(g, d + "fc2", cfg.out, H * M);
+        w.deepstack.push_back(std::move(m));
+    }
+
+    // Every tensor accounted for, as the container loader demands: a missing piece reads
+    // as plausible numbers rather than as an error, so an extra name is refused instead
+    // of skipped. 12 per block, 6 per deepstack merger, then the patch embed (one weight
+    // per temporal slice plus its bias), the position table, post_ln, and mm.0/mm.2.
+    const size_t want = 12 * static_cast<size_t>(cfg.depth) + 6 * cfg.deepstack.size() +
+                        static_cast<size_t>(T) + 8;
+    const size_t have = g.tensor_names().size();
+    if (have != want)
+        throw std::runtime_error("vit: " + path + " holds " + std::to_string(have) +
+                                 " tensors where this tower reads " + std::to_string(want) +
+                                 " - list its names before loading it");
+    return w;
+}
+
 VitWeights load_vit(const std::string& path, const VitConfig& cfg) {
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, ".gguf") == 0) return load_vit_gguf(path, cfg);
     Q4nxFile f(path);
     if (cfg.family == VitFamily::Qwen25VL) return load_vit_qwen25(f, cfg);
     const std::string p = "model.visual.";

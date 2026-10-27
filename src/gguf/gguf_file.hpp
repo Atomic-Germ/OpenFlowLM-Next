@@ -55,6 +55,11 @@ public:
     const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const override;
     /// One embedding row as f32, dequantized from whatever type stores it.
     void embed_row(const std::string& name, size_t row, size_t dim, float* out) const override;
+    /// The whole tensor decoded to f32, ANY RANK (f32/f16/bf16 exact, quantized via row
+    /// dequant). The width of a row is the fastest dim; f32()'s [rows, cols] assumption
+    /// (rows = dims[1]) is wrong for a 4-D tensor -- the vision projector's patch embed
+    /// is [P, P, C, hidden] and decodes as rows of P values.
+    std::vector<float> f32_all(const std::string& name) const;
     /// The whole tensor decoded to f32 (f32/f16/bf16 exact, quantized via row dequant).
     std::vector<float> bf16(const std::string& name) const override;
     std::vector<float> f32(const std::string& name) const override;
@@ -93,6 +98,9 @@ private:
     bool post_norm_ = false;
     mutable std::map<std::string, TensorMeta> meta_cache_;  // row-major shapes, built on demand
     std::map<std::string, std::string> meta_;       // everything as strings (the derivation's view)
+    /// One row of `dim` values starting at `row`, in the tensor's own block layout.
+    /// No bounds check: callers (embed_row, f32_all) decide what a row is.
+    void dequant_row(const TensorInfo& t, size_t row, size_t dim, float* out) const;
 #ifdef _WIN32
     void* file_ = nullptr;
     void* mapping_ = nullptr;

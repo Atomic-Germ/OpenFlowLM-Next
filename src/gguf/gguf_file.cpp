@@ -380,12 +380,12 @@ double GgufFile::kv_f64(const std::string& key) const {
     }
 }
 
-void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float* out) const {
-    const TensorInfo& t = tensor(name);
-    const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
-    if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
-    const uint64_t nrows = t.dims.size() >= 2 ? t.dims[1] : 1u;  // 1-D tensors are a single row
-    if (row >= nrows) fail("row " + std::to_string(row) + " past " + name);
+/// One row of a tensor, `dim` values wide, from a tensor whose fastest dim is `dim`.
+/// The caller has already checked that the row exists: embed_row for the model's
+/// [rows, cols] tensors, f32_all for any rank (the vision projector's patch embed is
+/// [P, P, C, hidden], and llama.cpp stores the conv kernel with the patch width
+/// fastest -- a row of it is a patch column, not a hidden row).
+void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* out) const {
     const uint8_t* base = map_ + data_base_ + t.offset;
     switch (t.type) {
         case Type::F32: {
@@ -596,6 +596,30 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
                  "IQ4_NL/IQ4_XS rows "
                  "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
     }
+}
+
+void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float* out) const {
+    const TensorInfo& t = tensor(name);
+    const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
+    if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
+    const uint64_t nrows = t.dims.size() >= 2 ? t.dims[1] : 1u;  // 1-D tensors are a single row
+    if (row >= nrows) fail("row " + std::to_string(row) + " past " + name);
+    dequant_row(t, row, dim, out);
+}
+
+std::vector<float> GgufFile::f32_all(const std::string& name) const {
+    const TensorInfo& t = tensor(name);
+    const size_t n = static_cast<size_t>(t.nvalues());
+    std::vector<float> out(n);
+    if (!n) return out;
+    // The fastest dim is the row width; the rows are the product of the rest, whatever
+    // the rank. A 4-D conv kernel therefore decodes as rows of P values -- which is what
+    // its layout means -- not as the dims[1] rows a [rows, cols] accessor assumes.
+    const size_t cols = static_cast<size_t>(t.dims.empty() ? n : t.dims[0]);
+    if (!cols || n % cols)
+        fail(name + ": " + std::to_string(n) + " values is not whole rows of " + std::to_string(cols));
+    for (size_t r = 0; r < n / cols; ++r) dequant_row(t, r, cols, out.data() + r * cols);
+    return out;
 }
 
 }  // namespace open_qwen36

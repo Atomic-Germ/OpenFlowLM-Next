@@ -1519,6 +1519,28 @@ add_test(NAME OPEN-VISION-IMAGE-READ
          COMMAND png_decode_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-engine/tests/fixtures/png"
                  "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-test/oflm_test/test_files/image")
+
+# OPEN-VISION-VIT-GGUF: the vision tower read from a llama.cpp `mmproj` GGUF, which is
+# what a GGUF model ships instead of vision_weight.q4nx. The test writes its own
+# projector, with values that reveal their position, so every transpose and every
+# split the loader performs is checked -- and so are its refusals. It links no device
+# and no weights, and needs no network.
+add_executable(vit_gguf_test
+    open_qwen36/vision/vit_gguf_test.cpp
+    open_qwen36/vision/vit.cpp
+    open_qwen36/q4nx_file.cpp
+    gguf/gguf_file.cpp)
+target_include_directories(vit_gguf_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(vit_gguf_test PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(MSVC)
+    target_compile_options(vit_gguf_test PRIVATE /EHsc /Zc:__cplusplus)
+    target_compile_definitions(vit_gguf_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME OPEN-VISION-VIT-GGUF COMMAND vit_gguf_test)
 # bench_embed: the pure half of `oflm bench-embed` -- the sweep plan, the stage
 # count, the task-name lookup, the corpus, and the batch slice. NO device, NO
 # weights, NO network. Every assertion there is a way the command could report a

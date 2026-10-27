@@ -139,12 +139,9 @@ void Engine::ensure_vit() {
     if (vit_) return;
     auto t0 = std::chrono::steady_clock::now();
     vcfg_ = vision::VitConfig::for_model_dir(cfg_.model_dir);
-    std::string file = "vision_weight.q4nx";
-    {
-        std::ifstream cf(cfg_.model_dir + "/config.json");
-        auto j = nlohmann::json::parse(cf, nullptr, false);
-        if (j.is_object()) file = j.value("vision_model_weight", file);
-    }
+    // `vision_weight.q4nx` for a container, `mmproj*.gguf` for a GGUF install; the
+    // config's own `vision_model_weight` wins when it names one. See vision_weights_path.
+    const std::string file = vision::vision_weights_path(cfg_.model_dir);
     vit_ = std::make_unique<vision::VitWeights>(vision::load_vit(cfg_.model_dir + "/" + file, vcfg_));
     std::fprintf(stderr, "open_qwen36: vision tower resident (%s, %d blocks) in %.1f s\n", file.c_str(), vcfg_.depth,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());

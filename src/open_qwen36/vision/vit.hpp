@@ -48,6 +48,16 @@ struct VitConfig {
     /// Qwen2.5-VL's windowed tower. Kept separate from from_config_text, which refuses a
     /// windowed vision_config because the tower it configures cannot run one.
     static VitConfig qwen25_from_model_dir(const std::string& model_dir);
+    /// The same tower, read from a llama.cpp `mmproj` GGUF instead of a container.
+    ///
+    /// A `mmproj-*.gguf` is what a GGUF model ships INSTEAD of `vision_weight.q4nx`, and
+    /// it is the better description of the tower: `clip.vision.*` names every number the
+    /// container made oflm-add write into a side `vision.json` (block count, embedding
+    /// width, heads, FFN, patch/merge size, the deepstack indexes, the norm epsilon), and
+    /// the tensors are plain rather than pre-tiled for the closed engine's vision_mm.
+    /// Everything is cross-checked against the tensor shapes, so a file that does not
+    /// describe the tower this reader runs is refused rather than believed.
+    static VitConfig from_gguf(const std::string& mmproj_path);
     static VitConfig qwen25_from_config_text(const std::string& config_json);
     /// Whichever of the two the container asks for, by config.json's model_type. The
     /// engine calls this; the two readers above stay narrow so each keeps refusing the
@@ -102,8 +112,17 @@ struct VitWeights {
     std::vector<Merger> deepstack;      // one per cfg.deepstack index, Qwen3-VL only
 };
 
+/// The tower's weight file in a model directory, as a NAME relative to it.
+///
+/// The container names its projector in `config.json` (`vision_model_weight`, default
+/// `vision_weight.q4nx`). A GGUF install has no container -- the projector arrives as
+/// llama.cpp's `mmproj*.gguf` beside the language model -- so when the named file is
+/// absent, the projector is the mmproj. Both readers take one path, so the engine asks
+/// here instead of guessing.
+std::string vision_weights_path(const std::string& model_dir);
+
 /// Read and un-tile the container, per cfg.family. ~0.85 GB resident as bf16 for the 35B,
-/// ~1.3 GB for Qwen2.5-VL-3B.
+/// ~1.3 GB for Qwen2.5-VL-3B. A `.gguf` path is the same tower from a mmproj.
 VitWeights load_vit(const std::string& vision_q4nx_path, const VitConfig& cfg);
 
 /// pixels: [grid_h * grid_w, patch_dim] f32 in the processor's patch order (merge-block
