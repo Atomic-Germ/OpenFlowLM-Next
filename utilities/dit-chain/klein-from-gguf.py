@@ -52,6 +52,11 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=None, help="the GGUF repo (its README names the checkpoint)")
     ap.add_argument("--gguf", default=None, help="a DiT GGUF already on disk (skips the download)")
     ap.add_argument("--resolutions", default="512", help="square sizes the bundle carries (512,1024)")
+    ap.add_argument("--edits", default="",
+                    help="resolutions that also get an edit configuration (e.g. 512,1024). The "
+                         "SHIPPED kernel set is built for --resolutions 512,1024 --edits 512,1024, "
+                         "and the layout hash covers both lists: a bundle with other ones needs its "
+                         "own kernel build beside it")
     ap.add_argument("--out", default=str(Path.home() / "klein-bundle"), help="the bundle directory")
     ap.add_argument("--pack-cache", default=str(Path.home() / "klein-pack"),
                     help="keep the per-weight packed files here (reused next run)")
@@ -88,7 +93,7 @@ def main(argv=None) -> int:
     out = Path(a.out).expanduser().resolve()
     run([sys.executable, HERE / "export_bundle.py",
          "--gguf-repo", repo, "--transformer-gguf", gguf,
-         "--resolutions", ",".join(str(r) for r in resolutions),
+         "--resolutions", ",".join(str(r) for r in resolutions), "--edits", a.edits,
          "--out", out, "--pack-cache", Path(a.pack_cache).expanduser(), "--jobs", a.jobs],
         f"bundle -> {out}")
 
@@ -102,9 +107,10 @@ def main(argv=None) -> int:
     else:
         built = REPO / "src" / "xclbins" / "FLUX.2-klein-4B-NPU2" / "open_kernels"
         run([sys.executable, REPO / "open_kernels" / "export_dit_kernels.py",
-             "--resolutions", ",".join(str(r) for r in resolutions), "--out", built], "kernel build")
+             "--resolutions", ",".join(str(r) for r in resolutions), "--edits", a.edits,
+             "--out", built], "kernel build")
         run([sys.executable, REPO / "open_kernels" / "export_dit_kernels.py",
-             "--resolutions", ",".join(str(r) for r in resolutions),
+             "--resolutions", ",".join(str(r) for r in resolutions), "--edits", a.edits,
              "--install", out / "open_kernels", "--out", built], "kernel install")
 
     # 5. the tag

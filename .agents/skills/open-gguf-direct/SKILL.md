@@ -990,6 +990,34 @@ imports its factories inside the converting branches), so the diffusion path nee
 ml_dtypes only; and `gguf_source.py` holds the DiT picker/fetcher both this and
 `klein-from-gguf.py` use.
 
+### The image texture is NOT steps and NOT quantisation (measured 2026-10-27)
+
+`oflm image --steps` now exists (default 0 = the bundle's own, 1..50, printed in the summary
+line). Measured on the Q4_1 bundle, same prompt and seed:
+
+| steps | 1 | 2 | 3 | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|
+| NPU | 1.7 s | 2.6 | 3.5 | 4.5 | 7.8 | 15.0 |
+| look | **cleanest** | textured | textured | textured | more | worst |
+
+The default was already 4 (the bundle's own), so the "it must be doing 1 step" hunch was
+wrong -- but the observation was right: more steps do not clean it up, and 16 is worse.
+
+Then the quant: a **Q8_0** DiT bundle (same repo, same pipeline, `--resolutions 512,1024
+--edits 512,1024` to match the shipped kernel layout) at 4 steps is **visually identical**
+to Q4_1's -- same grain. So it is not 4-bit noise either.
+
+And the step rebinding is sound: `schedule_512.json`'s 181 ops x 4 phases obey
+`off_k = off_0 + k*stride` exactly (checked offline), which is the law `Engine::Impl::rebind`
+applies.
+
+What is left: the converted DiT weights themselves (unsloth's GGUF, or `pack_b_cols`'s tile
+layout), or klein at 4 steps. The discriminator is the OFFICIAL bf16 bundle --
+`oflm pull flux2-klein:4b`, same prompt and seed: if it is clean, the GGUF conversion is at
+fault; if it is equally grainy, that is the model. Note the 1-step image is a different
+trajectory (the engine recomputes sigmas in C++ for a non-bundle count), so 1 vs 4 is not
+like-for-like.
+
 ### The EDIT path runs, and is wrong (found 2026-10-27)
 
 `oflm image <tag> "..." --image ref.png` completes -- reference decoded and centre-cropped,
