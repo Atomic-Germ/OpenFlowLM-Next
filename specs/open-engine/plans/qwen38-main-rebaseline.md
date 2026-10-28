@@ -1,5 +1,56 @@
 # Qwen3.8-27B validation report
 
+## Refined attention through the full L3 tail — 2026-10-28
+
+Added a private full-ax replay that feeds audited refined FP32 attention output
+through unchanged production output projection, residual addition, post-norm,
+FFN and closing residual. Only the output projection's input DMA source changes,
+to a separate seventh buffer. The original attention calculation still executes;
+its scratch OG and KV are required to remain native-exact. This is a forced-
+boundary experiment, not integrated projection refinement.
+
+All six NPU dispatches complete at P125/P205/P239. **All nine native control
+captures match bytewise** (full scratch, active KV prefix and residual at each
+position). Every candidate primary, conditioned-tail, output-projection,
+FFN-front and split-down gate passes at the unchanged 0.005 maxrel threshold.
+The primary reference independently composes unrounded-norm causal attention
+with FP64 output projection, residual, post-norm and FFN.
+
+| Position | Control primary maxabs | Candidate primary maxabs | Reduction |
+|---|---:|---:|---:|
+| 125 | 3.298774181e-4 | 1.516489372e-5 | 21.75× |
+| 205 | 4.871181614e-4 | 6.029089626e-5 | 8.08× |
+| 239 | 2.350416033e-4 | 1.911725848e-4 | 1.23× |
+
+Candidate primary maxrel is 7.29925e-7 / 2.30097e-6 / 1.08730e-5.
+The separately retained full-model CPU-reference errors also improve at all
+three positions. Maximum conditioned-tail maxrel is 1.90043e-6. P239 retains
+its small attention-only regression, but its complete residual improves in
+this test. Do not replace one boundary's finding with another's.
+
+The separate audit reproduces all measurements and **39 numerical arrays
+bytewise**, binding 18 raw captures and three NPZ files. The fresh 15-core
+build binds 858 compiler inputs: maximum .text **13,760 / 16,384 bytes**, L1
+end **59,920 / 65,536 bytes**, all stacks **6144 bytes** unchanged. Only one
+232,783,872-byte L3 weight pool is resident. CPU validation dequantizes four
+L3 matrices, not the full model.
+
+Two unsuccessful attempts are preserved: a build lacking the production
+helper include path, and an appended-OG position-table ABI rejected by the
+unchanged `attnpos` duplicate-transfer guard before any dispatch. The corrected
+ABI uses a separate OG argument and preserves every original argument position
+and runtime patch rule. No harness guard was weakened.
+
+TDD: eight initial failures, ten final new tests. Full host suite:
+**2036 passed, 47 skipped**. Evidence: `l3-tail-build-v3`, `l3-tail-v2` and
+associated logs under `Models/qwen38-27b/post-prefill-drift/`. Reproduction:
+`utilities/l3-tail-replay/README.md` and the new `open-qwen38-refined-tail` skill.
+
+Next extend the tail validation to all 240 causal positions before private
+full-ax integration. Full-model numerical acceptance remains FAIL; performance
+and request isolation remain open. Production arithmetic, registry and installed
+services are unchanged.
+
 ## Refined projections through native L3 attention — 2026-10-28
 
 Added a private replay using the current production attention workers and
