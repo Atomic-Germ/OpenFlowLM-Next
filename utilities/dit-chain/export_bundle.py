@@ -131,6 +131,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     if transformer_gguf is not None:
         # the DiT from the GGUF, the text encoder from the checkpoint (no GGUF of one exists)
         dit_get = _gguf_get(transformer_gguf)
+        kp.validate_sources(dit_get, te.get)     # before the 7.5 GiB pack, not after
         packed = _pack_dit_from_gguf(pack_cache, dit_get)
         # its own subdirectory: ensure_packed stamps the cache with the CHECKPOINT's identity
         # and clears every *.bin that does not match, which would drop the DiT packs above
@@ -138,6 +139,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     else:
         dit = G.SafeTensors(ckpt / "transformer")
         dit_get = dit.get
+        kp.validate_sources(dit_get, te.get)
         packed = G.ensure_packed(pack_cache, jobs, ckpt)
     weights, off = {}, 0
     with open(out / "weights.bin", "wb") as f:

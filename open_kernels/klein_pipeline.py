@@ -281,6 +281,57 @@ def dit_weight_specs() -> dict[str, tuple]:
     return specs
 
 
+def validate_sources(get_dit, get_te) -> None:
+    """Check the weights a bundle is built from are the ones the schedule runs.
+
+    This replaces the hand-written config dicts the builder used to compare against
+    (`attention_head_dim: 128`, `num_layers: 5`, `hidden_size: 2560`, ...). Those restated
+    the schedule's own constants, so they could only catch a checkpoint that disagreed
+    with them -- and a checkpoint whose config.json agreed while its tensors did not would
+    pass and pack garbage.
+
+    This asks the TENSORS, the way the text families' specs do: the weights the schedule
+    names must build at the (K, N) the schedule needs. Building all 194 would decode the
+    whole 7.5 GiB a second time, so the sample covers every distinct kind (the singles, the
+    first and last double/single block, the first and last text-encoder layer) -- a wrong
+    width, depth or fused layout changes one of those -- and `fill_params` then reads EVERY
+    norm, which is the cheap half. The embedding table's width is checked against the row
+    the schedule pads to.
+
+    Raises ValueError naming what does not fit.
+    """
+    dit, te = dit_weight_specs(), te_weight_specs()
+    names = ["t_emb1", "t_emb2", "mod", "ctx_emb", "x_emb", "proj_out",
+             "dbl0.img_qkv", f"dbl{N_DBL - 1}.txt_ffin", "sgl0.in", f"sgl{N_SGL - 1}.out",
+             "te0.qkv", f"te{TE_LAYERS - 1}.down"]
+    bad = []
+    for name in names:
+        specs, get = (dit, get_dit) if name in dit else (te, get_te)
+        if name not in specs:
+            bad.append(f"{name}: not a weight this schedule names")
+            continue
+        K, N, build = specs[name]
+        try:
+            b = build(get)
+        except Exception as e:                       # noqa: BLE001 - report them all
+            bad.append(f"{name}: {type(e).__name__}: {e}")
+            continue
+        if b.shape != (K, N):
+            bad.append(f"{name}: {b.shape} where the schedule needs {(K, N)}")
+    try:
+        fill_params(get_dit, get_te)                 # every norm the kernels read
+    except Exception as e:                           # noqa: BLE001
+        bad.append(f"norms: {type(e).__name__}: {e}")
+    try:
+        emb = get_te("model.embed_tokens.weight")
+        if getattr(emb, "ndim", 0) != 2 or emb.shape[1] > TE_PAD:
+            bad.append(f"embed table {getattr(emb, 'shape', '?')}: the schedule pads rows to {TE_PAD}")
+    except Exception as e:                           # noqa: BLE001
+        bad.append(f"embed table: {type(e).__name__}: {e}")
+    if bad:
+        raise ValueError("not the checkpoint these schedules were built for:\n  " + "\n  ".join(bad))
+
+
 def te_weight_specs() -> dict[str, tuple]:
     """The text encoder's GEMM weights (Qwen3-4B layers 0-26), get reads text_encoder/."""
     sw = _pack().interleave_swiglu

@@ -1018,11 +1018,27 @@ fetches only `text_encoder/`, `vae/`, `tokenizer/`, `LICENSE.md` from the base i
 it next time. A converter that leaves `base_model` empty (leejet's does) falls back to the
 repo's own name minus `-GGUF`.
 
+**The geometry checks now ask the TENSORS** (`klein_pipeline.validate_sources`): the
+hand-written `TRANSFORMER`/`TEXT_ENCODER` dicts in `q4nx/open_diffusion.py` are gone. They
+restated the schedule's own constants, so they could only catch a checkpoint whose
+config.json disagreed -- one whose config agreed while its tensors did not passed and packed
+garbage. Now the weights the schedule names must build at their (K, N): a sample covering
+every kind (the singles, first/last double and single block, first/last text-encoder layer)
+plus `fill_params`, which reads every norm, plus the embedding table's width against the
+row the schedule pads to. It runs before the 7.5 GiB pack (20 s on a warm cache) and is the
+only check that works for a GGUF DiT, which has no config.json at all.
+
+Proved both ways: the real sources pass; a DiT one row short is rejected ("x_emb: (512,
+3071) where the schedule needs (512, 3072)"), a text encoder with a 256-wide error is
+rejected at the concat, and one with no qk norms is rejected by `fill_params`.
+
+The layout hash stays hard -- it is the LINK key, computed identically on both sides
+(`layout_hash(set_streams(family, resolutions))`), and it is what stops a 1050-op schedule
+from reading streams built for another shape.
+
 Still to do for the product path: `q4nx-build --open-diffusion <gguf-repo>` (so a GGUF repo
 is one command), and `oflm add` recognising a bundle so `register-bundle.py` is only for
-local test builds. The hard-coded geometry checks in `q4nx/open_diffusion.py`
-(`TRANSFORMER`, `TEXT_ENCODER`) are the next "replace the constant with the file" candidates
-now that the checkpoint is resolved rather than named.
+local test builds.
 
 ### Diffusion: the klein DiT GGUF is a NAME map, not a kernel change (2026-10-27)
 
