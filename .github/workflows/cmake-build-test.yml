@@ -6,6 +6,7 @@ on:
       - main
       - "feat/**"
       - "bugfix/**"
+      - "model/**"
   pull_request:
     branches:
       - main
@@ -17,8 +18,55 @@ permissions:
   contents: read
 
 jobs:
+  # The settings registry is generated from the code, and CI checks that it is
+  # in step. That check is two python scripts and a git diff -- no XRT, no
+  # build, no NPU -- so it runs in its own job: it still gives signal when the
+  # XRT PPA on Launchpad is down, and it fails in seconds instead of after
+  # the whole build.
+  #
+  # For a pull request, the checkout is the merge with the target branch, so
+  # this sees the code as it will be merged -- including a variable the
+  # target branch added, which is the case that breaks the check without
+  # anyone touching it.
+  settings-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify the settings registry is up to date
+        run: |
+          python3 utilities/scan-settings.py --source-dir src > /tmp/scan.json
+          python3 utilities/generate-registry.py \
+            --settings src/config/settings.json \
+            --scan-output /tmp/scan.json \
+            --output src/config/settings_registry_generated.hpp \
+            --source-dir src
+          git diff --exit-code src/config/settings.json \
+                         src/config/settings_registry_generated.hpp
+
+  # Record replacement differs on Windows. This target needs only the checked-in
+  # headers, so exercise repeated writes with MSVC without the NPU dependencies.
+  pull-plan-windows:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and run pull planning tests
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          cl /nologo /std:c++20 /EHsc /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /Isrc/include /Isrc/pull src/pull/pull_plan_test.cpp src/pull/install_record.cpp /Fe:pull_plan_test.exe
+          if errorlevel 1 exit /b 1
+          pull_plan_test.exe
+
   config-build-test:
     runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
 
     steps:
       - name: Checkout
@@ -26,17 +74,55 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Cache C/C++ compilation
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-
+
       - name: Install dependencies
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          # The translations are of no use here, and the XRT PPA is on
+          # Launchpad, whose CDN answers 503 at random. A translation index
+          # that fails takes the whole `apt-get update` down with it, and the
+          # package list never lands -- which is how a PPA hiccup turned into
+          # "Unable to locate package libxrt2". Asking apt for no languages
+          # takes those requests out of the picture.
+          echo 'Acquire::Languages "none";' \
+            | sudo tee /etc/apt/apt.conf.d/99disable-translations >/dev/null
+
+          # The XRT packages come from a Launchpad PPA, and Launchpad has
+          # outages -- a 503 there turns the whole CI red for every pull
+          # request, including the ones that changed nothing about the NPU.
+          # Retrying turns "red for everyone" into "waited a couple of
+          # minutes".
+          apt_retry() {
+            local what="$1"; shift
+            local attempt
+            for attempt in 1 2 3 4 5 6; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::${what} failed (attempt ${attempt}/6); the XRT PPA on Launchpad is the usual suspect"
+              sleep 30
+            done
+            echo "::error::${what} failed after 6 attempts. If the XRT PPA (ppa:amd-team/xrt) is down, this job cannot pass; re-run it when it is back."
+            return 1
+          }
+
+          apt_retry "apt-get update" sudo apt-get update
+          apt_retry "apt-get install" sudo apt-get install -y \
             software-properties-common \
             libboost-all-dev \
             uuid-dev \
             libdrm-dev \
             cmake \
             ninja-build \
+            mold \
+            ccache \
             g++ \
             libreadline-dev \
             libcurl4-openssl-dev \
@@ -47,8 +133,8 @@ jobs:
             libswscale-dev
 
           sudo add-apt-repository -y ppa:amd-team/xrt
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_retry "apt-get update (XRT PPA)" sudo apt-get update
+          apt_retry "apt-get install (XRT)" sudo apt-get install -y \
             libxrt-dev \
             libxrt2 \
             libxrt-npu2
@@ -69,3 +155,33 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Verify settings registry is up to date
+        run: |
+          cmake --build build --target generate-settings
+          git diff --exit-code src/config/settings.json src/config/settings_registry_generated.hpp
+
+      # gguf-inspect's tests need the GGUF reader. The in-tree vendored copy
+      # (third_party/Guanaco/llama.cpp) is not a submodule of this repository,
+      # so install the reader from upstream llama.cpp instead. It goes in a
+      # throwaway venv of its own: `pip install llama.cpp` pulls transformers,
+      # tokenizers and protobuf along and will happily downgrade them, and the
+      # project's own ironvenv must keep the exact versions mlir-aie/Peano need.
+      - name: Install the GGUF reader for gguf-inspect
+        run: |
+          python3 -m venv /tmp/gguf-tools
+          /tmp/gguf-tools/bin/pip install --upgrade pip
+          /tmp/gguf-tools/bin/pip install \
+            "git+https://github.com/ggml-org/llama.cpp"
+          /tmp/gguf-tools/bin/python -c \
+            "import gguf; assert gguf.GGUFReader is not None; print('gguf reader ok')"
+
+      # These are pure metadata tests (no NPU, no model download): the pinned
+      # multi-GB snapshots are absent here, so those cases skip, while the
+      # snapshot-free cases still run and cover the dtype allowlist, the
+      # candidate-tag derivation and the provenance split.
+      - name: Test gguf-inspect
+        run: |
+          /tmp/gguf-tools/bin/pip install pytest
+          /tmp/gguf-tools/bin/python -m pytest \
+            utilities/gguf-utils/gguf-inspect/tests/ -v

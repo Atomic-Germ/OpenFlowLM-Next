@@ -93,7 +93,7 @@ what is open today.
   
 ---
 
-💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community](https://discord.gg/8RexzmW7))
+💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community]([https://discord.gg/8RexzmW7](https://discord.gg/AcFAKvVV8c)))
 
 ---
 
@@ -140,7 +140,8 @@ For detailed instructions, see [docs/BUILD.md](docs/BUILD.md).
 - Ninja (recommended)
 
 The full Linux build also compiles the open NPU kernel xclbins -- the `open_kernels`
-families (Qwen3.6-MoE, Qwen3.5/3 dense, Llama 3, Gemma 3, HunYuan, Granite) and the
+families (Qwen3.6-MoE, Qwen3.5/3 dense, Qwen2.5, LFM2 hybrid, Llama 3.1, Gemma 3
+4B/12B, HunYuan, Granite 4.2, Phi-4-mini, MiniCPM5) and the
 `open_npue` BERT embedding design sets -- which needs:
 
 - **XRT** installed on the host (the AMD NPU runtime; `/opt/xilinx/xrt`), including its
@@ -166,7 +167,9 @@ See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions.
 
 **Presets:**
 - **Linux full distribution:** `cmake --preset linux-default`
+- **Linux full distribution (Fedora):** `cmake --preset fedora-default`
 - **Linux debug (engine only):** `cmake --preset linux-debug`
+- **Linux debug (Fedora, engine only):** `cmake --preset fedora-debug`
 - **Linux portable:** `cmake --preset linux-portable`
 - **Windows:** `cmake --preset windows-default`
 
@@ -178,22 +181,38 @@ cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b
 
 Also you can build fast and simple with Docker.
 
-Simply run(linux-package preset is used by default):
+Simply run(linux-package-deb preset is used by default):
 
 ```bash
 ./build_in_docker.sh
 ```
 
-Or specify a workflow preset(for deb package in this example):
+Or specify a workflow preset(for tar.gz package in this example):
 
 ```bash
-./build_in_docker.sh linux-package-deb
+./build_in_docker.sh linux-package
 ```
 
 The script builds `openflowlm-build:ubuntu26`, passes `/dev/accel/accel0` into the container, enables XRT memory locking, and persists the build and NPU cache directories.
+
+The container toolchain lives in `/opt/ironvenv` (`OFLM_VENV_DIR`), outside
+the repository mounted at `/code`. This prevents a host `ironvenv` from hiding
+the image's tested Python, mlir-aie and Peano environment. Rebuild the builder
+image after changing the Dockerfile; the build script does this automatically.
 
 The host must have the AMD XDNA driver installed and expose:
 
 ```text
 /dev/accel/accel0
+```
+
+#### Run with Docker Compose
+
+On a Linux host with Docker Compose and the AMD XDNA driver, first build the
+Ubuntu DEB (including the kernel exports), then start the API:
+
+```bash
+./build_in_docker.sh
+docker compose up -d --build
+curl --fail http://127.0.0.1:52625/api/version
 ```

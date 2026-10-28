@@ -1,10 +1,15 @@
-"""Execute lx's actual glue worker with checked FIFOs, without pretending to run IRON.
+"""Execute the actual glue worker with checked FIFOs, without pretending to run IRON.
 
 This tests stream order, accumulator reuse and the conv/record continuation, and that
 the host's side-channel DMA issues exactly what the worker consumes. Past 32 value
 heads the glue runs glue_ab_w.cc's 64-lane tile, and at three xn halves it walks
 half-outer (recipes/qwen36moe.py glue_fills). Hardware placement and AIE arithmetic
 remain separate validation gates.
+
+The glue core and its declarations live in designs/layer_x/xlayer.py, shared by lx.py
+and the merged decode image ux.py; the host's side fills are still lx.py's
+`dense_sequence`. Both are read as source and executed: these geometries have no spec
+file of their own, and importing a design would pull in IRON.
 """
 import ast
 from collections import deque
@@ -23,6 +28,7 @@ from recipes.spec import ModelSpec
 
 ROOT = Path(__file__).resolve().parents[3]
 LX = ROOT / "open_kernels/designs/layer_x/lx.py"
+XLAYER = ROOT / "open_kernels/designs/layer_x/xlayer.py"
 
 
 def spec27():
@@ -42,14 +48,29 @@ def lx_function(name):
     return next(n for n in lx.body if isinstance(n, ast.FunctionDef) and n.name == name)
 
 
+def xlayer_module(names):
+    """xlayer.py's `D = R.linear` constants and the named module-level definitions."""
+    tree = ast.parse(XLAYER.read_text())
+    return ast.Module(type_ignores=[], body=[
+        n for n in tree.body
+        if (isinstance(n, ast.Assign) and ast.unparse(n) == "D = R.linear")
+        or (isinstance(n, ast.If) and ast.unparse(n.test) == "D is not None")
+        or (isinstance(n, ast.FunctionDef) and n.name in names)])
+
+
+def xlayer_function(name):
+    tree = ast.parse(XLAYER.read_text())
+    return next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
 def worker(namespace):
-    body = lx_function("glue_body")
-    exec(compile(ast.Module(body=[body], type_ignores=[]), str(LX), "exec"), namespace)
+    body = xlayer_function("glue_body")
+    exec(compile(ast.Module(body=[body], type_ignores=[]), str(XLAYER), "exec"), namespace)
     return namespace["glue_body"]
 
 
 def glue_namespace(d, hidden, dense=True):
-    """lx.py's module-level names that glue_body reads, from the recipe's Linear."""
+    """xlayer.py's module-level names that glue_body reads, from the recipe's Linear."""
     tiles = [min(2048, hidden - h * 2048) // d.AB_ROWS for h in range(d.XN_SIDE_ELEMS)]
     return dict(DENSE=dense, HALF_OUTER=d.GLUE_HALF_OUTER, AB_TILES=tiles, AB_ELEMS=d.AB_ELEMS,
                 NHEAD=d.NHEAD, KEY_TILES=d.VALUE_TILE0, VALUE_TILES=d.NT - d.VALUE_TILE0,
@@ -80,40 +101,32 @@ def test_actual_glue_declarations_preserve_legacy_and_budget_wide_buffers(heads,
         shape, dtype = ty.__args__
         return np.prod(shape) * np.dtype(dtype.__args__[0]).itemsize
 
-    x = SimpleNamespace(
-        types=lambda: dict(elem=object(), y=object(), x=object()),
-        ln_types=lambda: {"u8_ln": np.ndarray[(layout.ELN,), np.dtype[np.uint8]]},
-        kernels=lambda *args: {}, ln_kernels=lambda *args: {}, LN=Path("ln"), RT=Path("router"),
-        LNI_DEPTH=5)
-    ns = dict(layout.constants(), np=np, bfloat16=np.uint16, D=d, SPEC=s, X=x,
-              ELEM=4096, HID=hidden, NHEAD=heads, TILE=1024, N_CORES=8,
-              DENSE=True, AB_WIDE=d.AB_LANES > 32, ObjectFifo=fifo, ExternalFunction=external,
-              include_dirs=lambda: [], GEMV=Path("gemv"), GLUE=Path("glue"), POST=Path("post"),
-              HERE=LX.parent, GLUE_FLAGS={})
-    tree = ast.parse(LX.read_text())
-    lx = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "lx")
-    setup = []
-    for node in lx.body:
-        if isinstance(node, ast.FunctionDef):
-            break
-        setup.append(node)
-    exec(compile(ast.Module(body=setup, type_ignores=[]), str(LX), "exec"), ns)
+    ns = dict(np=np, bfloat16=np.uint16, R=SimpleNamespace(linear=d), SPEC=s,
+              X=SimpleNamespace(LNI_DEPTH=5), ELEM=4096, HID=hidden, N_CORES=8, DENSE=True,
+              ObjectFifo=fifo, ExternalFunction=external, GLUE=Path("glue"), POST=Path("post"))
+    exec(compile(xlayer_module({"main_fifos", "ln_fifos", "glue_post_types", "glue_post_kernels",
+                                "glue_post_fifos"}), str(XLAYER), "exec"), ns)
+    ns["main_fifos"](dict(elem=object(), y=object(), x=object()))
+    ns["ln_fifos"]({"u8_ln": np.ndarray[(layout.ELN,), np.dtype[np.uint8]]})
+    g = ns["glue_post_types"]()
+    k = ns["glue_post_kernels"]([], g)
+    ns["glue_post_fifos"](g)
     assert set(fifos) == ({f"w{i}" for i in range(8)} | {f"y{i}" for i in range(8)} |
                           {"x", "lni", "lno", "side", "gact", "gout", "pin", "pout"})
     assert (fifos["side"].depth, fifos["gact"].depth, fifos["gout"].depth) == (2, 5, 3)
-    assert ns["f_small"].name == "glue_small_fn"
+    assert k["small"].name == "glue_small_fn"
     if heads > 32:
         assert d.AB_LANES == 64
-        assert size(ns["facc"]) == 64 * 4
-        assert size(ns["f32"]) == heads * 4
-        assert ns["f_ab"].name == "glue_ab_w"
+        assert size(g["facc"]) == 64 * 4
+        assert size(g["f32"]) == heads * 4
+        assert k["ab"].name == "glue_ab_w"
         fifo_bytes = sum(size(fifos[n].ty) * fifos[n].depth for n in ("side", "gact", "gout"))
-        private_bytes = 2 * size(ns["facc"]) + 2 * size(ns["f32"]) + sum(size(ns[n]) for n in ("fqk", "fvt", "fxn"))
+        private_bytes = 2 * size(g["facc"]) + 2 * size(g["f32"]) + sum(size(g[n]) for n in ("fqk", "fvt", "fxn"))
         assert fifo_bytes + private_bytes + 0x1800 == 56192 <= Q36.L1_BUDGET
     else:
         assert d.AB_LANES == 32
-        assert ns["facc"] == ns["f32"]
-        assert ns["f_ab"].name == "glue_ab_e"
+        assert g["facc"] == g["f32"]
+        assert k["ab"].name == "glue_ab_e"
 
 
 class Input:

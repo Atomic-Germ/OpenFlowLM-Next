@@ -38,12 +38,12 @@ from __future__ import annotations
 
 import os
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from .qwen36moe import ATTN_LMAX  # Path A: the widest attention GEMM stream (window chunk)
-from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, GEMM_T, MB, _op_index, band_bytes, proj_op, q4_chunks,
-                        mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
+from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, GEMM_T, MB, _op_index, band_bytes, chunk_bytes, q4_bytes,
+                        proj_op, q4_chunks, mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
 
@@ -98,6 +98,16 @@ class DenseRecipe:
 # families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
 # query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
 QKNORM_POST_ROPE = ("hunyuan",)
+# families whose block prefill runs its attention as the two NPU products (OPEN-PREFILL-ATTN)
+# rather than T single-token dxB dispatches. The engine's host half (block_host.cpp
+# attention_prep) does exactly one thing before the products: q/k RMSNorm (or none), then the
+# half-split rotation over rotary_dim, with no bias, no output gate and no sliding window -- so a family
+# joins only if that is its attention, and by measurement against its dxB route, as
+# FAST_ATTENTION does. The manifest says so as attn_block.prep, which the engine refuses to
+# guess: a dense attn_block without it is left to the dxB route.
+BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
+# the same with no q/k norm: the rotation alone (attn_block.prep "rope")
+BLOCK_ATTN_ROPE = ("k2",)
 # families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
@@ -169,6 +179,11 @@ def cores_for(spec: ModelSpec) -> int:
     return 1
 
 
+def pool_quant(spec: ModelSpec) -> str:
+    """The pool's q4 chunk layout; mixed q8 specs retain the ordinary q4 base layout."""
+    return "q4_1_f32" if spec.quant == "q4_1_f32" else "q4_1"
+
+
 def _check(spec: ModelSpec) -> None:
     n = cores_for(spec)
     if spec.family not in DENSE_FAMILIES:
@@ -177,7 +192,10 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError(f"dense: activation {spec.activation!r} (silu | gelu_tanh)")
     if spec.has_local and spec.sliding_window <= 0:
         raise OpRangeError("dense: dense_local layers need a positive sliding_window")
-    quant_check(spec, "dense")
+    if spec.quant == "q4_1_f32":
+        pass
+    else:
+        quant_check(spec, "dense")
     mixed_check(spec, "dense", ("attn", "ffn"))
     if spec.quant_of("experts") == "q8" or spec.quant_of("shared") == "q8" or spec.quant_of("linear") == "q8":
         raise OpRangeError("dense: this family has only the 'attn' and 'ffn' roles")
@@ -214,7 +232,12 @@ def per_call(spec: ModelSpec) -> int:
     leaves no room for two of them beside the x elements -- then 1 (Llama 3 8B: K = 14336 -> 32 KB)."""
     wide = max(spec.hidden, spec.attn_q_width, spec.intermediate)
     for pc in (2, 1):
-        l1 = tab_bytes(wide) + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + STACK
+        ch = chunk_bytes(pool_quant(spec))
+        # Gemma 3 12B's f32-scale twin is 768 B over physical tile memory with
+        # the ordinary 6 KiB stack. The generated main-core body fits the 5 KiB
+        # stack used by dx.py for f32 builds, retaining the 4 KiB safety margin.
+        stack = 0x1400 if pool_quant(spec) == "q4_1_f32" else STACK
+        l1 = tab_bytes(wide) + 2 * pc * ch + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + stack
         if l1 <= L1_BUDGET:
             return pc
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")
@@ -237,6 +260,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     hpo = e_a // (hd * 2)                     # og heads (bf16) per aout element = KVH
     wide = max(hid, qw, ff)
     pc = per_call(spec)
+    ch = chunk_bytes(pool_quant(spec))
     # The fast attention path (recipes/attnknobs.py): only for the families measured on
     # it; every other family's artifacts stay byte-identical until it has been.
     A = attn_knobs(spec, nh, hpo)
@@ -247,7 +271,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         QKVB=qkv_bias(spec),
         PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=512 // e_a,
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
-        WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * CHUNK,
+        WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * ch,
         QW=qw, KVW=kvw,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=hid // BAND_ROWS // n,
         UP_PC=ff // BAND_ROWS // n, DOWN_PC=hid // BAND_ROWS // n,
@@ -304,7 +328,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     pool_bytes = roundup(off, MB)
     kv_row = 2 * e_a
     ptab_row = _ptab_row(spec)
-    band = band_bytes(hid)
+    band = band_bytes(hid, pool_quant(spec))
     bands = lm_rows(spec) // BAND_ROWS
     return DenseLayout(
         CD_LNW=c["lnw"], CD_POSTLN=c["postln"], CD_META=c["meta"], CD_PREFFN=c["preffn"], CD_POSTFFN=c["postffn"],
@@ -354,12 +378,14 @@ def pack_plan(spec: ModelSpec) -> dict:
             ] if spec.sandwich_norms else []),
     }
     return {
-        "pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK,
+        "pool_bytes": L.POOL_BYTES, "chunk_bytes": chunk_bytes(pool_quant(spec)),
         "layer_types": {lt: one for lt in sorted(set(spec.layer_types))},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm", "tensor": "lm_head.weight", "dst": 0,
-                             "nch": q4_chunks(lm_rows(spec), hid), "in_dim": hid}]},
-        "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
+                    "ops": [{"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                             "tensor": "lm_head.weight", "dst": 0,
+                              "nch": q4_chunks(lm_rows(spec), hid, pool_quant(spec)), "in_dim": hid}]},
+        "embed": {"tensor": "model.embed_tokens.weight", "dim": hid,
+                  **({"scale": hid ** 0.5} if spec.quant == "q4_1_f32" and spec.family == "gemma3" else {})},
         "norm": {"tensor": "model.norm.weight", "bytes": hid * 2},
     }
 
@@ -415,10 +441,17 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     ag_args = ["ag_a", "ag_b", "ag_c"]
     check_buffer_args("attn_block", ag_args)
     attn_block = None
-    if set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
+    prep = None
+    if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
+            and not spec.attn_gate):
+        prep = "qknorm_rope"
+    elif spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate:
+        prep = "rope"
+    # without a prep the engine never reads it, and its products need not even tile (Granite's 5 row blocks)
+    if prep and set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
         attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
                       "kernels_s": {str(Lw): f"ag_s{Lw}" for Lw in ag_tiers},
-                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}}
+                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}, "prep": prep}
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
@@ -500,12 +533,18 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         # serves every tier. ag_s / ag_pv, each kernel wired to its family.
         out["contexts"]["ag_s"] = f"ag_s{ag_tiers[0]}/final.xclbin"
         out["contexts"]["ag_pv"] = f"ag_pv{ag_tiers[0]}/final.xclbin"
+        # AG_M is a compile-time knob of the design, so it belongs in the build
+        # dir name: two dense specs whose head config gives a different ag_m
+        # need different kernels, and without this they shared one directory
+        # and one overwrote the other's xclbin. The qwen36moe recipe already
+        # spelled it this way.
+        msfx = "" if ag_m == 2048 else f"_m{ag_m}"
         for Lw in ag_tiers:
             for tag, K, N, cols in (("s", hd, Lw, 8), ("pv", Lw, hd, pv_cols)):
                 name = f"ag_{tag}{Lw}"
                 out["kernels"][name] = {"context": f"ag_{tag}", "insts": f"{name}/insts.bin", "build": name}
                 out["builds"][name] = {"design": "attn_block/attn_gemm.py",
-                                       "build_dir": f"attn_block/build_{tag}{Lw}{sfx}",
+                                       "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K),
                                                 "AG_N": str(N), "AG_COLS": str(cols)}}
         # a: the Q or P rows [M, K] bf16 (plain, the design streams A); b: the tiled
@@ -538,7 +577,7 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                     name = f"ag16_{tag}{Lw}"
                     out["kernels"][name] = {"context": "ag16", "insts": f"{name}/insts.bin", "build": name}
                     out["builds"][name] = {"design": "attn_block/attn_gemm.py",
-                                       "build_dir": f"attn_block/build16_{tag}{Lw}{sfx}",
+                                       "build_dir": f"attn_block/build16_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K),
                                                 "AG_N": str(N), "AG_COLS": "8", "AG_N_TILE": "16"}}
 
@@ -569,13 +608,16 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     `switch_row`) and `max_ctx` plays no part in the choice; every other family's global carries
     neither key, unchanged. The attention scale rides on the table as `scale` for any family that
     has one (Phi-3 only, today)."""
-    L, G = layout(spec), geometry(spec)
+    L, G = layout(spec, max_ctx), geometry(spec)
     sc = spec.rope_scaling
     longrope = bool(sc) and sc.get("rope_type") == "longrope"
+    f32 = spec.quant == "q4_1_f32"
+    dx_set = "dx_f32" if f32 else "dx"
+    lm_set = "lm_head_q4_f32" if f32 else "lm_head_q4"
     out = {
-        "contexts": {"dx": "dx/final.xclbin", "ln": "ln/final.xclbin", "lm": "lm_head_q4/final.xclbin"},
+        "contexts": {"dx": f"{dx_set}/final.xclbin", "ln": "ln/final.xclbin", "lm": f"{lm_set}/final.xclbin"},
         "kernels": {"ln": {"context": "ln", "insts": "ln/insts.bin", "build": "ln"},
-                    "lm": {"context": "lm", "insts": "lm_head_q4/insts.bin", "build": "lm_head_q4"}},
+                    "lm": {"context": "lm", "insts": f"{lm_set}/insts.bin", "build": lm_set}},
         "layer_types": {},
         "tail": [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
@@ -591,7 +633,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         window = spec.sliding_window if local else 0
         args = ["pool", "xres", "consts", "state", "act", tab]
         check_buffer_args(kn, args)
-        out["kernels"][kn] = {"context": "dx", "insts": "dx/insts.bin", "patch": "attnpos", "build": "dx", "window": window}
+        out["kernels"][kn] = {"context": "dx", "insts": f"{dx_set}/insts.bin", "patch": "attnpos", "build": dx_set, "window": window}
         out["globals"][tab] = {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq(local=local), "window": window}
         if longrope:
             orig = int(sc["original_max_position_embeddings"])
@@ -603,16 +645,73 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": kn, "args": args}],
         }
-    r = gemm_route(spec, max_ctx)
+    # The block-prefill GEMM route (gemm_q4_prefill / attn_block) reads the pool's 5120 B
+    # bf16-scale chunks by a hardcoded law; the GGUF-direct pool is 6144 B f32-scale, so a
+    # f32-scale kernel set must NOT advertise it -- the engine then prefills through step()
+    # (decode-as-prefill), which is exact. BUILDING THE f32 TWINS of those GEMMs is the way
+    # to bring the route back (its GQD_CHUNK_BYTES / scale loads need the SCALES_F32 variant).
+    r = None if f32 else gemm_route(spec, max_ctx)
     if r:
         for k in ("contexts", "kernels", "globals"):
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+    rr = None if f32 else rows_route(spec)
+    if rr:
+        out["contexts"].update(rr["contexts"])
+        out["kernels"].update(rr["kernels"])
+        out["rows"] = rr["rows"]
+    if spec.quant == "q4_1":
+        # the export also builds the f32-scale twins (dx_f32, lm_head_q4_f32); the engine
+        # swaps this section in for GGUF-direct models (same weight file family, f32-scale
+        # pool chunks, open_kernels/gguf_pool.py)
+        f32 = programs(replace(spec, quant="q4_1_f32"), max_ctx)
+        out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
+                       "layer_types": f32["layer_types"], "tail": f32["tail"], "globals": f32["globals"]}
     return out
 
 
+# Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
+ROWS_FAMILIES = ("k2", "granite")
+ROWS_L = 4
+
+
+def rows_route(spec: ModelSpec) -> dict | None:
+    """The L-row pass's kernels (dxl, lmhl) and the manifest's `rows` section for a ROWS_FAMILIES spec, else None."""
+    if spec.family not in ROWS_FAMILIES:
+        return None
+    from .dxl import head_act_bytes, layout as dxl_layout, lora_pack_plan
+    try:
+        X = dxl_layout(spec, ROWS_L)
+    except OpRangeError:
+        return None
+    n_head = 8
+    bd = f"dxl/build_{spec.family}_h{spec.hidden}_l{ROWS_L}"
+    # dxl_lora is the draft pass's stream for the same core programs: it runs in dxl's context
+    return {
+        "contexts": {"dxl": "dxl/final.xclbin", "lmhl": "lmhl/final.xclbin"},
+        "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl"},
+                    "dxl_lora": {"context": "dxl", "insts": "dxl_lora/insts.bin", "patch": "attnrows",
+                                 "build": "dxl_lora"},
+                    "lmhl": {"context": "lmhl", "insts": "lmhl/insts.bin", "build": "lmhl"}},
+        "rows": {"l": ROWS_L, "kernel": "dxl", "head": "lmhl", "act_bytes": X.AD_BYTES,
+                 "head_act_bytes": head_act_bytes(spec, ROWS_L), "head_cores": n_head,
+                 "head_out_floats": ROWS_L * lm_rows(spec) + n_head * ROWS_L * 64,
+                 "lora_kernel": "dxl_lora", "lora_file": "uno.q4nx", "lora_pool_bytes": X.LORA_BYTES,
+                 "lora_pack": lora_pack_plan(spec, ROWS_L)},
+        "builds": {"dxl": {"design": "dxl/dxl.py", "build_dir": bd, "env": {"DXL_L": str(ROWS_L)}},
+                   "dxl_lora": {"design": "dxl/dxl.py", "build_dir": bd + "_draft",
+                                "env": {"DXL_L": str(ROWS_L), "DXL_DRAFT": "1"}},
+                   # the hidden too: K2-3.7B and K2-7B share the vocab, and one export would overwrite the other's head
+                   "lmhl": {"design": "dxl/lmhl.py",
+                            "build_dir": f"dxl/build_lmhl_{lm_rows(spec)}_h{spec.hidden}_l{ROWS_L}",
+                            "env": {"DXL_L": str(ROWS_L)}}},
+    }
+
+
 def builds(spec: ModelSpec) -> dict[str, dict]:
+    """Every kernel set the recipe ships: the q4nx build of each weight-consuming
+    design AND its GGUF-direct f32-scale twin (`*_f32`, see programs())."""
     n = cores_for(spec)
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
@@ -629,17 +728,26 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}", **genv}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
+        "dx_f32": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}_f32",
+                   "env": {"GEMV_SCALES_F32": "1"}},
+        "lm_head_q4_f32": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}_f32",
+                           "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden),
+                                   "LMHEAD_CORES": str(n), "LMHEAD_SCALES_F32": "1"}},
     }
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
+    rr = rows_route(spec)
+    if rr:
+        b.update(rr["builds"])
     return b
 
 
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L = layout(spec, max_ctx)
     return {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
-            "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES, "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
+            "chunk_bytes": chunk_bytes(pool_quant(spec)), "pool_bytes": L.POOL_BYTES,
+            "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
             "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
             "rope_inv_freq": spec.rope_inv_freq()}     # the global table's short/base table; each ptab
             # global carries its own (both tables, for a longrope family -- see programs())
@@ -735,7 +843,8 @@ KERNEL_SOURCES = [
     "designs/lm_head_q4/*.py",
     # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
-    "include/vecmath.h", "ironutil.py", "build_design.py",
+    "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
+    "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
 Q8_ROLES = frozenset({"attn", "ffn"})     # the only two roles a dense layer has

@@ -671,6 +671,28 @@ def _parse_args(argv):
              "expects, f32 biases/norms, the decoder in bf16, and a tokenizer_config.json "
              "carrying the bos/eos ids the host reads.",
     )
+    parser.add_argument(
+        "--open-diffusion", dest="open_diffusion", action="store_true",
+        help="Build the open diffusion engine's model repo (FLUX.2 [klein] 4B): GEMM weights "
+             "packed for the dit_gemm kernel set (tied to it by a layout hash), the VAE's, "
+             "the 512/1024 schedules and the embedding table. Runs from a repo checkout.",
+    )
+    parser.add_argument(
+        "--pack-cache", dest="pack_cache", default=None, metavar="DIR",
+        help="With --open-diffusion: keep the per-weight packed files here and reuse them "
+             "on the next build (default: a temporary directory)",
+    )
+    parser.add_argument(
+        "--uno-adapter", dest="uno_adapter", default=None, metavar="DIR|ORG/NAME",
+        help="A Uno diffusion LoRA (a PEFT adapter dir or HF repo, e.g. IFM/K2-Horizon-7B-Uno): "
+             "after the base converts, write it as uno.q4nx beside model.q4nx for the open engine's "
+             "draft pass (q4nx/uno.py)",
+    )
+    parser.add_argument(
+        "--uno-noise-high", dest="uno_noise_high", type=int, default=None, metavar="N",
+        help="With --uno-adapter: the adapter's draft noise ids are [1, N), e.g. the first special id "
+             "for an adapter trained without special tokens (default: the engine's [1, vocab - 1])",
+    )
     return parser.parse_args(argv)
 
 
@@ -720,6 +742,25 @@ def main(argv=None) -> int:
             print(f"  - {name}")
         print(f"[INFO] Registry metadata written to "
               f"{os.path.join(result['output_dir'], MODEL_INFO_ARTIFACT)}")
+        return 0
+
+    if args.open_diffusion:
+        from q4nx.open_diffusion import MODEL_INFO_ARTIFACT, build_open_diffusion_repo
+
+        output_folder = os.path.abspath(args.output_flag or ".")
+        result = build_open_diffusion_repo(input_path, output_folder, npu_assets=args.npu_assets,
+                                           pack_cache=args.pack_cache)
+        print(f"[INFO] Open diffusion repo built at {result['output_dir']}")
+        print(f"[INFO] Source: {result['source']}")
+        print(f"[INFO] Kernel layout: {result['layout']} (the kernel set must be built from "
+              f"the same open_kernels code: export_dit_kernels.py, then --install)")
+        for name in result["files"]:
+            print(f"  - {name}")
+        print(
+            f"[INFO] Registry metadata written to "
+            f"{os.path.join(result['output_dir'], MODEL_INFO_ARTIFACT)}; "
+            "merge it into src/model_info.json under the model tag."
+        )
         return 0
 
     if args.open_embedding or args.open_causal_lm:
@@ -930,6 +971,13 @@ def main(argv=None) -> int:
             imatrix_name=imatrix_ref.name if imatrix_ref else None,
             source_repo=source_repo,
         )
+
+    # the drafter is written first so --deploy copies it with the base
+    if getattr(args, "uno_adapter", None):
+        from q4nx.uno import build as build_uno, fetch_adapter
+
+        build_uno(fetch_adapter(args.uno_adapter), Path(output_folder) / "config.json", Path(output_folder),
+                  Path(__file__).resolve().parents[1] / "configs" / "k2.json", args.uno_noise_high)
 
     if args.deploy_tag:
         from q4nx.deploy import deploy_model

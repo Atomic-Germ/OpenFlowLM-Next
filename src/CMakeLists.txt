@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(oflm LANGUAGES CXX VERSION 0.1.0)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildAcceleration.cmake")
+
 if(POLICY CMP0207)
     cmake_policy(SET CMP0207 NEW)
 endif()
@@ -13,8 +15,10 @@ if(NOT DEFINED NPU_VERSION)
     message(FATAL_ERROR "NPU_VERSION must be specified externally. Use -DNPU_VERSION=<version> when running cmake.")
 endif()
 
-# Set build type to Release
-set(CMAKE_BUILD_TYPE Release)
+# Default to Release while honoring presets and multi-config generators.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -279,6 +283,27 @@ if(WIN32)
     endif()
 endif()
 
+# sentencepiece creates third_party/absl -> third_party/abseil-cpp/absl only
+# when the link is missing, so a link left over from another checkout survives
+# and points at a tree that is not here. The build then fails on
+# "third_party/absl/log/check.h: No such file or directory" in a place that
+# says nothing about the cause. Drop a link that points elsewhere so
+# sentencepiece makes a correct one.
+if(NOT WIN32)
+    set(OFLM_SPM_TP
+        "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
+    if(IS_SYMLINK "${OFLM_SPM_TP}/absl")
+        file(READ_SYMLINK "${OFLM_SPM_TP}/absl" OFLM_SPM_LINK_TARGET)
+        get_filename_component(OFLM_SPM_LINK_DIR "${OFLM_SPM_LINK_TARGET}" DIRECTORY)
+        get_filename_component(OFLM_SPM_LINK_NAME "${OFLM_SPM_LINK_TARGET}" NAME)
+        if(NOT OFLM_SPM_LINK_NAME STREQUAL "absl" OR
+           NOT OFLM_SPM_LINK_DIR STREQUAL "${OFLM_SPM_TP}/abseil-cpp")
+            message(STATUS "sentencepiece: replacing a stale third_party/absl link")
+            file(REMOVE "${OFLM_SPM_TP}/absl")
+        endif()
+    endif()
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
                  ${CMAKE_BINARY_DIR}/tokenizers-cpp
                  EXCLUDE_FROM_ALL)
@@ -286,10 +311,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
 # ———————————————————————————————————————————————
 # Gather your sources
 # ———————————————————————————————————————————————
+file(GLOB OFLM_CONFIG_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/config/*.cpp")
 file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
 # Unit-test translation units carry their own main() and must never join the engine.
 list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
+
+list(APPEND SOURCES ${OFLM_CONFIG_SOURCES})
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT OFLM_USE_HRX)
@@ -299,6 +327,7 @@ if(NOT OFLM_USE_HRX)
     # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
     list(APPEND SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
@@ -450,6 +479,31 @@ if(NOT OFLM_USE_HRX)
     endif()
 endif()
 
+# ———————————————————————————————————————————————
+# open_diffusion: FLUX.2 [klein] text-to-image, every op on the NPU (`oflm image`)
+# ———————————————————————————————————————————————
+#
+# The engine replays a precomputed schedule of XRT runs; the host only writes the
+# prompt's embedding rows and the noise and encodes the image, so unlike open_whisper it
+# needs no AVX or OpenMP flags. cli.cpp is EXCLUDED: it is open_diffusion/build.cmd's
+# standalone gate with its own main(), as open_whisper's cli.cpp is.
+#
+# Every build has the interface (engine.hpp), so `oflm image` and `oflm serve` need no
+# flag of their own. The engine drives XRT directly; an HRX build compiles
+# engine_unavailable.cpp in its place, whose open_diffusion::available() is false.
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp")
+# an edit's reference image: decode, orient, crop, resize (host code, every build)
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/reference.cpp")
+if(NOT OFLM_USE_HRX)
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp")
+    # stb_image_write (vendored, public domain) encodes the PNG/JPEG; only engine.cpp
+    # includes it
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb")
+else()
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine_unavailable.cpp")
+endif()
+
 # Exclude files that depend on missing libraries for Linux
 if(NOT WIN32)
     # list(FILTER SOURCES EXCLUDE REGEX ".*modeling_gemma3\\.cpp$")
@@ -592,8 +646,15 @@ if(NOT OFLM_USE_HRX)
         # initialiser set a variable the runtime had already read past. Delay-loading
         # vcomp moves its load to the first call into it, which is after that. Worth
         # 20.5 -> 17.1 s on a 2582-token prefill; see the note above OmpWaitPolicy.
+        # The eight closed model DLLs below import vcomp themselves, so linking them at load
+        # time loaded vcomp first anyway and the workers spun regardless (#176); they are
+        # delay-loaded for that reason alone. A closed DLL added later that imports vcomp
+        # belongs on this list, and Core's WARNING names the symptom if it is left off.
         if(MSVC)
-            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL")
+            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL"
+                "/DELAYLOAD:qwen3_6_moe_npu.dll" "/DELAYLOAD:qwen3_5vl_npu.dll" "/DELAYLOAD:qwen3_5_omni_npu.dll"
+                "/DELAYLOAD:qwen3vl_npu.dll" "/DELAYLOAD:gemma_npu.dll" "/DELAYLOAD:gemma4e_npu.dll"
+                "/DELAYLOAD:gemma4_12b_npu.dll" "/DELAYLOAD:gpt_oss_npu.dll")
             target_link_libraries(oflm PRIVATE delayimp)
         endif()
     endif()
@@ -1047,19 +1108,28 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
     # (q4nx.cli:main defaults argv=None), so "$@" flows through sys.argv.
+    #
+    # The package is found RELATIVE to the launcher, not at the prefix the
+    # tree was configured with: an install into another prefix (a staging
+    # directory, a tarball unpacked somewhere else) then finds its own
+    # package. The configured path stays as the fallback, for a launcher that
+    # was copied out of its tree.
     function(_oflm_install_utility name subdir module)
         set(_oflm_util_dir "${CMAKE_INSTALL_PREFIX}/${OFLM_SHARE_DESTINATION}/utilities")
         set(_oflm_util_tmpl "${CMAKE_BINARY_DIR}/_oflm-utility-launcher.in")
         if(NOT EXISTS "${_oflm_util_tmpl}")
             file(WRITE "${_oflm_util_tmpl}" [==[#!/bin/sh
 # Bundled launcher: runs the @_OFLM_UTIL_NAME@ package installed beside this tool.
-_OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
+# Beside means relative to this script, so the install can be moved.
+_OFLM_UTIL_DIR="$(cd -- "$(dirname -- "$0")/../@_OFLM_SHARE_REL@/utilities" 2>/dev/null && pwd)"
+[ -d "$_OFLM_UTIL_DIR" ] || _OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
 export PYTHONPATH="${_OFLM_UTIL_DIR}/@_OFLM_UTIL_SUBDIR@${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -c 'import sys; from @_OFLM_UTIL_MODULE@ import main; sys.exit(main())' "$@"
 ]==])
         endif()
         set(_OFLM_UTIL_NAME "${name}")
         set(_OFLM_UTIL_DIR "${_oflm_util_dir}")
+        set(_OFLM_SHARE_REL "${OFLM_SHARE_DESTINATION}")
         set(_OFLM_UTIL_SUBDIR "${subdir}")
         set(_OFLM_UTIL_MODULE "${module}")
         configure_file("${_oflm_util_tmpl}" "${CMAKE_BINARY_DIR}/${name}" @ONLY)
@@ -1316,12 +1386,24 @@ else()
     option(OFLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" ON)
 endif()
 set(OFLM_KERNEL_SPECS "" CACHE STRING "Comma-separated spec names to export (empty = all specs in open_kernels/recipes/specs)")
+
+# Parallel jobs for the kernel export. 0 = auto-detect CPU count.
+# The export runs one subprocess per kernel spec, so this is what turns a
+# 20-100 minute serial build into a 2-10 minute parallel one.
+include(ProcessorCount)
+ProcessorCount(OFLM_NPROC)
+if(NOT OFLM_NPROC)
+    set(OFLM_NPROC 8)
+endif()
+set(OFLM_KERNEL_JOBS "${OFLM_NPROC}" CACHE STRING "Parallel jobs for kernel export (0 = auto)")
+
 if(OFLM_BUILD_KERNELS AND NOT WIN32)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_export_script "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/export-kernels.py")
     add_custom_target(export_kernels ALL
         COMMENT "Exporting open NPU kernel xclbins into src/xclbins"
         COMMAND "${Python3_EXECUTABLE}" "${_export_script}" "--specs=${OFLM_KERNEL_SPECS}"
+                "-j" "${OFLM_KERNEL_JOBS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
         VERBATIM)
 endif()
@@ -1335,6 +1417,40 @@ enable_testing()
 # in-tree registry, since a build-tree run has no installed share/oflm/.
 add_test(NAME oflm_smoke COMMAND $<TARGET_FILE:oflm> list)
 set_tests_properties(oflm_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Config command smoke tests
+add_test(NAME oflm_config_show COMMAND $<TARGET_FILE:oflm> config show --config-model dummy)
+set_tests_properties(oflm_config_show PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+add_test(NAME oflm_config_gen_schema COMMAND $<TARGET_FILE:oflm> config gen-schema --config-model dummy)
+set_tests_properties(oflm_config_gen_schema PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Test config set/unset with isolated settings file
+add_test(NAME oflm_config_set_unset
+    COMMAND ${CMAKE_COMMAND} -E env
+        "OFLM_SETTINGS_PATH=${CMAKE_BINARY_DIR}/test_settings.json"
+        "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json"
+        sh -c "$<TARGET_FILE:oflm> config set --config-key ctx_len --config-value 8192 --config-model llama3.1:8b && \
+               $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\".*\"8192\"' && \
+               $<TARGET_FILE:oflm> config unset --config-key ctx_len --config-model llama3.1:8b && \
+               $<TARGET_FILE:oflm> config show --json --config-model llama3.1:8b | tr -d '\\n' | grep -q '\"ctx_len\"'")
+
+# TUI smoke test. The full-screen browse needs a real terminal; under ctest
+# there is none, so it must refuse gracefully -- say what to use instead and
+# exit non-zero, not crash and not hang.
+add_test(NAME oflm_config_browse_smoke
+    COMMAND sh -c "echo q | $<TARGET_FILE:oflm> config browse; \
+                   test \$? -eq 1 && echo q | $<TARGET_FILE:oflm> config browse 2>&1 | grep -q 'guided flow'")
+set_tests_properties(oflm_config_browse_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# Guided flow smoke test (Tier 1 fallback)
+add_test(NAME oflm_config_guided_smoke
+    COMMAND sh -c "printf '0\\n' | $<TARGET_FILE:oflm> config")
+set_tests_properties(oflm_config_guided_smoke PROPERTIES
     ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
 # openai_compat: the OpenAI wire vocabulary (finish_reason, error bodies, HTTP
@@ -1371,6 +1487,31 @@ if(MSVC)
 endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# PULL-STALE, PULL-RECORD, PULL-FORCE: which files `oflm pull` fetches. No network, no device.
+add_executable(pull_plan_test pull/pull_plan_test.cpp pull/install_record.cpp)
+target_include_directories(pull_plan_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/pull" "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(pull_plan_test PRIVATE /EHsc /Zc:__cplusplus)
+    target_compile_definitions(pull_plan_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME pull_plan COMMAND pull_plan_test)
+
+# SERVER-IMAGES-EDITS: which part a multipart form names. Header-only Boost.Beast; no device.
+add_executable(multipart_test server/multipart_test.cpp server/multipart.cpp)
+target_include_directories(multipart_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/server")
+if(TARGET Boost::headers)
+    target_link_libraries(multipart_test PRIVATE Boost::headers)
+elseif(WIN32)
+    target_include_directories(multipart_test PRIVATE C:/dev/boost_1_88_0)
+endif()
+if(MSVC)
+    target_compile_options(multipart_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(multipart_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 BOOST_ALL_NO_LIB)
+endif()
+add_test(NAME multipart COMMAND multipart_test)
 
 # OPEN-VISION-IMAGE-READ: the reader's own PNG decoder, against fixtures whose
 # expected RGB24 was computed outside this code. Links NOTHING -- no ffmpeg, no
@@ -1423,6 +1564,59 @@ if(MSVC)
 endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# src/test holds two kinds of tests. The per-model NPU ones need a device and
+# the prebuilt engine libraries, so they are built standalone and are NOT added
+# here. The host-only ones (device registry, npu_platform helpers, downloader
+# pinning) need neither, and were standalone projects that nothing added -- so
+# they never built and never ran anywhere, CI included. src/test/CMakeLists.txt
+# adds exactly those three.
+add_subdirectory(test)
+
+# OPEN-DIFFUSION-TOKENS: `oflm image`'s prompt path against klein_pipeline.token_ids'
+# goldens. It needs the installed model's tokenizer.json and fails naming the path
+# without it; no device.
+if(NOT OFLM_USE_HRX)
+    add_executable(open_diffusion_tokens_test
+        open_diffusion/tokens_test.cpp open_diffusion/prompt.cpp common/tokenizer/tokenizer.cpp)
+    target_include_directories(open_diffusion_tokens_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion")
+    # tokenizer.hpp -> typedef.hpp -> buffer.hpp -> device_runtime.hpp: the XRT headers
+    # are needed to compile, though nothing opens a device
+    if(XRT_INCLUDE_DIRS)
+        target_include_directories(open_diffusion_tokens_test PRIVATE ${XRT_INCLUDE_DIRS})
+    elseif(XRT_INCLUDE_DIR)
+        target_include_directories(open_diffusion_tokens_test PRIVATE ${XRT_INCLUDE_DIR})
+    endif()
+    target_link_libraries(open_diffusion_tokens_test PRIVATE tokenizers_cpp)
+    target_compile_definitions(open_diffusion_tokens_test PRIVATE DISABLE_ABI_CHECK=1)
+    if(MSVC)
+        target_compile_options(open_diffusion_tokens_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+        target_compile_definitions(open_diffusion_tokens_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
+        target_link_libraries(open_diffusion_tokens_test PRIVATE
+            ntdll ws2_32 Bcrypt userenv advapi32)
+    else()
+        target_compile_options(open_diffusion_tokens_test PRIVATE -mavx -mavx2)
+        target_link_libraries(open_diffusion_tokens_test PRIVATE Threads::Threads dl)
+    endif()
+    add_test(NAME open_diffusion_tokens
+             COMMAND open_diffusion_tokens_test
+                     "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
+    set_tests_properties(open_diffusion_tokens PROPERTIES SKIP_RETURN_CODE 77)
+
+    # OPEN-DIFFUSION-STEPS: schedule.hpp's sigmas / timestep features / dts against the
+    # installed model's own tf_<R>.bin and dt_<R>.bin. Header-only; no device, no XRT.
+    add_executable(open_diffusion_schedule_test open_diffusion/schedule_test.cpp)
+    target_include_directories(open_diffusion_schedule_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion")
+    if(MSVC)
+        target_compile_options(open_diffusion_schedule_test PRIVATE /EHsc /Zc:__cplusplus)
+        target_compile_definitions(open_diffusion_schedule_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME open_diffusion_schedule COMMAND open_diffusion_schedule_test)
+    set_tests_properties(open_diffusion_schedule PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 
 # ————————————————————————————————————————————————————————————
 # PATH plumbing for the /opt/openflowlm prefix. The prefix keeps the runtime
@@ -1524,4 +1718,31 @@ set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 # /etc/profile.d and /usr/bin belong to the base filesystem packages; do not
 # make openflowlm claim ownership of them.
 set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
+
+# Generate settings registry from source code scan + settings.json
+#
+# Python3 is looked for HERE, unconditionally: the target below is built
+# whatever the other options are, and with Python3_EXECUTABLE empty the
+# rule ran the scripts as programs -- which failed with "Permission
+# denied" on the CI, where the scripts are not executable.
+#
+# Not REQUIRED: a build that never runs the target (the Windows release)
+# must still configure on a machine with no python3.
+find_package(Python3 COMPONENTS Interpreter)
+if(NOT Python3_EXECUTABLE)
+    set(Python3_EXECUTABLE "python3")
+    message(STATUS "No python3 interpreter found: generate-settings will use 'python3' from PATH")
+endif()
+add_custom_target(generate-settings
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/scan-settings.py
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+            > ${CMAKE_BINARY_DIR}/scan-settings.json
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/generate-registry.py
+            --settings ${CMAKE_CURRENT_SOURCE_DIR}/config/settings.json
+            --scan-output ${CMAKE_BINARY_DIR}/scan-settings.json
+            --output ${CMAKE_CURRENT_SOURCE_DIR}/config/settings_registry_generated.hpp
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Generating settings registry from source code"
+)
+
 include(CPack)

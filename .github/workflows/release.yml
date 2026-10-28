@@ -191,19 +191,37 @@ jobs:
     name: deb + rpm + tgz
     needs: verify
     runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.verify.outputs.checkout_ref }}
           submodules: recursive
 
+      - name: Cache C/C++ compilation
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ runner.os }}-${{ runner.arch }}-release-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ runner.arch }}-release-
+
       - name: Install build dependencies
         run: |
           set -euo pipefail
+          # No translations: they are of no use to a build, and the XRT PPA is
+          # on Launchpad, whose CDN answers 503 at random. A translation index
+          # that fails takes the whole `apt-get update` down with it, and the
+          # package list never lands.
+          echo 'Acquire::Languages "none";' \
+            | sudo tee /etc/apt/apt.conf.d/99disable-translations >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             software-properties-common \
             libboost-all-dev uuid-dev libdrm-dev cmake ninja-build g++ \
+            mold ccache \
             libreadline-dev libcurl4-openssl-dev libfftw3-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
             python3 rpm
@@ -214,8 +232,21 @@ jobs:
             echo "::error::could not add ppa:amd-team/xrt; without XRT there is no engine build"
             exit 1
           fi
-          sudo apt-get update
-          sudo apt-get install -y libxrt-dev libxrt2 libxrt-npu2
+          # The PPA is on Launchpad, and Launchpad has outages. A 503 there
+          # fails the release for a reason that has nothing to do with the
+          # code; retry before giving up on it.
+          for attempt in 1 2 3 4 5 6; do
+            if sudo apt-get update && \
+               sudo apt-get install -y libxrt-dev libxrt2 libxrt-npu2; then
+              break
+            fi
+            if [ "$attempt" = "6" ]; then
+              echo "::error::could not install XRT from ppa:amd-team/xrt after 6 attempts; if that PPA is down, the release cannot build"
+              exit 1
+            fi
+            echo "::warning::XRT install failed (attempt ${attempt}/6); the Launchpad PPA is the usual suspect"
+            sleep 30
+          done
           xclbinutil --version
 
       - name: Drop the staged kernels when skip_prebuilts is set
@@ -246,6 +277,16 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Inject settings schema
+        run: |
+          OFLM_CONFIG_PATH="$PWD/src/model_list.json" ./build/src/oflm config gen-schema > /tmp/schema.json
+          python3 utilities/release/inject-schema.py \
+            --input src/model_list.json \
+            --schema /tmp/schema.json \
+            --output src/model_list.json
+          echo "Schema injected. Verifying..."
+          python3 -c "import json; d=json.load(open('src/model_list.json')); assert 'settings_schema' in d; assert 'defaults_version' in d; print('OK:', len(d['settings_schema']['settings']), 'settings')"
 
       - name: Package
         run: |

@@ -69,6 +69,7 @@
   "quant": "q4_1",
   "extra": {
     "model_type": "k2_horizon",
-    "source": "hf_config"
+    "source": "hf_config",
+    "model": "K2-Horizon-3.7B-NPU2"
   }
 }

@@ -27,6 +27,8 @@ struct program_args_t {
     bool json_output = false;
     int ctx_length = -1; // let model decide
     int prefill_chunk_len = -1; // let model decide
+    std::string prefill_mode = ""; // fast | lean; empty leaves OFLM_OPEN_PREFILL_MODE as it is
+    bool speculative = false;     // use the model's draft (Uno) pass; false leaves OFLM_SPECULATIVE as it is
 
     // handling input file
     std::string input_file_name = "";
@@ -44,6 +46,18 @@ struct program_args_t {
     // specific commands
     int img_pre_resize = 3;
 
+    // for image command: `oflm image <tag> "<prompt>"`
+    std::string image_prompt = "";
+    std::string image_out = "";       // empty: oflm-<seed>.png in the current directory
+    int image_size = 1024;
+    bool image_size_given = false;    // --size was on the command line (an edit's default follows the reference)
+    std::string image_seed = "";      // empty: a random 64-bit seed, printed
+    std::string image_ref = "";       // --image: edit this reference image (.png or .jpg)
+
+    // for serve command's image endpoints (/v1/images/*)
+    bool image_resident = false;      // --imagegen 1: load the image engine at startup and keep it
+    std::string image_model = "";     // --imagemodel; empty means flux2-klein:4b
+
     // for list command
     std::string list_filter = "all";
 
@@ -60,6 +74,13 @@ struct program_args_t {
     int port = -1; // default port
     bool cors = false;
     bool sub_process_mode = false;
+    
+    // Config command fields
+    std::string config_key;
+    std::string config_value;
+    std::string config_model;
+    bool config_accept_shipped = false;
+    bool config_keep_all = false;
     
     program_args_t() {}
 };

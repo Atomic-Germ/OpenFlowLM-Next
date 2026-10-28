@@ -161,6 +161,27 @@ void Core::apply_thread_budget() const {
     if (omp_threads_ > 0 && omp_get_max_threads() != omp_threads_) omp_set_num_threads(omp_threads_);
 }
 
+nlohmann::json derive_config(const GgufFile& g) {
+    const std::string arch = g.kv_str("general.architecture");
+    auto u = [&](const std::string& k) { return g.kv_u64(arch + "." + k); };
+    nlohmann::json c;
+    c["model_type"] = arch;
+    c["hidden_size"] = u("embedding_length");
+    c["num_hidden_layers"] = u("block_count");
+    if (g.kv_has(arch + ".vocab_size"))
+        c["vocab_size"] = u("vocab_size");
+    else
+        c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
+    c["num_attention_heads"] = u("attention.head_count");
+    c["num_key_value_heads"] = u("attention.head_count_kv");
+    c["intermediate_size"] = u("feed_forward_length");
+    if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
+    else c["head_dim"] = u("embedding_length") / u("attention.head_count");
+    if (g.kv_has(arch + ".attention.sliding_window"))
+        c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
+    return c;
+}
+
 void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
 }
@@ -178,12 +199,50 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         std::string(std::getenv("OMP_WAIT_POLICY") ? std::getenv("OMP_WAIT_POLICY") : "unset") + ")");
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
+    // OPEN-PREFILL-MODE: swapped in before the kernel list and the packing, so the other route costs nothing
+    if (cfg_.prefill_mode != "fast" && cfg_.prefill_mode != "lean")
+        throw std::runtime_error("open_qwen36: prefill mode '" + cfg_.prefill_mode + "' is not fast or lean");
+    bool has_lean = false;
+    for (const auto& [name, t] : man_.layer_types) has_lean = has_lean || t.gemm_block_variants.count("lean");
+    man_.select_prefill_route(cfg_.prefill_mode == "lean" ? "lean" : "");
+    if (has_lean) prefill_route_ = cfg_.prefill_mode;
+    else if (cfg_.prefill_mode == "lean") log("this kernel set has one prefill route; lean changes nothing");
     fs::path md(cfg_.model_dir);
+    // ---- the weight file: the shipped container (model.q4nx) or a GGUF
+    // (model.gguf, the direct path). When both exist the shipped container
+    // wins -- it is the curated conversion.
+    const bool have_q4nx = fs::exists(md / "model.q4nx");
+    const bool have_gguf = fs::exists(md / "model.gguf");
+    if (!have_q4nx && !have_gguf)
+        throw std::runtime_error("open_qwen36: neither model.q4nx nor model.gguf in " + cfg_.model_dir);
+    gguf_ = have_gguf && !have_q4nx;
+    w_ = gguf_ ? man_.gguf.get() : &man_;
+    if (gguf_ && !w_)
+        throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
+                                 "(manifest.json has no gguf section; re-export the kernels)");
+    // ---- the model's config: from the model dir when it ships one, else
+    // derived from the GGUF metadata (the shapes the manifest checks are all
+    // there); anything GGUF does not carry is refused with its name.
+    if (gguf_)
+        file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
+    nlohmann::json j;
     std::ifstream cf(md / "config.json");
-    if (!cf) throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
-    auto j = nlohmann::json::parse(cf, nullptr, false);
-    if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
-    man_.check_model(j, md.filename().string());
+    // #24: config.json is optional for a GGUF -- the metadata carries it.
+    if (cf) {
+        j = nlohmann::json::parse(cf, nullptr, false);
+        if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        if (gguf_) {
+            const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
+            for (const auto& [key, value] : derived.items())
+                if (!j.contains(key)) j[key] = value;
+        }
+    } else if (gguf_) {
+        j = derive_config(*static_cast<GgufFile*>(file_.get()));
+        log("config.json absent; derived from the GGUF metadata");
+    } else {
+        throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
+    }
+    w_->check_model(j, md.filename().string());
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
@@ -236,16 +295,18 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             size_t sum = 0;
             for (const auto& v : rp["mrope_section"]) { mrope_section_.push_back(v.get<int>()); sum += v.get<int>(); }
             mrope_interleaved_ = rp.value("mrope_interleaved", false);
-            if (sum != man_.rotary_dim / 2)
+            if (sum != w_->rotary_dim / 2)
                 throw std::runtime_error("open_qwen36: mrope_section sums to " + std::to_string(sum) + ", not the " +
-                                         std::to_string(man_.rotary_dim / 2) + " rotary pairs");
+                                         std::to_string(w_->rotary_dim / 2) + " rotary pairs");
         }
     }
-    int total = static_cast<int>(man_.layers.size());
+    if (!gguf_ && !file_) {
+        file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    }
+    int total = static_cast<int>(w_->layers.size());
     nl_ = cfg_.num_layers > 0 && cfg_.num_layers < total ? cfg_.num_layers : total;
     types_.resize(nl_);
-    for (int l = 0; l < nl_; ++l) types_[l] = &man_.layer_type(l);
-    file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    for (int l = 0; l < nl_; ++l) types_[l] = &w_->layer_type(l);
     int nattn = 0;
     for (int l = 0; l < nl_; ++l) nattn += is_attention_layer(l);
     log("model " + md.filename().string() + " (" + man_.family + ", " + man_.spec_hash.substr(0, 19) + "): " +
@@ -277,10 +338,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_s) wanted[k] = true;
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_pv) wanted[k] = true;
     }
-    for (const auto& s : man_.tail) wanted[s.kernel] = true;
-    for (const auto& [name, d] : man_.kernels)
+    for (const auto& s : w_->tail) wanted[s.kernel] = true;
+    if (rows_l()) {
+        wanted[man_.rows.kernel] = true;
+        wanted[man_.rows.head] = true;
+        if (cfg_.draft && !man_.rows.lora_kernel.empty()) wanted[man_.rows.lora_kernel] = true;
+    }
+    for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
-    logits_host_.assign(man_.vocab, 0.f);
+    logits_host_.assign(w_->vocab, 0.f);
 
     // 0167/#32: the GEMM-route block size every loaded layer type agrees on.
     // Disagreement (a mixed dense_local/dense manifest where only one carries
@@ -297,11 +363,13 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     for (int l = 1; l < nl_; ++l)
         if (types_[l]->gemm_block.t != gemm_block_t_) { gemm_block_t_ = 0; break; }
     log("block prefill route: T = " + std::to_string(gemm_block_t_) +
-        (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
+        (gemm_block_t_ ? (prefill_route_.empty() ? "" : " (" + prefill_route_ + ")")
+                       : " (no gemm_block program in this kernel set, or its layer types disagree)"));
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_STAGE_MAJOR")) stage_major_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
     // Measurement only; off (and free) unless the env names a file.
@@ -314,6 +382,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     // Stage 2.5 Gate B: opt-in host attention for the dense block route.
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN")) host_attn_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
+    // OPEN-HOST-ATTN-GUARD: refuse at load, not on the first dispatch, and keep Auto off the host route
+    host_attn_refusal_ = man_.host_attention_refusal();
+    if ((host_attn_on_ || host_attn_decode_on_) && !host_attn_refusal_.empty())
+        throw std::runtime_error("open_qwen36: OFLM_OPEN_HOST_ATTN / OFLM_OPEN_HOST_ATTN_DECODE: " + host_attn_refusal_);
     if (host_attn_on_)
         log("gemm-block attention: HOST (OFLM_OPEN_HOST_ATTN=1; K2 dense shape only, "
             "no qk-norm/gate, geometry checked against the manifest)");
@@ -321,7 +394,6 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // the 2.5 gemm-block chain at T=1 (host attention forced for those calls
     // only) instead of the fused per-layer dx dispatch. Decode-only: the
     // gemm-block prefill route's own selector stays OFLM_OPEN_HOST_ATTN.
-    if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
     if (host_attn_decode_on_)
         log("decode route: HOST (OFLM_OPEN_HOST_ATTN_DECODE=1; the 2.5 gemm-block chain at T=1 "
             "with host attention; the NPU GEMMs run padded at the kernel set's compiled T)");
@@ -380,17 +452,24 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gemm_block_t_ && any_moe)
         log(std::string("token-batched expert kernel: ") +
             (any_batch ? (moe_batch_on_ ? "on" : "off (OFLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
-    bool any_attn = false;
-    for (const auto& t : types_) any_attn = any_attn || t->gemm_block.attn_block.present();
+    bool any_attn = false, any_dense = false;
+    for (const auto& t : types_) {
+        any_attn = any_attn || t->gemm_block.attn_block.present();
+        any_dense = any_dense || t->gemm_block.kind == "dense";
+    }
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
-            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
+            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)")
+                      : any_dense ? "not in this kernel set (one dxB dispatch a token)"
+                                  : "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
         log(std::string("prefill schedule: ") +
-            (layer_major_ok() ? (any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
-                                         : "layer-major (the whole prompt through each layer)")
-                              : layer_major_on_ ? "block-major (a MoE kind's layer types only)"
-                                                : "block-major (OFLM_OPEN_LAYER_MAJOR=0)"));
+            (layer_major_ok() ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
+                                                    : "layer-major (the whole prompt through each layer)") +
+                                    (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
+                                                     : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
+                              : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
+                                                            : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
 }
 
 bool Core::layer_major_ok() const {
@@ -413,7 +492,7 @@ Core::~Core() {
 xrt::hw_context& Core::context(const std::string& name) {
     auto it = ctxs_.find(name);
     if (it != ctxs_.end()) return *it->second;
-    fs::path p = fs::path(cfg_.kernel_dir) / man_.contexts.at(name);
+    fs::path p = fs::path(cfg_.kernel_dir) / w_->contexts.at(name);
     if (!fs::exists(p)) throw std::runtime_error("open_qwen36: missing kernel " + p.string());
     xrt::xclbin xcl(p.string());
     auto uuid = dev_->register_xclbin(xcl);
@@ -436,18 +515,24 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     k.instr = std::make_unique<xrt::bo>(*dev_, insts.size(), xrt::bo::flags::cacheable, k.k->group_id(1));
     std::memcpy(k.instr->map<void*>(), insts.data(), insts.size());
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, man_.moe);
+    if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, w_->moe);
     else if (d.patch == "moebatch") {
         // every expert fill is a placeholder (slot s compiled as expert s), so the table is
         // moeroute2's with the whole expert range as slots; the stream's length is its highest
-        stream_patch::MoeGeometry g = man_.moe;
+        stream_patch::MoeGeometry g = w_->moe;
         g.topk = g.experts;
         k.moe2 = stream_patch::moe2_table(k.words, name, g);
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
-        k.attn = stream_patch::attn_table(k.words, name, man_.attn);
-        k.geom = man_.attn;
+        k.attn = stream_patch::attn_table(k.words, name, w_->attn);
+        k.geom = w_->attn;
         k.geom.window = d.window;
+        k.geom.rb = d.rb;
+    } else if (d.patch == "attnrows") {
+        k.attn_rows = stream_patch::attn_rows_table(k.words, name, static_cast<uint32_t>(man_.rows.l), w_->attn);
+        k.geom = w_->attn;
+        k.geom.window = d.window;
+        k.geom.rb = d.rb;
     }
 }
 
@@ -484,10 +569,10 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
             if (from == "pack") {
                 size_t bytes = 0;
-                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + o.nch * man_.chunk_bytes);
+for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::op_bytes(o, w_->chunk_bytes));
                 xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
                 std::memset(w.map<uint8_t*>(), 0, padup(bytes));
-                for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, man_.chunk_bytes);
+                for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, w_->chunk_bytes);
                 w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
                 v[l] = std::move(w);
                 continue;
@@ -509,16 +594,16 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     };
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
-        xrt::bo pool = xrt::ext::bo(*dev_, man_.pool_bytes);
+        xrt::bo pool = xrt::ext::bo(*dev_, w_->pool_bytes);
         uint8_t* pool_host = pool.map<uint8_t*>();
-        pools::pack_pool(man_, lt, *file_, l, pool_host);
+        pools::pack_pool(*w_, lt, *file_, l, pool_host);
         build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
         xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
-        pools::pack_consts(man_, lt, *file_, l, c_host);
+        pools::pack_consts(*w_, lt, *file_, l, c_host);
         build_weights(lt, l, "consts", c_host);
         build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
@@ -526,10 +611,10 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 // the dense route's host RMSNorm reads the two norm weights as bf16;
                 // dense.py's consts plan puts input_layernorm at byte 0 and
                 // post_attention_layernorm right after it (ELN = hidden * 2 each)
-                ln_w_bf16_[l].resize(man_.hidden);
-                post_ln_w_bf16_[l].resize(man_.hidden);
-                std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
-                std::memcpy(post_ln_w_bf16_[l].data(), c_host + man_.hidden * 2, man_.hidden * 2);
+                ln_w_bf16_[l].resize(w_->hidden);
+                post_ln_w_bf16_[l].resize(w_->hidden);
+                std::memcpy(ln_w_bf16_[l].data(), c_host, w_->hidden * 2);
+                std::memcpy(post_ln_w_bf16_[l].data(), c_host + w_->hidden * 2, w_->hidden * 2);
                 if (lt.gemm_block.sandwich) {
                     // Read straight from the file by tensor name suffix (the MoE kinds'
                     // pattern, `const_tensor()`), not sliced from packed consts bytes: these
@@ -538,16 +623,31 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                     // so their offsets are family-specific in a way the other two are not.
                     pre_ffn_w_[l] = file_->bf16(const_tensor(lt, "pre_feedforward_layernorm.weight", l));
                     post_ffn_w_[l] = file_->bf16(const_tensor(lt, "post_feedforward_layernorm.weight", l));
-                    if (pre_ffn_w_[l].size() != man_.hidden || post_ffn_w_[l].size() != man_.hidden)
+                    if (pre_ffn_w_[l].size() != w_->hidden || post_ffn_w_[l].size() != w_->hidden)
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) +
                                                  ": sandwich norm weight is not [hidden]");
+                }
+                // The attention products' host half (OPEN-PREFILL-ATTN) reads the q/k norms as
+                // f32, from the file by name as the full layers' does. The consts plan `put`s the
+                // same bf16 bytes for the dxB kernel, so both routes norm with one weight.
+                const AttnBlock& ab = lt.gemm_block.attn_block;
+                if (ab.prep == "qknorm_rope") {
+                    HostConsts& h = hc_[l];
+                    h.qn = file_->bf16(const_tensor(lt, "q_norm.weight", l));
+                    h.kn = file_->bf16(const_tensor(lt, "k_norm.weight", l));
+                    if (h.qn.size() != ab.hd || h.kn.size() != ab.hd)
+                        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": q_norm / k_norm is not [" +
+                                                 std::to_string(ab.hd) + "], the head dim the attention products were built for");
                 }
             } else {
                 // the MoE kinds' host stages read their small tensors straight from the
                 // file, by the names the consts plan carries (no consts layout knowledge here)
                 const GemmBlockProgram& gb = lt.gemm_block;
                 HostConsts& h = hc_[l];
-                auto bf = [&](const char* suffix) { return file_->bf16(const_tensor(lt, suffix, l)); };
+                auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
+                if (!qf)
+                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
+                auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + what + " has " +
@@ -555,13 +655,13 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 };
                 h.ln = bf("input_layernorm.weight");
                 h.postln = bf("post_attention_layernorm.weight");
-                want(h.ln, man_.hidden, "input_layernorm");
-                want(h.postln, man_.hidden, "post_attention_layernorm");
+                want(h.ln, w_->hidden, "input_layernorm");
+                want(h.postln, w_->hidden, "post_attention_layernorm");
                 if (!gb.has_dense_ffn()) {
                     h.router = bf("moe_router.weight");
                     h.sgw = bf("shared_expert_gate.weight");
-                    want(h.router, man_.hidden * man_.moe.experts, "moe_router");
-                    want(h.sgw, man_.hidden, "shared_expert_gate");
+                    want(h.router, w_->hidden * w_->moe.experts, "moe_router");
+                    want(h.sgw, w_->hidden, "shared_expert_gate");
                 }
                 if (gb.kind == "linear") {
                     // The host reads alpha / beta as [hidden, lanes]. The 35B's container stores
@@ -576,13 +676,13 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                         const std::string name = const_tensor(lt, t ? copy : stem + ".weight", l);
                         const auto& shape = file_->meta(name).shape;
                         const size_t hid_dim = t ? 1 : 0;
-                        if (shape.size() != 2 || shape[hid_dim] != man_.hidden)
+                        if (shape.size() != 2 || shape[hid_dim] != w_->hidden)
                             throw std::runtime_error("open_qwen36: " + name + (t ? " is not [heads, hidden]" : " is not [hidden, lanes]"));
                         const size_t lanes = shape[1 - hid_dim];
                         std::vector<float> w = file_->bf16(name);
                         if (t) {
-                            out.assign(man_.hidden * lanes, 0.f);
-                            host::transpose(w.data(), lanes, man_.hidden, out.data());   // [lanes, hid] -> [hid, lanes]
+                            out.assign(w_->hidden * lanes, 0.f);
+                            host::transpose(w.data(), lanes, w_->hidden, out.data());   // [lanes, hid] -> [hid, lanes]
                         } else {
                             out = std::move(w);
                         }
@@ -595,7 +695,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                     h.dtb = file_->f32(const_tensor(lt, "ssm_dt.bias", l));
                     h.convw = bf("ssm_conv1d.weight");
                     h.nw = bf("ssm_norm.weight");
-                    want(h.Wb, man_.hidden * h.lanes, "ssm_beta_proj");
+                    want(h.Wb, w_->hidden * h.lanes, "ssm_beta_proj");
                     want(h.A, gb.value_heads, "ssm_a");
                     want(h.dtb, gb.value_heads, "ssm_dt.bias");
                     want(h.convw, gb.conv_kernel * gb.qkv_dim, "ssm_conv1d");
@@ -611,7 +711,15 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
         act_.push_back(alloc(lt.act_bytes));
-        state_.push_back(alloc(lt.state_kind == "kv" ? cfg_.max_ctx * lt.state_row : lt.state_bytes));
+        // A blocked attention kernel (manifest `rb` > 1) streams its padded window up to row
+        // pos + rb - 2 (stream_patch::attn_apply), which at the last position is past the
+        // context capacity by rb - 2 rows. The slack is allocated -- and zeroed, so the rows
+        // the kernel masks multiply as exact zeros -- rather than clamped: a shorter stream
+        // than the kernel's block count deadlocks the fifo.
+        uint64_t kv_slack = 0;
+        for (const auto& [kn, kd] : w_->kernels)
+            if (kd.patch == "attnpos" && kd.rb > 2) kv_slack = std::max<uint64_t>(kv_slack, kd.rb - 2);
+        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
@@ -619,25 +727,72 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     }
     // ---- the globals: the lm_head pool and the final norm's weight from the file, the ptab
     // computed, everything else zero (xres, zero, xresf, hn, logits)
-    for (const auto& [name, bytes] : man_.globals) {
+    for (const auto& [name, bytes] : w_->globals) {
         if (name == "lmpool") {
             xrt::bo lm = xrt::ext::bo(*dev_, bytes);
-            pools::pack_lmhead(man_, *file_, lm.map<uint8_t*>());
+            pools::pack_lmhead(*w_, *file_, lm.map<uint8_t*>());
             lm.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             globals_[name] = std::move(lm);
         } else if (name == "normw") {
-            size_t n = 0;
-            const uint8_t* nw = file_->raw(man_.norm_tensor, &n);
-            if (n != man_.norm_bytes) throw std::runtime_error("open_qwen36: " + man_.norm_tensor + " is not " + std::to_string(man_.norm_bytes) + " B");
-            globals_[name] = alloc(bytes, nw, n);
+            if (bytes != w_->norm_bytes) throw std::runtime_error("open_qwen36: global normw is " + std::to_string(bytes) + " B, pack.norm says " + std::to_string(w_->norm_bytes));
+            std::vector<uint8_t> nw(bytes);
+            pools::pack_norm(*file_, w_->norm_tensor, bytes, nw.data());
+            globals_[name] = alloc(bytes, nw.data(), nw.size());
         } else {
             globals_[name] = alloc(bytes);
         }
     }
-    for (const auto& [name, rg] : man_.per_row_globals) {
+    // a "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU uses the other
+    if (stage_major_on_ && layer_major_ok())
+        for (int l = 0; l < nl_; ++l) {
+            const GemmBlockProgram& gb = types_[l]->gemm_block;
+            for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
+                for (const Step& s : *prog)
+                    for (const std::string& name : {s.args[1], s.args[2]})
+                        if (!globals_.count(name + "#1")) globals_[name + "#1"] = alloc(w_->globals.at(name));
+        }
+    for (const auto& [name, rg] : w_->per_row_globals) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
-        pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
+        pools::build_ptab(*w_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
+    }
+    if (rows_l()) {
+        globals_["rows_xres"] = alloc(man_.rows.l * w_->hidden * 4);
+        globals_["rows_act"] = alloc(man_.rows.act_bytes);
+        globals_["rows_hact"] = alloc(man_.rows.head_act_bytes);
+        globals_["rows_out"] = alloc(man_.rows.head_out_floats * 4);
+        lora_.clear();
+        noise_high_ = 0;
+        lora_none_ = alloc(4096);
+        const fs::path lf = fs::path(cfg_.model_dir) / man_.rows.lora_file;
+        const bool has_draft = !man_.rows.lora_kernel.empty() && fs::exists(lf);
+        if (has_draft && !cfg_.draft)
+            log("draft pass: " + man_.rows.lora_file + " is present but off; OFLM_SPECULATIVE=1 turns it on");
+        if (cfg_.draft && !has_draft)
+            // Asked for, and there is none: say so. A switch that turns on
+            // nothing, silently, reads like a switch that did not take.
+            log("draft pass: asked for, but " + man_.rows.lora_file + " is not there; the model runs without it");
+        if (cfg_.draft && has_draft) {
+            Q4nxFile uno(lf.string());
+            if (const std::string nh = uno.metadata("uno_noise_high"); !nh.empty()) {
+                const unsigned long long v = std::stoull(nh);
+                if (v < 2 || v > w_->vocab)
+                    throw std::runtime_error("draft pass: " + man_.rows.lora_file + "'s uno_noise_high " + nh +
+                                             " is outside [2, vocab " + std::to_string(w_->vocab) + "]");
+                noise_high_ = static_cast<size_t>(v);
+            }
+            for (int l = 0; l < nl_; ++l) {
+                xrt::bo b = xrt::ext::bo(*dev_, man_.rows.lora_pool_bytes);
+                std::memset(b.map<uint8_t*>(), 0, man_.rows.lora_pool_bytes);
+                for (const PackOp& o : man_.rows.lora_pack)
+                    pools::apply(o, uno, l, b.map<uint8_t*>(), man_.rows.lora_pool_bytes, w_->chunk_bytes);
+                b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+                lora_.push_back(std::move(b));
+            }
+            log("draft pass: " + man_.rows.lora_file + " packed, " + std::to_string(nl_) + " LoRA pools of " +
+                std::to_string(man_.rows.lora_pool_bytes >> 20) + " MB, noise ids [1, " +
+                std::to_string(uno_noise_bound()) + ")");
+        }
     }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
@@ -649,9 +804,12 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
 
 void Core::reset() {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: reset before load_weights");
-    // The linear layers' state must start at zero. The KV rows need not: the
-    // window read is [0, max(pos, 1)) and row 0 at position 0 is a dummy the
-    // kernel masks.
+    // The linear layers' state must start at zero. The KV rows need not: the window
+    // read is [0, max(pos, 1)) and row 0 at position 0 is a dummy the kernel masks.
+    // A blocked attention kernel (manifest `rb`) reads a few rows at or past `pos` as
+    // padding and multiplies them by an exact zero, so their CONTENT does not matter --
+    // but it must not be a NaN, which Core::alloc's memset and any earlier token's real
+    // k'/v' both guarantee.
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
         if (lt.state_kind != "linear") continue;
@@ -661,9 +819,9 @@ void Core::reset() {
     // A request with an image rewrote the position records of the rows it used
     // (write_record); the next request expects row p to say position p again.
     if (ptab_dirty_) {
-        for (const auto& [name, rg] : man_.per_row_globals) {
+        for (const auto& [name, rg] : w_->per_row_globals) {
             xrt::bo& bo = globals_.at(name);
-            pools::build_ptab(man_, rg, ptab_dirty_, bo.map<uint8_t*>());
+            pools::build_ptab(*w_, rg, ptab_dirty_, bo.map<uint8_t*>());
             bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, ptab_dirty_ * rg.per_row, 0);
         }
         ptab_dirty_ = 0;
@@ -678,6 +836,7 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
     if (name == "consts") return consts_[layer];
     if (name == "act") return act_[layer];
     if (name == "state") return state_[layer];
+    if (name == "lora") return layer >= 0 && static_cast<size_t>(layer) < lora_.size() ? lora_[layer] : lora_none_;
     // the block route's per-layer weight buffers (load_weights)
     if (auto g = gemm_w_.find(name); g != gemm_w_.end()) {
         if (layer < 0 || static_cast<size_t>(layer) >= g->second.size() || !g->second[layer])
@@ -883,7 +1042,7 @@ void Core::bench_dispatch(int layer, int reps) {
         alone[name] = st;
         const double mb = stream_mb(k.iw(), k.words.size());
         std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f %9.1f %7.1f %8s\n", name.c_str(), st.min, st.mean(),
-                     st.mean_submit(), mb, gbps(mb, st.min), man_.kernels.at(name).context.c_str());
+                     st.mean_submit(), mb, gbps(mb, st.min), w_->kernels.at(name).context.c_str());
     }
 
     // Every probe below compares a kernel against its own baseline taken IN THE SAME LOOP, one
@@ -960,7 +1119,7 @@ void Core::bench_dispatch(int layer, int reps) {
 
     // The patched kernels with their instruction stream re-synced first, as the real path does
     // it. The patch itself is a few hundred words; the sync is the whole stream.
-    std::vector<uint32_t> ex(man_.moe.experts);
+    std::vector<uint32_t> ex(w_->moe.experts);
     for (size_t i = 0; i < ex.size(); ++i) ex[i] = static_cast<uint32_t>(i);
     std::map<std::string, BenchStat> sync_only;
     probe("with the expert patch + instruction sync (the patch probe)", jobs,
@@ -968,7 +1127,7 @@ void Core::bench_dispatch(int layer, int reps) {
           [&](const std::string& n, const std::vector<std::string>& args, int) {
               Kern& k = kerns_.at(n);
               auto p0 = std::chrono::steady_clock::now();
-              stream_patch::moe2_apply(k.iw(), k.moe2, ex.data(), man_.moe);
+              stream_patch::moe2_apply(k.iw(), k.moe2, ex.data(), w_->moe);
               k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
               sync_only[n].add(ms_since(p0), 0);
               return run_split(k, args, layer);
@@ -1118,7 +1277,7 @@ void Core::bench_kernel(const std::string& name, int reps, int layer, int warm_t
     for (const Step& s : types_[layer]->program)
         if (s.op == "run" && s.kernel == name) args = &s.args;
     if (!args)
-        for (const Step& s : man_.tail)
+        for (const Step& s : w_->tail)
             if (s.kernel == name) args = &s.args;
     // the block route's kernels too: the prefill's own dispatches are the ones worth holding
     // at full rate for a whole prefill's worth of seconds (see the window report below)
@@ -1164,7 +1323,7 @@ void Core::bench_kernel(const std::string& name, int reps, int layer, int warm_t
         }
     }
     std::fprintf(stderr, "\nopen_qwen36: %s on layer %d, %d reps: %.3f min, %.3f mean, %.3f submit (context %s)\n\n",
-                 name.c_str(), layer, reps, st.min, st.mean(), st.mean_submit(), man_.kernels.at(name).context.c_str());
+                 name.c_str(), layer, reps, st.min, st.mean(), st.mean_submit(), w_->kernels.at(name).context.c_str());
 }
 
 void Core::bench_decode(int reps) {
@@ -1208,7 +1367,7 @@ void Core::bench_decode(int reps) {
             const double mb = stream_mb(k.iw(), k.words.size());
             std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f %9.1f %7.1f %8s\n", ("one " + tname).c_str(),
                          s.kernel.c_str(), st.min, st.mean(), st.mean_submit(), mb, gbps(mb, st.min),
-                         man_.kernels.at(s.kernel).context.c_str());
+                         w_->kernels.at(s.kernel).context.c_str());
         }
     }
 
@@ -1255,7 +1414,7 @@ void Core::bench_decode(int reps) {
     double step_ms = 0;
     for (int i = 0; i < reps; ++i) {
         for (int l = 0; l < nl_; ++l) step_ms += replay(l, walk);
-        for (const Step& s : man_.tail) {
+        for (const Step& s : w_->tail) {
             const auto [submit, wait] = run_split(kerns_.at(s.kernel), s.args, 0);
             walk[s.kernel].add(submit, wait);
             step_ms += submit + wait;
@@ -1324,8 +1483,8 @@ int Core::det_step(int reps, const std::vector<int>& ids, bool full) {
         if (full)
             for (const char* g : {"xres", "xresf", "hn"})
                 if (globals_.count(g))
-                    take(g, -1, globals_.at(g), 0, man_.hidden * (std::string(g) == "hn" ? 2 : 4), false);
-        std::vector<uint8_t> lg(man_.vocab * 4);
+                    take(g, -1, globals_.at(g), 0, w_->hidden * (std::string(g) == "hn" ? 2 : 4), false);
+        std::vector<uint8_t> lg(w_->vocab * 4);
         std::memcpy(lg.data(), logits_host_.data(), lg.size());
         out.push_back({"logits", -1, std::move(lg)});
         return out;
@@ -1565,10 +1724,10 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     auto t0 = std::chrono::steady_clock::now();
     if (k.moe2.empty()) throw std::runtime_error("open_qwen36: moeroute2 on " + k.name + ", which has no routed-expert table");
     xrt::bo& act = act_[layer];
-    const size_t off = act_off + man_.rout_idx_off;
+    const size_t off = act_off + w_->rout_idx_off;
     if (route_log_on_) {
         // the whole record: the router's probabilities, then idx and the weights
-        const size_t n = man_.rout_idx_off + 64;
+        const size_t n = w_->rout_idx_off + 64;
         read_back(act, n, act_off);
         const uint8_t* m = act.map<uint8_t*>() + act_off;
         route_log_.push_back({layer, std::vector<uint8_t>(m, m + n)});
@@ -1586,7 +1745,7 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     // step's dispatches, so a read that still shows it has not landed yet: sync again.
     if (route_sentinel_) {
         auto armed = [&] {
-            for (unsigned s = 0; s < man_.moe.topk; ++s)
+            for (unsigned s = 0; s < w_->moe.topk; ++s)
                 if (idx[s] == kRouteSentinel) return true;
             return false;
         };
@@ -1620,9 +1779,9 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
                          pos_, fmt_idx(idx).c_str(), fmt_idx(again).c_str(), fmt_idx(later).c_str());
         }
     }
-    for (unsigned s = 0; s < man_.moe.topk; ++s)
-        if (idx[s] >= man_.moe.experts) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
-    stream_patch::moe2_apply(k.iw(), k.moe2, idx, man_.moe);
+    for (unsigned s = 0; s < w_->moe.topk; ++s)
+        if (idx[s] >= w_->moe.experts) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
+    stream_patch::moe2_apply(k.iw(), k.moe2, idx, w_->moe);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     timing_.route_ms += ms_since(t0);
 }
@@ -1634,7 +1793,7 @@ void Core::arm_route_records() {
     for (int l = 0; l < nl_; ++l)
         for (const Step& s : types_[l]->program) {
             if (s.op == "run") continue;
-            const size_t off = s.act_off + man_.rout_idx_off;
+            const size_t off = s.act_off + w_->rout_idx_off;
             uint32_t* p = reinterpret_cast<uint32_t*>(act_[l].map<uint8_t*>() + off);
             for (int i = 0; i < 8; ++i) p[i] = kRouteSentinel;
             act_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, 32, off);
@@ -1642,6 +1801,13 @@ void Core::arm_route_records() {
 }
 
 void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
+
+void Core::embedding_row(size_t token, float* out) const {
+    file_->embed_row(w_->embed_tensor, token, w_->hidden, out);
+    if (w_->embed_scale != 1.0)
+        for (size_t i = 0; i < w_->hidden; ++i)
+            out[i] = static_cast<float>(out[i] * w_->embed_scale);
+}
 
 void Core::step_embed(const float* x, bool want_logits, const int64_t mpos[3],
                       const float* deepstack, int n_deepstack) {
@@ -1659,10 +1825,10 @@ void Core::mrope_begin() {
 }
 
 void Core::write_record(size_t row, const double pos[3]) {
-    for (const auto& [name, rg] : man_.per_row_globals) {
+    for (const auto& [name, rg] : w_->per_row_globals) {
         xrt::bo& bo = globals_.at(name);
         uint8_t* r = bo.map<uint8_t*>() + row * rg.per_row;
-        pools::build_ptab_record(man_, rg, row, pos, mrope_section_, mrope_interleaved_, r);
+        pools::build_ptab_record(*w_, rg, row, pos, mrope_section_, mrope_interleaved_, r);
         bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, rg.per_row, row * rg.per_row);
     }
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
@@ -1674,7 +1840,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     if (static_cast<size_t>(pos_) >= cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
                                  std::to_string(cfg_.max_ctx));
-    if (!x && (token < 0 || static_cast<size_t>(token) >= man_.vocab)) throw std::runtime_error("open_qwen36: token id out of range");
+    if (!x && (token < 0 || static_cast<size_t>(token) >= w_->vocab)) throw std::runtime_error("open_qwen36: token id out of range");
     // ---- Stage 2.6 Gate B / Stage 2.7 Gate A: the decode route. Runtime-
     // selectable (npu / host / auto against the measured threshold); the
     // whole step runs as the 2.5 gemm-block chain at T=1 with host attention,
@@ -1694,10 +1860,20 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
 
     xrt::bo& xres = buffer("xres", 0);
     if (x)
-        std::memcpy(xres.map<float*>(), x, man_.hidden * 4);
+        std::memcpy(xres.map<float*>(), x, w_->hidden * 4);
     else
-        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(token), man_.hidden, xres.map<float*>());
-    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
+        embedding_row(static_cast<size_t>(token), xres.map<float*>());
+    if (cfg_.verbose && !x) {
+        const float* e = xres.map<float*>();
+        int nnan = 0;
+        float mx = 0.f;
+        for (size_t i = 0; i < w_->hidden; ++i) {
+            if (!std::isfinite(e[i])) ++nnan;
+            else mx = std::max(mx, std::fabs(e[i]));
+        }
+        log("embed t=" + std::to_string(token) + " nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
+    }
+    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
     if (mpos) {
         const double p3[3] = {static_cast<double>(mpos[0]), static_cast<double>(mpos[1]), static_cast<double>(mpos[2])};
         write_record(static_cast<size_t>(pos_), p3);
@@ -1773,11 +1949,11 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 }
             }
             if (deepstack && l < n_deepstack) {
-                read_back(xres, man_.hidden * 4, 0);
+                read_back(xres, w_->hidden * 4, 0);
                 float* r = xres.map<float*>();
-                const float* f = deepstack + static_cast<size_t>(l) * man_.hidden;
-                for (size_t i = 0; i < man_.hidden; ++i) r[i] += f[i];
-                xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
+                const float* f = deepstack + static_cast<size_t>(l) * w_->hidden;
+                for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
+                xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
             continue;
         }
@@ -1844,9 +2020,9 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     // The tail's norm reads the same xres, from its own hardware context, so only level 2
     // queues it behind the last layer.
     Inflight tail0;
-    if (want_logits && submit_ahead_ >= 2 && tail_in.active() && !man_.tail.empty() &&
-        man_.tail.front().op == "run") {
-        tail0 = start_run(kerns_.at(man_.tail.front().kernel), man_.tail.front().args, 0);
+    if (want_logits && submit_ahead_ >= 2 && tail_in.active() && !w_->tail.empty() &&
+        w_->tail.front().op == "run") {
+        tail0 = start_run(kerns_.at(w_->tail.front().kernel), w_->tail.front().args, 0);
         timing_.dispatch_ms += tail0.submit_ms;
     }
     if (tail_in.active()) {
@@ -1855,17 +2031,28 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         timing_.dispatch_ms += elapsed;
     }
     if (want_logits) {
+        if (cfg_.verbose) {
+            xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+            const float* x = xres.map<float*>();
+            int nnan = 0;
+            float mx = 0.f;
+            for (size_t i = 0; i < w_->hidden; ++i) {
+                if (!std::isfinite(x[i])) ++nnan;
+                else mx = std::max(mx, std::fabs(x[i]));
+            }
+            log("xres after layers nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
+        }
         auto t1 = std::chrono::steady_clock::now();
         size_t first = 0;
         if (tail0.active()) {
             timing_.dispatch_ms += wait_run(tail0).first;
             first = 1;
         }
-        for (size_t i = first; i < man_.tail.size(); ++i)
-            timing_.dispatch_ms += run(kerns_.at(man_.tail[i].kernel), man_.tail[i].args, 0);
+        for (size_t i = first; i < w_->tail.size(); ++i)
+            timing_.dispatch_ms += run(kerns_.at(w_->tail[i].kernel), w_->tail[i].args, 0);
         xrt::bo& lg = buffer("logits", 0);
-        read_back(lg, man_.vocab * 4, 0);
-        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
+        read_back(lg, w_->vocab * 4, 0);
+        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
@@ -1894,7 +2081,10 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
 void Core::set_decode_route(const std::string& route) {
     const std::string prev = decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_));
     if (route == "npu") decode_route_ = DecodeRoute::Npu;
-    else if (route == "host") decode_route_ = DecodeRoute::Host;
+    else if (route == "host") {
+        if (!host_attn_refusal_.empty()) throw std::runtime_error("open_qwen36: set_decode_route: host route refused: " + host_attn_refusal_);
+        decode_route_ = DecodeRoute::Host;
+    }
     else if (route == "auto") decode_route_ = DecodeRoute::Auto;
     else throw std::runtime_error("open_qwen36: set_decode_route: unknown route '" + route + "' (npu | host | auto)");
     const std::string now = decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_));
@@ -1905,7 +2095,7 @@ std::string Core::decode_route_at(size_t pos) const {
     switch (decode_route_) {
         case DecodeRoute::Host: return "host";
         case DecodeRoute::Npu: return "npu";
-        case DecodeRoute::Auto: return pos < decode_auto_threshold_ ? "npu" : "host";
+        case DecodeRoute::Auto: return pos < decode_auto_threshold_ || !host_attn_refusal_.empty() ? "npu" : "host";
     }
     return "npu";
 }
@@ -1939,7 +2129,7 @@ void Core::step_host_decode(int token, const float* x, bool want_logits) {
                                      types_[l]->name + ") is not a dense gemm-block type (refusing rather than "
                                      "computing it wrong)");
     }
-    const size_t hid = man_.hidden;
+    const size_t hid = w_->hidden;
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
 
@@ -1955,7 +2145,7 @@ void Core::step_host_decode(int token, const float* x, bool want_logits) {
             for (size_t c = 0; c < hid; ++c) xres[c] = static_cast<double>(x[c]);
         } else {
             std::vector<float> row(hid);
-            file_->bf16_row(man_.embed_tensor, static_cast<size_t>(token), hid, row.data());
+            file_->bf16_row(w_->embed_tensor, static_cast<size_t>(token), hid, row.data());
             for (size_t c = 0; c < hid; ++c) xres[c] = static_cast<double>(row[c]);
         }
         timing_.embed_ms += ms_since(te);
@@ -1998,10 +2188,10 @@ std::pair<size_t, size_t> Core::op_region(const LayerType& lt, const std::string
     const PackOp& op = ops[idx];
     // the GEMM dequantises the q4_1 band law, which is what std_perm writes; a q8_perm
     // projection has no route (the recipe does not emit one) and is refused here too
-    if (op.op != "std_perm")
+    if (op.op != "std_perm" && op.op != "std_perm_gguf")
         throw std::runtime_error("open_qwen36: op_region: " + from + " op " + std::to_string(idx) + " is a " + op.op +
                                  ", not a band-law projection the GEMM reads");
-    return {static_cast<size_t>(op.dst), static_cast<size_t>(op.nch) * man_.chunk_bytes};
+    return {static_cast<size_t>(op.dst), static_cast<size_t>(op.nch) * w_->chunk_bytes};
 }
 
 std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, int layer) const {
@@ -2018,11 +2208,15 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
 }
 
 const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
+    // A split step's weight is [hi | lo] of a q8 projection's exact q4_1 split (OPEN-PREFILL-BATCH):
+    // the dispatch returns 2N rows, and rows N.. are added into rows 0.. below, so every caller
+    // sees the projection's [N, T] whether its weight was split or not.
+    const size_t rows = s.split ? 2 * N : N;
     xrt::bo& xb = buffer(s.args[1], 0);
     xrt::bo& yb = buffer(s.args[2], 0);
-    if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
+    if (xb.size() < K * T * 2 || yb.size() < rows * T * 4)
         throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals are smaller than [" +
-                                 std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(N) + "]");
+                                 std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(rows) + "]");
     auto t0 = std::chrono::steady_clock::now();
     host::tile_x(x, T, K, xb.map<uint16_t*>());          // straight into the mapped buffer
     timing_.part1_ms += ms_since(t0);
@@ -2033,10 +2227,25 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     timing_.part1_ms += ms_since(ts);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
     ts = std::chrono::steady_clock::now();
-    read_back(yb, N * T * 4, 0);
+    read_back(yb, rows * T * 4, 0);
     timing_.sync_ms += ms_since(ts);
     timing_.part1_ms += ms_since(ts);
-    return yb.map<float*>();
+    const float* y = yb.map<const float*>();
+    if (!s.split) return y;
+    // The sum goes to host memory, never back into the mapped y: the next read_back's
+    // CLFLUSH writes a dirty line back over whatever the device wrote there since, so
+    // folding in place corrupts a later dispatch's output -- by how much depends on what
+    // got evicted in between, and the route stops being deterministic.
+    ts = std::chrono::steady_clock::now();
+    std::vector<float>& sum = split_y_[s.args[2]];       // one per y global, so it lives as long as y would
+    if (sum.size() < N * T) sum.resize(N * T);
+    const float* lo = y + N * T;
+    float* o = sum.data();
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(N * T); ++i) o[i] = y[i] + lo[i];
+    timing_.part1_ms += ms_since(ts);
+    timing_.gemm_tr_ms += ms_since(ts);
+    return o;
 }
 
 void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
@@ -2052,12 +2261,12 @@ void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int
 void Core::tail_logits(const float* row) {
     auto t1 = std::chrono::steady_clock::now();
     xrt::bo& xres1 = buffer("xres", 0);
-    std::memcpy(xres1.map<uint8_t*>(), row, man_.hidden * 4);
-    xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
-    for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
+    std::memcpy(xres1.map<uint8_t*>(), row, w_->hidden * 4);
+    xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
+    for (const Step& s : w_->tail) run(kerns_.at(s.kernel), s.args, 0);
     xrt::bo& lg = buffer("logits", 0);
-    read_back(lg, man_.vocab * 4, 0);
-    std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
+    read_back(lg, w_->vocab * 4, 0);
+    std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
     timing_.lmhead_ms = ms_since(t1);
 }
 
@@ -2184,24 +2393,25 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
     // No qk-norm, no output gate: the K2 dense shape. The new cache rows are
     // written bf16, and the row the softmax sees IS the rounded one (the
     // kernel reads the bf16 cache, so the host path rounds identically here).
+    if (!host_attn_refusal_.empty()) throw std::runtime_error("open_qwen36: host attention: " + host_attn_refusal_);
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const size_t qw = gb.qw, kvw = gb.kvw;
     // Geometry from the manifest's own check data -- the same numbers
     // check_model compares config.json against, so they cannot drift from
     // the model the engine was built for. Anything else: refuse (fail-closed).
-    const size_t nh = man_.hf_config_check.at("num_attention_heads").get<size_t>();
-    const size_t kvh = man_.hf_config_check.at("num_key_value_heads").get<size_t>();
-    const size_t hd = man_.hf_config_check.at("head_dim").get<size_t>();
-    const size_t half = man_.rotary_dim / 2;
-    if (qw != nh * hd || kvw != kvh * hd || nh % kvh || man_.rotary_dim > hd ||
-        half != man_.rope_inv_freq.size() || half * 2 != hd)
+    const size_t nh = w_->hf_config_check.at("num_attention_heads").get<size_t>();
+    const size_t kvh = w_->hf_config_check.at("num_key_value_heads").get<size_t>();
+    const size_t hd = w_->hf_config_check.at("head_dim").get<size_t>();
+    const size_t half = w_->rotary_dim / 2;
+    if (qw != nh * hd || kvw != kvh * hd || nh % kvh || w_->rotary_dim > hd ||
+        half != w_->rope_inv_freq.size() || half * 2 != hd)
         throw std::runtime_error("open_qwen36: host attention: this model's attention geometry is "
                                  "not the full-rotary no-qknorm no-gate dense shape this path "
                                  "implements (refusing rather than computing it wrong)");
     const size_t grp = nh / kvh, P0 = static_cast<size_t>(pos_), rows = P0 + T;
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    const std::vector<double>& inv_freq = man_.rope_inv_freq;
+    const std::vector<double>& inv_freq = w_->rope_inv_freq;
 
     xrt::bo& st = buffer(gb.attn_args[3], l);          // "state" under its manifest name
     const size_t row_elems = lt.state_row / 2;          // bf16 elements per row: [K kvw | V kvw]
@@ -2293,11 +2503,66 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
     timing_.route_ms += ms_since(th);
 }
 
-void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
+void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t T, size_t t_real,
+                                 std::vector<float>& og) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const double mid0 = timing_.mid_ms;
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
-    const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, ff = gb.ff;
+    const AttnBlock& ab = gb.attn_block;
+    const HostConsts& hc = hc_[l];
+    const size_t qw = gb.qw, kvw = gb.kvw, hd = ab.hd;
+    // The geometry the products were built for, against what this layer's projection produces;
+    // attention_npu checks m against the group size times T.
+    const bool qknorm = ab.prep == "qknorm_rope";
+    if ((!qknorm && ab.prep != "rope") || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || w_->rotary_dim > hd ||
+        (qknorm && (hc.qn.size() != hd || hc.kn.size() != hd)))
+        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": the dense attention products were built for "
+                                 "head dim " + std::to_string(hd) + ", which this layer's q / k / v widths do not divide into");
+    // y [n_qkv3, T] straight into the [T, width] parts attention_prep reads
+    auto tt = std::chrono::steady_clock::now();
+    float* q = BlockScratch::fit(bs_.part[0], T * qw);
+    float* k = BlockScratch::fit(bs_.part[1], T * kvw);
+    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
+    const host::TransposePart parts[3] = {{q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}};
+    host::transpose_parts(y_qkv3.data(), T, parts, 3);
+    timing_.gemm_tr_ms += ms_since(tt);
+    // The window's cached rows on the host map. A decode step (or a dxB block) writes them on
+    // the device, so read them back on every block that has any.
+    xrt::bo& st = state_[l];
+    const size_t row = lt.state_row, pos0 = static_cast<size_t>(pos_);
+    tt = std::chrono::steady_clock::now();
+    if (pos0 > 0) read_back(st, pos0 * row, 0);
+    timing_.state_ms += ms_since(tt);
+    host::AttnGeom g;
+    g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
+    g.pos0 = pos0; g.eps = gb.eps;
+    tt = std::chrono::steady_clock::now();
+    float* Q = BlockScratch::fit(bs_.qrope, T * qw);
+    host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
+                         w_->rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
+    timing_.mid_ms += ms_since(tt);
+    og.assign(T * qw, 0.f);
+    // attention_npu books its dispatches as part0 and its host stages as part1, the full layers'
+    // columns; on this route the GEMM column is the five projections and the attention column
+    // (route_ms, below) holds all of the attention, so the stage line compares with the dxB loop's
+    const double p0 = timing_.part0_ms, p1 = timing_.part1_ms;
+    attention_npu(l, g, Q, nullptr, st.map<uint16_t*>(), row / 2, og.data());
+    timing_.part0_ms = p0;
+    timing_.part1_ms = p1;
+    tt = std::chrono::steady_clock::now();
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, pos0 * row);
+    timing_.state_ms += ms_since(tt);
+    timing_.attn_ms += timing_.mid_ms - mid0;
+    timing_.route_ms += ms_since(t0);       // the dense route's attention column, as the dxB loop's
+}
+
+void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T, size_t t_real) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const size_t hid = w_->hidden, qw = gb.qw, kvw = gb.kvw, ff = gb.ff;
     const size_t n_qkv3 = qw + 2 * kvw;
+    if (t_real == 0) t_real = T;
 
     // One GEMM dispatch: tile `x` [T,K] -> upload -> run -> download `y` [N,T].
     // Timing: part0_ms sums ALL 5 GEMM dispatches
@@ -2305,10 +2570,11 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     // layer type -- no MoE routing here) is repurposed for the T attention
     // (dxB) dispatches below, so the two are cleanly separable instead of
     // both landing in part1_ms.
-    auto run_gemm = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N, std::vector<float>& y_out) {
+    // Tile x [T, K] (padded to the compiled gb.t columns), run step idx, and pull its output
+    // [N, Tk] back into the step's y buffer; returns Tk, the columns the kernel wrote.
+    auto gemm_dispatch = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N) -> size_t {
         const Step& s = gb.program[idx];
         auto tt = std::chrono::steady_clock::now();
-        std::vector<uint16_t> xt;
         // Stage 2.6 Gate B: the GEMM's instruction stream is compiled for gb.t
         // tokens (256 in every set this repo emits -- gemm_q4_prefill.py: "T is
         // still compiled in"), so a T < gb.t call (the host decode route's T=1)
@@ -2318,36 +2584,48 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         // C gates ran 22 real columns against 234 padding ones and matched the
         // sequential route). The output side reads back the kernel's whole
         // [N, gb.t] and keeps the T real columns.
+        if (T > gb.t)
+            throw std::runtime_error("open_qwen36: gemm route: T=" + std::to_string(T) +
+                                     " exceeds the kernel set's compiled " + std::to_string(gb.t));
+        xrt::bo& xb = buffer(s.args[1], 0);
         if (T == gb.t) {
-            tile_gemm_x(x, T, K, xt);
+            host::tile_x(x.data(), T, K, xb.map<uint16_t*>());      // straight into the mapped buffer
         } else {
-            if (T > gb.t)
-                throw std::runtime_error("open_qwen36: gemm route: T=" + std::to_string(T) +
-                                         " exceeds the kernel set's compiled " + std::to_string(gb.t));
             std::vector<float> xp(gb.t * K, 0.f);
             for (size_t r = 0; r < T; ++r)
                 for (size_t c = 0; c < K; ++c) xp[r * K + c] = x[r * K + c];
-            tile_gemm_x(xp, gb.t, K, xt);
+            host::tile_x(xp.data(), gb.t, K, xb.map<uint16_t*>());
         }
-        xrt::bo& xb = buffer(s.args[1], 0);
-        std::memcpy(xb.map<uint8_t*>(), xt.data(), xt.size() * 2);
-        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xt.size() * 2, 0);
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, gb.t * K * 2, 0);
         timing_.gemm_tile_ms += ms_since(tt);
         Kern& k = kerns_.at(s.kernel);
         timing_.part0_ms += run(k, s.args, l);
         tt = std::chrono::steady_clock::now();
-        xrt::bo& yb = buffer(s.args[2], 0);
-        if (T == gb.t) {
-            read_back(yb, N * T * 4, 0);
-            y_out.assign(N * T, 0.f);
-            std::memcpy(y_out.data(), yb.map<uint8_t*>(), N * T * 4);
+        read_back(buffer(s.args[2], 0), N * gb.t * 4, 0);
+        timing_.gemm_tr_ms += ms_since(tt);
+        return static_cast<size_t>(gb.t);
+    };
+    // The output as the kernel wrote it, [N, T]: the fused input projection, whose three parts
+    // the attention paths split by row range.
+    auto run_gemm = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N, std::vector<float>& y_out) {
+        const size_t Tk = gemm_dispatch(idx, x, K, N);
+        auto tt = std::chrono::steady_clock::now();
+        const float* y = buffer(gb.program[idx].args[2], 0).map<float*>();
+        y_out.resize(N * T);
+        if (Tk == T) {
+            std::memcpy(y_out.data(), y, N * T * 4);
         } else {
-            read_back(yb, N * gb.t * 4, 0);
-            y_out.assign(N * T, 0.f);
-            const float* y = yb.map<float*>();
             for (size_t n = 0; n < N; ++n)
-                for (size_t t = 0; t < T; ++t) y_out[n * T + t] = y[n * gb.t + t];
+                for (size_t t = 0; t < T; ++t) y_out[n * T + t] = y[n * Tk + t];
         }
+        timing_.gemm_tr_ms += ms_since(tt);
+    };
+    // The output as token rows, [T, N] (rows past T are padding): everything after the attention
+    // reads a token's row at a time, which over [N, T] is a T-float stride per element.
+    auto run_gemm_rows = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N, std::vector<float>& out) {
+        const size_t Tk = gemm_dispatch(idx, x, K, N);
+        auto tt = std::chrono::steady_clock::now();
+        host::transpose(buffer(gb.program[idx].args[2], 0).map<float*>(), N, Tk, BlockScratch::fit(out, Tk * N));
         timing_.gemm_tr_ms += ms_since(tt);
     };
 
@@ -2369,6 +2647,10 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     std::vector<float> og(T * qw, 0.f);
     if (host_attn_on_ || in_host_decode_) {
         host_attn_layer(l, y_qkv3, T, og);
+    } else if (attn_block_on_ && gb.attn_block.present() && !gb.attn_block.prep.empty()) {
+        // the two NPU products per kv head (OPEN-PREFILL-ATTN), for a family whose set declares
+        // the host half they need; OFLM_OPEN_ATTN_BLOCK=0 keeps the dxB dispatches below
+        dense_attention_block(l, y_qkv3, T, t_real, og);
     } else {
     // ---- T single-token dxB dispatches, position-patched, through a GLOBAL
     // T-wide "gact" scratch buffer, shuttled one token at a time via
@@ -2448,8 +2730,10 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     }  // end of the NPU dxB path (the host branch filled og above)
 
     // ---- GEMM O (o_proj, real weight, reusing the "qkv"-shaped context) ---
-    std::vector<float> y_o;  // [hid, T]
-    run_gemm(1, og, qw, hid, y_o);
+    // From here on every intermediate is token rows in scratch kept across layers and blocks:
+    // the values are what the [N, T] form gave, read contiguously and never re-zeroed.
+    std::vector<float>& y_o = bs_.d_o;       // [T, hid]
+    run_gemm_rows(1, og, qw, hid, y_o);
 
     // ---- host: residual add, post-attention RMSNorm ------------------------
     // Plain: res1 = xres + y_o; xm = post_attn_norm(res1). Sandwich (Gemma 3): the norm sits
@@ -2458,14 +2742,16 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     // post_attention_layernorm and pre_feedforward_layernorm are different tensors here,
     // where the plain chain has only the one.
     auto th = std::chrono::steady_clock::now();
-    std::vector<double> res1(T * hid);
+    std::vector<double>& res1 = bs_.d_res;   // [T, hid]
+    BlockScratch::fit(res1, T * hid);
     std::vector<float> xm;
     if (gb.sandwich) {
-        std::vector<double> y_o_row(T * hid);
+        std::vector<double>& y_o_row = bs_.d_row;
+        BlockScratch::fit(y_o_row, T * hid);
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)
-                y_o_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+                y_o_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_o[static_cast<size_t>(t) * hid + c]);
         std::vector<float> t_attn;
         rmsnorm_host(y_o_row, T, hid, post_ln_w_bf16_[l], gb.eps, t_attn, gb.norm_groups);
 #pragma omp parallel for
@@ -2479,26 +2765,28 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)
                 res1[static_cast<size_t>(t) * hid + c] =
-                    xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+                    xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[static_cast<size_t>(t) * hid + c]);
         rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm, gb.norm_groups);
     }
     timing_.tail_ms += ms_since(th);
 
     // ---- GEMM gate_proj + up_proj (SAME context, zero switch between them) -
-    std::vector<float> y_gate, y_up;  // both [ff, T]
-    run_gemm(2, xm, hid, ff, y_gate);
-    run_gemm(3, xm, hid, ff, y_up);
+    std::vector<float>& y_gate = bs_.d_gate;  // both [T, ff]
+    std::vector<float>& y_up = bs_.d_up;
+    run_gemm_rows(2, xm, hid, ff, y_gate);
+    run_gemm_rows(3, xm, hid, ff, y_up);
 
     // ---- host gated FFN: silu(gate) * up, or Gemma 3's gelu_tanh(gate) * up ------------
     const bool gelu_tanh = gb.act == "gelu_tanh";
     th = std::chrono::steady_clock::now();
-    std::vector<float> h(T * ff);
+    std::vector<float>& h = bs_.d_h;          // [T, ff], the down projection's x
+    h.resize(T * ff);                          // exactly T rows: run_gemm pads a short one itself
 #pragma omp parallel for
     for (long long t = 0; t < static_cast<long long>(T); ++t) {
         const size_t tk = static_cast<size_t>(t);
         for (size_t c = 0; c < ff; ++c) {
-            const double g = static_cast<double>(y_gate[c * T + tk]);
-            const double u = static_cast<double>(y_up[c * T + tk]);
+            const double g = static_cast<double>(y_gate[tk * ff + c]);
+            const double u = static_cast<double>(y_up[tk * ff + c]);
             // tanh-approximate GELU (HF's "gelu_pytorch_tanh"): sqrt(2/pi) = 0.7978845608028654
             const double act = gelu_tanh ? 0.5 * g * (1.0 + std::tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))
                                          : (g / (1.0 + std::exp(-g)));
@@ -2510,15 +2798,16 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     // ---- GEMM down_proj, then residual -> next layer's xres -----------------
     // Plain: xres = res1 + y_down. Sandwich: y_down is normed (post_feedforward_layernorm)
     // before it joins the residual, mirroring the attention side above.
-    std::vector<float> y_down;  // [hid, T]
-    run_gemm(4, h, ff, hid, y_down);
+    std::vector<float>& y_down = bs_.d_down;  // [T, hid]
+    run_gemm_rows(4, h, ff, hid, y_down);
     th = std::chrono::steady_clock::now();
     if (gb.sandwich) {
-        std::vector<double> y_down_row(T * hid);
+        std::vector<double>& y_down_row = bs_.d_row;
+        BlockScratch::fit(y_down_row, T * hid);
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)
-                y_down_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+                y_down_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_down[static_cast<size_t>(t) * hid + c]);
         std::vector<float> t_ffn;
         rmsnorm_host(y_down_row, T, hid, post_ffn_w_[l], gb.eps, t_ffn, gb.norm_groups);
 #pragma omp parallel for
@@ -2531,7 +2820,7 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)
                 xres[static_cast<size_t>(t) * hid + c] =
-                    res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+                    res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[static_cast<size_t>(t) * hid + c]);
     }
     timing_.tail_ms += ms_since(th);
 }
@@ -2556,7 +2845,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
                                  std::to_string(pos_ + T) + ") would exceed the context capacity " +
                                  std::to_string(cfg_.max_ctx));
     for (int tok : ids)
-        if (tok < 0 || static_cast<size_t>(tok) >= man_.vocab) throw std::runtime_error("open_qwen36: token id out of range");
+        if (tok < 0 || static_cast<size_t>(tok) >= w_->vocab) throw std::runtime_error("open_qwen36: token id out of range");
     if (types_[0]->gemm_block.kind != "dense") {
         step_block_moe(ids, t_real, want_logits);
         return;
@@ -2570,35 +2859,35 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
     // HOST between GEMM dispatches (RMSNorm/residual/SwiGLU are host-side,
     // not fused on-core), so there is no device-resident T-wide buffer for
     // it, unlike the per-layer weight/activation buffers below. ------------
-    std::vector<double> xres(T * man_.hidden);
+    std::vector<double> xres(T * w_->hidden);
     {
-        std::vector<float> row(man_.hidden);
+        std::vector<float> row(w_->hidden);
         for (size_t tk = 0; tk < T; ++tk) {
-            file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[tk]), man_.hidden, row.data());
-            for (size_t c = 0; c < man_.hidden; ++c) xres[tk * man_.hidden + c] = static_cast<double>(row[c]);
+            embedding_row(static_cast<size_t>(ids[tk]), row.data());
+            for (size_t c = 0; c < w_->hidden; ++c) xres[tk * w_->hidden + c] = static_cast<double>(row[c]);
         }
     }
 
     for (int l = 0; l < nl_; ++l) {
         if (types_[l]->gemm_block.t == 0)
             throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no gemm_block program");
-        step_gemm_block_layer(l, xres, T);
+        step_gemm_block_layer(l, xres, T, t_real);
     }
     pos_ += static_cast<int>(t_real);
 
     block_logits_.clear();
     if (block_logits_all_) {
-        std::vector<float> row(man_.hidden);
+        std::vector<float> row(w_->hidden);
         for (size_t t = 0; t < t_real; ++t) {
-            for (size_t c = 0; c < man_.hidden; ++c) row[c] = static_cast<float>(xres[t * man_.hidden + c]);
+            for (size_t c = 0; c < w_->hidden; ++c) row[c] = static_cast<float>(xres[t * w_->hidden + c]);
             tail_logits(row.data());
             block_logits_.push_back(logits_host_);
         }
     }
     if (want_logits) {
         // only the last REAL token's logits, as step() does for a prefill
-        std::vector<float> last_row(man_.hidden);
-        for (size_t c = 0; c < man_.hidden; ++c) last_row[c] = static_cast<float>(xres[(t_real - 1) * man_.hidden + c]);
+        std::vector<float> last_row(w_->hidden);
+        for (size_t c = 0; c < w_->hidden; ++c) last_row[c] = static_cast<float>(xres[(t_real - 1) * w_->hidden + c]);
         tail_logits(last_row.data());
     }
     timing_.total_ms = ms_since(t0);
@@ -2608,7 +2897,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
 // dispatches, part1 = the host stages, route = the per-token MoE (routing + kernel).
 
 void Core::moe_stage_resize(size_t rows) {
-    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    const size_t hid = w_->hidden, E = w_->moe.experts, topk = w_->moe.topk;
     if (moe_.res.size() >= rows * hid) return;
     moe_.res.resize(rows * hid);
     moe_.xm.resize(rows * hid);
@@ -2620,7 +2909,7 @@ void Core::moe_stage_resize(size_t rows) {
 void Core::block_layer_moe(int l, size_t rows, size_t t_real, float* xres) {
     const GemmBlockProgram& gb = types_[l]->gemm_block;
     if (gb.has_dense_ffn()) return;                 // the layer's own FFN already wrote xres
-    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    const size_t hid = w_->hidden, E = w_->moe.experts, topk = w_->moe.topk;
     if (moe_batch_on_ && gb.moe_batch.present()) {
         moe_block(l, moe_.xm.data(), moe_.res.data(), moe_.idx.data(), moe_.w.data(), rows, t_real, xres);
         return;
@@ -2637,9 +2926,9 @@ void Core::block_layer_moe(int l, size_t rows, size_t t_real, float* xres) {
 void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits) {
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
-    const size_t T = ids.size(), hid = man_.hidden;
+    const size_t T = ids.size(), hid = w_->hidden;
     std::vector<float> xres(T * hid);
-    for (size_t t = 0; t < T; ++t) file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[t]), hid, xres.data() + t * hid);
+    for (size_t t = 0; t < T; ++t) embedding_row(static_cast<size_t>(ids[t]), xres.data() + t * hid);
     moe_stage_resize(T);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
@@ -2682,7 +2971,7 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
-    const size_t T = gemm_block_t_, hid = man_.hidden;
+    const size_t T = gemm_block_t_, hid = w_->hidden;
     const size_t N = ids.size(), B = (N + T - 1) / T, TOT = B * T;
     if (static_cast<size_t>(pos_) + N > cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: prompt of " + std::to_string(N) + " at position " + std::to_string(pos_) +
@@ -2693,12 +2982,18 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     auto tsetup = std::chrono::steady_clock::now();
     std::vector<float> xres(TOT * hid);
     for (size_t t = 0; t < TOT; ++t)
-        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[std::min(t, N - 1)]), hid, xres.data() + t * hid);
+        file_->bf16_row(w_->embed_tensor, static_cast<size_t>(ids[std::min(t, N - 1)]), hid, xres.data() + t * hid);
     moe_stage_resize(TOT);
     timing_.setup_ms += ms_since(tsetup);
     timing_.part1_ms += ms_since(tsetup);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
+        if (stage_major_on_) {
+            if (kind == "linear") layer_linear_staged(l, xres.data(), B, T, N);
+            else layer_full_staged(l, xres.data(), B, T, N, pos0);
+            block_layer_moe(l, TOT, N, xres.data());
+            continue;
+        }
         for (size_t b = 0; b < B; ++b) {
             const size_t row0 = b * T, t_real = std::min(T, N - row0);
             if (kind == "linear") block_layer_linear(l, xres.data() + row0 * hid, T, t_real, row0, b == 0, b + 1 == B);
@@ -2721,7 +3016,7 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
                      float* out) {
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
-    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    const size_t hid = w_->hidden, E = w_->moe.experts, topk = w_->moe.topk;
     xrt::bo& act = act_[l];
     uint8_t* a = act.map<uint8_t*>();
     auto tp = std::chrono::steady_clock::now();
@@ -2730,8 +3025,8 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
     uint16_t* xmb = reinterpret_cast<uint16_t*>(a + gb.a_xm);
     for (size_t i = 0; i < hid; ++i) xmb[i] = f32_to_bf16(xm[i]);
     std::memcpy(a + gb.a_rout, probs, E * 4);
-    int32_t* ri = reinterpret_cast<int32_t*>(a + gb.a_rout + man_.rout_idx_off);
-    float* rw = reinterpret_cast<float*>(a + gb.a_rout + man_.rout_idx_off + 8 * 4);
+    int32_t* ri = reinterpret_cast<int32_t*>(a + gb.a_rout + w_->rout_idx_off);
+    float* rw = reinterpret_cast<float*>(a + gb.a_rout + w_->rout_idx_off + 8 * 4);
     for (size_t s = 0; s < 8; ++s) {
         ri[s] = s < topk ? idx[s] : 0;
         rw[s] = s < topk ? w[s] : 0.f;
@@ -2751,7 +3046,7 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
         if (idx[s] < 0 || static_cast<unsigned>(idx[s]) >= E) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
         slots[s] = static_cast<uint32_t>(idx[s]);
     }
-    stream_patch::moe2_apply(mk.iw(), mk.moe2, slots, man_.moe);
+    stream_patch::moe2_apply(mk.iw(), mk.moe2, slots, w_->moe);
     mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     timing_.moe_patch_ms += ms_since(t0);
     timing_.moe_run_ms += run(mk, gb.moe_args, l);
@@ -2770,7 +3065,7 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
 // first because that is what the dispatch would have seen.
 void Core::ffn_block(int l, const std::vector<Step>& prog, size_t ff, const float* xm, float* res, size_t T,
                      size_t t_real, const std::vector<float>* gate_w) {
-    const size_t hid = man_.hidden;
+    const size_t hid = w_->hidden;
     gemm(prog[0], xm, T, hid, 2 * ff, l, sg_ug_);
     const std::vector<float>& ug = sg_ug_;
     auto t0 = std::chrono::steady_clock::now();
@@ -2812,7 +3107,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const HostConsts& hc = hc_[l];
-    const size_t hid = man_.hidden, nch = gb.qkv_dim, vw = gb.vw, E = man_.moe.experts, topk = man_.moe.topk;
+    const size_t hid = w_->hidden, nch = gb.qkv_dim, vw = gb.vw, E = w_->moe.experts, topk = w_->moe.topk;
     float* res = moe_.res.data() + row0 * hid;
     float* xm = moe_.xm.data() + row0 * hid;
 
@@ -2858,19 +3153,8 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     if (last) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
     auto t1 = std::chrono::steady_clock::now();
-    if (gb.out_split) {
-        // a q8 out projection as its exact q4_1 split: rows [0, hid) are the hi half's
-        // output and [hid, 2 hid) the lo half's, and the projection is their sum
-        gemm(gb.program[1], og, T, vw, 2 * hid, l, gout_);
-        t1 = std::chrono::steady_clock::now();
-        const std::vector<float>& y = gout_;
-#pragma omp parallel for
-        for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
-            const size_t t = static_cast<size_t>(tt);
-            const float* a = y.data() + t * 2 * hid;
-            for (size_t c = 0; c < hid; ++c) res[t * hid + c] = xres[t * hid + c] + (a[c] + a[hid + c]);
-        }
-    } else {
+    {
+        // a q8 out projection is a split step (out_split marks it) and gemm() adds its halves
         gemm(gb.program[1], og, T, vw, hid, l, gout_);
         t1 = std::chrono::steady_clock::now();
         const std::vector<float>& out = gout_;
@@ -2909,18 +3193,117 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
     size_t* pos = BlockScratch::fit(bs_.pos, M);
     for (size_t r = 0; r < M; ++r) pos[r] = g.pos0 + r % T;
     uint16_t* qb = BlockScratch::fit(bs_.qb, M * hd);
-    float* m = BlockScratch::fit(bs_.m, M);
-    float* lsum = BlockScratch::fit(bs_.lsum, M);
+    // no q/k norm leaves the scores unbounded, so Q goes in as a bf16 hi/lo pair, as attn.h's decode does
+    uint16_t* ql = ab.prep == "rope" ? BlockScratch::fit(bs_.qlo, M * hd) : nullptr;
     float* acc = BlockScratch::fit(bs_.acc, M * hd);
     std::fill(og, og + T * qw, 0.f);
-    for (size_t gh = 0; gh < g.kvh; ++gh) {
-        auto th = std::chrono::steady_clock::now();
+    // The kv group's queries as the scores' A operand: row hl * T + t is query head hl of the group
+    auto group_queries = [&](size_t gh) {
         for (size_t hl = 0; hl < grp; ++hl)
             for (size_t t = 0; t < T; ++t) {
                 const float* src = Q + t * qw + (gh * grp + hl) * hd;
                 uint16_t* dst = qb + (hl * T + t) * hd;
                 for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
+                if (ql) {
+                    uint16_t* lo = ql + (hl * T + t) * hd;
+                    for (size_t j = 0; j < hd; ++j) lo[j] = f32_to_bf16(src[j] - bf16_to_f32(dst[j]));
+                }
             }
+    };
+    // The scores the softmax reads, after the lo half's pass over the same K^T where Q is split
+    auto with_lo = [&](size_t L) -> const float* {
+        if (!ql) return bc.map<float*>();
+        const auto th = std::chrono::steady_clock::now();
+        float* sh = BlockScratch::fit(bs_.s_hi, M * L);
+        std::memcpy(sh, bc.map<float*>(), M * L * 4);
+        std::memcpy(ba.map<uint16_t*>(), ql, M * hd * 2);
+        ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
+        const double r = run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
+        read_back(bc, M * L * 4, 0);
+        // summed on the host side: a write into bc's map leaves dirty lines the next read_back flushes over the device's output
+        const float* c = bc.map<float*>();
+        for (size_t i = 0; i < M * L; ++i) sh[i] += c[i];
+        timing_.part0_ms += r;
+        timing_.mid_ms += ms_since(th) - r;
+        timing_.part1_ms += ms_since(th) - r;
+        return sh;
+    };
+    // og for the group's real tokens: the merged sum over the denominator, gated when the layer is
+    auto group_out = [&](size_t gh, const float* lsum_g) {
+        for (size_t hl = 0; hl < grp; ++hl)
+            for (size_t t = 0; t < g.t_real; ++t) {
+                const size_t r = hl * T + t, h = gh * grp + hl;
+                const float inv = 1.0f / lsum_g[r];
+                float* out = og + t * qw + h * hd;
+                if (!gate) {
+                    for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv;
+                    continue;
+                }
+                const float* gt = gate + t * qw + h * hd;
+                for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv / (1.0f + std::exp(-gt[j]));
+            }
+    };
+    // A window that fits the widest stream is one chunk: every group's scores, then every group's
+    // values. Per group this is the chunked loop below with one chunk, so the output is the same
+    // bit for bit; only the dispatch order differs. It matters where the two products sit on
+    // different xclbins (a dense head dim of 128: scores 8 columns wide, values 4), which the
+    // per-group order switches between twice a group.
+    if (rows <= ab.l_max) {
+        const size_t L = (rows + 255) / 256 * 256;
+        float* m_all = BlockScratch::fit(bs_.m, g.kvh * M);
+        float* l_all = BlockScratch::fit(bs_.lsum, g.kvh * M);
+        uint16_t* p_all = BlockScratch::fit(bs_.p_all, g.kvh * M * L);
+        for (size_t gh = 0; gh < g.kvh; ++gh) {
+            auto th = std::chrono::steady_clock::now();
+            group_queries(gh);
+            std::fill(m_all + gh * M, m_all + (gh + 1) * M, -std::numeric_limits<float>::infinity());
+            std::fill(l_all + gh * M, l_all + (gh + 1) * M, 0.f);
+            std::memcpy(ba.map<uint16_t*>(), qb, M * hd * 2);
+            host::tile_rows_as_bt(kv + gh * hd, kv_row_elems, rows, L, hd, bb.map<uint16_t*>());
+            ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
+            bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hd * L * 2, 0);
+            timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+            timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
+            th = std::chrono::steady_clock::now();
+            read_back(bc, M * L * 4, 0);
+            timing_.sync_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+            const float* s = with_lo(L);
+            th = std::chrono::steady_clock::now();
+            // acc only takes a rescale from an earlier chunk, and there is none
+            host::softmax_chunk(M, L, hd, 0, s, pos, m_all + gh * M, l_all + gh * M, acc, p_all + gh * M * L);
+            timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+        }
+        for (size_t gh = 0; gh < g.kvh; ++gh) {
+            auto th = std::chrono::steady_clock::now();
+            std::memcpy(ba.map<uint16_t*>(), p_all + gh * M * L, M * L * 2);
+            host::tile_rows_as_b(kv + kvw + gh * hd, kv_row_elems, rows, L, hd, bb.map<uint16_t*>());
+            ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
+            bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
+            timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+            timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
+            th = std::chrono::steady_clock::now();
+            read_back(bc, M * hd * 4, 0);
+            timing_.sync_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+            th = std::chrono::steady_clock::now();
+            std::fill(acc, acc + M * hd, 0.f);
+            const float* c = bc.map<float*>();
+            for (size_t i = 0; i < M * hd; ++i) acc[i] += c[i];
+            group_out(gh, l_all + gh * M);
+            timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+        }
+        return;
+    }
+    float* m = BlockScratch::fit(bs_.m, M);
+    float* lsum = BlockScratch::fit(bs_.lsum, M);
+    for (size_t gh = 0; gh < g.kvh; ++gh) {
+        auto th = std::chrono::steady_clock::now();
+        group_queries(gh);
         std::fill(m, m + M, -std::numeric_limits<float>::infinity());
         std::fill(lsum, lsum + M, 0.f);
         std::fill(acc, acc + M * hd, 0.f);
@@ -2942,8 +3325,9 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             read_back(bc, M * L * 4, 0);   // the whole M x L score matrix
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
+            const float* s = with_lo(L);
             th = std::chrono::steady_clock::now();
-            host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos, m, lsum, acc, ba.map<uint16_t*>());
+            host::softmax_chunk(M, L, hd, c0, s, pos, m, lsum, acc, ba.map<uint16_t*>());
             host::tile_rows_as_b(kv + c0 * kv_row_elems + kvw + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
             ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
@@ -2961,14 +3345,7 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             timing_.part1_ms += ms_since(th);
         }
         th = std::chrono::steady_clock::now();
-        for (size_t hl = 0; hl < grp; ++hl)
-            for (size_t t = 0; t < g.t_real; ++t) {
-                const size_t r = hl * T + t, h = gh * grp + hl;
-                const float inv = 1.0f / lsum[r];
-                const float* gt = gate + t * qw + h * hd;
-                float* out = og + t * qw + h * hd;
-                for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv / (1.0f + std::exp(-gt[j]));
-            }
+        group_out(gh, lsum);
         timing_.mid_ms += ms_since(th);
         timing_.part1_ms += ms_since(th);
     }
@@ -2979,8 +3356,8 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const HostConsts& hc = hc_[l];
-    const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, nf = 2 * qw + 2 * kvw;
-    const size_t E = man_.moe.experts, topk = man_.moe.topk;
+    const size_t hid = w_->hidden, qw = gb.qw, kvw = gb.kvw, nf = 2 * qw + 2 * kvw;
+    const size_t E = w_->moe.experts, topk = w_->moe.topk;
     float* res = moe_.res.data() + row0 * hid;
     float* xm = moe_.xm.data() + row0 * hid;
 
@@ -3020,13 +3397,13 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     auto t0 = std::chrono::steady_clock::now();
     if (attn_block_on_ && gb.attn_block.present()) {
         float* Q = BlockScratch::fit(bs_.qrope, T * qw);
-        host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+        host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), w_->rope_inv_freq.data(),
                              st.map<uint16_t*>(), row / 2, Q);
         timing_.part1_ms += ms_since(t0);
         timing_.mid_ms += ms_since(t0);
         attention_npu(l, g, Q, gate, st.map<uint16_t*>(), row / 2, og);
     } else {
-        host::attention_block(g, q, k, v, gate, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+        host::attention_block(g, q, k, v, gate, hc.qn.data(), hc.kn.data(), w_->rope_inv_freq.data(),
                               st.map<uint16_t*>(), row / 2, og);
         timing_.part1_ms += ms_since(t0);
         timing_.mid_ms += ms_since(t0);
@@ -3056,6 +3433,283 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     ffn_block(l, gb.shared_program, gb.shared_ff, xm, res, T, t_real, &hc.sgw);
 }
 
+void Core::gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
+                      const std::function<const float*(size_t)>& prep,
+                      const std::function<void(size_t, const float*)>& post) {
+    const size_t rows = s.split ? 2 * N : N;
+    Step twin = s;
+    twin.args[1] += "#1";
+    twin.args[2] += "#1";
+    const Step* step[2] = {&s, &twin};
+    for (const Step* p : step) {
+        xrt::bo& xb = buffer(p->args[1], 0);
+        xrt::bo& yb = buffer(p->args[2], 0);
+        if (xb.size() < K * T * 2 || yb.size() < rows * T * 4)
+            throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals " + p->args[1] + " / " +
+                                     p->args[2] + " are smaller than [" + std::to_string(K) + "] x " +
+                                     std::to_string(T) + " -> [" + std::to_string(rows) + "]");
+    }
+    Kern& k = kerns_.at(s.kernel);
+    auto stage_in = [&](size_t b) {
+        xrt::bo& xb = buffer(step[b & 1]->args[1], 0);
+        const float* x = prep(b);
+        auto t0 = std::chrono::steady_clock::now();
+        host::tile_x(x, T, K, xb.map<uint16_t*>());
+        timing_.part1_ms += ms_since(t0);
+        timing_.gemm_tile_ms += ms_since(t0);
+        auto ts = std::chrono::steady_clock::now();
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
+        timing_.sync_ms += ms_since(ts);
+        timing_.part1_ms += ms_since(ts);
+    };
+    auto launch = [&](size_t b) {
+        Inflight f = start_run(k, step[b & 1]->args, l);
+        timing_.part0_ms += f.submit_ms;
+        return f;
+    };
+    // One run outstanding: a second run of a kernel queued behind the first gave different bits run to run.
+    stage_in(0);
+    Inflight cur = launch(0);
+    for (size_t b = 0; b < B; ++b) {
+        if (b + 1 < B) stage_in(b + 1);
+        const double submit = cur.submit_ms;
+        // blocked, not elapsed: only the time the host sat waiting adds to the prefill
+        const auto [elapsed, blocked] = wait_run(cur);
+        timing_.part0_ms += blocked;
+        if (dispatch_log_) dispatch_stats_[k.name].add(submit + elapsed);
+        xrt::bo& yb = buffer(step[b & 1]->args[2], 0);
+        auto ts = std::chrono::steady_clock::now();
+        read_back(yb, rows * T * 4, 0);
+        timing_.sync_ms += ms_since(ts);
+        timing_.part1_ms += ms_since(ts);
+        if (b + 1 < B) cur = launch(b + 1);
+        const float* y = yb.map<const float*>();
+        if (s.split) {
+            // gemm_run's fold, into host memory and never back into the mapped y
+            ts = std::chrono::steady_clock::now();
+            std::vector<float>& sum = split_y_[step[b & 1]->args[2]];
+            if (sum.size() < N * T) sum.resize(N * T);
+            const float* lo = y + N * T;
+            float* o = sum.data();
+#pragma omp parallel for
+            for (long long i = 0; i < static_cast<long long>(N * T); ++i) o[i] = y[i] + lo[i];
+            timing_.part1_ms += ms_since(ts);
+            timing_.gemm_tr_ms += ms_since(ts);
+            y = o;
+        }
+        post(b, y);
+    }
+}
+
+void Core::staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres) {
+    const GemmBlockProgram& gb = types_[l]->gemm_block;
+    const HostConsts& hc = hc_[l];
+    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    const size_t row0 = b * T, t_real = std::min(T, N - row0);
+    float* res = moe_.res.data() + row0 * hid;
+    float* xm = moe_.xm.data() + row0 * hid;
+    auto tt = std::chrono::steady_clock::now();
+    float* out = BlockScratch::fit(gout_, T * hid);
+    host::transpose(y, hid, T, out);
+    timing_.part1_ms += ms_since(tt);
+    timing_.gemm_tr_ms += ms_since(tt);
+    auto t1 = std::chrono::steady_clock::now();
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
+    host::rmsnorm_rows(res, T, hid, hc.postln.data(), gb.eps, xm);
+    if (!gb.has_dense_ffn())
+        host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,
+                           moe_.idx.data() + row0 * topk, moe_.w.data() + row0 * topk);
+    timing_.part1_ms += ms_since(t1);
+    timing_.tail_ms += ms_since(t1);
+}
+
+void Core::ffn_staged(int l, const std::vector<Step>& prog, size_t ff, float* xres, size_t B, size_t T, size_t N,
+                      const std::vector<float>* gate_w) {
+    const size_t hid = man_.hidden;
+    float* h_all = BlockScratch::fit(ss_.h, B * T * ff);
+    gemm_phase(l, prog[0], B, T, hid, 2 * ff,
+               [&](size_t b) -> const float* { return moe_.xm.data() + b * T * hid; },
+               [&](size_t b, const float* y) {
+                   auto tt = std::chrono::steady_clock::now();
+                   float* ug = BlockScratch::fit(sg_ug_, T * 2 * ff);
+                   host::transpose(y, 2 * ff, T, ug);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   auto t0 = std::chrono::steady_clock::now();
+                   float* h = h_all + b * T * ff;
+#pragma omp parallel for
+                   for (long long tk = 0; tk < static_cast<long long>(T); ++tk) {
+                       const float* u = ug + static_cast<size_t>(tk) * 2 * ff;
+                       const float* g = u + ff;
+                       float* ho = h + static_cast<size_t>(tk) * ff;
+                       for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
+                   }
+                   timing_.shared_ms += ms_since(t0);
+               });
+    gemm_phase(l, prog[1], B, T, ff, hid,
+               [&](size_t b) -> const float* { return h_all + b * T * ff; },
+               [&](size_t b, const float* yd) {
+                   const size_t row0 = b * T, t_real = std::min(T, N - row0);
+                   float* res = moe_.res.data() + row0 * hid;
+                   const float* xm = moe_.xm.data() + row0 * hid;
+                   auto tt = std::chrono::steady_clock::now();
+                   float* y = BlockScratch::fit(sg_y_, T * hid);
+                   host::transpose(yd, hid, T, y);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   auto t1 = std::chrono::steady_clock::now();
+                   if (!gate_w) {
+                       // a dense FFN: every row, padding included, then the layer's output
+#pragma omp parallel for
+                       for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] += y[static_cast<size_t>(i)];
+                       std::memcpy(xres + row0 * hid, res, T * hid * 4);
+                       timing_.shared_ms += ms_since(t1);
+                       return;
+                   }
+                   const std::vector<float>& sgw = *gate_w;
+#pragma omp parallel for
+                   for (long long tk = 0; tk < static_cast<long long>(t_real); ++tk) {
+                       const size_t t = static_cast<size_t>(tk);
+                       const float* x = xm + t * hid;
+                       double d = 0;
+                       for (size_t i = 0; i < hid; ++i) d += static_cast<double>(bf16_to_f32(f32_to_bf16(x[i]))) * sgw[i];
+                       const float gate = 1.f / (1.f + std::exp(-static_cast<float>(d)));
+                       const float* yr = y + t * hid;
+                       float* r = res + t * hid;
+                       for (size_t i = 0; i < hid; ++i) r[i] += gate * yr[i];
+                   }
+                   timing_.shared_ms += ms_since(t1);
+               });
+}
+
+void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const HostConsts& hc = hc_[l];
+    const size_t hid = man_.hidden, nch = gb.qkv_dim, vw = gb.vw;
+    float* xn_all = BlockScratch::fit(ss_.xn, B * T * hid);
+    float* og_all = BlockScratch::fit(ss_.og, B * T * vw);
+    // the conv rows and S, off the device once for the layer and back once after its last block
+    xrt::bo& st = state_[l];
+    auto ts = std::chrono::steady_clock::now();
+    read_back(st, lt.state_bytes, 0);
+    timing_.state_ms += ms_since(ts);
+    uint8_t* sp = st.map<uint8_t*>();
+    host::DeltaGeom g;
+    g.T = T; g.hid = hid;
+    g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    // DeltaNet still goes block by block in order: S and the conv rows chain through it
+    gemm_phase(l, gb.program[0], B, T, hid, nch + vw,
+               [&](size_t b) -> const float* {
+                   auto tn = std::chrono::steady_clock::now();
+                   float* xn = xn_all + b * T * hid;
+                   host::rmsnorm_rows(xres + b * T * hid, T, hid, hc.ln.data(), gb.eps, xn);
+                   timing_.part1_ms += ms_since(tn);
+                   timing_.prenorm_ms += ms_since(tn);
+                   return xn;
+               },
+               [&](size_t b, const float* yq) {
+                   float* qkv = BlockScratch::fit(bs_.part[0], T * nch);
+                   float* z = BlockScratch::fit(bs_.part[1], T * vw);
+                   auto tt = std::chrono::steady_clock::now();
+                   const host::TransposePart parts[2] = {{qkv, 0, nch}, {z, nch, vw}};
+                   host::transpose_parts(yq, T, parts, 2);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   g.t_real = std::min(T, N - b * T);
+                   auto t0 = std::chrono::steady_clock::now();
+                   double phase[2] = {0, 0};
+                   host::deltanet_block(g, qkv, z, xn_all + b * T * hid, hc.convw.data(), hc.Wa.data(), hc.Wb.data(),
+                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                                        reinterpret_cast<float*>(sp + gb.state_s_off), og_all + b * T * vw, phase);
+                   timing_.dn_conv_ms += phase[0];
+                   timing_.dn_rule_ms += phase[1];
+                   timing_.part1_ms += ms_since(t0);
+                   timing_.mid_ms += ms_since(t0);
+               });
+    ts = std::chrono::steady_clock::now();
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+    timing_.state_ms += ms_since(ts);
+    // out (a q8 out projection is a split step, and gemm_phase adds its halves)
+    gemm_phase(l, gb.program[1], B, T, vw, hid,
+               [&](size_t b) -> const float* { return og_all + b * T * vw; },
+               [&](size_t b, const float* y) { staged_tail(l, b, T, N, y, xres + b * T * hid); });
+    if (gb.has_dense_ffn()) ffn_staged(l, gb.ffn_program, gb.ff, xres, B, T, N, nullptr);
+    else ffn_staged(l, gb.shared_program, gb.shared_ff, xres, B, T, N, &hc.sgw);
+}
+
+void Core::layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0) {
+    const double mid0 = timing_.mid_ms;   // whatever this layer adds to mid is the attention half
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const HostConsts& hc = hc_[l];
+    const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, nf = 2 * qw + 2 * kvw;
+    const bool npu_attn = attn_block_on_ && gb.attn_block.present();
+    float* q_all = npu_attn ? BlockScratch::fit(ss_.q, B * T * qw) : nullptr;
+    float* gate_all = BlockScratch::fit(ss_.gate, B * T * qw);
+    float* og_all = BlockScratch::fit(ss_.og, B * T * qw);
+    // the KV rows: [0, pos0) cached on the device, [pos0, pos0 + N) written here on the host
+    xrt::bo& st = state_[l];
+    const size_t row = lt.state_row;
+    auto ts = std::chrono::steady_clock::now();
+    if (pos0 > 0) read_back(st, pos0 * row, 0);
+    timing_.state_ms += ms_since(ts);
+    auto geom = [&](size_t b) {
+        host::AttnGeom g;
+        g.T = T; g.t_real = std::min(T, N - b * T); g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
+        g.pos0 = pos0 + b * T; g.eps = gb.eps;
+        return g;
+    };
+    // each block's attention window is explicit, so later blocks' K / V rows in the map change nothing
+    gemm_phase(l, gb.program[0], B, T, hid, nf,
+               [&](size_t b) -> const float* {
+                   auto tn = std::chrono::steady_clock::now();
+                   float* xn = BlockScratch::fit(bs_.xn, T * hid);   // tiled before the next prep runs
+                   host::rmsnorm_rows(xres + b * T * hid, T, hid, hc.ln.data(), gb.eps, xn);
+                   timing_.part1_ms += ms_since(tn);
+                   timing_.prenorm_ms += ms_since(tn);
+                   return xn;
+               },
+               [&](size_t b, const float* yf) {
+                   float* q = BlockScratch::fit(bs_.part[0], T * qw);
+                   float* k = BlockScratch::fit(bs_.part[1], T * kvw);
+                   float* v = BlockScratch::fit(bs_.part[2], T * kvw);
+                   float* gate = gate_all + b * T * qw;
+                   auto tt = std::chrono::steady_clock::now();
+                   const host::TransposePart parts[4] = {
+                       {q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}, {gate, qw + 2 * kvw, qw}};
+                   host::transpose_parts(yf, T, parts, 4);
+                   timing_.part1_ms += ms_since(tt);
+                   timing_.gemm_tr_ms += ms_since(tt);
+                   const host::AttnGeom g = geom(b);
+                   auto t0 = std::chrono::steady_clock::now();
+                   if (npu_attn)
+                       host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                                            st.map<uint16_t*>(), row / 2, q_all + b * T * qw);
+                   else
+                       host::attention_block(g, q, k, v, gate, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                                             st.map<uint16_t*>(), row / 2, og_all + b * T * qw);
+                   timing_.part1_ms += ms_since(t0);
+                   timing_.mid_ms += ms_since(t0);
+               });
+    // every block's attention in one visit to the attention products' context
+    if (npu_attn)
+        for (size_t b = 0; b < B; ++b)
+            attention_npu(l, geom(b), q_all + b * T * qw, gate_all + b * T * qw, st.map<uint16_t*>(), row / 2,
+                          og_all + b * T * qw);
+    ts = std::chrono::steady_clock::now();
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, N * row, pos0 * row);
+    timing_.state_ms += ms_since(ts);
+    timing_.attn_ms += timing_.mid_ms - mid0;
+    gemm_phase(l, gb.program[1], B, T, qw, hid,
+               [&](size_t b) -> const float* { return og_all + b * T * qw; },
+               [&](size_t b, const float* y) { staged_tail(l, b, T, N, y, xres + b * T * hid); });
+    if (gb.has_dense_ffn()) ffn_staged(l, gb.ffn_program, gb.ff, xres, B, T, N, nullptr);
+    else ffn_staged(l, gb.shared_program, gb.shared_ff, xres, B, T, N, &hc.sgw);
+}
+
 // The routed experts over the block on the token-batched kernel. Every expert's tokens are
 // cut into visits of NT (a hot expert takes several slots of the same dispatch, since a slot
 // can be patched to any expert); a pass fills the shortest stream that holds the visits still
@@ -3065,7 +3719,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
 void Core::moe_block(int l, const float* xm, const float* res, const int32_t* idx, const float* w, size_t T, size_t t_real,
                      float* out) {
     const MoeBatch& mb = types_[l]->gemm_block.moe_batch;
-    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk, NT = mb.nt;
+    const size_t hid = w_->hidden, E = w_->moe.experts, topk = w_->moe.topk, NT = mb.nt;
     auto tp = std::chrono::steady_clock::now();
     std::memcpy(out, res, T * hid * 4);
     std::vector<std::vector<std::pair<int, float>>> owed(E);   // per expert: its (token, weight) pairs
@@ -3123,7 +3777,7 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         timing_.moe_prep_ms += ms_since(t0);
         auto t1 = std::chrono::steady_clock::now();
         Kern& mk = kerns_.at(*kname);
-        stream_patch::moe2_apply(mk.iw(), mk.moe2, ex.data(), man_.moe);
+        stream_patch::moe2_apply(mk.iw(), mk.moe2, ex.data(), w_->moe);
         mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
         timing_.moe_patch_ms += ms_since(t1);
         const double run_ms = run(mk, mb.args, l);
@@ -3170,6 +3824,56 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         done += n;
     }
     timing_.route_ms += ms_since(tp);
+}
+
+void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) {
+    const size_t L = man_.rows.l, hid = w_->hidden;
+    if (!L) throw std::runtime_error("open_qwen36: this kernel set has no L-row pass (manifest `rows`)");
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_rows before load_weights");
+    if (draft && lora_.empty())
+        throw std::runtime_error("open_qwen36: a draft pass needs " + man_.rows.lora_file + " beside model.q4nx");
+    if (static_cast<size_t>(pos_) + L > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: rows " + std::to_string(pos_) + "+" + std::to_string(L) +
+                                 " pass the context capacity " + std::to_string(cfg_.max_ctx));
+    const auto t0 = std::chrono::steady_clock::now();
+    xrt::bo& xr = buffer("rows_xres", 0);
+    float* x = xr.map<float*>();
+    for (size_t j = 0; j < L; ++j) {
+        if (ids[j] < 0 || static_cast<size_t>(ids[j]) >= w_->vocab)
+            throw std::runtime_error("open_qwen36: step_rows token id out of range");
+        file_->bf16_row(w_->embed_tensor, static_cast<size_t>(ids[j]), hid, x + j * hid);
+    }
+    xr.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hid * 4, 0);
+    Kern& k = kerns_.at(draft ? man_.rows.lora_kernel : man_.rows.kernel);
+    stream_patch::attn_rows_apply(k.iw(), k.attn_rows, static_cast<uint64_t>(pos_), k.geom);
+    k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    // One stream on per-layer buffers: nothing is patched between layers, so layer l + 1 can queue behind l.
+    const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab", "lora"};
+    Inflight prev;
+    for (int l = 0; l < nl_; ++l) {
+        Inflight f = start_run(k, args, l);
+        if (prev.active()) wait_run(prev);
+        prev = std::move(f);
+    }
+    if (prev.active()) wait_run(prev);
+    run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_hact", "rows_out"}, 0);
+    xrt::bo& out = buffer("rows_out", 0);
+    const size_t lb = L * w_->vocab * 4, cores = man_.rows.head_cores, el = L * 64;
+    read_back(out, cores * el * 4, lb);
+    const int32_t* am = reinterpret_cast<const int32_t*>(out.map<uint8_t*>() + lb);
+    for (size_t j = 0; j < L; ++j) {
+        int32_t best = INT32_MIN, tok = -1;
+        for (size_t c = 0; c < cores; ++c)                   // a core's rows precede the next's: first on a tie
+            if (am[c * el + j] > best) { best = am[c * el + j]; tok = am[c * el + L + j]; }
+        argmax[j] = tok;
+    }
+    if (want_logits) read_back(out, lb, 0);
+    rows_ms_ = ms_since(t0);
+}
+
+const float* Core::rows_logits(size_t j) {
+    if (j >= man_.rows.l) throw std::runtime_error("open_qwen36: rows_logits row out of range");
+    return buffer("rows_out", 0).map<float*>() + j * w_->vocab;
 }
 
 void Core::seek(int pos) {

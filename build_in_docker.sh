@@ -2,13 +2,14 @@
 set -euo pipefail
 
 IMAGE="openflowlm-build:ubuntu26"
-PRESET="${1:-linux-package}"
+PRESET="${1:-linux-package-deb}"
 
 mkdir -p oflm-build npu-cache
 
 echo "Using preset: $PRESET"
 
 docker build \
+  --target builder \
   -f Dockerfile \
   -t "$IMAGE" \
   .
@@ -20,7 +21,16 @@ docker run --rm -it \
   -e CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
   -e CTEST_PARALLEL_LEVEL="$(nproc)" \
   -e NPU_CACHE_HOME=/root/.npu/cache \
-  -v "$PWD:/code" \
-  -v "$PWD/npu-cache:/root/.npu/cache" \
+  -v "$PWD:/code:z" \
+  -v "$PWD/npu-cache:/root/.npu/cache:z" \
+  -v oflm-ccache:/var/cache/oflm-ccache \
   "$IMAGE" \
-  cmake --workflow --preset "$PRESET"
+  bash -eu -c '
+    case "$1" in
+      linux-package-deb|linux-package-rpm|linux-package-tgz)
+        cmake --workflow --preset linux-default
+        cpack --preset "$1"
+        ;;
+      *) cmake --workflow --preset "$1" ;;
+    esac
+  ' -- "$PRESET"

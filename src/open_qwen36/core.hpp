@@ -42,9 +42,11 @@
 #include "xrt/xrt_kernel.h"
 
 #include "open_qwen36/block_host.hpp"
+#include "open_qwen36/gguf_file.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 
 namespace open_qwen36 {
@@ -56,6 +58,8 @@ struct CoreConfig {
     size_t max_ctx = 4096;   ///< KV rows per attention layer and RoPE records: the context capacity
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
+    std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 
 /// Everything a request needs to be resumed later (the app's checkpoint/restore).
@@ -108,6 +112,12 @@ struct StepTiming {
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
     double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
 };
+
+/// The config.json fields a manifest checks, derived from a GGUF's metadata
+/// (the llama-family `<arch>.embedding_length` keys). A key the model does not
+/// carry is refused by name; families whose config carries GGUF-invisible
+/// fields (Granite's folded multipliers) need their config.json.
+nlohmann::json derive_config(const GgufFile& g);
 
 class Core {
 public:
@@ -253,6 +263,17 @@ public:
     void set_block_logits_all(bool on) { block_logits_all_ = on; }
     const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
+    // OPEN-DECODE-ROWS: step_rows writes the L rows' KV but does not move the position; the caller seeks.
+    size_t rows_l() const { return gguf_ ? 0 : man_.rows.l; }  // the rows kernels read bf16-scale pools only
+    // draft: the OPEN-UNO-LORA pass, the LoRA on every row but row 0.
+    void step_rows(const int* ids, int* argmax, bool want_logits = false, bool draft = false);
+    bool has_draft() const { return !lora_.empty(); }
+    /// The draft rows' noise ids are [1, uno_noise_bound()): the adapter's uno_noise_high, else the vocab.
+    size_t uno_noise_bound() const { return noise_high_ ? noise_high_ : man_.vocab; }
+    /// Row j's logits from the last step_rows(want_logits = true).
+    const float* rows_logits(size_t j);
+    double rows_ms() const { return rows_ms_; }
+
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
     void seek(int pos);
@@ -261,8 +282,11 @@ public:
     bool is_attention_layer(int l) const { return types_[l]->state_kind == "kv"; }
     const StepTiming& last_timing() const { return timing_; }
     const Manifest& manifest() const { return man_; }
-    size_t vocab() const { return man_.vocab; }
-    size_t real_vocab() const { return man_.real_vocab; }
+    /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
+    const Manifest& weights() const { return w_ ? *w_ : man_; }
+    bool is_gguf() const { return gguf_; }
+    size_t vocab() const { return weights().vocab; }
+    size_t real_vocab() const { return weights().real_vocab; }
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
@@ -270,7 +294,7 @@ public:
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
-    const Q4nxFile& file() const { return *file_; }
+    const WeightFile& file() const { return *file_; }
 
 private:
     struct Kern {
@@ -283,13 +307,16 @@ private:
         std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
         size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
+        std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
 
     CoreConfig cfg_;
     Manifest man_;
-    std::unique_ptr<Q4nxFile> file_;
+    const Manifest* w_ = nullptr;              ///< the weights view (man_ or man_.gguf.get())
+    bool gguf_ = false;                        ///< the weights are a GGUF (model.gguf)
+    std::unique_ptr<WeightFile> file_;
     int nl_ = 0;
     std::vector<const LayerType*> types_;      ///< per layer
 
@@ -299,6 +326,9 @@ private:
     std::map<std::string, Kern> kerns_;
 
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
+    std::vector<xrt::bo> lora_;                 ///< per layer: the draft pass's LoRA pool (rows.lora_file), if any
+    xrt::bo lora_none_;                         ///< what the verify stream's unused LoRA argument binds to
+    size_t noise_high_ = 0;                     ///< the LoRA's uno_noise_high; 0 = the whole vocab
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, gact, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;
@@ -342,9 +372,11 @@ private:
 
     // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
+    std::string prefill_route_;  ///< "fast" | "lean" on a set that carries both, "" on a set with one route
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
+    bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count
     /// Put omp_threads_ in force for the CALLING thread: omp_set_num_threads sets a
@@ -353,6 +385,7 @@ private:
     void apply_thread_budget() const;
     bool moe_redispatch_ = false;  ///< OFLM_OPEN_MOE_REDISPATCH: run each MoE pass twice and print both
     std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
+    std::map<std::string, std::vector<float>> split_y_;   ///< a split step's hi + lo, per y global (gemm_run)
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
@@ -399,6 +432,12 @@ private:
         std::vector<float> sh;          ///< the shared expert's silu(gate) * up
         std::vector<uint16_t> qb;       ///< attention_npu: one KV group's queries as bf16
         std::vector<float> m, lsum, acc;///< attention_npu: the merged softmax's running state
+        std::vector<uint16_t> p_all;    ///< attention_npu, one chunk: every kv group's P between the two passes
+        std::vector<uint16_t> qlo;      ///< attention_npu at prep rope: Q's bf16 remainder
+        std::vector<float> s_hi;        ///< attention_npu at prep rope: the scores summed over both halves
+        /// the dense route's token rows: o / gate / up / down outputs, silu(gate) * up, the residual
+        std::vector<float> d_o, d_gate, d_up, d_down, d_h;
+        std::vector<double> d_res, d_row;
         std::vector<size_t> pos;        ///< attention_npu: each product row's absolute position
         /// `v` grown to at least `n` (never shrunk) and its data pointer.
         template <class T>
@@ -408,10 +447,16 @@ private:
         }
     };
     BlockScratch bs_;
+    /// A stage-major layer's rows that outlive one step, for every block of the prompt.
+    struct StageScratch {
+        std::vector<float> xn, og, h, q, gate;
+    };
+    StageScratch ss_;
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
+    double rows_ms_ = 0;
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the
@@ -438,6 +483,8 @@ private:
     /// its own selector (host_attn_on_ / OFLM_OPEN_HOST_ATTN), so the two
     /// routings stay independently switchable in one binary.
     bool host_attn_decode_on_ = false;
+    /// Manifest::host_attention_refusal(): empty when the host attention computes this model (OPEN-HOST-ATTN-GUARD).
+    std::string host_attn_refusal_;
     /// Stage 2.7 Gate A: the RUNTIME decode route selector. The 2.6 env stays
     /// as the constructor-time default (compat/debug: env on -> initial route
     /// Host); set_decode_route() overrides it any time -- including between
@@ -469,8 +516,9 @@ private:
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
-    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
+void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                    const float* deepstack = nullptr, int n_deepstack = 0);
+    void embedding_row(size_t token, float* out) const;
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);
@@ -547,10 +595,15 @@ private:
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
     /// The scalar original of tile_gemm_x, kept only as the reference host::tile_x is checked against.
     static void tile_gemm_x_reference(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
-    /// One dense layer of the route (0167/#32): entry RMSNorm -> GEMM qkv3 -> T dxB
-    /// dispatches -> GEMM o -> residual + post-attn RMSNorm -> GEMM gate, up -> host
-    /// SwiGLU -> GEMM down -> residual. `xres` is T*hidden fp64, updated in place.
-    void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
+    /// One dense layer of the route (0167/#32): entry RMSNorm -> GEMM qkv3 -> the attention
+    /// (T dxB dispatches, or the products when the set declares attn_block.prep) -> GEMM o ->
+    /// residual + post-attn RMSNorm -> GEMM gate, up -> host SwiGLU -> GEMM down -> residual.
+    /// `xres` is T*hidden fp64, updated in place; t_real (0 = T) is how many of the T are real.
+    void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T, size_t t_real = 0);
+    /// The dense route's attention as the two NPU products (OPEN-PREFILL-ATTN), for a layer
+    /// whose attn_block.prep is "qknorm_rope": y_qkv3 [n_qkv3, T] in, og [T, qw] out, the
+    /// layer's KV rows [pos_, pos_ + t_real) written on the host and synced to the device.
+    void dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t T, size_t t_real, std::vector<float>& og);
     /// Stage 2.6 Gate B: one decode step on the host route (see
     /// host_attn_decode_on_). The layer = step_gemm_block_layer at T=1 with
     /// host attention forced; the residual rides the xres global between
@@ -580,6 +633,18 @@ private:
     /// first position, which is pos_ on the block-major route and pos_ + row0 on the
     /// layer-major one; the cached rows below it are pulled off the device on `first` only.
     void block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t pos0, size_t row0, bool first);
+    /// One GEMM step over B blocks: block b + 1 runs on the NPU while post(b, [N, T] y) runs on the host.
+    void gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
+                    const std::function<const float*(size_t)>& prep,
+                    const std::function<void(size_t, const float*)>& post);
+    /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
+    void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
+    void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);
+    /// Block b's residual, post-norm and router after the out / o GEMM, into moe_ at row b * T.
+    void staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres);
+    /// ffn_block's two GEMMs as two phases over the layer's rows; a dense FFN writes the output into xres.
+    void ffn_staged(int l, const std::vector<Step>& prog, size_t ff, float* xres, size_t B, size_t T, size_t N,
+                    const std::vector<float>* gate_w);
     /// The routed experts for whatever the layer's attention half staged in moe_: the
     /// token-batched kernel over rows [0, t_real) of `rows`, or mx one token at a time.
     /// `xres` (rows * hidden) is overwritten with the layer's output.
@@ -596,7 +661,8 @@ private:
     /// The full-attention layer's attention over the block as GEMM dispatches (OPEN-PREFILL-ATTN):
     /// per kv head, the group's queries against the window's K rows for the scores, the row
     /// softmax on the host, then against the V rows. Q [T, nh*hd] as attention_prep leaves it,
-    /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated.
+    /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated by
+    /// sigmoid(gate) -- or ungated when gate is null (a dense layer).
     void attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
                        size_t kv_row_elems, float* og);
 };

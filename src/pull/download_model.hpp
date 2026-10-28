@@ -6,6 +6,8 @@
 /// \note This class for curl download
 #pragma once
 
+#include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <memory>
@@ -18,6 +20,16 @@ namespace download_utils {
 std::string calculate_file_sha256(const std::string& file_path);
 std::string calculate_git_blob_oid(const std::string& file_path);
 
+enum class HashAlgorithm { Sha256, GitBlobSha1 };
+
+struct DownloadRequest {
+    std::string url;
+    std::filesystem::path destination;
+    std::uint64_t expected_size;
+    HashAlgorithm hash_algorithm;
+    std::string expected_hash;
+};
+
 // Cursor control functions
 void hide_cursor();
 void show_cursor();
@@ -28,15 +40,41 @@ size_t write_data_to_file(void* ptr, size_t size, size_t nmemb, FILE* stream);
 // Callback function for libcurl to write data to a string
 size_t write_data_to_string(void* ptr, size_t size, size_t nmemb, std::string* userdata);
 
-// Progress callback function
-int progress_callback(void* clientp, double dltotal, double dlnow, double ultotal, double ulnow);
+// Progress callback function.
+// CURLOPT_XFERINFOFUNCTION's callback: the older CURLOPT_PROGRESSFUNCTION took
+// doubles and is deprecated since libcurl 7.32. This one takes curl_off_t,
+// which is what curl counts in bytes.
+int progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
+                      curl_off_t ultotal, curl_off_t ulnow);
 
 // Download a file from URL to a local file
 bool download_file(const std::string& url, const std::string& local_path, bool is_lfs, std::string remote_oid,
                    std::function<void(double)> progress_cb = nullptr);
 
+// Download to a same-directory temporary file, verify size + hash, then
+// atomically promote it. Resumes a previous `.part` file when one exists.
+// Ported from the FastFlowLM fork (MIT); the strict verify here applies to
+// pinned (file_sources) downloads, while the legacy path above stays
+// advisory for the existing catalog.
+bool download_file_atomic(
+    const DownloadRequest& request,
+    std::function<void(double)> progress_cb = nullptr);
+
 // Download content from URL to a string
 std::string download_string(const std::string& url);
+
+// Reuse a file the user already has in the local Hugging Face cache
+// (HF_HUB_CACHE / HF_HOME/hub, else ~/.cache/huggingface/hub) instead of the
+// network. `url` is a huggingface.co/<repo>/resolve/<rev>/<file> URL; only that
+// exact revision is resolved (a commit id directly, a ref through the cache's
+// refs/<rev>), never an arbitrary snapshot. The cached file is copied to
+// `local_path` and this returns true only when it matches `expected_size`
+// (0 skips the size guard) and, when `expected_hash` is non-empty, hashes to it
+// under `hash_algorithm` -- so a caller can skip the download. Returns false
+// when the file is not cached or the cached copy fails verification.
+bool download_from_hf_cache(const std::string& url, const std::string& local_path,
+                            uint64_t expected_size, HashAlgorithm hash_algorithm,
+                            const std::string& expected_hash);
 
 // Download multiple files with progress tracking
 bool download_multiple_files(const nlohmann::json downloads,

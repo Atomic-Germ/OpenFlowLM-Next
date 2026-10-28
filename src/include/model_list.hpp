@@ -13,6 +13,7 @@
 #include <any>
 #include <unordered_set>
 #include <filesystem>
+#include <cstdlib>
 #include "utils/utils.hpp"
 
 /// \note This class is used to manage the model list.
@@ -39,6 +40,7 @@ class model_list {
             std::filesystem::path root_path = std::filesystem::path(exe_dir) / relative_model_path;
             this->model_root_path = root_path.string();
             config_file.close();
+            this->resolve_hf_owner();
 
             // Populate all_tags set
             for (const auto& [model_type, sizes] : this->config["models"].items()) {
@@ -46,6 +48,28 @@ class model_list {
                 all_tags.insert(model_type);
                 for (const auto& [size, model_info] : sizes.items()) {
                     all_tags.insert(model_type + ":" + size);
+                }
+            }
+        }
+
+        /// \brief constructor from pre-loaded JSON (for merged config)
+        /// \param config_json the pre-loaded (and possibly merged) registry JSON
+        /// \param exe_dir the executable directory for resolving relative paths
+        model_list(const nlohmann::json& config_json, std::string& exe_dir) {
+            this->config = config_json;
+            // Resolve model_root_path relative to executable directory
+            std::string relative_model_path = this->config.value("model_path", "models");
+            std::filesystem::path root_path = std::filesystem::path(exe_dir) / relative_model_path;
+            this->model_root_path = root_path.string();
+            this->resolve_hf_owner();
+
+            // Populate all_tags set
+            if (this->config.contains("models")) {
+                for (const auto& [model_type, sizes] : this->config["models"].items()) {
+                    all_tags.insert(model_type);
+                    for (const auto& [size, model_info] : sizes.items()) {
+                        all_tags.insert(model_type + ":" + size);
+                    }
                 }
             }
         }
@@ -169,7 +193,7 @@ class model_list {
 
             for (const auto& [model_type, model_subset] : this->config["models"].items()) {
                 if (model_type == "whisper-v3") continue;
-                else if (model_type == "embed-gemma") continue;
+                else if (model_type == "flux2-klein") continue;   // not a chat model (/v1/models lists it)
                 for (const auto& [size, model_info] : model_subset.items()) {
                     nlohmann::json model_entry = {
                         {"name", model_type + ":" + size},
@@ -199,7 +223,8 @@ class model_list {
 
             for (const auto& [model_type, model_subset] : this->config["models"].items()) {
                 if (model_type == "whisper-v3") continue;
-                else if (model_type == "embed-gemma") continue;
+                // flux2-klein IS listed: /v1/images/generations serves it, and OpenAI's own
+                // list carries its image models (SERVER-IMAGES-GENERATIONS)
                 for (const auto& [size, model_info] : model_subset.items()) {
                     // id uses the same "type:size" convention; created uses current epoch seconds
                     nlohmann::json model_entry = {
@@ -231,6 +256,36 @@ class model_list {
         }
         
     private:
+        /// \brief fill in the Hugging Face account that hosts our own model repositories
+        /// \note Their `url` / `file_url` are written with `{hf_owner}`, so one place says
+        ///       where they are: the list's "hf_owner", or OFLM_HF_OWNER when it is set (to
+        ///       try another account without editing the list). A third-party repository
+        ///       names its own account and is left as written.
+        void resolve_hf_owner() {
+            static const std::string kSlot = "{hf_owner}";
+            const char* env = std::getenv("OFLM_HF_OWNER");
+            std::string owner = (env && *env) ? std::string(env) : this->config.value("hf_owner", std::string());
+            if (!this->config.contains("models")) return;
+            for (auto& [model_type, sizes] : this->config["models"].items()) {
+                for (auto& [size, model_info] : sizes.items()) {
+                    for (const char* key : {"url", "file_url"}) {
+                        if (!model_info.contains(key) || !model_info[key].is_string()) continue;
+                        std::string v = model_info[key].get<std::string>();
+                        size_t at = v.find(kSlot);
+                        if (at == std::string::npos) continue;
+                        if (owner.empty()) {
+                            std::cerr << "Model list " << this->list_path << ": " << model_type << ":" << size
+                                      << " uses {hf_owner}, but the list has no \"hf_owner\"" << std::endl;
+                            exit(1);
+                        }
+                        for (; at != std::string::npos; at = v.find(kSlot, at + owner.size()))
+                            v.replace(at, kSlot.size(), owner);
+                        model_info[key] = v;
+                    }
+                }
+            }
+        }
+
         std::string list_path;
         nlohmann::json config;
         std::string model_root_path;

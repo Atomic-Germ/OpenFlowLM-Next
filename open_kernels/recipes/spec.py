@@ -31,8 +31,9 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q8", "mxfp4")
+QUANT_FORMATS = ("q4_1", "q4_1_f32", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
+NORM_GROUPS = (1, 2, 4)   # the GroupRMSNorm counts the `ln` kernels build (ln.h LN_GROUPS)
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
 # 2560 is deliberately NOT in that table: GPT-OSS ships both its q4_1 projections and its
 # MXFP4 experts at that size, so the byte count alone does not name the format and only the
@@ -81,8 +82,7 @@ class ModelSpec:
     moe_intermediate: int = 0
     shared_expert_intermediate: int = 0   # 0 = no shared expert
     norm_eps: float = 1e-6
-    # K2's GroupRMSNorm: one RMS per contiguous hidden/`norm_groups` span (K2: 2 halves of
-    # 1280). 1 is every other family's single RMS over the whole width. NOT a family property:
+    # K2's GroupRMSNorm: one RMS per contiguous hidden/`norm_groups` span; 1 is every other family's single RMS. NOT a family property:
     # it is the norm's own arithmetic, so it lives on the spec like norm_eps -- but it serialises
     # and hashes exactly as the pre-field specs did while it is 1 (to_dict below), the same way
     # canonical_quant keeps a no-q8 model hashing as the bare string.
@@ -255,8 +255,8 @@ class ModelSpec:
                 raise SpecError(f"layer_types: unknown layer type {t!r}")
         if len(kw["layer_types"]) != kw["num_layers"]:
             raise SpecError(f"layer_types has {len(kw['layer_types'])} entries, num_layers is {kw['num_layers']}")
-        if kw.get("norm_groups", 1) not in (1, 2):
-            raise SpecError(f"norm_groups {kw['norm_groups']!r}: only 1 (a single RMS) or 2 (K2's halves) exist")
+        if kw.get("norm_groups", 1) not in NORM_GROUPS:
+            raise SpecError(f"norm_groups {kw['norm_groups']!r}: only 1 (a single RMS), 2 or 4 (K2's groups) exist")
         return cls(**kw)
 
     @classmethod
@@ -935,10 +935,10 @@ def _llama3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 
 
 def _k2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
-    """K2-Horizon (IFM/K2-Horizon-3.7B, model_type `k2_horizon`): a generic dense family
-    of its own, NOT a qwen2/qwen3 -- K2's RMSNorm normalises two contiguous 1280-wide
-    halves separately (`layernorm_num_groups: 2`, the field this builder is the only one
-    to set), its attention has no q/k norm, no gate and no bias, and the RoPE base rides
+    """K2-Horizon (IFM/K2-Horizon-3.7B and -7B, model_type `k2_horizon`): a generic dense family
+    of its own, NOT a qwen2/qwen3 -- K2's RMSNorm normalises contiguous groups separately
+    (`layernorm_num_groups`: 2 halves of 1280 on the 3.7B, 4 quarters of 1024 on the 7B;
+    the field this builder is the only one to set), its attention has no q/k norm, no gate and no bias, and the RoPE base rides
     under `rope_parameters.rope_theta` rather than at the top level.
 
     head_dim is read EXPLICITLY (config.json always carries it for K2): the fallback
@@ -956,8 +956,8 @@ def _k2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         raise SpecError(f"k2: rope_head_dim {cfg.get('rope_head_dim')} != head_dim {hd}: "
                         "a partial rotation is a different kernel")
     groups = _need(cfg, "layernorm_num_groups")
-    if groups not in (1, 2):
-        raise SpecError(f"k2: layernorm_num_groups {groups!r} is not 1 or 2")
+    if groups not in NORM_GROUPS:
+        raise SpecError(f"k2: layernorm_num_groups {groups!r} is not one of {NORM_GROUPS}")
     rp = cfg.get("rope_parameters")
     if not isinstance(rp, Mapping) or "rope_theta" not in rp:
         raise SpecError("k2: rope_parameters.rope_theta is missing (K2 keeps the base there, "
@@ -1519,6 +1519,9 @@ ROLE_TENSORS["gptoss"] = {**_ATTN_HF, "ffn_up_exps.weight": "experts",
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
 _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",
               "attn_output.weight": "attn",
+              # Qwen3-Next linear layers fuse q/k/v into one tensor; the full
+              # layers keep the split names (same roles either way).
+              "attn_qkv.weight": "linear",
               "ffn_up.weight": "ffn", "ffn_gate.weight": "ffn", "ffn_down.weight": "ffn",
               "ffn_up_exps.weight": "experts", "ffn_gate_exps.weight": "experts",
               "ffn_down_exps.weight": "experts",

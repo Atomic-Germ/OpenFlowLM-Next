@@ -61,18 +61,34 @@ std::vector<std::string> user_oflm_directories();
 }
 
 std::string find_model_list() {
+    // Backward-compatible wrapper. New code should use find_shipped_registry()
+    // + find_user_settings() to get the two-file overlay behavior.
+    // If OFLM_CONFIG_PATH is set, this returns the whole-registry override.
+    // Otherwise, this returns the shipped registry (no user overlay).
+    return find_shipped_registry();
+}
+
+namespace {
+
+// The registry lookup, with the notice about the file that was picked on or
+// off. The notice is what tells a user WHICH registry oflm read, so it stays
+// on for the commands that read it -- but a view that shows the path itself
+// would print it twice.
+std::string find_shipped_registry_impl(bool quiet) {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
-    // 1. Check OFLM_CONFIG_PATH environment variable
+    // 1. Check OFLM_CONFIG_PATH environment variable (whole-registry override)
     const std::string env_path = getenv_oflm("OFLM_CONFIG_PATH");
     if (!env_path.empty()) {
         if (std::filesystem::exists(env_path)) {
-            std::cerr << "[OFLM]  Using custom model list path: " << env_path << std::endl;
+            if (!quiet) {
+                std::cerr << "[OFLM]  Using custom model list path: " << env_path << std::endl;
+            }
             return env_path;
         }
     }
 
-    // Portable development-tree location (next to the executable, then CWD).
+    // 2. Portable development-tree location (next to the executable, then CWD).
     std::string exe_dir = get_executable_directory();
     std::string exe_relative_path = exe_dir + "/model_list.json";
     if (std::filesystem::exists(exe_relative_path)) {
@@ -82,49 +98,63 @@ std::string find_model_list() {
         return "model_list.json";
     }
 
-    // User-level registry written by `oflm add`: it mirrors the shipped registry
-    // and adds the models the user installed, so it must win over the frozen copy
-    // in the install tree or a just-added model would be invisible. This is also
-    // what lets `oflm add` take effect with no OFLM_CONFIG_PATH export in the
-    // user's shell.
-    for (const std::string& d : user_oflm_directories()) {
-        std::string user_path = d + "/model_list.json";
-        if (std::filesystem::exists(user_path)) {
-            return user_path;
-        }
-    }
-    for (const std::string& d : legacy_flm_directories()) {
-        std::string legacy_path = d + "/model_list.json";
-        if (std::filesystem::exists(legacy_path)) {
-            return legacy_path;
-        }
-    }
+    // NOTE: No user registry step here! The user registry is now an overlay
+    // (settings.json), not a replacement. This is the key change from the
+    // old find_model_list() which checked the user dir at this point.
 
-    // Relocatable installed bundle, independent of its original prefix.
+    // 3. Relocatable installed bundle, independent of its original prefix.
     std::string bundle_path = exe_dir + "/../share/oflm/model_list.json";
     if (std::filesystem::exists(bundle_path)) {
         return bundle_path;
     }
 
-    // Legacy configured prefix.
+    // 4. Legacy configured prefix.
     std::string installed_path = install_prefix + "/share/oflm/model_list.json";
     if (std::filesystem::exists(installed_path)) {
         return installed_path;
     }
 
-    // If not found, throw an error
     throw std::runtime_error("model_list.json not found. Reinstall OpenFlowLM, or set OFLM_CONFIG_PATH "
                              "if you are running from a non-standard location.");
 }
 
-std::string find_model_info() {
+} // namespace
+
+std::string find_shipped_registry() {
+    return find_shipped_registry_impl(false);
+}
+
+std::string find_shipped_registry_quiet() {
+    return find_shipped_registry_impl(true);
+}
+
+std::string find_user_settings() {
+    // 1. OFLM_SETTINGS_PATH (for testing)
+    const std::string env_path = getenv_oflm("OFLM_SETTINGS_PATH");
+    if (!env_path.empty()) {
+        return env_path;  // Return even if it doesn't exist — caller handles missing file
+    }
+
+    // 2. <models_dir>/settings.json (sibling of models directory)
+    std::string models_dir = get_models_directory();
+    std::string settings_path = models_dir + "/settings.json";
+    return settings_path;  // Return the path; caller checks if it exists
+}
+
+namespace {
+
+// The model info lookup, with the notice on or off. Same reasoning as the
+// registry lookup above.
+std::string find_model_info_impl(bool quiet) {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
     // 1. Check OFLM_MODELINFO_PATH environment variable
     const std::string env_path = getenv_oflm("OFLM_MODELINFO_PATH");
     if (!env_path.empty()) {
         if (std::filesystem::exists(env_path)) {
-            std::cerr << "[OFLM]  Using custom model info path: " << env_path << std::endl;
+            if (!quiet) {
+                std::cerr << "[OFLM]  Using custom model info path: " << env_path << std::endl;
+            }
             return env_path;
         }
     }
@@ -176,6 +206,16 @@ std::string find_model_info() {
     // If not found, throw an error
     throw std::runtime_error("model_info.json not found. Reinstall OpenFlowLM, or set OFLM_MODELINFO_PATH "
                              "if you are running from a non-standard location.");
+}
+
+} // namespace
+
+std::string find_model_info() {
+    return find_model_info_impl(false);
+}
+
+std::string find_model_info_quiet() {
+    return find_model_info_impl(true);
 }
 
 namespace {
@@ -252,6 +292,11 @@ std::vector<std::string> xclbin_roots() {
     // comment says (#41).
     for (const std::string& d : user_oflm_directories()) candidates.push_back(d);
     for (const std::string& d : legacy_flm_directories()) candidates.push_back(d);
+
+    // The embedding design sets (BERT-*/gemm_rtp) ship here, separately from the
+    // chat-model xclbin tree that CMAKE_XCLBIN_PREFIX points at. Listing it makes
+    // the pre-built sets discoverable by geometry/family with no manual symlink.
+    candidates.push_back("/usr/local/share/flm");
 
     for (const std::string& c : closed_path_roots()) candidates.push_back(c);
 
