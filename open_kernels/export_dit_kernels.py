@@ -132,11 +132,14 @@ sys.path.insert(0, str(HERE / "designs" / "dit_gemm"))
 sys.path.insert(0, str(HERE))
 import klein_pipeline  # noqa: E402  (the whole-image schedule; no IRON import)
 
+# FLUX.2 [klein]'s text encoder is Qwen3: 4B on the 4B model, 8B on the 9B one. Its shape is
+# part of the family, not a constant -- the TE streams are built from it.
+TE_4B = dict(hidden=2560, heads=32, kv_heads=8, mlp=9728, pad_hidden=3072)
+TE_9B = dict(hidden=4096, heads=32, kv_heads=8, mlp=12288, pad_hidden=4096)
 FAMILIES = {
-    "FLUX.2-klein-4B-NPU2": dict(hidden=3072, mlp=9216, text_tokens=512, patch_px=16),
-    # 9B: 32 heads x 128 = hidden 4096, mlp_ratio 3 -> 12288 (black-forest-labs/FLUX.2-klein-9B).
-    # Its streams pass check_shape already (20 gemm + 4 fa, 0 refused, measured 2026-10-28).
-    "FLUX.2-klein-9B-NPU2": dict(hidden=4096, mlp=12288, text_tokens=512, patch_px=16),
+    "FLUX.2-klein-4B-NPU2": dict(hidden=3072, mlp=9216, text_tokens=512, patch_px=16, te=TE_4B),
+    # 9B: 32 heads x 128 = hidden 4096, mlp_ratio 3 -> 12288, Qwen3-8B (black-forest-labs/FLUX.2-klein-9B)
+    "FLUX.2-klein-9B-NPU2": dict(hidden=4096, mlp=12288, text_tokens=512, patch_px=16, te=TE_9B),
 }
 FA_FAMILIES = {
     "FLUX.2-klein-4B-NPU2": dict(heads=24, text_tokens=512, patch_px=16, mlp=9216,
@@ -160,7 +163,7 @@ def configs(resolutions: list[int], edits: list[int], patch_px: int) -> list[tup
 
 
 def klein_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: int,
-                  patch_px: int, edits: list[int] = ()) -> dict[str, dict]:
+                  patch_px: int, edits: list[int] = (), te: dict | None = None) -> dict[str, dict]:
     h, f, L = hidden, mlp, text_tokens
     fu = fu_width(h, f)
     ffin = {"epi": {"first_cb": 0}}                       # SwiGLU epilogue everywhere
@@ -198,12 +201,14 @@ def klein_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: in
                              role="timestep_embedder.linear_1 (K 256 -> 512; M = steps, padded)")
     streams["t_emb2"] = dict(M=512, K=h, N=h, role="timestep_embedder.linear_2")
     streams.update(klein_pipeline.gemm_streams())         # ctx_emb, the modulation GEMM
-    streams.update(qwen3_te_streams(L))
+    t = te or TE_4B
+    streams.update(qwen3_te_streams(L, hidden=t["hidden"], heads=t["heads"],
+                                    kv_heads=t["kv_heads"], mlp=t["mlp"], pad=t["pad_hidden"]))
     return streams
 
 
-# FLUX.2 [klein] 4B's text encoder: Qwen3-4B (hidden 2560, 32/8 heads of 128, MLP 9728).
-TE = dict(hidden=2560, heads=32, kv_heads=8, mlp=9728, pad_hidden=3072)
+# The 4B text encoder, kept as the default for callers that name no family.
+TE = TE_4B
 
 
 def qwen3_te_streams(L: int, hidden=TE["hidden"], heads=TE["heads"], kv_heads=TE["kv_heads"],
@@ -247,15 +252,20 @@ def klein_fa_streams(resolutions: list[int], heads: int, text_tokens: int, patch
     return streams
 
 
-EW_EL = 3072
+el = 3072
 
 
 def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: int,
-                     patch_px: int, edits: list[int] = ()) -> dict[str, dict]:
-    """dit_ew specs over the layout in the module docstring."""
-    assert hidden == EW_EL, "dit_ew's row element is FLUX.2 [klein]'s hidden size"
+                     patch_px: int, edits: list[int] = (), te: dict | None = None) -> dict[str, dict]:
+    """dit_ew specs over the layout in the module docstring.
+
+    `el` is the kernel's row element = the transformer hidden (dit_ew compiles it in); the
+    text-encoder streams take that family's encoder widths.
+    """
+    el = hidden                                          # dit_ew's row element
     h, L = hidden, text_tokens
-    E_mlp = mlp // EW_EL                                  # SwiGLU row = 3 elements
+    t = te or TE_4B
+    E_mlp = mlp // el                                     # SwiGLU row = 3 elements
 
     def view(T, ld=h, off=0, E=1):
         return {"off": off, "ld": ld, "T": T, "E": E}
@@ -268,39 +278,39 @@ def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens:
             del rows["txt"]
         for part, (T, tok0) in rows.items():
             streams[f"r{key}_ln_{part}"] = {
-                "op": "ln_mod", "a": view(T), "y": view(T), "p_off": EW_EL, "n_par": 2,
+                "op": "ln_mod", "a": view(T), "y": view(T), "p_off": el, "n_par": 2,
                 "idx": {"shift": 0, "scale": 1},
-                "sizes": {"X": T * h, "B": EW_EL, "P": 4 * EW_EL, "Y": T * h, "Z": EW_EL}}
+                "sizes": {"X": T * h, "B": el, "P": 4 * el, "Y": T * h, "Z": el}}
             streams[f"r{key}_res_{part}"] = {
                 "op": "res_ln_mod", "a": view(T), "b": view(T), "y": view(T), "z": view(T),
-                "p_off": EW_EL, "n_par": 3, "idx": {"gate": 0, "shift": 1, "scale": 2},
-                "sizes": {"X": T * h, "B": T * h, "P": 5 * EW_EL, "Y": T * h, "Z": T * h}}
+                "p_off": el, "n_par": 3, "idx": {"gate": 0, "shift": 1, "scale": 2},
+                "sizes": {"X": T * h, "B": T * h, "P": 5 * el, "Y": T * h, "Z": T * h}}
         for part, ld in (("txt", 3 * h), ("img", 3 * h), ("sgl", fu_width(h, mlp))):
             if part not in rows and part != "sgl":
                 continue
             T, tok0 = rows["all" if part == "sgl" else part]
             streams[f"r{key}_qk_{part}"] = {
                 "op": "qk", "a": view(T, ld), "b": view(T, ld, h), "y": view(T, ld),
-                "z": view(T, ld, h), "p_off": EW_EL, "n_par": 3, "tok0": tok0, "n_txt": L,
+                "z": view(T, ld, h), "p_off": el, "n_par": 3, "tok0": tok0, "n_txt": L,
                 "grid_w": R // patch_px, "heads": h // 128,
-                "sizes": {k: T * ld for k in ("X", "B", "Y", "Z")} | {"P": 5 * EW_EL}}
+                "sizes": {k: T * ld for k in ("X", "B", "Y", "Z")} | {"P": 5 * el}}
     # text encoder: RMSNorm x weight over W = 2560 of the 3072 element, unit-gate residual,
     # Qwen3 q/k (fused q|k|v row = 2 elements; rotate-half RoPE)
-    Lt, W, qkv = L, TE["hidden"], TE["heads"] * 128 + 2 * TE["kv_heads"] * 128
+    Lt, W, qkv = L, t["hidden"], t["heads"] * 128 + 2 * t["kv_heads"] * 128
     streams["te_rms"] = {
-        "op": "ln_mod", "norm": "rms", "W": W, "a": view(Lt), "y": view(Lt), "p_off": EW_EL,
+        "op": "ln_mod", "norm": "rms", "W": W, "a": view(Lt), "y": view(Lt), "p_off": el,
         "n_par": 1, "idx": {"scale": 0},
-        "sizes": {"X": Lt * h, "B": EW_EL, "P": 3 * EW_EL, "Y": Lt * h, "Z": EW_EL}}
+        "sizes": {"X": Lt * h, "B": el, "P": 3 * el, "Y": Lt * h, "Z": el}}
     streams["te_res_rms"] = {
         "op": "res_ln_mod", "norm": "rms", "unit_gate": 1, "W": W, "a": view(Lt),
-        "b": view(Lt), "y": view(Lt), "z": view(Lt), "p_off": EW_EL, "n_par": 1,
+        "b": view(Lt), "y": view(Lt), "z": view(Lt), "p_off": el, "n_par": 1,
         "idx": {"scale": 0},
-        "sizes": {"X": Lt * h, "B": Lt * h, "P": 3 * EW_EL, "Y": Lt * h, "Z": Lt * h}}
+        "sizes": {"X": Lt * h, "B": Lt * h, "P": 3 * el, "Y": Lt * h, "Z": Lt * h}}
     streams["te_qk"] = {
-        "op": "qk", "rope": "qwen", "a": view(Lt, qkv), "b": view(Lt, qkv, EW_EL),
-        "y": view(Lt, qkv), "z": view(Lt, qkv, EW_EL), "p_off": EW_EL, "n_par": 3,
+        "op": "qk", "rope": "qwen", "a": view(Lt, qkv), "b": view(Lt, qkv, el),
+        "y": view(Lt, qkv), "z": view(Lt, qkv, el), "p_off": el, "n_par": 3,
         "heads": 24, "b_q_heads": TE["heads"] - 24, "b_k_heads": TE["kv_heads"],
-        "sizes": {k: Lt * qkv for k in ("X", "B", "Y", "Z")} | {"P": 5 * EW_EL}}
+        "sizes": {k: Lt * qkv for k in ("X", "B", "Y", "Z")} | {"P": 5 * el}}
     streams.update(klein_pipeline.ew_streams(resolutions))   # silu, euler, text-encoder taps
     return streams
 
@@ -652,12 +662,13 @@ def main() -> int:
         marker = ew_out / "dit_ew.json"
         marker.unlink(missing_ok=True)
         print(f"dit_ew set for {args.family}: {len(ew_streams)} streams -> {ew_out}")
-        dirs = build_many({n: (s, {"DE_SPEC": json.dumps(s)}, EW_DESIGN, ew_out)
+        ew_el = FAMILIES[args.family]["hidden"]
+        dirs = build_many({n: (s, {"DE_SPEC": json.dumps(s), "EW_EL": str(ew_el)}, EW_DESIGN, ew_out)
                            for n, s in ew_streams.items()}, args.force, args.jobs)
         assemble(ew_out, dirs, marker, {
             "family": args.family,
             "kernel": "dit_ew",
-            "row_element": EW_EL,
+            "row_element": el,
             "resolutions": resolutions, "edits": edits,
             "streams": ew_streams,
         })

@@ -21,7 +21,10 @@ in through the memtile and split between the pair; two output streams (Y, Z) joi
 on the way out -- 6 memtile S2MM and 6 MM2S, the channel budget, which is why it is 2
 cores per column and not 4. The ops are DDR-bound: 16 cores are plenty.
 
-The unit of work is a row element of EL = 3072 bf16 (FLUX.2 [klein]'s hidden size; a
+The unit of work is a row element of # The row element is the family's transformer hidden: a compile-time constant in the kernel
+# (the DMA shapes and -DEW_EL below are built from it), so a family with a different hidden
+# size is a REBUILD of this design with EW_EL set, not a different stream spec.
+EL = int(os.environ.get("EW_EL", "3072")) bf16 (FLUX.2 [klein]'s hidden size; a
 q/k row is 24 heads). A stream reads a "view" of a buffer: T tokens, each E consecutive
 elements of 3072 starting at column `off`, row stride `ld` (the fused QKV/MLP buffers
 are read in place). Column c takes tokens [c*T/8, (c+1)*T/8); within a column the
