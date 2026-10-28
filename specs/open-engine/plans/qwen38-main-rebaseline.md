@@ -1,5 +1,56 @@
 # Qwen3.8-27B validation report
 
+## Refined projections through native L3 attention — 2026-10-28
+
+Added a private replay using the current production attention workers and
+kernels directly. Two 240-position trajectories consume original and refined
+FP32 projections, each with its own NPU-generated paired-BF16 KV from position
+zero. The prerequisite refinement retains its explicit host FP32 addition;
+this stage does not load a model weight pool or change production arithmetic.
+
+Both NPU dispatches complete. The control reproduces **240/240 attention
+outputs and 240/240 entire native KV prefixes bytewise**. The separate audit
+recomputes every identity and head measurement and verifies all four captures.
+Candidate primary and conditioned comparisons each pass **5760/5760 heads**
+at unchanged maxabs <0.02 and cosine >0.9999 bounds.
+
+| Native attention / independent unrounded-norm reference | Maximum error | Minimum cosine |
+|---|---:|---:|
+| Control | 2.720021153e-4 | 0.999999784269 |
+| Refined candidate | 5.185089467e-5 | 0.999999994834 |
+
+Against the independent attention reference conditioned on the candidate's
+actual projections, maximum error is 5.520919823e-5, minimum cosine
+0.999999998349. Selected primary errors (control → candidate):
+
+- P125: 5.937908748e-5 → 1.106952289e-5.
+- P205: 8.628521564e-5 → 1.553450229e-5.
+- **P239: 2.560080227e-5 → 2.574159746e-5**, a small regression despite
+  passing the unchanged bounds. CPU-attention improvement does not establish
+  improvement through actual NPU arithmetic at every position.
+
+The fresh build pins 814 compiler input files and production source copies.
+Maximum linked .text is **13,760 / 16,384 bytes**, L1 allocation end
+**59,920 / 65,536 bytes**, stack **6144 bytes** unchanged. Logical data buffers
+are 22,609,920 bytes. These are isolated-attention resources, not a full-ax
+budget. The initial build's compiler phase succeeded but provenance checking
+rejected IRON's copied source paths; a fresh corrected build passed and was
+used for execution. No failed evidence was relabelled.
+
+TDD: 10 initial failures, 13 final new tests; focused suite 27 passed; full
+host suite **2026 passed, 47 skipped**. Evidence is retained under
+`Models/qwen38-27b/post-prefill-drift/l3-attention-v1` and
+`l3-attention-build-v2`; report SHA256:
+`72bc31ebcdd91da691e5cb7b2c77df963e82344849b3314280608699be0be2c7`.
+Commands and the build workflow are documented in
+`utilities/l3-attention-replay/README.md` and the new
+`open-qwen38-refined-attention` skill.
+
+Next validate output projection, FFN and complete layer residual with an exact
+native control, preserving P239 before private full-ax integration. Global
+full-model numerical acceptance remains FAIL. No installed service, registry,
+weight packing or acceptance threshold changed; performance remains unaccepted.
+
 ## Two-pass L3 projection refinement — 2026-10-28
 
 Added an isolated residual-refinement runner using the existing audited GEMV
