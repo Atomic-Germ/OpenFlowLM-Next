@@ -336,7 +336,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     of_aout = ObjectFifo(brow, name="aout", depth=2)
     if KVC:
         # more og streams than free shim S2MM channels: consecutive cores join in memtiles (at most 6 inputs each)
-        OGJ_N = 4 if KVC == 1 else 6
+        # the weight ring holds S2MM channel 0 of every memtile, so a join there takes 5 at most
+        OGJ_N = 4 if KVC == 1 or WRING else 6
         OGJ = [list(range(g, min(g + OGJ_N, ACORES))) for g in range(0, ACORES, OGJ_N)]
         ogj_ty = [np.ndarray[(sum(CORE_NHL[c] for c in cs) * G.HD,), np.dtype[bfloat16]] for cs in OGJ]
         of_ogj = [ObjectFifo(ogj_ty[j], name=f"ogj{j}", depth=1) for j in range(len(OGJ))]
@@ -893,7 +894,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     io_ty = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty]
     if HEAD:
         # every fifo stays in the Runtime so the image stays dx's: only the stream differs
-        def sequence(a_lm, c_xres, a_normw, c_logits, a_hn, a_unused, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
+        def sequence(a_lm, c_xres, a_normw, c_logits, a_hn, a_unused, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs,
+                     *kw_ps):
             head_sequence(a_lm, c_xres, a_normw, c_logits, a_hn, lni, lno, w_prods, x_prod, y_conss)
         u8 = np.dtype[np.uint8]
         io_ty = [np.ndarray[(L.LMHEAD_POOL_BYTES,), u8], xres_ty, np.ndarray[(ELN,), u8],

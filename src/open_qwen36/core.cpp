@@ -397,7 +397,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     host_attn_on_ = gemm_block_t_ && host_attn_fits();
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN")) host_attn_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
-    // OPEN-HOST-ATTN-GUARD: refuse at load, not on the first dispatch, and keep Auto off the host route
+    // OPEN-HOST-ATTN-GUARD: refuse at load, not on the first dispatch, and keep Auto off the host route.
     host_attn_refusal_ = man_.host_attention_refusal();
     if ((host_attn_on_ || host_attn_decode_on_) && !host_attn_refusal_.empty())
         throw std::runtime_error("open_qwen36: OFLM_OPEN_HOST_ATTN / OFLM_OPEN_HOST_ATTN_DECODE: " + host_attn_refusal_);

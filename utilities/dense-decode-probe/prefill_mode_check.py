@@ -140,8 +140,8 @@ def main() -> int:
                     first = next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), None)
                     where = ""
                     if first is not None:
-                        # _t<i> holds the logits token i was picked from; both routes share tokens 0 .. i - 1
-                        top2 = np.sort(np.fromfile(t / f"{name}_fast_t{first}.bin", np.float32))[-2:]
+                        # _t<i> holds the logits token i was picked from; both arms share tokens 0 .. i - 1
+                        top2 = np.sort(np.fromfile(t / f"{name}_ref_t{first}.bin", np.float32))[-2:]
                         where = f" (reference top-2 margin there {float(top2[1] - top2[0]):.3f})"
                     print(f"decode {name}: {len(x)} vs {len(y)} tokens, "
                           f"{'IDENTICAL' if same else 'differ at token ' + str(first) + where}")
