@@ -1,5 +1,37 @@
 # Qwen3.8-27B validation report
 
+## Exact isolated L3 projection control — 2026-10-28
+
+Added a private current-arithmetic Q/gate/K/V replay with activation-table
+captures. It uses production-generated FP32 preparation and Q4 GEMV functions,
+including the already-integrated consistent-sum arithmetic. The source tensors
+are packed independently and compared bytewise with the audited L3 pool.
+
+The fresh one-core build passes resource checks: 3376 bytes of program text,
+maximum L1 buffer end 32512 and 6144-byte stack. Build provenance binds 807
+input/dependency files. Replay preparation binds 8493 input files and 484
+prepared artifacts, including norms, reference projections, weights and the
+poisoned-buffer command program. No full model is resident.
+
+All 240 native dispatches complete. **960/960** individual Q/gate/K/V outputs
+match the current full-layer captures bytewise, and **240/240** activation
+tables match the independent CPU construction exactly, including both BF16
+sum planes. A separate audit repeats the comparisons and verifies all 480
+output artifacts. Logical NPU buffers total 45,964,544 bytes, not a host RSS
+measurement. TDD started with 10 failing tests; 15 new tests now pass. Focused
+suite: 48 passed. Full host suite: **1988 passed, 47 skipped**.
+
+Evidence is retained under `Models/qwen38-27b/post-prefill-drift/` in
+`l3-projection-build-v1`, `l3-projection-resources.json`, `l3-projection-v2`
+and the corresponding build/prepare/run/audit/test logs. Reproduction is in
+`utilities/l3-projection-replay/README.md`.
+
+This is a verified control, not a precision fix. The global sequential
+numerical failure, thresholds and production runtime are unchanged;
+`model_acceptance` remains false. The next experiment will separate the signed
+effect of INT16 activation quantization from native accumulation/epilogue
+error using independent FP64 projections. Preserve P239 as a separate
+attention/cancellation control alongside P125/P205.
 
 ## Signed L3 attribution with real native KV — 2026-10-28
 
