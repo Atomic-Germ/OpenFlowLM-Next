@@ -508,6 +508,9 @@ def assemble(out: Path, dirs: dict[str, Path], marker: Path, meta: dict) -> None
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--list-families", action="store_true",
+                    help="print the families this tree can build, one per line, and exit "
+                         "(utilities/export-kernels.py uses this instead of a hard-coded list)")
     ap.add_argument("--family", default="FLUX.2-klein-4B-NPU2", choices=sorted(FAMILIES))
     ap.add_argument("--resolutions", default="512,1024",
                     help="square output sizes; (R/16)^2 image tokens must be a multiple of 512")
@@ -531,6 +534,9 @@ def main() -> int:
                          "src/xclbins/<family>/open_kernels, which the installer ships")
     args = ap.parse_args()
 
+    if args.list_families:
+        print("\n".join(sorted(FAMILIES)))
+        return 0
     resolutions = [int(r) for r in args.resolutions.split(",")]
     edits = [int(r) for r in args.edits.split(",") if r]
     bad = [why for R in edits if (why := klein_pipeline.check_edit(R, R))]

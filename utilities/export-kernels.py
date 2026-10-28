@@ -180,7 +180,6 @@ def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> 
     return len(failed)
 
 
-DIT_FAMILY = "FLUX.2-klein-4B-NPU2"
 # The sizes the schedules carry, and the edits: both sides of a bundle must name the same
 # ones (q4nx/open_diffusion.py's RESOLUTIONS/EDITS), and the layout hash is computed from
 # them, so a mismatch is refused at load rather than running the wrong streams.
@@ -188,29 +187,46 @@ DIT_RESOLUTIONS = "512,1024"
 DIT_EDITS = "512,1024"
 
 
-def export_diffusion_sets(py: Path, force: bool, jobs: int = 4) -> int:
-    """FLUX.2 [klein] 4B's kernel set. Returns the number of failures (0 or 1).
+def diffusion_families(py: Path) -> list[str]:
+    """The families the exporter can build, asked of the exporter itself.
 
-    Built in `build/dit-kernels/<family>` and INSTALLED into `src/xclbins/<family>/open_kernels`:
-    the build directory carries every stream's xclbin (681 MiB), the installed form is the
-    full ELFs and their manifest (16 MiB), and that is what ships and what the engine reads.
-    The exporter keeps its own cache, so a second run is seconds.
+    A hard-coded list here would ship whichever families someone remembered (it shipped only
+    the 4B for a day); `--list-families` is the exporter's own answer.
+    """
+    out = subprocess.run([str(py), str(REPO / "open_kernels" / "export_dit_kernels.py"),
+                          "--list-families"], capture_output=True, text=True)
+    return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+
+
+def export_diffusion_sets(py: Path, force: bool, jobs: int = 4,
+                          families: list[str] | None = None) -> int:
+    """The diffusion kernel sets (FLUX.2 [klein], one per family). Failures count.
+
+    Each is built in `build/dit-kernels/<family>` and INSTALLED into
+    `src/xclbins/<family>/open_kernels`: the build directory carries every stream's xclbin
+    (hundreds of MiB), the installed form is the full ELFs and their manifest (tens of MiB),
+    and that is what ships and what the engine reads. The exporter keeps its own cache, so a
+    second run is seconds.
     """
     script = REPO / "open_kernels" / "export_dit_kernels.py"
-    scratch = REPO / "build" / "dit-kernels" / DIT_FAMILY
-    shipped = REPO / "src" / "xclbins" / DIT_FAMILY / "open_kernels"
-    print(f"-- diffusion: {DIT_FAMILY} (resolutions {DIT_RESOLUTIONS}, edits {DIT_EDITS})", flush=True)
-    cmd = [str(py), str(script), "--resolutions", DIT_RESOLUTIONS, "--edits", DIT_EDITS,
-           "--out", str(scratch), "--jobs", str(jobs)]
-    if force:
-        cmd.append("--force")
-    if subprocess.run(cmd).returncode:
-        return 1
-    # --install copies the runtime files only; src/ must not carry the build tree
-    rc = subprocess.run([str(py), str(script), "--resolutions", DIT_RESOLUTIONS,
-                         "--edits", DIT_EDITS, "--out", str(scratch),
-                         "--install", str(shipped)]).returncode
-    return 1 if rc else 0
+    failed = 0
+    for fam in (families or diffusion_families(py)):
+        scratch = REPO / "build" / "dit-kernels" / fam
+        shipped = REPO / "src" / "xclbins" / fam / "open_kernels"
+        print(f"-- diffusion: {fam} (resolutions {DIT_RESOLUTIONS}, edits {DIT_EDITS})", flush=True)
+        cmd = [str(py), str(script), "--family", fam, "--resolutions", DIT_RESOLUTIONS,
+               "--edits", DIT_EDITS, "--out", str(scratch), "--jobs", str(jobs)]
+        if force:
+            cmd.append("--force")
+        if subprocess.run(cmd).returncode:
+            failed += 1
+            continue
+        # --install copies the runtime files only; src/ must not carry the build tree
+        if subprocess.run([str(py), str(script), "--family", fam, "--resolutions", DIT_RESOLUTIONS,
+                           "--edits", DIT_EDITS, "--out", str(scratch),
+                           "--install", str(shipped)]).returncode:
+            failed += 1
+    return failed
 
 
 def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
@@ -292,7 +308,10 @@ def main() -> int:
     ap.add_argument("--skip-diffusion", action="store_true",
                     help="skip the FLUX.2 [klein] diffusion kernel set")
     ap.add_argument("--diffusion-only", action="store_true",
-                    help="only build the diffusion kernel set")
+                    help="only build the diffusion kernel sets")
+    ap.add_argument("--diffusion-family", default="",
+                    help="comma-separated diffusion families (default: every family the "
+                         "exporter can build -- FLUX.2-klein-4B-NPU2, -9B-NPU2, ...)")
     ap.add_argument("-j", "--jobs", type=int, default=0,
                    help="parallel kernel builds (default: 0 = auto-detect CPU count)")
     a = ap.parse_args()
@@ -355,7 +374,8 @@ def main() -> int:
         n_failed += export_bert_sets(py, a.force, a.jobs)
 
     if not a.skip_diffusion:
-        n_failed += export_diffusion_sets(py, a.force, a.jobs)
+        fams = [f.strip() for f in a.diffusion_family.split(",") if f.strip()] or None
+        n_failed += export_diffusion_sets(py, a.force, a.jobs, fams)
 
     print(flush=True)
     if n_failed:
@@ -364,11 +384,11 @@ def main() -> int:
     if a.bert_only:
         print("kernel export ok: BERT design sets", flush=True)
     elif a.diffusion_only:
-        print(f"kernel export ok: {DIT_FAMILY} diffusion set", flush=True)
+        print("kernel export ok: diffusion sets", flush=True)
     else:
         suffix = " + BERT design sets" if not a.skip_bert else ""
         if not a.skip_diffusion:
-            suffix += f" + {DIT_FAMILY} diffusion set"
+            suffix += " + diffusion sets"
         print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 
