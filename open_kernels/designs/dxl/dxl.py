@@ -11,7 +11,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, Worker, WorkerRuntimeBarrier
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, Worker
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import Tile
@@ -154,6 +154,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
         return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
 
     f_mode = ef("dxl_mode", HERE / "dxl_mode.cc", [x_ty, rtp_ty], OS)
+    f_lncount = ef("dxl_lncount", HERE / "dxl_lncount.cc", [u8_ln, rtp_ty], OS + [f"-DDXL_L={LR}"])
     f_njobs = ef("dxl_njobs", HERE / "dxl_njobs.cc", [table_ty, rtp_ty, q4_ty], GL_FLAGS)
     f_job = ef("dxl_job", HERE / "dxl_job.cc", [table_ty, rtp_ty, i32, jp_ty], GL_FLAGS)
     f_prep = ef("dxl_prep_slot", HERE / "dxl_prep_slot.cc", [x_ty, tab_ty, i32, i32, jp_ty], GL_FLAGS)
@@ -218,8 +219,6 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     tables = np.zeros(TABLE_INTS, np.int32)
     tables[:2 * (1 + JMAX * NF)] = job_table(SPEC, LR).reshape(-1)
     tables[2 * (1 + JMAX * NF):2 * (1 + JMAX * NF) + 1 + DXR.HEAD_JMAX * NF] = DXR.head_table(SPEC, LR)
-    lrtp = Buffer(rtp_ty, name="lnrtp", initial_value=np.zeros(16, np.int32), use_write_rtp=True)
-    lbar = WorkerRuntimeBarrier()
     rtps = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(16, np.int32))
             for c in range(N_CORES)]
 
@@ -247,8 +246,10 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                     fout(acc, ye, jp, b)
                     yout.release(1)
 
-    def ln_body(ain, aout, f_nr, f_lny, f_lnx, lrtp, lbar):
-        lbar.wait_for_value(1)
+    def ln_body(ain, aout, f_nr, f_lny, f_lnx, f_cnt, cnt):
+        e = ain.acquire(1)                                       # the mode element opens the ln stream too
+        f_cnt(e, cnt)
+        ain.release(1)
         for _ in range_(LR):                                     # entry norm, per row: [x0 x1 lnw] -> xn; with lnw = normw, the head's
             e = ain.acquire(3)
             o = aout.acquire(1)
@@ -271,7 +272,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             aout.release(1)
             ain.release(5)
 
-        for _ in range_(lrtp[0]):                                # 2 L, or 0 for the head: res = x + out; xm = norm(res), then xres = res + out2
+        for _ in range_(cnt[0]):                                 # 2 L, or 0 for the head: res = x + out; xm = norm(res), then xres = res + out2
             add_norm()
 
     PRO = 1 + NPTAB + G.Q_AIN_ELEMS + 2 * G.K_AIN_ELEMS          # one row's prologue elements on ain
@@ -390,7 +391,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             _attn(g, ain, kvout, ogout, *bufs, *fns, h0, kvall=tuple(rest[-8:]) if packs_all else None, kw=kw)
         return body
 
-    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx, lrtp, lbar],
+    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx, f_lncount,
+                                        Buffer(rtp_ty, name="lncnt")],
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
@@ -427,8 +429,6 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                  ain_p, kv_c, og_cs, *kw):
         kw_ps = kw[0] if kw else None
         AB, XF = X.AD_BYTES, X.XRES_FLOATS
-        lrtp[0] = 0 if HEAD else 2 * LR
-        lbar.set(1)
         pw, py, px, pl = Pipeline(3), Pipeline(3), Pipeline(3), Pipeline(3)
         if HEAD:
             # a_pool is the head pool, a_consts the final norm's weight, a_kv (an InOut slot, as dx's head uses) the logits
@@ -446,6 +446,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                                                    [0, 256, VOC * 4, 1]))
 
             px.fill(x_prod, a_ptab, bt(AB, X.AD_MODE + 2 * DXR.XE, DXR.XE))
+            pl.fill(lni, a_ptab, bt(AB, X.AD_MODE + 2 * DXR.XE, ELN))   # the ln core's too: no add-norms
             for j in range(LR):                                  # the final norm, per row
                 pl.fill(lni, c_xres, bt(XF, j * HID, HID))
                 pl.fill(lni, a_consts, bt(ELN, 0, ELN))
@@ -461,6 +462,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             px.finish()
             return
         px.fill(x_prod, a_act, bt(AB, X.AD_MODE + (1 if DRAFT else 0) * DXR.XE, DXR.XE))
+        # the ln core's too (2 L add-norms); ELN bytes from the mode element stay inside act, ending at most in junk
+        pl.fill(lni, a_act, bt(AB, X.AD_MODE + (1 if DRAFT else 0) * DXR.XE, ELN))
         stage = {}
         for job in jobs(SPEC, LR, DRAFT):
             stage.setdefault(job.stage, []).append(job)
