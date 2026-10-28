@@ -248,10 +248,19 @@ def resolve(name):
 
 
 class GgufWeights:
-    """`SafeTensors.get`-compatible view of a klein DiT GGUF (HF layout, f32)."""
+    """`SafeTensors.get`-compatible view of a klein DiT GGUF (HF layout, f32).
 
-    def __init__(self, path):
+    `bfl_modulation`: the file came from BFL's original weights rather than diffusers', so
+    `final_layer.adaLN_modulation.1.weight` holds its two 3072-row halves as (scale, shift)
+    where diffusers has (shift, scale). BOTH converters we tried do this -- unsloth's BF16 and
+    leejet's Q8_0 -- so it is a source convention, not a broken file. Detect it against the
+    checkpoint (`detect_bfl_modulation`) rather than guess: the two orders are exact mirror
+    images, so one of them matches to the bit.
+    """
+
+    def __init__(self, path, bfl_modulation: bool = False):
         self.gguf = Gguf(path)
+        self.bfl_modulation = bfl_modulation
 
     def get(self, name):
         r = resolve(name)
@@ -259,6 +268,10 @@ class GgufWeights:
             raise KeyError(f"gguf_weights: no mapping for {name}")
         tensor, part, layout = r
         w = self.gguf.array(tensor)          # already HF layout
+        if name == "norm_out.linear.weight" and self.bfl_modulation:
+            # (scale, shift) -> (shift, scale)
+            half = w.shape[0] // 2
+            w = np.concatenate([w[half:], w[:half]], axis=0)
         if layout in ("1d", "T"):
             return np.ascontiguousarray(w).astype(np.float32)
         if layout.startswith("Tf"):
@@ -266,6 +279,36 @@ class GgufWeights:
             n = int(layout[2:])
             return np.ascontiguousarray(np.split(w, n, axis=0)[part]).astype(np.float32)
         raise SystemExit(f"gguf_weights: unknown layout {layout}")
+
+
+def detect_bfl_modulation(gguf_path, hf_repo, prefix: str = "transformer/") -> bool | None:
+    """True when this file's adaLN tensor is BFL-ordered (needs the halves swapped).
+
+    `final_layer.adaLN_modulation.1.weight` is 6144x3072 and its two halves are (shift, scale)
+    in diffusers and (scale, shift) in BFL's original -- and the converters read one or the
+    other. The two are exact mirror images, so comparing against the checkpoint decides it
+    to the bit. Returns None when the checkpoint cannot be read (caller should say so).
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import hf_safetensors as st
+
+    try:
+        idx = st.index(hf_repo, prefix=prefix)
+        vals, shape = st.tensor(idx["norm_out.linear.weight"])
+    except Exception:
+        return None
+    ref = np.asarray(vals, np.float32).reshape(shape).astype(np.float64)
+    got = Gguf(gguf_path).array("final_layer.adaLN_modulation.1.weight").astype(np.float64)
+    rms = float(np.sqrt((ref ** 2).mean())) or 1.0
+    as_is = float(np.sqrt(((got - ref) ** 2).mean())) / rms
+    half = got.shape[0] // 2
+    flipped = np.concatenate([got[half:], got[:half]], axis=0)
+    swapped = float(np.sqrt(((flipped - ref) ** 2).mean())) / rms
+    if swapped < as_is / 10:
+        return True
+    if as_is < swapped / 10:
+        return False
+    return None
 
 
 # --------------------------------------------------------------------------- checks

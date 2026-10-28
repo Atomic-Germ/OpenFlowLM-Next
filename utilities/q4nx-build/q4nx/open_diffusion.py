@@ -101,9 +101,11 @@ def build_open_diffusion_repo(source: str, output_dir: str, npu_assets: Optional
 
         transformer_gguf = gguf_source.ensure(source, gguf_source.pick(source))
         src, base = klein_checkpoint.resolve(source)
+        reference_repo = base
         print(f"checkpoint: {src} (from {base}, for the text encoder and the VAE)", flush=True)
     else:
         src = resolve_source(source)
+        reference_repo = None
     read = lambda p: json.loads((src / p).read_text(encoding="utf-8"))  # noqa: E731
     if read("model_index.json").get("_class_name") != "Flux2KleinPipeline":
         raise ValueError(f"{src} is not a Flux2KleinPipeline checkpoint")
@@ -118,7 +120,7 @@ def build_open_diffusion_repo(source: str, output_dir: str, npu_assets: Optional
     out = Path(output_dir)
     files = export_bundle.build(src, out.resolve(), RESOLUTIONS, jobs,
                                 Path(pack_cache) if pack_cache else None, EDITS,
-                                transformer_gguf=transformer_gguf)
+                                transformer_gguf=transformer_gguf, reference_repo=reference_repo)
     layout = json.loads((out / "config.json").read_text(encoding="utf-8"))["layout"]
     (out / "README.md").write_text(README.replace("{layout}", layout), encoding="utf-8")
     files = sorted(files + ["README.md"])

@@ -54,12 +54,24 @@ FAMILY = "FLUX.2-klein-4B-NPU2"
 ALIGN = 4096
 
 
-def _gguf_get(path: Path):
-    """`SafeTensors.get`-compatible reader over a klein DiT GGUF (see gguf_weights)."""
-    sys.path.insert(0, str(HERE))
-    from gguf_weights import GgufWeights
+def _gguf_get(path: Path, reference_repo: str | None = None):
+    """`SafeTensors.get`-compatible reader over a klein DiT GGUF (see gguf_weights).
 
-    return GgufWeights(Path(path)).get
+    `reference_repo` is the checkpoint the file was converted from (the GGUF repo's README
+    names it). It is used for ONE decision: whether the modulation tensor is BFL-ordered --
+    both converters we tried emit BFL's (scale, shift) where diffusers has (shift, scale),
+    which silently graining the image (measured 2026-10-28)."""
+    sys.path.insert(0, str(HERE))
+    from gguf_weights import GgufWeights, detect_bfl_modulation
+
+    bfl = None
+    if reference_repo:
+        bfl = detect_bfl_modulation(Path(path), reference_repo)
+        if bfl is None:
+            print(f"[WARN] {reference_repo}: could not check the DiT's modulation convention; "
+                  f"assuming BFL's (scale, shift)", flush=True)
+            bfl = True
+    return GgufWeights(Path(path), bfl_modulation=bool(bfl)).get
 
 
 def _pack_dit_from_gguf(cache: Path, get, jobs: int = 4) -> dict[str, tuple[Path, int]]:
@@ -104,7 +116,7 @@ def _pack_dit_from_gguf(cache: Path, get, jobs: int = 4) -> dict[str, tuple[Path
 
 def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
           pack_cache: Path | None = None, edits: list[int] = (),
-          transformer_gguf: Path | None = None) -> list[str]:
+          transformer_gguf: Path | None = None, reference_repo: str | None = None) -> list[str]:
     """Write the model directory; returns the files written. pack_cache: keep the per-weight
     packed files there (reused by the next build); default a temporary directory. edits: the
     resolutions that also get an edit configuration.
@@ -130,7 +142,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
         pack_cache = Path(tmp.name)
     if transformer_gguf is not None:
         # the DiT from the GGUF, the text encoder from the checkpoint (no GGUF of one exists)
-        dit_get = _gguf_get(transformer_gguf)
+        dit_get = _gguf_get(transformer_gguf, reference_repo)
         kp.validate_sources(dit_get, te.get)     # before the 7.5 GiB pack, not after
         packed = _pack_dit_from_gguf(pack_cache, dit_get)
         # its own subdirectory: ensure_packed stamps the cache with the CHECKPOINT's identity
@@ -279,6 +291,9 @@ def main() -> int:
     ap.add_argument("--gguf-repo", default=None,
                     help="the HF repo the GGUF came from: its README's base_model is the "
                          "checkpoint to fetch (a GGUF carries only the DiT)")
+    ap.add_argument("--reference-repo", default=None,
+                    help="the checkpoint the DiT GGUF came from, for the modulation-convention "
+                         "check (default: --gguf-repo)")
     ap.add_argument("--checkpoint-cache", default=None,
                     help="where resolved checkpoints live (default $OFLM_DIT_CHECKPOINT_CACHE "
                          "or ~/.cache/oflm/dit-checkpoints)")
@@ -297,7 +312,8 @@ def main() -> int:
           [int(r) for r in a.resolutions.split(",")], a.jobs,
           Path(a.pack_cache) if a.pack_cache else None,
           [int(r) for r in a.edits.split(",") if r],
-          Path(a.transformer_gguf) if a.transformer_gguf else None)
+          Path(a.transformer_gguf) if a.transformer_gguf else None,
+          a.reference_repo or a.gguf_repo)
     return 0
 
 
