@@ -1035,3 +1035,54 @@ def test_a_vision_checkpoint_is_named_by_its_arch_not_its_kernels():
     assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) == "qwen2vl"
     assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl_text"}) == "qwen2vl"
     assert oflm_add.GGUF_ARCH_FAMILIES["qwen3vl"] == "qwen3vl"
+
+
+def test_a_bundle_links_the_kernel_set_whose_layout_matches(tmp_path):
+    """A diffusion bundle names its kernels by LAYOUT HASH (the stream specs), not by a
+    model geometry, so the match is exact -- a set built for other resolutions or edits
+    must not be linked."""
+    import json
+
+    good = tmp_path / "xclbins" / "FLUX.2-klein-4B-NPU2" / "open_kernels"
+    bad = tmp_path / "xclbins" / "Other" / "open_kernels"
+    for d, layout in ((good, "e667"), (bad, "c327")):
+        d.mkdir(parents=True)
+        (d / "diffusion_kernels.json").write_text(json.dumps({"layout": layout, "complete": True}))
+    assert oflm_add.find_diffusion_kernels("e667", [tmp_path / "xclbins"]) == good
+    assert oflm_add.find_diffusion_kernels("dead", [tmp_path / "xclbins"]) is None
+    # an incomplete set is not a candidate even when the layout matches
+    (bad / "diffusion_kernels.json").write_text(json.dumps({"layout": "e667", "complete": False}))
+    assert oflm_add.find_diffusion_kernels("e667", [bad.parent, tmp_path / "xclbins"]) == good
+
+
+def test_a_symlinked_bundle_target_is_replaced_not_written_through(tmp_path, monkeypatch):
+    """register-bundle.py left models/<name> as a link to the build directory. Installing
+    with --force THROUGH that link unlinked the source's files one at a time (it ate a
+    LICENSE.md), so the link has to be replaced first."""
+    import argparse
+    import json
+
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "bundle.json").write_text(json.dumps({"layout": "L", "resolutions": {}, "edits": {}}))
+    (build / "LICENSE.md").write_text("apache")
+    (build / "weights.bin").write_bytes(b"w")
+
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "my-klein").symlink_to(build)
+
+    monkeypatch.setattr(oflm_add, "models_root_dir", lambda arg: root)
+    monkeypatch.setattr(oflm_add, "find_system_model_list", lambda: tmp_path / "list.json")
+    (tmp_path / "list.json").write_text(json.dumps({"models": {"flux2-klein": {"4b": {
+        "name": "FLUX.2-klein-4B-NPU2", "details": {"family": "flux2-klein"}}}}}))
+    monkeypatch.setattr(oflm_add, "register", lambda entry, *a, **k: "my-klein:512")
+    monkeypatch.setattr(oflm_add, "log", lambda *a, **k: None)
+
+    args = argparse.Namespace(models_root=None, system_list=None, tag="my-klein:512", name=None,
+                              force=True, dry_run=False, no_xclbin=True, config=None)
+    oflm_add.install_bundle(args, build, "my-klein")
+
+    assert not (root / "my-klein").is_symlink()          # a real directory now
+    assert (root / "my-klein" / "LICENSE.md").read_text() == "apache"
+    assert (build / "LICENSE.md").is_file()              # the SOURCE is untouched

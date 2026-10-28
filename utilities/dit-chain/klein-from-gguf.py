@@ -51,12 +51,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--repo", default=None, help="the GGUF repo (its README names the checkpoint)")
     ap.add_argument("--gguf", default=None, help="a DiT GGUF already on disk (skips the download)")
-    ap.add_argument("--resolutions", default="512", help="square sizes the bundle carries (512,1024)")
-    ap.add_argument("--edits", default="",
-                    help="resolutions that also get an edit configuration (e.g. 512,1024). The "
-                         "SHIPPED kernel set is built for --resolutions 512,1024 --edits 512,1024, "
-                         "and the layout hash covers both lists: a bundle with other ones needs its "
-                         "own kernel build beside it")
+    ap.add_argument("--resolutions", default="512,1024",
+                    help="square sizes the bundle carries (default: the shipped set's 512,1024)")
+    ap.add_argument("--edits", default="512,1024",
+                    help="resolutions that also get an edit configuration (default: the shipped "
+                         "set's 512,1024). The layout hash covers BOTH lists, so the defaults are "
+                         "what lets the bundle use the kernel set that ships with the app; name "
+                         "others only if you will build kernels for them too")
     ap.add_argument("--out", default=str(Path.home() / "klein-bundle"), help="the bundle directory")
     ap.add_argument("--pack-cache", default=str(Path.home() / "klein-pack"),
                     help="keep the per-weight packed files here (reused next run)")
