@@ -9,6 +9,7 @@
 #include "model_list.hpp"
 #include "lm_config.hpp"
 #include "download_model.hpp"
+#include "install_record.hpp"
 #include "nlohmann/json.hpp"
 #include <filesystem>
 #include <vector>
@@ -52,7 +53,7 @@ public:
     // Check if model is already downloaded.
     // When fast_check is true, only the local presence + version compatibility
     // are checked; no HuggingFace metadata is fetched and no per-file hash
-    // verification / cleanup is performed. Use this for cheap status queries
+    // verification is performed. Use this for cheap status queries
     // such as `oflm list`.
     ModelStatus is_model_downloaded(const std::string& model_tag, bool sub_process_mode=0, bool fast_check=false);
     
@@ -85,17 +86,15 @@ private:
     // Get the full path for a model file
     std::string get_model_file_path(const std::string& model_path, const std::string& filename);
     
-    // Build download URLs for model files.
-    // When force_redownload is true, files already on disk are re-queued
-    // instead of skipped (previously --force with a complete tree downloaded
-    // nothing and still reported success).
+    // Build download URLs for the files a pull plan fetches, in plan order
     std::pair<nlohmann::json, float> build_download_list(
-        const std::string& model_tag, bool modelscope=0, bool force_redownload=false);
+        const std::string& model_tag, const std::vector<std::pair<pull::RegistryFile, pull::Fetch>>& plan,
+        bool modelscope = false);
 
     // bool check_model_compatibility(const std::string& model_tag);
     ModelStatus check_model_compatibility(const std::string& model_tag, bool sub_process_mode=0);
 
-    // Verify per-file integrity against HuggingFace metadata and remove any
-    // corrupted files. Returns true if all files passed verification.
-    bool verify_and_clean_files(const std::string& model_tag, bool use_modelscope=0, bool sub_process_mode=0);
-}; 
+    // Verify per-file integrity without deleting existing files. Returns true
+    // if all files passed verification (unpinned hash checks remain advisory).
+    bool verify_files(const std::string& model_tag, bool use_modelscope=0, bool sub_process_mode=0);
+};
