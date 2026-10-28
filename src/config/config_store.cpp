@@ -237,6 +237,8 @@ std::vector<std::string> migrate_legacy_user_registry(
         log.push_back("Failed to parse legacy file: " + std::string(e.what()));
         return log;
     }
+    // Closed now: Windows cannot rename an open file, and it is renamed to .bak below.
+    legacy_file.close();
 
     // Build the new settings.json structure
     nlohmann::json settings;

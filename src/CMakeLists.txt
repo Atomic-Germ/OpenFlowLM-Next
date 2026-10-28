@@ -1734,10 +1734,10 @@ if(NOT Python3_EXECUTABLE)
     message(STATUS "No python3 interpreter found: generate-settings will use 'python3' from PATH")
 endif()
 add_custom_target(generate-settings
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/scan-settings.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../utilities/scan-settings.py
             --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
             > ${CMAKE_BINARY_DIR}/scan-settings.json
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utilities/generate-registry.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../utilities/generate-registry.py
             --settings ${CMAKE_CURRENT_SOURCE_DIR}/config/settings.json
             --scan-output ${CMAKE_BINARY_DIR}/scan-settings.json
             --output ${CMAKE_CURRENT_SOURCE_DIR}/config/settings_registry_generated.hpp

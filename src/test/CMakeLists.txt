@@ -14,27 +14,31 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# The repository root, whether this tree was configured from it or from src/
+# (CMAKE_SOURCE_DIR is the one or the other).
+get_filename_component(OFLM_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+
 # Settings registry tests (host-only, no NPU needed)
 add_executable(settings_registry_test settings_registry_test.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)
+    ${OFLM_REPO_ROOT}/src/config/settings_registry.cpp)
 target_include_directories(settings_registry_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src/include
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR})
+    ${OFLM_REPO_ROOT}/include
+    ${OFLM_REPO_ROOT}/src/include
+    ${OFLM_REPO_ROOT}/src
+    ${OFLM_REPO_ROOT})
 add_test(NAME settings_registry_test COMMAND settings_registry_test)
 
 # Settings resolver tests (host-only, no NPU needed)
 add_executable(settings_resolver_test settings_resolver_test.cpp
     test_stubs.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/settings_resolver.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/config_store.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)
+    ${OFLM_REPO_ROOT}/src/config/settings_resolver.cpp
+    ${OFLM_REPO_ROOT}/src/config/config_store.cpp
+    ${OFLM_REPO_ROOT}/src/config/settings_registry.cpp)
 target_include_directories(settings_resolver_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src/include
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR})
+    ${OFLM_REPO_ROOT}/include
+    ${OFLM_REPO_ROOT}/src/include
+    ${OFLM_REPO_ROOT}/src
+    ${OFLM_REPO_ROOT})
 target_compile_definitions(settings_resolver_test PRIVATE
     CMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
     OFLM_NO_XRT=1)
@@ -43,13 +47,13 @@ add_test(NAME settings_resolver_test COMMAND settings_resolver_test)
 # Config store tests (host-only, no NPU needed)
 add_executable(config_store_test config_store_test.cpp
     test_stubs.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/config_store.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)
+    ${OFLM_REPO_ROOT}/src/config/config_store.cpp
+    ${OFLM_REPO_ROOT}/src/config/settings_registry.cpp)
 target_include_directories(config_store_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src/include
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR})
+    ${OFLM_REPO_ROOT}/include
+    ${OFLM_REPO_ROOT}/src/include
+    ${OFLM_REPO_ROOT}/src
+    ${OFLM_REPO_ROOT})
 target_compile_definitions(config_store_test PRIVATE
     CMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
     OFLM_NO_XRT=1)
@@ -60,12 +64,12 @@ add_test(NAME config_store_test COMMAND config_store_test)
 # a terminal: what a terminal sends for a key, and what the pickers do with
 # it, are two things that can go wrong apart.
 add_executable(config_ui_test config_ui_test.cpp
-    ${CMAKE_SOURCE_DIR}/src/config/config_keys.cpp)
+    ${OFLM_REPO_ROOT}/src/config/config_keys.cpp)
 target_include_directories(config_ui_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src/include
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR})
+    ${OFLM_REPO_ROOT}/include
+    ${OFLM_REPO_ROOT}/src/include
+    ${OFLM_REPO_ROOT}/src
+    ${OFLM_REPO_ROOT})
 add_test(NAME config_ui_test COMMAND config_ui_test)
 
 add_subdirectory(npu_platform)
