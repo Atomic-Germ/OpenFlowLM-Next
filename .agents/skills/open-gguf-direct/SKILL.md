@@ -985,6 +985,37 @@ leaves the other whole), registers the tag with the bundle's OWN `image_sizes` /
 `--force` through that link unlinked the source's files one at a time (it ate a LICENSE.md
 during testing). `register-bundle.py` is gone.
 
+### Would 9B klein be a spec, like a new text family:size? No -- one module, but not a JSON (measured 2026-10-28)
+
+Facts, all read or run rather than guessed:
+
+| part | 4B | 9B (`black-forest-labs/FLUX.2-klein-9B`) | verdict |
+|---|---|---|---|
+| transformer | hd 128, 24 heads, 5 double + 20 single | hd 128, **32 heads**, **8 + 24** | hidden 4096, MLP 12288 |
+| scheduler | 1000 ts, shift 3.0, dynamic, base_shift 0.5 | **identical** | same 4-step law, no new math |
+| VAE | `AutoencoderKLFlux2`, [128,256,512,512], latent 32 | **identical** | reusable as-is |
+| text encoder | Qwen3-4B (2560 / 27 / 9728) | **Qwen3-8B** (4096 / 36 / 12288) | packing grows |
+
+* **The kernel side is already spec-shaped.** `export_dit_kernels.py` takes its shapes from
+  `FAMILIES`/`FA_FAMILIES` dicts and passes them to `klein_streams(**params)`; running its own
+  gates on a 9B parameter set (`hidden=4096, mlp=12288, heads=32, te 32/8`) gives **20 gemm +
+  4 fa streams, 0 refused**. So 9B kernels are a dict entry plus a build.
+* **The schedule/packing side is not.** `klein_pipeline.py` (687 lines, 28 functions) carries
+  the 4B shape in **15 module-level constants used by 11 functions** -- `H, MLP, EL, HEADS, HD,
+  N_DBL, N_SGL, TE_LAYERS, TE_HID, TE_PAD, TE_Q, TE_KV, TE_MLP, TAPS, CTX_LD` (plus derived
+  `FU`, `MOD_N`) -- across the buffer sizes, the op strides, `fill_params`' slot table,
+  `dit_weight_specs`/`te_weight_specs` and the TE packing. Those have to become a shape record
+  threaded through `plan()` and friends.
+
+So the one factual element: **the shape knowledge for diffusion lives in the pipeline module,
+not in a spec.** That is exactly the state the text recipes were in before `ModelSpec`, and
+it is the change that would make "another diffusion size" cost a JSON + a build instead of a
+refactor. Until then, 9B = the refactor + 2 dict entries + a kernel build + a bundle.
+
+The bundle also triples: 9B DiT ~8.2B + Qwen3-8B ~6.9B -> ~28 GiB packed bf16 (or ~14 GiB at
+Q8_0), with the same again in the build's pack cache -- a different class of install from the
+4B's 8.1 GiB.
+
 ### A GGUF klein is not usable yet, and not because of us (2026-10-28)
 
 Ran the full e2e -- `klein-from-gguf.py --repo unsloth/FLUX.2-klein-4B-GGUF` with no tuning
