@@ -134,9 +134,14 @@ import klein_pipeline  # noqa: E402  (the whole-image schedule; no IRON import)
 
 FAMILIES = {
     "FLUX.2-klein-4B-NPU2": dict(hidden=3072, mlp=9216, text_tokens=512, patch_px=16),
+    # 9B: 32 heads x 128 = hidden 4096, mlp_ratio 3 -> 12288 (black-forest-labs/FLUX.2-klein-9B).
+    # Its streams pass check_shape already (20 gemm + 4 fa, 0 refused, measured 2026-10-28).
+    "FLUX.2-klein-9B-NPU2": dict(hidden=4096, mlp=12288, text_tokens=512, patch_px=16),
 }
 FA_FAMILIES = {
     "FLUX.2-klein-4B-NPU2": dict(heads=24, text_tokens=512, patch_px=16, mlp=9216,
+                                 te_heads=32, te_kv_heads=8),
+    "FLUX.2-klein-9B-NPU2": dict(heads=32, text_tokens=512, patch_px=16, mlp=12288,
                                  te_heads=32, te_kv_heads=8),
 }
 

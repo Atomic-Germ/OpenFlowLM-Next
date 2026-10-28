@@ -985,6 +985,30 @@ leaves the other whole), registers the tag with the bundle's OWN `image_sizes` /
 `--force` through that link unlinked the source's files one at a time (it ate a LICENSE.md
 during testing). `register-bundle.py` is gone.
 
+### The diffusion Shape record exists now (2026-10-28)
+
+`klein_pipeline.Shape` is the diffusion equivalent of a text `ModelSpec`: one frozen record
+holding everything the schedule, the packing and the params depend on (`H, MLP, HEADS, HD,
+N_DBL, N_SGL, L_TXT, PATCH_PX, LAT_CH, TE_LAYERS, TE_HID, TE_PAD, TE_Q, TE_KV, TE_MLP, TAPS,
+CTX_LD, STEPS`, with `EL`/`FU`/`MOD_N` derived), a registry `SHAPES` keyed by family, and
+`set_shape(shape) -> previous` which rebinds the module-level names the 700 lines of schedule
+code read.
+
+* `export_bundle.py --family <name>` selects it, and the layout hash + bundle/config family
+  follow it; `export_dit_kernels.FAMILIES`/`FA_FAMILIES` gained the 9B entries (its streams
+  already pass `check_shape`).
+* **Regression gate**: the 4B Q8 bundle rebuilt through the refactored code is
+  **byte-identical in all 21 files** to the one built before it -- 8.1 GiB `weights.bin`,
+  `params.bin` and all four schedules included. That is the check to re-run after any change
+  to this module.
+
+What 9B still needs, in order: `TE_PAD` (a PACKING choice, 4096 guessed from `TE_HID`; the 4B
+pads 2560 -> 3072, and only a build + gate confirms it), `TAPS`/`CTX_LD` for a 36-layer TE
+(12/24/36, `3*TE_HID+1`), the kernel build for the 9B entries, and a `shape_from_config()`
+that DERIVES the record from `transformer/config.json` + `text_encoder/config.json` (H =
+head_dim x heads, MLP = H x mlp_ratio, TE fields from the encoder config) so `oflm add
+<9B-gguf-repo>` picks its shape the way a text GGUF picks its spec.
+
 ### Would 9B klein be a spec, like a new text family:size? No -- one module, but not a JSON (measured 2026-10-28)
 
 Facts, all read or run rather than guessed:

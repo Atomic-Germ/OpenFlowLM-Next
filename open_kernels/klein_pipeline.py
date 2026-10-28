@@ -53,18 +53,76 @@ from ml_dtypes import bfloat16
 
 HERE = Path(__file__).resolve().parent
 
-H, MLP, L_TXT, HEADS, HD = 3072, 9216, 512, 24, 128
-N_DBL, N_SGL = 5, 20
-EL = 3072                                    # dit_ew row element
-FU = 3 * H + 2 * H + 2 * MLP                 # single block q|k|v, attention slot, MLP tiles
-PATCH_PX, LAT_CH = 16, 128
-STEPS = 4
+# The shape of a diffusion family: everything the schedule, the packing and the params
+# depend on, in ONE record -- the diffusion equivalent of a text ModelSpec. The module's
+# globals below are the ACTIVE shape (set_shape rebinds them), so the 700 lines of schedule
+# code read them by name; `SHAPES` is the registry a caller picks from.
+@dataclass(frozen=True)
+class Shape:
+    H: int                      # transformer hidden
+    MLP: int                    # transformer FFN width
+    HEADS: int
+    HD: int
+    N_DBL: int                  # double-stream blocks
+    N_SGL: int                  # single-stream blocks
+    L_TXT: int                  # text tokens per prompt
+    PATCH_PX: int
+    LAT_CH: int
+    TE_LAYERS: int              # text encoder
+    TE_HID: int
+    TE_PAD: int                 # its row width after padding (a PACKING choice, gated)
+    TE_Q: int
+    TE_KV: int
+    TE_MLP: int
+    TAPS: tuple
+    CTX_LD: int                 # CTX row stride: len(TAPS) * TE_HID + one element's spill
+    STEPS: int
+    family: str = ""
+
+    @property
+    def EL(self) -> int:
+        """dit_ew row element -- the transformer hidden on every family so far."""
+        return self.H
+
+    @property
+    def FU(self) -> int:
+        """Single block FU: q|k|v, the attention-output slot, the MLP tiles."""
+        return 3 * self.H + 2 * self.H + 2 * self.MLP
+
+    @property
+    def MOD_N(self) -> int:
+        return len(MOD_RUNS) * MOD_SLOT * self.EL
+
+
+KLEIN_4B = Shape(H=3072, MLP=9216, HEADS=24, HD=128, N_DBL=5, N_SGL=20, L_TXT=512,
+                 PATCH_PX=16, LAT_CH=128, TE_LAYERS=27, TE_HID=2560, TE_PAD=3072,
+                 TE_Q=4096, TE_KV=1024, TE_MLP=9728, TAPS=(9, 18, 27), CTX_LD=8192,
+                 STEPS=4, family="FLUX.2-klein-4B-NPU2")
+
+# FLUX.2-klein-9B from its own configs (32 heads, 8 double + 24 single blocks, Qwen3-8B text
+# encoder; scheduler and VAE identical to the 4B). Its DiT streams pass export_dit_kernels'
+# gates already; TE_PAD is the one PACKING decision that still needs a build to confirm
+# (4096 = TE_HID, as the 4B pads 2560 -> 3072).
+KLEIN_9B = Shape(H=4096, MLP=12288, HEADS=32, HD=128, N_DBL=8, N_SGL=24, L_TXT=512,
+                 PATCH_PX=16, LAT_CH=128, TE_LAYERS=36, TE_HID=4096, TE_PAD=4096,
+                 TE_Q=4096, TE_KV=1024, TE_MLP=12288, TAPS=(9, 18, 27), CTX_LD=12289,
+                 STEPS=4, family="FLUX.2-klein-9B-NPU2")
+
+SHAPES = {s.family: s for s in (KLEIN_4B, KLEIN_9B)}
+
+# The ACTIVE shape's values, as the module-level names the schedule code reads.
+H, MLP, L_TXT, HEADS, HD = KLEIN_4B.H, KLEIN_4B.MLP, KLEIN_4B.L_TXT, KLEIN_4B.HEADS, KLEIN_4B.HD
+N_DBL, N_SGL = KLEIN_4B.N_DBL, KLEIN_4B.N_SGL
+EL = KLEIN_4B.EL
+FU = KLEIN_4B.FU
+PATCH_PX, LAT_CH = KLEIN_4B.PATCH_PX, KLEIN_4B.LAT_CH
+STEPS = KLEIN_4B.STEPS
 ALIGN = 4096                                 # sub-buffer offsets (bytes)
 
-TE_LAYERS, TE_HID, TE_PAD = 27, 2560, 3072
-TE_Q, TE_KV, TE_MLP = 4096, 1024, 9728
-TAPS = (9, 18, 27)
-CTX_LD = 8192                                # CTX row stride: 3 taps x 2560 + one element's spill
+TE_LAYERS, TE_HID, TE_PAD = KLEIN_4B.TE_LAYERS, KLEIN_4B.TE_HID, KLEIN_4B.TE_PAD
+TE_Q, TE_KV, TE_MLP = KLEIN_4B.TE_Q, KLEIN_4B.TE_KV, KLEIN_4B.TE_MLP
+TAPS = KLEIN_4B.TAPS
+CTX_LD = KLEIN_4B.CTX_LD
 PAD_ID = 151643                              # <|endoftext|>
 
 # The modulation GEMM's output, per step row: diffusers' chunk orders are double
@@ -92,6 +150,32 @@ MOD_RUNS = [
 MOD_SLOT = 6
 MOD_N = len(MOD_RUNS) * MOD_SLOT * EL        # 184320
 RUN_INDEX = {name: i for i, (name, _) in enumerate(MOD_RUNS)}
+
+
+def set_shape(shape: Shape) -> Shape:
+    """Make `shape` the ACTIVE family and return the previous one.
+
+    The schedule, the packing and the param table read the module-level names; rebinding
+    them here is what lets one module build any family. Callers that build more than one
+    shape in a process restore the old value (`previous = set_shape(a); ...; set_shape(previous)`).
+    """
+    global H, MLP, L_TXT, HEADS, HD, N_DBL, N_SGL, EL, FU, PATCH_PX, LAT_CH, STEPS
+    global TE_LAYERS, TE_HID, TE_PAD, TE_Q, TE_KV, TE_MLP, TAPS, CTX_LD, MOD_N
+    previous = Shape(H=H, MLP=MLP, HEADS=HEADS, HD=HD, N_DBL=N_DBL, N_SGL=N_SGL, L_TXT=L_TXT,
+                     PATCH_PX=PATCH_PX, LAT_CH=LAT_CH, TE_LAYERS=TE_LAYERS, TE_HID=TE_HID,
+                     TE_PAD=TE_PAD, TE_Q=TE_Q, TE_KV=TE_KV, TE_MLP=TE_MLP, TAPS=tuple(TAPS),
+                     CTX_LD=CTX_LD, STEPS=STEPS)
+    H, MLP, L_TXT, HEADS, HD = shape.H, shape.MLP, shape.L_TXT, shape.HEADS, shape.HD
+    N_DBL, N_SGL = shape.N_DBL, shape.N_SGL
+    EL, FU = shape.EL, shape.FU
+    PATCH_PX, LAT_CH = shape.PATCH_PX, shape.LAT_CH
+    STEPS = shape.STEPS
+    TE_LAYERS, TE_HID, TE_PAD = shape.TE_LAYERS, shape.TE_HID, shape.TE_PAD
+    TE_Q, TE_KV, TE_MLP = shape.TE_Q, shape.TE_KV, shape.TE_MLP
+    TAPS = tuple(shape.TAPS)
+    CTX_LD = shape.CTX_LD
+    MOD_N = shape.MOD_N
+    return previous
 
 
 def image_tokens(R: int) -> int:

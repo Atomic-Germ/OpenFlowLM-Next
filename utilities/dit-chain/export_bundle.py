@@ -116,7 +116,8 @@ def _pack_dit_from_gguf(cache: Path, get, jobs: int = 4) -> dict[str, tuple[Path
 
 def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
           pack_cache: Path | None = None, edits: list[int] = (),
-          transformer_gguf: Path | None = None, reference_repo: str | None = None) -> list[str]:
+          transformer_gguf: Path | None = None, reference_repo: str | None = None,
+          family: str | None = None) -> list[str]:
     """Write the model directory; returns the files written. pack_cache: keep the per-weight
     packed files there (reused by the next build); default a temporary directory. edits: the
     resolutions that also get an edit configuration.
@@ -133,6 +134,13 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     import vae_encoder as ve
 
     out.mkdir(parents=True, exist_ok=True)
+    # The shape is one record in klein_pipeline (the diffusion equivalent of a text
+    # ModelSpec): the schedule, the packing and the params all read it, so a family switch
+    # is set_shape + the matching kernel build (export_dit_kernels.FAMILIES).
+    fam = family or FAMILY
+    if fam not in kp.SHAPES:
+        raise SystemExit(f"{fam}: no shape in klein_pipeline.SHAPES (have {sorted(kp.SHAPES)})")
+    kp.set_shape(kp.SHAPES[fam])
     te = G.SafeTensors(ckpt / "text_encoder")
     files = []
 
@@ -251,9 +259,9 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
         files += [name, f"tf_{R}.bin", f"dt_{R}.bin", f"qin_{R}.bin"]
         print(f"{name}: {len(ops)} ops, {len(buffers)} buffers", flush=True)
 
-    layout = xk.layout_hash(xk.set_streams(FAMILY, resolutions, edits=edits))
+    layout = xk.layout_hash(xk.set_streams(fam, resolutions, edits=edits))
     bundle = {
-        "family": FAMILY,
+        "family": fam,
         "layout": layout,
         "resolutions": schedules,
         "edits": edit_schedules,
@@ -266,7 +274,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     }
     (out / "bundle.json").write_text(json.dumps(bundle, indent=1), encoding="utf-8")
     # LM_Config::from_pretrained only needs config.json to parse; model_type names the engine
-    config = {"model_type": "flux2-klein", "family": FAMILY, "resolutions": resolutions,
+    config = {"model_type": "flux2-klein", "family": fam, "resolutions": resolutions,
               "edits": list(edits), "steps": kp.STEPS, "layout": layout}
     (out / "config.json").write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
     files += ["bundle.json", "config.json"]
@@ -291,6 +299,9 @@ def main() -> int:
     ap.add_argument("--gguf-repo", default=None,
                     help="the HF repo the GGUF came from: its README's base_model is the "
                          "checkpoint to fetch (a GGUF carries only the DiT)")
+    ap.add_argument("--family", default=None,
+                    help="the diffusion family (default FLUX.2-klein-4B-NPU2); its shape comes "
+                         "from klein_pipeline.SHAPES and its kernels from export_dit_kernels.FAMILIES")
     ap.add_argument("--reference-repo", default=None,
                     help="the checkpoint the DiT GGUF came from, for the modulation-convention "
                          "check (default: --gguf-repo)")
@@ -317,7 +328,7 @@ def main() -> int:
           Path(a.pack_cache) if a.pack_cache else None,
           [int(r) for r in a.edits.split(",") if r],
           Path(a.transformer_gguf) if a.transformer_gguf else None,
-          a.reference_repo)
+          a.reference_repo, a.family)
     return 0
 
 
