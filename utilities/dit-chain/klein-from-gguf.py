@@ -119,7 +119,11 @@ def main(argv=None) -> int:
 
     # 5. the tag
     if a.tag:
-        run([sys.executable, HERE / "register-bundle.py", out, "--tag", a.tag], f"register {a.tag}")
+        # `oflm add` knows what a bundle is: it copies/links the files, registers the tag
+        # with the bundle's own sizes and edits, and links the kernel set whose layout
+        # hash matches (open_kernels/export_dit_kernels.py --install writes those).
+        run([sys.executable, REPO / "utilities" / "oflm-add" / "oflm-add.py", out,
+             "--tag", a.tag, "--force"], f"install {a.tag}")
 
     # 6. the only check that says the weights are right
     if a.image:

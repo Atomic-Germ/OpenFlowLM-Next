@@ -2980,6 +2980,153 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
     return written
 
 
+def _bundle_layout(path):
+    """The layout hash a bundle declares, or "" when the directory is not one."""
+    man = Path(path) / "bundle.json"
+    if not man.is_file():
+        return ""
+    try:
+        return json.loads(man.read_text(encoding="utf-8")).get("layout", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def find_diffusion_kernels(layout, roots):
+    """The kernel set a bundle needs: its own, or one under an xclbins root.
+
+    A diffusion bundle names the kernel workload by a LAYOUT HASH (the stream specs it was
+    built against), not by a model geometry, so the match is exact: a set built for another
+    resolution or edit list is refused by the engine rather than run.
+    """
+    for root in roots:
+        if not root:
+            continue
+        for m in sorted(Path(root).glob("*/open_kernels/diffusion_kernels.json")):
+            try:
+                d = json.loads(m.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if d.get("layout") == layout and d.get("complete"):
+                return m.parent
+    return None
+
+
+def install_bundle(args, source, dir_name, modelscope=False):
+    """Install a diffusion bundle: FLUX.2 [klein]'s schedules, weights and VAE.
+
+    A bundle is neither a q4nx container nor a GGUF -- it is what `q4nx-build
+    --open-diffusion` writes and what `oflm image` replays -- so it gets its own path:
+    copy (or fetch) its files, register it with the official `flux2-klein` entry as the
+    template, and link the kernel set whose layout hash matches. Returns the tag.
+    """
+    system_list = Path(args.system_list) if args.system_list else find_system_model_list()
+    system_registry = load_json(system_list)
+    template = (system_registry.get("models", {}).get("flux2-klein") or {}).get("4b")
+    if template is None:
+        raise SystemExit(f"{system_list} has no flux2-klein entry to install a bundle against")
+    models_root = models_root_dir(args.models_root)
+    target = models_root / dir_name
+    # A link here is a previous install that pointed at the build directory (what
+    # register-bundle.py does). Writing through it would edit the SOURCE: with --force it
+    # even unlinked the source's files one by one. Replace the link with a real directory.
+    if target.is_symlink():
+        if not args.force:
+            raise SystemExit(f"{target} is a link to {target.resolve()}; --force replaces it "
+                             f"with a real directory")
+        target.unlink()
+
+    if isinstance(source, Path):
+        man = json.loads((source / "bundle.json").read_text(encoding="utf-8"))
+        files = sorted(p.name for p in source.iterdir() if p.is_file())
+        if args.dry_run:
+            print(f"bundle         : {source} -> {target}")
+            print(f"files          : {len(files)} ({sum((source / f).stat().st_size for f in files) / 2**30:.2f} GiB)")
+            print(f"layout         : {man.get('layout')}")
+            print(f"resolutions    : {sorted(man.get('resolutions', {}))}  edits {sorted(man.get('edits', {}))}")
+            return None
+        if target.resolve() == source.resolve():
+            # installed in place: the files are already the model's
+            files = sorted(p.name for p in target.iterdir() if p.is_file())
+            target_ready = True
+        else:
+            target_ready = False
+        target.mkdir(parents=True, exist_ok=True)
+        for f in ([] if target_ready else files):
+            dst = target / f
+            if dst.exists() and not args.force:
+                continue
+            # a bundle is gigabytes and the source is usually a build output on the same
+            # filesystem: hard-link it, so `oflm add <dir>` costs no space (deleting either
+            # side later leaves the other intact). Fall back to a copy across filesystems.
+            if dst.exists():
+                dst.unlink()
+            try:
+                os.link(source / f, dst)
+            except OSError:
+                shutil.copy2(source / f, dst)
+        src_kernels = source / "open_kernels"
+        if src_kernels.is_dir() and target.resolve() != source.resolve():
+            dst = target / "open_kernels"
+            if dst.is_symlink() or dst.exists():
+                if args.force:
+                    shutil.rmtree(dst, ignore_errors=True)
+            if not dst.exists():
+                shutil.copytree(src_kernels, dst, copy_function=os.link)
+    else:
+        if args.dry_run:
+            from huggingface_hub import list_repo_files
+            print(f"bundle repo    : {source}")
+            print(f"files          : {len(list(list_repo_files(source)))}")
+            return None
+        from huggingface_hub import snapshot_download
+
+        target.mkdir(parents=True, exist_ok=True)
+        snapshot_download(source, local_dir=str(target),
+                          allow_patterns=None if args.force else None)
+        files = sorted(p.name for p in target.iterdir() if p.is_file())
+
+    layout = _bundle_layout(target)
+    if not layout:
+        raise SystemExit(f"{target} has no readable bundle.json after install")
+    bundle = json.loads((target / "bundle.json").read_text(encoding="utf-8"))
+
+    # the kernel set: beside the model wins (the engine looks there first); otherwise link
+    # the family's set from an xclbins root when its layout matches
+    kernels = target / "open_kernels"
+    if not (kernels / "diffusion_kernels.json").is_file() and not args.no_xclbin:
+        roots = [find_system_xclbin_root(), tree_xclbins()]
+        found = find_diffusion_kernels(layout, roots)
+        if found:
+            if kernels.is_symlink():
+                kernels.unlink()
+            elif kernels.is_dir():
+                shutil.rmtree(kernels, ignore_errors=True)
+            kernels.symlink_to(found)
+            log(f"[INFO] Linked diffusion kernels: {kernels} -> {found}")
+        else:
+            log(f"[WARN] no kernel set with layout {layout} under any xclbins root; "
+                f"build it with open_kernels/export_dit_kernels.py")
+
+    entry = copy.deepcopy(template)
+    entry["name"] = dir_name
+    entry["files"] = sorted(f for f in files if f not in ("open_kernels",))
+    entry["size"] = sum((target / f).stat().st_size for f in entry["files"] if (target / f).is_file())
+    entry["url"] = entry["file_url"] = entry["ms_url"] = ""
+    entry.setdefault("details", {})["family"] = "flux2-klein"
+    if bundle.get("resolutions"):
+        entry["image_sizes"] = sorted(int(r) for r in bundle["resolutions"])
+    entry["image_edit_sizes"] = sorted(int(r) for r in bundle.get("edits", {}))
+    tag = derive_tag(dir_name, args.tag or args.name, entry["size"])
+    tag = register(entry, user_settings_path(args.config), system_registry,
+                   force=args.force, name_override=args.name, tag=tag)
+    log(f"[INFO] Registered tag '{tag}' in {user_settings_path(args.config)}")
+    log(f"[INFO] {tag}: {len(entry['files'])} files, {entry['size'] / 2**30:.2f} GiB, "
+        f"layout {layout}, sizes {entry.get('image_sizes')}"
+        + (f", edits {entry['image_edit_sizes']}" if entry["image_edit_sizes"] else ""))
+    log(f"Run:  oflm image {tag} \"a red fox in fresh snow\" --size {(entry.get('image_sizes') or [512])[0]}")
+    return tag
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
@@ -3024,6 +3171,23 @@ def main():
         dir_name = repo.split("/")[-1]
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
+
+    # ---- a diffusion bundle: `q4nx-build --open-diffusion` writes one, and `oflm image`
+    # replays it. It has no q4nx container and no GGUF, so it takes its own path before
+    # either scan below.
+    _bundle_src = None
+    if local_dir and (local_dir / "bundle.json").is_file():
+        _bundle_src = local_dir
+    elif not local_dir:
+        try:
+            _tree = ms_file_tree(repo)[1] if modelscope else hf_file_tree(repo)
+            _names = set(_tree) if modelscope else {e.get("path") for e in _tree}
+            if "bundle.json" in _names:
+                _bundle_src = repo
+        except Exception:
+            pass
+    if _bundle_src is not None:
+        return install_bundle(args, _bundle_src, dir_name, modelscope)
 
     # ---- scan the repo for a compatible GGUF (the GGUF-direct path): a repo
     # that carries llama.cpp-style weights installs one of them as model.gguf;
