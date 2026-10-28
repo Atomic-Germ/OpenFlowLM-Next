@@ -85,7 +85,25 @@ def build_open_diffusion_repo(source: str, output_dir: str, npu_assets: Optional
     if not (REPO_ROOT / "utilities" / "dit-chain" / "export_bundle.py").is_file():
         raise RuntimeError(f"--open-diffusion runs from an OpenFlowLM checkout; "
                            f"{REPO_ROOT} is not one")
-    src = resolve_source(source)
+    sys.path.insert(0, str(REPO_ROOT / "utilities" / "dit-chain"))
+    # A GGUF source carries only the DiT: the checkpoint that supplies the text encoder and
+    # the VAE is the one the GGUF repo's README names, exactly as a text quant repo names
+    # its base for the tokenizer. `q4nx-build --open-diffusion <gguf-repo>` therefore works
+    # on a GGUF repo alone.
+    transformer_gguf = None
+    if str(source).lower().endswith(".gguf") and Path(source).is_file():
+        raise ValueError("a local GGUF needs the repo it came from for the checkpoint: pass "
+                         "the HF repo id instead, or use utilities/dit-chain/klein-from-gguf.py")
+    import gguf_source  # noqa: E402
+
+    if not Path(source).is_dir() and gguf_source.is_gguf_repo(source):
+        import klein_checkpoint  # noqa: E402
+
+        transformer_gguf = gguf_source.ensure(source, gguf_source.pick(source))
+        src, base = klein_checkpoint.resolve(source)
+        print(f"checkpoint: {src} (from {base}, for the text encoder and the VAE)", flush=True)
+    else:
+        src = resolve_source(source)
     read = lambda p: json.loads((src / p).read_text(encoding="utf-8"))  # noqa: E731
     if read("model_index.json").get("_class_name") != "Flux2KleinPipeline":
         raise ValueError(f"{src} is not a Flux2KleinPipeline checkpoint")
@@ -95,12 +113,12 @@ def build_open_diffusion_repo(source: str, output_dir: str, npu_assets: Optional
     # export_bundle.build now asks the TENSORS (klein_pipeline.validate_sources), which is
     # also the only check that works when the DiT is a GGUF and there is no config.json.
 
-    sys.path.insert(0, str(REPO_ROOT / "utilities" / "dit-chain"))
     import export_bundle  # noqa: E402
 
     out = Path(output_dir)
     files = export_bundle.build(src, out.resolve(), RESOLUTIONS, jobs,
-                                Path(pack_cache) if pack_cache else None, EDITS)
+                                Path(pack_cache) if pack_cache else None, EDITS,
+                                transformer_gguf=transformer_gguf)
     layout = json.loads((out / "config.json").read_text(encoding="utf-8"))["layout"]
     (out / "README.md").write_text(README.replace("{layout}", layout), encoding="utf-8")
     files = sorted(files + ["README.md"])

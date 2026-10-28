@@ -33,44 +33,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-DIT_CACHE = Path.home() / ".cache" / "oflm" / "dit-gguf"
-
-# The quants gguf_weights decodes, best first. Q4_1 is what the rest of the tree runs and
-# what these repos publish; BF16/F16 are lossless and much larger.
-QUANTS = ["Q4_1", "BF16", "F16", "Q8_0"]
-
+sys.path.insert(0, str(HERE))
+import gguf_source  # noqa: E402
 
 def log(msg):
     print(msg, flush=True)
-
-
-def pick_gguf(repo: str) -> str:
-    """(repo-relative) name of the DiT GGUF to take from a repo, Q4_1 first."""
-    from huggingface_hub import list_repo_files
-
-    files = [f for f in list_repo_files(repo) if f.lower().endswith(".gguf")]
-    dit = [f for f in files if "mmproj" not in f.lower() and "mtp" not in f.lower()]
-    for q in QUANTS:
-        cand = sorted(f for f in dit if q.lower() in f.lower())
-        if cand:
-            return cand[0]
-    raise SystemExit(f"{repo}: no DiT GGUF in {QUANTS} (have: {', '.join(sorted(files)) or 'none'})")
-
-
-def ensure_gguf(repo: str, name: str) -> Path:
-    target = DIT_CACHE / f"{repo.replace('/', '--')}--{Path(name).name}"
-    if target.is_file():
-        log(f"DiT GGUF: {target} (cached)")
-        return target
-    from huggingface_hub import hf_hub_download
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    log(f"DiT GGUF: {name} <- {repo}")
-    got = hf_hub_download(repo_id=repo, filename=name, local_dir=str(target.parent))
-    got = Path(got)
-    if got != target:
-        got.replace(target)
-    return target
 
 
 def run(cmd, what):
@@ -114,8 +81,8 @@ def main(argv=None) -> int:
             ap.error("--gguf needs --repo too: the text encoder and VAE are in the checkpoint "
                      "its README names (no GGUF of either exists)")
     else:
-        name = pick_gguf(repo)
-        gguf = ensure_gguf(repo, name)
+        name = gguf_source.pick(repo)
+        gguf = gguf_source.ensure(repo, name)
 
     # 2+3. the bundle (the checkpoint is resolved inside export_bundle from --gguf-repo)
     out = Path(a.out).expanduser().resolve()

@@ -8,7 +8,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from q4nx import create_converter, create_hf_converter
+# The converter stack (gguf/mpmath/torch) is imported where it is used, not here: `--help`
+# and `--open-diffusion` build a FLUX.2 bundle and share nothing with it, and requiring
+# torch for those would make the diffusion path need the whole converter toolchain.
 from q4nx.arch_detect import family_from_text
 from q4nx.build_plan import derive_build_plan, format_chain
 from q4nx.model_assets import (
@@ -904,6 +906,8 @@ def main(argv=None) -> int:
         if args.prune_moe_ffn or args.prune_experts:
             sys.exit("--prune-moe-ffn/--prune-experts only apply to a GGUF source (no "
                      "imatrix signal otherwise). Use a GGUF input.")
+        from q4nx import create_hf_converter  # the safetensors converter stack
+
         model = create_hf_converter(hf_input, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
         model.prune_ffn = args.prune_ffn
@@ -932,6 +936,8 @@ def main(argv=None) -> int:
                 source_repo=source_repo, pin_quant=pin_quant),
         )
     else:
+        from q4nx import create_converter  # the GGUF converter stack
+
         model = create_converter(input_path, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
         model.prune_ffn = args.prune_ffn
