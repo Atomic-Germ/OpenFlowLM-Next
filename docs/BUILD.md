@@ -585,6 +585,14 @@ Three rules can pick that directory — `OFLM_OPEN_KERNELS_DIR`, then a set besi
 the model, then an `xclbins` root — and all three produce valid output. If you
 have just rebuilt kernels and want to be sure the new ones ran, read that line.
 
+### "No module named 'pyxrt'" during the BERT kernel export
+
+The kernel venv cannot see XRT's Python binding. `utilities/export-kernels.py`
+finds it under `$XILINX_XRT/python` (or `/opt/xilinx/xrt/python`), or in the
+system site-packages of a distro XRT (Fedora's `xrt-base`, Ubuntu's
+`python3-xrt`), as long as the build runs under the Python version pyxrt was
+built for. Check with `python3 -c 'import pyxrt'`.
+
 ---
 
 ## Quick Links

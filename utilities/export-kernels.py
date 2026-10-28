@@ -20,7 +20,8 @@ Two kernel families share the one toolchain venv:
 
 Requirements (assumed present, or set up here):
   * XRT installed at /opt/xilinx/xrt, or wherever XILINX_XRT points
-    (xclbinutil/aiebu-asm on PATH, pyxrt under <prefix>/python).
+    (xclbinutil/aiebu-asm on PATH, pyxrt under <prefix>/python), or a distro
+    XRT under /usr whose pyxrt is in the system site-packages.
   * ironvenv/ created here from ironvenv-requirements.txt (mlir-aie + Peano).
   * third_party/mlir-aie cloned here (best-effort; only used for toolchain.json
     version metadata).
@@ -82,6 +83,32 @@ PYTHON = PY if PY_MIN <= sys.version_info.minor <= PY_MAX else "3.11"
 
 def venv_python() -> Path:
     return VENV / "bin" / "python3"
+
+
+def system_pyxrt_dir() -> Path | None:
+    """A directory holding only the distro's pyxrt, or None.
+
+    A distro XRT (Fedora's xrt-base, Ubuntu's python3-xrt) lives under /usr
+    with pyxrt in the system site-packages, which the venv does not see.
+    Putting that whole directory on PYTHONPATH would put the distro's numpy and
+    friends ahead of the venv's, so link just pyxrt into a directory of its
+    own. Only when the venv is the interpreter's own minor version: pyxrt is
+    built for one Python.
+    """
+    if PYTHON != PY:
+        return None
+    import importlib.util
+    spec = importlib.util.find_spec("pyxrt")
+    if spec is None or not spec.origin:
+        return None
+    out = VENV / "system-pyxrt"
+    out.mkdir(exist_ok=True)
+    for src in Path(spec.origin).parent.glob("pyxrt*"):
+        link = out / src.name
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(src)
+    return out
 
 
 def llvm_aie_bin() -> Path | None:
@@ -274,9 +301,10 @@ def main() -> int:
     os.environ["PATH"] = os.pathsep.join(path_parts)
 
     # pyxrt (XRT's Python binding) lives beside the runtime, not in the venv.
-    if XRT_PY.is_dir():
+    pyxrt_dir = XRT_PY if XRT_PY.is_dir() else system_pyxrt_dir()
+    if pyxrt_dir:
         os.environ["PYTHONPATH"] = os.pathsep.join(
-            [str(XRT_PY)] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+            [str(pyxrt_dir)] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
         )
 
     for tool in ("clang", "xclbinutil", "aiebu-asm"):
