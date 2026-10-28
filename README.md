@@ -138,16 +138,21 @@ For detailed instructions, see [docs/BUILD.md](docs/BUILD.md).
 - CMake (version 3.25 or higher)
 - A C++20 compatible compiler (e.g., GCC, Clang, MSVC)
 - Ninja (recommended)
+- The submodules (`git clone --recursive`, or `git submodule update --init
+  --recursive` in an existing checkout)
+- On Linux, the development packages listed for Fedora and Ubuntu in the
+  [Linux getting-started guide](docs/linux-getting-started.md#before-the-first-build)
 
 The full Linux build also compiles the open NPU kernel xclbins -- the `open_kernels`
 families (Qwen3.6-MoE, Qwen3.5/3 dense, Qwen2.5, LFM2 hybrid, Llama 3.1, Gemma 3
 4B/12B, HunYuan, Granite 4.2, Phi-4-mini, MiniCPM5) and the
 `open_npue` BERT embedding design sets -- which needs:
 
-- **XRT** installed on the host (the AMD NPU runtime; `/opt/xilinx/xrt`), including its
-  Python binding `pyxrt`. The installed XRT ships `pyxrt` for Python 3.11, so the
-  kernel toolchain venv is pinned to 3.11.
-- The kernel toolchain (`ironvenv` with `mlir-aie` + Peano, Python 3.11) -- **created
+- **XRT** installed on the host (the AMD NPU runtime; `/opt/xilinx/xrt`, or a distro
+  package under `/usr`), including its Python binding `pyxrt`. `pyxrt` is built for
+  one Python version, so the kernel toolchain venv is made for the version the build
+  runs under (3.11 to 3.14).
+- The kernel toolchain (`ironvenv` with `mlir-aie` + Peano) -- **created
   automatically** by the build if absent.
 - `third_party/mlir-aie` -- **cloned automatically** by the build if absent (best-effort;
   only used for `toolchain.json` metadata).
