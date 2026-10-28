@@ -54,24 +54,91 @@ FAMILY = "FLUX.2-klein-4B-NPU2"
 ALIGN = 4096
 
 
+def _gguf_get(path: Path):
+    """`SafeTensors.get`-compatible reader over a klein DiT GGUF (see gguf_weights)."""
+    sys.path.insert(0, str(HERE))
+    from gguf_weights import GgufWeights
+
+    return GgufWeights(Path(path)).get
+
+
+def _pack_dit_from_gguf(cache: Path, get, jobs: int = 4) -> dict[str, tuple[Path, int]]:
+    """{name: (file, bytes)} for the DiT's GEMM weights, packed from a GGUF getter.
+
+    The same five lines as `G.ensure_packed`'s worker (`build(get) -> pack_b_cols`), without
+    the process pool: there is one file to read and it stays mapped, so threads would only
+    contend for it. The provenance stamp is the file's identity, so a different GGUF (or a
+    repacked node) is repacked rather than reused.
+    """
+    import hashlib
+
+    specs = kp.dit_weight_specs()
+    want = {n: K * N * 9 // 8 for n, (K, N, _) in specs.items()}
+    src = get.__self__.gguf.path if hasattr(get, "__self__") else Path("?")
+    try:
+        st = src.stat()
+        fp = hashlib.sha256(f"{src}:{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()
+    except OSError:
+        fp = "?"
+    cache.mkdir(parents=True, exist_ok=True)
+    stamp = cache / "provenance.txt"
+    if stamp.exists() and stamp.read_text().strip() != fp:
+        print(f"{cache} was packed from another DiT; repacking", flush=True)
+        for p in cache.glob("*.bin"):
+            p.unlink()
+    stamp.write_text(fp + "\n")
+    todo = [n for n, nb in want.items()
+            if not (cache / f"{n}.bin").exists() or (cache / f"{n}.bin").stat().st_size != nb]
+    if todo:
+        print(f"packing {len(todo)} DiT weights from {src} -> {cache}", flush=True)
+        for n in todo:
+            K, N, build = specs[n]
+            b = build(get)
+            assert b.shape == (K, N), (n, b.shape, (K, N))
+            tmp = cache / f"{n}.tmp"
+            kp.pack_b_cols(b).tofile(tmp)
+            tmp.replace(cache / f"{n}.bin")
+        print(f"packed {len(todo)} DiT weights", flush=True)
+    return {n: (cache / f"{n}.bin", nb) for n, nb in want.items()}
+
+
 def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
-          pack_cache: Path | None = None, edits: list[int] = ()) -> list[str]:
+          pack_cache: Path | None = None, edits: list[int] = (),
+          transformer_gguf: Path | None = None) -> list[str]:
     """Write the model directory; returns the files written. pack_cache: keep the per-weight
     packed files there (reused by the next build); default a temporary directory. edits: the
-    resolutions that also get an edit configuration."""
+    resolutions that also get an edit configuration.
+
+    `transformer_gguf`: take the DiT from a GGUF instead of `ckpt/transformer`. The bundle
+    packs the DiT's weights to dit_gemm's bfp16 tiles either way, so the source only has to
+    present them by HF name in HF layout -- `gguf_weights.GgufWeights` does (BFL names,
+    fused qkv, ggml orientation). The text encoder and the VAE still come from the
+    checkpoint: no GGUF of either exists. A GGUF-only source is therefore NOT possible, and
+    the caller names the checkpoint that supplies the other two.
+    """
     import export_dit_kernels as xk
     import vae_decoder as vd
     import vae_encoder as ve
 
     out.mkdir(parents=True, exist_ok=True)
-    dit, te = G.SafeTensors(ckpt / "transformer"), G.SafeTensors(ckpt / "text_encoder")
+    te = G.SafeTensors(ckpt / "text_encoder")
     files = []
 
     tmp = None
     if pack_cache is None:
         tmp = tempfile.TemporaryDirectory(prefix="klein-pack-", dir=out)
         pack_cache = Path(tmp.name)
-    packed = G.ensure_packed(pack_cache, jobs, ckpt)
+    if transformer_gguf is not None:
+        # the DiT from the GGUF, the text encoder from the checkpoint (no GGUF of one exists)
+        dit_get = _gguf_get(transformer_gguf)
+        packed = _pack_dit_from_gguf(pack_cache, dit_get)
+        # its own subdirectory: ensure_packed stamps the cache with the CHECKPOINT's identity
+        # and clears every *.bin that does not match, which would drop the DiT packs above
+        packed |= G.ensure_packed(pack_cache / "text_encoder", jobs, ckpt, only=("text_encoder",))
+    else:
+        dit = G.SafeTensors(ckpt / "transformer")
+        dit_get = dit.get
+        packed = G.ensure_packed(pack_cache, jobs, ckpt)
     weights, off = {}, 0
     with open(out / "weights.bin", "wb") as f:
         for n, (p, nb) in packed.items():
@@ -86,7 +153,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     files.append("weights.bin")
     print(f"weights.bin: {len(weights)} weights, {off / 2**30:.2f} GiB", flush=True)
 
-    kp.fill_params(dit.get, te.get).tofile(out / "params.bin")
+    kp.fill_params(dit_get, te.get).tofile(out / "params.bin")
     vst = G.SafeTensors(ckpt / "vae")
     wbytes, vtable, blocks, vindex = vd.pack_weights(
         {k: vst.get(k) for k in vst._where if not k.endswith("num_batches_tracked")})
@@ -202,11 +269,18 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=4, help="packing processes")
     ap.add_argument("--pack-cache", default=None,
                     help="keep the per-weight packed files here (reused next build)")
+    ap.add_argument("--transformer-gguf", default=None,
+                    help="take the DiT from this GGUF instead of --checkpoint's transformer/ "
+                         "(the text encoder and VAE still come from the checkpoint)")
     a = ap.parse_args()
+    if not a.checkpoint and a.transformer_gguf:
+        ap.error("--transformer-gguf still needs --checkpoint: the text encoder and the VAE "
+                 "have no GGUF")
     build(Path(a.checkpoint) if a.checkpoint else G.model_dir(), Path(a.out).resolve(),
           [int(r) for r in a.resolutions.split(",")], a.jobs,
           Path(a.pack_cache) if a.pack_cache else None,
-          [int(r) for r in a.edits.split(",") if r])
+          [int(r) for r in a.edits.split(",") if r],
+          Path(a.transformer_gguf) if a.transformer_gguf else None)
     return 0
 
 

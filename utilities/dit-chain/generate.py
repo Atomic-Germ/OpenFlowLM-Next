@@ -90,9 +90,12 @@ def pack_fingerprint(ckpt: Path) -> str:
     return h.hexdigest()
 
 
-def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None) -> dict[str, tuple[Path, int]]:
+def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None,
+                  only: tuple[str, ...] = ("transformer", "text_encoder")) -> dict[str, tuple[Path, int]]:
     """{name: (file, bytes)} for every DiT and text-encoder GEMM weight, packing the missing.
-    ckpt: the checkpoint directory (default: the HF cache's snapshot)."""
+    ckpt: the checkpoint directory (default: the HF cache's snapshot).
+    only: which halves to pack -- a bundle whose DiT came from a GGUF packs the text
+    encoder here and the DiT elsewhere (export_bundle._pack_dit_from_gguf)."""
     ckpt = ckpt or model_dir()
     cache.mkdir(parents=True, exist_ok=True)
     stamp, fp = cache / "provenance.txt", pack_fingerprint(ckpt)
@@ -101,8 +104,11 @@ def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None) -> dict[str,
         for p in cache.glob("*.bin"):
             p.unlink()
     stamp.write_text(fp + "\n")
-    want = {n: ("transformer", K * N * 9 // 8) for n, (K, N, _) in kp.dit_weight_specs().items()}
-    want |= {n: ("text_encoder", K * N * 9 // 8) for n, (K, N, _) in kp.te_weight_specs().items()}
+    want = {}
+    if "transformer" in only:
+        want |= {n: ("transformer", K * N * 9 // 8) for n, (K, N, _) in kp.dit_weight_specs().items()}
+    if "text_encoder" in only:
+        want |= {n: ("text_encoder", K * N * 9 // 8) for n, (K, N, _) in kp.te_weight_specs().items()}
     todo = [n for n, (_, nb) in want.items()
             if not (cache / f"{n}.bin").exists() or (cache / f"{n}.bin").stat().st_size != nb]
     if todo:
