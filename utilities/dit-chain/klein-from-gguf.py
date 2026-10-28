@@ -88,6 +88,10 @@ def main(argv=None) -> int:
     else:
         name = gguf_source.pick(repo)
         gguf = gguf_source.ensure(repo, name)
+        if any(q.lower() in name.lower() for q in gguf_source.LOSSY):
+            log("[WARN] a lossy DiT quant: klein's 4-step trajectory is sensitive enough that "
+                "Q8_0 and Q4_1 both come out grainy (measured against the shipped bf16 bundle). "
+                "Use the repo's BF16 or F16 file for the image the model is capable of.")
 
     # 2+3. the bundle (the checkpoint is resolved inside export_bundle from --gguf-repo)
     out = Path(a.out).expanduser().resolve()

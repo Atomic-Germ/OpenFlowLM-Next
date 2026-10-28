@@ -1011,12 +1011,35 @@ And the step rebinding is sound: `schedule_512.json`'s 181 ops x 4 phases obey
 `off_k = off_0 + k*stride` exactly (checked offline), which is the law `Engine::Impl::rebind`
 applies.
 
-What is left: the converted DiT weights themselves (unsloth's GGUF, or `pack_b_cols`'s tile
-layout), or klein at 4 steps. The discriminator is the OFFICIAL bf16 bundle --
-`oflm pull flux2-klein:4b`, same prompt and seed: if it is clean, the GGUF conversion is at
-fault; if it is equally grainy, that is the model. Note the 1-step image is a different
-trajectory (the engine recomputes sigmas in C++ for a non-bundle count), so 1 vs 4 is not
-like-for-like.
+**ANSWERED (2026-10-28): the DiT quantisation, and klein is brutal about it.**
+
+`oflm pull flux2-klein:4b` (the shipped bf16 bundle), same prompt, seed, 4 steps, same
+kernels: a CLEAN, photographic fox. Then the bundles were compared file by file:
+
+```
+identical: bundle.json keys, layout e667e5952ca22004, all four schedules, tf/dt/qin (both
+           sizes), params.bin, embed.bin, vae_W/S, vae_enc_W/S, tokenizer.json   -- byte-for-byte
+114 of 194 packed weights                                              -- byte-identical
+80 differing                                                          -- exactly the DiT blocks
+```
+
+and, decisively, **the checkpoint's bf16 packed by `pack_b_cols` is byte-identical to the
+shipped bundle** (rel 0.000e+00). So the packer, the schedules, the TE, the VAE and the step
+machinery are all exactly right; the only difference is the DiT's weights:
+
+| DiT source | weight error vs shipped | image |
+|---|---|---|
+| checkpoint bf16 / BF16 GGUF | 0 | clean |
+| Q8_0 GGUF | 1.0% RMS | grainy |
+| Q4_1 GGUF | 8.3% RMS | the same grain |
+
+Q8_0 and Q4_1 look the SAME because this distilled 4-step trajectory saturates: about 1% of
+weight error is already too much. So a GGUF klein is a FORMAT convenience, not a size win --
+take the repo's BF16 or F16 file. `gguf_source.QUANTS` now prefers BF16/F16 and
+`klein-from-gguf.py` warns when it has to use a lossy one.
+
+(For the record, 1 vs 4 steps was never like-for-like: a non-bundle step count recomputes
+sigmas in C++ and is a different trajectory.)
 
 ### The EDIT path runs, and is wrong (found 2026-10-27)
 

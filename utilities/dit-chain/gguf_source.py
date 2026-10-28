@@ -13,9 +13,21 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# The quants gguf_weights decodes, best first. Q4_1 is what the rest of the tree runs and
-# what these repos publish; BF16/F16 are lossless and several times larger.
-QUANTS = ["Q4_1", "BF16", "F16", "Q8_0"]
+# The quants gguf_weights decodes, best first -- and for klein "best" means PRECISION, not
+# size. Measured 2026-10-28 against the shipped bf16 bundle (same prompt, seed, 4 steps):
+#
+#   * the checkpoint's bf16, packed by our code, is BYTE-IDENTICAL to the shipped bundle;
+#   * a Q8_0 DiT (1.0% weight error) and a Q4_1 DiT (8.3%) produce the SAME grainy image;
+#   * the shipped bf16 bundle is clean, and no other file differs at all -- 114 of 194
+#     packed weights are byte-identical, and the 80 that differ are exactly the blocks.
+#
+# So this distilled 4-step model needs a lossless DiT: the quantisation is the whole
+# difference. BF16/F16 first; the lossy ones are still decoded (a user may ask) but the
+# image is visibly worse.
+QUANTS = ["BF16", "F16", "Q8_0", "Q4_1"]
+
+# The ones that visibly degrade klein (see above), for the warning.
+LOSSY = ("Q8_0", "Q4_1", "Q5_0", "Q5_1", "Q4_0")
 
 CACHE = Path(os.environ.get("OFLM_DIT_GGUF_CACHE") or Path.home() / ".cache" / "oflm" / "dit-gguf")
 
