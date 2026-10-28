@@ -54,6 +54,29 @@ FAMILY = "FLUX.2-klein-4B-NPU2"
 ALIGN = 4096
 
 
+def _derive_shape(ckpt: Path, reference_repo: str | None, fam: str):
+    """The Shape the checkpoint describes, from its own configs.
+
+    `transformer/config.json` is in the checkpoint; a GGUF-sourced build has the checkpoint
+    only for its text encoder and VAE, so the transformer config comes from the repo the
+    README named (`reference_repo`).
+    """
+    import json as _json
+
+    tcfg = Path(ckpt) / "transformer" / "config.json"
+    if tcfg.is_file():
+        transformer = _json.loads(tcfg.read_text())
+    elif reference_repo:
+        from huggingface_hub import hf_hub_download
+
+        transformer = _json.loads(open(hf_hub_download(reference_repo, "transformer/config.json")).read())
+    else:
+        raise SystemExit(f"{fam}: cannot derive the shape -- no transformer/config.json and no "
+                         f"reference repo; pass --family with one of {sorted(kp.SHAPES)}")
+    te = _json.loads((Path(ckpt) / "text_encoder" / "config.json").read_text())
+    return kp.shape_from_config(transformer, te, family=fam)
+
+
 def _gguf_get(path: Path, reference_repo: str | None = None):
     """`SafeTensors.get`-compatible reader over a klein DiT GGUF (see gguf_weights).
 
@@ -137,10 +160,20 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     # The shape is one record in klein_pipeline (the diffusion equivalent of a text
     # ModelSpec): the schedule, the packing and the params all read it, so a family switch
     # is set_shape + the matching kernel build (export_dit_kernels.FAMILIES).
-    fam = family or FAMILY
-    if fam not in kp.SHAPES:
-        raise SystemExit(f"{fam}: no shape in klein_pipeline.SHAPES (have {sorted(kp.SHAPES)})")
-    kp.set_shape(kp.SHAPES[fam])
+    fam = family
+    if not fam or fam not in kp.SHAPES:
+        # not a named family: derive the shape from the checkpoint's own configs and find the
+        # kernels it can run, the way a text spec finds its set by geometry.
+        derived = _derive_shape(ckpt, reference_repo, fam)
+        fam = kp.family_for_shape(derived) or ""
+        if not fam:
+            raise SystemExit(
+                f"this checkpoint's shape ({derived.H} hidden, {derived.MLP} FFN, "
+                f"{derived.N_DBL}+{derived.N_SGL} blocks) has no kernel family.\n"
+                f"  known: {', '.join(sorted(kp.SHAPES))}\n"
+                f"  add it to export_dit_kernels.FAMILIES/FA_FAMILIES (and klein_pipeline.SHAPES) "
+                f"and build the set")
+        kp.set_shape(kp.SHAPES[fam])
     te = G.SafeTensors(ckpt / "text_encoder")
     files = []
 

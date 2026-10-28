@@ -985,6 +985,34 @@ leaves the other whole), registers the tag with the bundle's OWN `image_sizes` /
 `--force` through that link unlinked the source's files one at a time (it ate a LICENSE.md
 during testing). `register-bundle.py` is gone.
 
+### The shape is DERIVED now, like a text spec (2026-10-28)
+
+`klein_pipeline.shape_from_config(transformer_cfg, text_encoder_cfg)` builds the record from
+the checkpoint's own configs:
+
+```
+H      = attention_head_dim x num_attention_heads        MLP    = H x mlp_ratio
+TE_*   = the encoder's widths, TE_Q/KV from its head count
+TE_PAD = the encoder hidden rounded up to a 1024 row       (2560 -> 3072, 4096 -> 4096)
+CTX_LD = three taps of that hidden, rounded up to 1024     (3x2560 -> 8192, 3x4096 -> 12288)
+TE_LAYERS = max(TAPS), TAPS = the pipeline's own default (9, 18, 27)
+```
+
+Only `patch_px` (16, the VAE/transformer patch law) and `steps` (4, distilled) are not in the
+configs. **Verified: it reproduces `KLEIN_4B` and `KLEIN_9B` field-for-field** from
+`black-forest-labs/FLUX.2-klein-4B` and `-9B` (test_klein_shape.py, hermetic).
+
+The 9B record was CORRECTED by this: the taps are the same (9, 18, 27) because
+`Flux2KleinPipeline` -- the same class for both sizes -- defaults
+`text_encoder_out_layers=(9, 18, 27)`, so a 36-layer Qwen3-8B still runs **27** layers, not
+36. (diffusers' plain Flux2 pipeline uses (10, 20, 30); klein does not.)
+
+`export_bundle` now derives the family when none is named (`--family` is optional): it builds
+the Shape from the configs and asks `family_for_shape()` -- matched on hidden, FFN width and
+the two block counts, the diffusion analogue of a spec's kernel_hash -- for the kernels. A
+shape nothing serves is refused with the known families named, instead of building against
+the wrong streams. `oflm add <gguf-repo>` therefore needs no family flag, at any size.
+
 ### The diffusion Shape record exists now (2026-10-28)
 
 `klein_pipeline.Shape` is the diffusion equivalent of a text `ModelSpec`: one frozen record

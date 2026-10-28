@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -104,11 +105,58 @@ KLEIN_4B = Shape(H=3072, MLP=9216, HEADS=24, HD=128, N_DBL=5, N_SGL=20, L_TXT=51
 # gates already; TE_PAD is the one PACKING decision that still needs a build to confirm
 # (4096 = TE_HID, as the 4B pads 2560 -> 3072).
 KLEIN_9B = Shape(H=4096, MLP=12288, HEADS=32, HD=128, N_DBL=8, N_SGL=24, L_TXT=512,
-                 PATCH_PX=16, LAT_CH=128, TE_LAYERS=36, TE_HID=4096, TE_PAD=4096,
-                 TE_Q=4096, TE_KV=1024, TE_MLP=12288, TAPS=(9, 18, 27), CTX_LD=12289,
+                 PATCH_PX=16, LAT_CH=128, TE_LAYERS=27, TE_HID=4096, TE_PAD=4096,
+                 TE_Q=4096, TE_KV=1024, TE_MLP=12288, TAPS=(9, 18, 27), CTX_LD=12288,
                  STEPS=4, family="FLUX.2-klein-9B-NPU2")
 
 SHAPES = {s.family: s for s in (KLEIN_4B, KLEIN_9B)}
+
+# Flux2KleinPipeline's own default (`text_encoder_out_layers`), the SAME for every size --
+# read from diffusers' pipeline_flux2_klein.py. The bundle runs the text encoder up to the
+# last tap, so TE_LAYERS = max(TAPS), not the encoder's full depth: klein-4B taps 9/18/27 of
+# Qwen3-4B's 36 layers, and klein-9B taps the same three of Qwen3-8B's.
+TEXT_TAPS = (9, 18, 27)
+
+# The schedule's row paddings: the dit_ew/dit_gemm row widths must be whole 1024s (measured
+# against the shipped 4B: 3*2560 -> 8192 and 2560 -> 3072, and both kernels accept it).
+ROW_ALIGN = 1024
+
+
+def _row(n: int) -> int:
+    return -(-n // ROW_ALIGN) * ROW_ALIGN
+
+
+def shape_from_config(transformer: Mapping, text_encoder: Mapping, *,
+                      patch_px: int = 16, steps: int = 4, taps: tuple = TEXT_TAPS,
+                      family: str = "") -> Shape:
+    """Derive a family's Shape from the checkpoint's own configs.
+
+    This is the diffusion equivalent of deriving a text spec from config.json: nothing here
+    is a per-size constant except `patch_px` and `steps`, which the configs do not carry
+    (they are the VAE/transformer patch law and the distilled step count).
+
+        H      = attention_head_dim x num_attention_heads
+        MLP    = H x mlp_ratio
+        TE_*   = the text encoder's own widths, taps from the pipeline's default
+        TE_PAD = the encoder's hidden rounded up to a 1024 row
+        CTX_LD = three taps of that hidden, rounded up to a 1024 row
+    """
+    hd = int(transformer["attention_head_dim"])
+    heads = int(transformer["num_attention_heads"])
+    h = hd * heads
+    mlp = int(round(h * float(transformer.get("mlp_ratio", 3.0))))
+    te_hid = int(text_encoder["hidden_size"])
+    te_heads = int(text_encoder["num_attention_heads"])
+    te_hd = int(text_encoder.get("head_dim") or te_hid // te_heads)
+    te_kv = int(text_encoder["num_key_value_heads"])
+    return Shape(
+        H=h, MLP=mlp, HEADS=heads, HD=hd,
+        N_DBL=int(transformer["num_layers"]), N_SGL=int(transformer["num_single_layers"]),
+        L_TXT=512, PATCH_PX=patch_px, LAT_CH=int(transformer["in_channels"]),
+        TE_LAYERS=max(taps), TE_HID=te_hid, TE_PAD=_row(te_hid),
+        TE_Q=te_heads * te_hd, TE_KV=te_kv * te_hd, TE_MLP=int(text_encoder["intermediate_size"]),
+        TAPS=tuple(taps), CTX_LD=_row(len(taps) * te_hid), STEPS=steps, family=family,
+    )
 
 # The ACTIVE shape's values, as the module-level names the schedule code reads.
 H, MLP, L_TXT, HEADS, HD = KLEIN_4B.H, KLEIN_4B.MLP, KLEIN_4B.L_TXT, KLEIN_4B.HEADS, KLEIN_4B.HD
@@ -176,6 +224,19 @@ def set_shape(shape: Shape) -> Shape:
     CTX_LD = shape.CTX_LD
     MOD_N = shape.MOD_N
     return previous
+
+
+def family_for_shape(shape: Shape) -> str | None:
+    """The registry family whose KERNELS this shape can run, or None.
+
+    Matched on the four numbers the kernel streams are built from (hidden, FFN width, and
+    the two block counts) -- the diffusion analogue of a text spec's kernel_hash. A shape
+    that matches nothing needs an entry in export_dit_kernels.FAMILIES and a build.
+    """
+    for fam, s in SHAPES.items():
+        if (s.H, s.MLP, s.N_DBL, s.N_SGL) == (shape.H, shape.MLP, shape.N_DBL, shape.N_SGL):
+            return fam
+    return None
 
 
 def image_tokens(R: int) -> int:
