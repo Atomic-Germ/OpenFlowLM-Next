@@ -52,6 +52,7 @@ struct program_args_t {
     int image_size = 1024;
     bool image_size_given = false;    // --size was on the command line (an edit's default follows the reference)
     std::string image_seed = "";      // empty: a random 64-bit seed, printed
+    int image_steps = 0;              // --steps: 0 = the bundle's own count (1..50 otherwise)
     std::string image_ref = "";       // --image: edit this reference image (.png or .jpg)
 
     // for serve command's image endpoints (/v1/images/*)

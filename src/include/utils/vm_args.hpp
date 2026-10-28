@@ -160,6 +160,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Image width and height in pixels (for image command)")
             ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
              "Noise seed, for a reproducible image (for image command; default random)")
+            ("steps", po::value<int>(&parsed_args.image_steps)->default_value(0),
+             "Denoising steps (for image command; default 0 = the model's own count, "
+             "otherwise 1..50 -- a distilled model is built for a few, more is not better)")
             ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
              "Reference image to edit, .png or .jpg: the prompt says what to change (for "
              "image command; the size then defaults to the largest one not above the "
