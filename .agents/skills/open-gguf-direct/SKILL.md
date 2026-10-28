@@ -972,10 +972,18 @@ Three pieces made it work beyond the reader:
 
 `export_bundle.py --transformer-gguf <diT.gguf> --checkpoint <FLUX.2-klein-4B>` produces a
 bundle whose DiT came from `unsloth/FLUX.2-klein-4B-GGUF`'s **Q4_1** file; the text encoder
-(108 weights) and VAE come from the checkpoint. Then `register-bundle.py <bundle>
---tag klein-gguf:512` and `oflm image klein-gguf:512 "a red fox in fresh snow" --size 512`
--> **4.3 s on the NPU** (text 0.40, steps 3.44, vae 0.42) and a real fox. Bundle layout and
-kernel layout both `c3277a2aa2dd6005`.
+(108 weights) and VAE come from the checkpoint. Then `oflm add <bundle> --tag klein-gguf:512`
+and `oflm image klein-gguf:512 "a red fox in fresh snow" --size 512` -> **4.3 s on the NPU**
+and a real fox. Bundle layout and kernel layout both `c3277a2aa2dd6005`.
+
+**`oflm add` handles a bundle now**: `bundle.json` in the directory or the repo root is the
+detector, and it is a third install path beside the q4nx container and the GGUF. It
+hard-links a local source when it can (a bundle is gigabytes; deleting either side later
+leaves the other whole), registers the tag with the bundle's OWN `image_sizes` /
+`image_edit_sizes`, links the kernel set whose layout hash matches, and replaces a
+*symlinked* target instead of writing through it -- register-bundle.py used to leave one, and
+`--force` through that link unlinked the source's files one at a time (it ate a LICENSE.md
+during testing). `register-bundle.py` is gone.
 
 **The product path exists** (`361d41a`): `q4nx-build --open-diffusion -i <gguf-repo> -o <dir>`
 takes a GGUF repo alone -- it picks the DiT GGUF, resolves the checkpoint from the README,
