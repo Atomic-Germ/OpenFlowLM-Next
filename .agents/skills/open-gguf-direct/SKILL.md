@@ -1021,6 +1021,22 @@ the few small "conditioning" tensors (modulation, time embedder, embeddings) and
 that disagrees, naming the tensor. Those are cheap to check, easy for a converter to get
 wrong, and catastrophic when wrong.
 
+**`oflm add <gguf-repo>` goes repo -> ready by itself** (2026-10-28). A FLUX DiT is
+recognised by its TENSORS (`double_blocks.0.img_attn.qkv.weight` + `single_blocks.0.linear1`,
+because leejet's converter writes no `general.architecture` at all), the DiT quant comes from
+the quality-first list (Q8_0), and `oflm add` then drives the bundle build and installs it
+through the same path a prebuilt bundle takes:
+
+    oflm add leejet/FLUX.2-klein-4B-GGUF --tag klein-add:4b
+    oflm image klein-add:4b "a red fox in fresh snow" --size 512     # 4.2 s, corr 0.9946 vs bf16
+
+That is the whole chain in one command: 4.3 GB download, one 8 GiB packing pass, four
+schedules (512, 1024, and both edits), the shipped kernel set linked by layout, and the tag
+registered with its sizes. The converter is looked for in `$OFLM_DIT_CHAIN`, then beside the
+package (`utilities/dit-chain`), and when it is absent -- it is a BUILD-machine tool (numpy,
+ml_dtypes, 8 GiB, ~10 minutes), not part of the runtime install -- `oflm add` names the two
+alternatives instead of failing inside a build.
+
 **The product path exists** (`361d41a`): `q4nx-build --open-diffusion -i <gguf-repo> -o <dir>`
 takes a GGUF repo alone -- it picks the DiT GGUF, resolves the checkpoint from the README,
 packs the DiT from the GGUF -- and writes a pullable bundle plus `model_info_entry.json`.

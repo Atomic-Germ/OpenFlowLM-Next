@@ -45,6 +45,7 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -3011,6 +3012,116 @@ def find_diffusion_kernels(layout, roots):
     return None
 
 
+def is_diffusion_dit(kv, tensors):
+    """True when a GGUF is a diffusion transformer, not a language model.
+
+    `general.architecture` is not reliable -- leejet's converter omits it entirely -- so the
+    TENSORS decide: FLUX's double/single blocks and its two embedders exist in no
+    language-model GGUF, and the pair is unmistakable.
+    """
+    if str((kv or {}).get("general.architecture", "")).lower() == "flux":
+        return True
+    names = {t[0] if isinstance(t, (list, tuple)) else t for t in (tensors or [])}
+    return ("double_blocks.0.img_attn.qkv.weight" in names
+            and "single_blocks.0.linear1.weight" in names)
+
+
+# FLUX.2 [klein]'s DiT quant preference (Q8_0 first: near-lossless and half the size of
+# BF16, measured 0.9946 correlation with the shipped bf16 bundle). The text path's
+# GGUF_QUANT_PREFERENCE is about the q4_1 pool law; this one is about image quality.
+DIT_QUANTS = ["Q8_0", "BF16", "F16", "Q5_1", "Q5_0", "Q4_1", "Q4_0"]
+
+
+def _pick_dit_gguf(names):
+    for q in DIT_QUANTS:
+        cand = sorted(n for n in names if q.lower() in n.lower())
+        if cand:
+            return cand[0]
+    return None
+
+
+def dit_builder():
+    """`export_bundle.py` when this install can build a bundle, else None.
+
+    The diffusion conversion is a BUILD-machine job -- numpy, ml_dtypes, an 8 GB download and
+    ~9 minutes of packing -- so it is not part of the runtime install. It is looked for in
+    $OFLM_DIT_CHAIN, then beside this package (a source checkout, or a future install that
+    ships it), and `oflm add` says exactly that when it is missing instead of failing deep
+    inside a build.
+    """
+    cands = []
+    env = os.environ.get("OFLM_DIT_CHAIN")
+    if env:
+        cands.append(Path(env))
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        cands.append(parent / "dit-chain")
+        cands.append(parent / "utilities" / "dit-chain")
+    for c in cands:
+        if (c / "export_bundle.py").is_file():
+            return c / "export_bundle.py"
+    return None
+
+
+def install_diffusion_gguf(args, repo, gguf_name, local_dir, dir_name):
+    """A FLUX.2 [klein] DiT GGUF -> a bundle -> an installed, runnable model.
+
+    `oflm add <gguf-repo>` for a diffusion repo is the same promise as for a text one: repo
+    in, runnable tag out. The DiT is only one of the three parts (the text encoder and the
+    VAE come from the checkpoint the repo's README names), so this builds the bundle with
+    export_bundle.py and then installs it through install_bundle() -- one path for the
+    registration, the tag and the kernel link.
+    """
+    builder = dit_builder()
+    if builder is None:
+        raise SystemExit(
+            f"{repo}: this is a diffusion DiT (FLUX.2 [klein]), not a language model, so it has "
+            "to be converted into a bundle before it can be installed -- and this build has no "
+            "converter.\n"
+            "  * use a prebuilt bundle instead: oflm pull flux2-klein:4b, or oflm add <bundle dir>\n"
+            "  * or convert it with utilities/dit-chain/klein-from-gguf.py (source checkout), "
+            "then oflm add the directory it writes")
+    models_root = models_root_dir(args.models_root)
+    target = models_root / dir_name
+    if target.is_symlink():
+        if not args.force:
+            raise SystemExit(f"{target} is a link to {target.resolve()}; --force replaces it")
+        target.unlink()
+
+    # the DiT file: a local one, or the repo's best quant (Q8_0 first)
+    quant = gguf_name
+    pack_cache = Path.home() / ".cache" / "oflm" / "dit-pack" / f"{repo.replace('/', '--')}--{Path(quant).stem}"
+    resolutions, edits = "512,1024", "512,1024"   # the shipped kernel set's pair
+    if args.dry_run:
+        print(f"diffusion      : {repo} ({quant}) -> {target}")
+        print(f"bundle         : build with {builder}")
+        print(f"resolutions    : {resolutions}   edits {edits}")
+        print(f"pack cache     : {pack_cache}")
+        print(f"kernels        : the xclbins set whose layout matches (export_dit_kernels.py --install)")
+        return None
+    if local_dir:
+        gguf = Path(local_dir) / quant
+    else:
+        gguf = Path.home() / ".cache" / "oflm" / "dit-gguf" / f"{repo.replace('/', '--')}--{Path(quant).name}"
+        if not gguf.is_file():
+            log(f"[INFO] DiT GGUF: {quant} <- {repo}")
+            got = fetch_from_repo(repo, quant, gguf, modelscope=args.modelscope, force=args.force)
+            if not got:
+                raise SystemExit(f"{repo}: could not fetch {quant}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    log(f"[INFO] converting {quant} into a diffusion bundle (this packs ~8 GiB; 5-15 minutes)")
+    rc = subprocess.run([sys.executable, str(builder),
+                         "--gguf-repo", repo, "--transformer-gguf", str(gguf),
+                         "--resolutions", resolutions, "--edits", edits,
+                         "--out", str(target), "--pack-cache", str(pack_cache),
+                         "--jobs", "4"]).returncode
+    if rc:
+        raise SystemExit(f"{repo}: the bundle build failed (exit {rc})")
+    files = sorted(p.name for p in target.iterdir() if p.is_file())
+    log(f"[INFO] bundle: {len(files)} files, layout {_bundle_layout(target)}")
+    return install_bundle(args, target, dir_name, args.modelscope)
+
+
 def install_bundle(args, source, dir_name, modelscope=False):
     """Install a diffusion bundle: FLUX.2 [klein]'s schedules, weights and VAE.
 
@@ -3205,6 +3316,23 @@ def main():
             gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
+    # A FLUX DiT is a GGUF repo too, and `choose_gguf_file` would install it as a language
+    # model (there is no model.gguf convention for it). Read the chosen file's architecture
+    # -- one small range read -- and take the diffusion path when it says `flux`.
+    dit_name = _pick_dit_gguf(gguf_names) if gguf_names else None
+    if dit_name and not gguf_want:
+        try:
+            if local_dir:
+                _inv = read_gguf_inventory(str(local_dir / dit_name), limit_mb=2)
+            else:
+                _src = (f"https://huggingface.co/{repo}/resolve/main/{dit_name}" if not modelscope
+                        else f"https://www.modelscope.ai/models/{repo}/resolve/master/{dit_name}")
+                _inv = read_gguf_inventory(_src, limit_mb=2)
+        except Exception:
+            _inv = None
+        if _inv and is_diffusion_dit(*_inv):
+            return install_diffusion_gguf(args, repo, dit_name, local_dir, dir_name)
+
     gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want)
     if gguf_want and gguf_name is None:
         if not gguf_names:

@@ -1086,3 +1086,25 @@ def test_a_symlinked_bundle_target_is_replaced_not_written_through(tmp_path, mon
     assert not (root / "my-klein").is_symlink()          # a real directory now
     assert (root / "my-klein" / "LICENSE.md").read_text() == "apache"
     assert (build / "LICENSE.md").is_file()              # the SOURCE is untouched
+
+
+def test_a_flux_dit_is_recognised_by_its_tensors():
+    """leejet's converter writes no general.architecture at all, so the arch cannot be the
+    test: FLUX's double/single blocks and its embedders exist in no language-model GGUF."""
+    tensors = [("double_blocks.0.img_attn.qkv.weight", 3, [3072, 9216]),
+               ("single_blocks.0.linear1.weight", 3, [3072, 27648]),
+               ("img_in.weight", 30, [128, 3072])]
+    assert oflm_add.is_diffusion_dit({}, tensors) is True
+    assert oflm_add.is_diffusion_dit({"general.architecture": "flux"}, []) is True
+    # a language model, even a fused-qkv one, is not
+    lm = [("blk.0.attn_qkv.weight", 3, [3072, 9216]), ("token_embd.weight", 3, [3072, 151936])]
+    assert oflm_add.is_diffusion_dit({"general.architecture": "qwen3"}, lm) is False
+
+
+def test_the_dit_quant_preference_is_quality_first():
+    """Q8_0 first: near-lossless and half of BF16's size (measured 0.9946 correlation with the
+    shipped bf16 bundle). The text path's order is about the q4_1 pool law, not image quality."""
+    names = ["flux-2-klein-4b-Q4_0.gguf", "flux-2-klein-4b-Q8_0.gguf", "flux-2-klein-4b-BF16.gguf"]
+    assert oflm_add._pick_dit_gguf(names) == "flux-2-klein-4b-Q8_0.gguf"
+    assert oflm_add._pick_dit_gguf(["x-BF16.gguf"]) == "x-BF16.gguf"
+    assert oflm_add._pick_dit_gguf(["x-Q4_0.gguf"]) == "x-Q4_0.gguf"
