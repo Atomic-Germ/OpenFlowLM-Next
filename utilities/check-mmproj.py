@@ -28,21 +28,7 @@ import urllib.request
 GGUF_TYPES = {0: ("F32", 4), 1: ("F16", 2), 30: ("BF16", 2)}
 
 
-def http_range(url, start, end):
-    """Bytes [start, end) of a URL, or the whole prefix when end is None."""
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{'' if end is None else end - 1}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return r.read()
-
-
-def fetch_all(url):
-    with urllib.request.urlopen(url, timeout=120) as r:
-        return r.read()
-
-
-def hf_url(repo, filename):
-    return f"https://huggingface.co/{repo}/resolve/main/{filename}"
-
+from hf_safetensors import fetch_all, hf_url, http_range, index as st_index, tensor as st_tensor  # noqa: E402
 
 # ----------------------------------------------------------------- GGUF header
 def gguf_header(url):
@@ -131,48 +117,8 @@ def gguf_tensor(url, tensors, data_base, name):
 
 
 # ----------------------------------------------------------------- safetensors
-def safetensors_index(repo):
-    """tensor name -> (shard, dtype, [start, end]), reading the index (or the one shard)."""
-    try:
-        idx = json.loads(fetch_all(hf_url(repo, "model.safetensors.index.json")))
-        shards = sorted(set(idx["weight_map"].values()))
-        mapping = idx["weight_map"]
-    except Exception:
-        idx = None
-        mapping = None
-        shards = None
-    if shards is None:
-        # one shard: the file list has exactly one .safetensors
-        meta = json.loads(fetch_all(f"https://huggingface.co/api/models/{repo}"))
-        shards = [s["rfilename"] for s in meta.get("siblings", []) if s["rfilename"].endswith(".safetensors")]
-        if len(shards) != 1:
-            raise SystemExit(f"{repo}: {len(shards)} safetensors shards and no index; name the shard explicitly")
-        mapping = {}
-    out = {}
-    for shard in shards:
-        url = hf_url(repo, shard)
-        (hlen,) = struct.unpack("<Q", http_range(url, 0, 8))
-        header = json.loads(http_range(url, 8, 8 + hlen))
-        for name, info in header.items():
-            if name == "__metadata__":
-                continue
-            out[name] = (url, 8 + hlen, info["dtype"], info["data_offsets"], info["shape"])
-    return out
-
-
-def safetensor(spec):
-    url, base, dtype, (start, end), shape = spec
-    raw = http_range(url, base + start, base + end)
-    n = len(raw) // (2 if dtype in ("BF16", "F16") else 4)
-    if dtype == "F32":
-        vals = list(struct.unpack(f"<{n}f", raw))
-    elif dtype == "F16":
-        vals = list(struct.unpack(f"<{n}e", raw))
-    elif dtype == "BF16":
-        vals = list(struct.unpack(f"<{n}f", b"".join(b"\x00\x00" + raw[i:i + 2] for i in range(0, len(raw), 2))))
-    else:
-        raise SystemExit(f"dtype {dtype} not handled")
-    return vals, list(shape)
+safetensors_index = st_index
+safetensor = st_tensor
 
 
 def max_err(a, b):

@@ -968,6 +968,41 @@ Three pieces made it work beyond the reader:
    `rope_parameters` from `qwen3vl.rope.dimension_sections` ([24,20,20,0] -> [24,20,20],
    interleaved, which is Qwen3-VL's law).
 
+### Diffusion: the klein DiT GGUF is a NAME map, not a kernel change (2026-10-27)
+
+`unsloth/FLUX.2-klein-4B-GGUF` and `leejet/...` carry **only the DiT** -- no text encoder,
+no VAE -- so "klein from GGUF" is: DiT from the GGUF, TE from Qwen3-4B (a model this branch
+already runs), VAE from the BFL/Comfy safetensors (no GGUF of a VAE exists anywhere). The
+engine is unchanged: it replays `klein_pipeline`'s schedule against a bundle.
+
+`utilities/dit-chain/gguf_weights.py` is the adapter: a `SafeTensors.get`-compatible view of
+the GGUF in **HF layout**, so `dit_weight_specs()` and `fill_params()` take it as they take
+a checkpoint. Everything it does is names and orientation:
+
+* the GGUF speaks **BFL names** (`double_blocks.0.img_attn.qkv`, `img_in`,
+  `final_layer.linear`) where diffusers has `transformer_blocks.0.attn.to_q`, `x_embedder`,
+  `proj_out`; the modulations are `*.lin` vs `*.linear` and `final_layer.adaLN_modulation.1`
+  vs `norm_out.linear`;
+* ggml stores a matmul `[in, out]` -- which is the same bytes as HF's `[out, in]` read
+  row-major, so **the reshape is `dims[::-1]` and there is NO transpose**. Reshaping `dims`
+  and transposing gives the right SHAPE with scrambled values (it passed the shape check and
+  failed the numeric one);
+* the fused tensors split along the OUTPUT axis: `qkv` -> thirds (q, k, v),
+  `single_blocks.N.linear1` -> `to_qkv_mlp_proj`, `linear2` -> `to_out`.
+
+Verified against `black-forest-labs/FLUX.2-klein-4B` by byte range (no 8 GB download):
+BF16 tensors are **exact** (x_embedder, proj_out, the time embedder, the qk norm), and the
+Q4_1 ones agree at cos 0.9967 / mean error 6.4% of rms -- what 4 bits costs, not a mapping
+error. `--check` builds all 86 schedule weights at their (K, N).
+
+A quantized source also changes the METRIC: the worst element of a Q4_1 tensor is about the
+tensor's own rms, so `max|d|/rms < 1e-2` can never pass. Use cosine + mean error, and
+`exact` where the source is BF16.
+
+Still to wire: `export_bundle.py --transformer-gguf` (the packing path is
+`build(get) -> kp.pack_b_cols(b)`, so it is the same three lines with `gguf.get`), and
+`q4nx-build --open-diffusion` passing the file through.
+
 ### Gemma 4 is a FAMILY project, not a projector one (surveyed 2026-10-27)
 
 Asked to do Gemma 4 next; the survey says the mmproj is the last 10% of it, not the first.
