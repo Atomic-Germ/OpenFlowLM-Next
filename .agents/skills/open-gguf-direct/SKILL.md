@@ -968,6 +968,48 @@ Three pieces made it work beyond the reader:
    `rope_parameters` from `qwen3vl.rope.dimension_sections` ([24,20,20,0] -> [24,20,20],
    interleaved, which is Qwen3-VL's law).
 
+### Diffusion WORKS from a GGUF (2026-10-27, `c7a2d69`)
+
+`export_bundle.py --transformer-gguf <diT.gguf> --checkpoint <FLUX.2-klein-4B>` produces a
+bundle whose DiT came from `unsloth/FLUX.2-klein-4B-GGUF`'s **Q4_1** file; the text encoder
+(108 weights) and VAE come from the checkpoint. Then `register-bundle.py <bundle>
+--tag klein-gguf:512` and `oflm image klein-gguf:512 "a red fox in fresh snow" --size 512`
+-> **4.3 s on the NPU** (text 0.40, steps 3.44, vae 0.42) and a real fox. Bundle layout and
+kernel layout both `c3277a2aa2dd6005`.
+
+The recipe, end to end (a full run is ~25 min on this box, mostly the kernel build):
+
+```
+# 1. the bundle: DiT from the GGUF, TE + VAE from the checkpoint (~9 min; 4.5 GB pack cache)
+python utilities/dit-chain/export_bundle.py --checkpoint ~/klein-ckpt \
+    --transformer-gguf flux-2-klein-4b-Q4_1.gguf --resolutions 512 \
+    --out ~/klein-bundle --pack-cache ~/klein-pack
+
+# 2. the kernels for the SAME resolutions (the layout hash must match, and it names them)
+python open_kernels/export_dit_kernels.py --resolutions 512            # ~15 min
+python open_kernels/export_dit_kernels.py --resolutions 512 \
+    --install ~/klein-bundle/open_kernels --out src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels
+
+# 3. a tag, then an image
+python utilities/dit-chain/register-bundle.py ~/klein-bundle --tag klein-gguf:512
+oflm image klein-gguf:512 "a red fox in fresh snow, photograph" --size 512
+```
+
+Two traps that only show at run time:
+
+* **the text encoder is not in the GGUF.** `_pack_dit_from_gguf` covers the DiT; the TE is
+  still packed from the checkpoint (`generate.ensure_packed(..., only=("text_encoder",))`).
+  Without it the engine fails at load with "schedule names an unknown buffer w:te0.qkv".
+* **the pack cache is stamped with the CHECKPOINT's identity**, and a mismatch deletes every
+  `*.bin` in it -- so the TE packs need their own subdirectory or they wipe the DiT packs.
+
+Edits are not exercised yet: they need `--edits 512` on BOTH sides (the VAE encoder streams)
+and a reference image.
+
+Still to do for the product path: `q4nx-build --open-diffusion --transformer-gguf` (so a
+GGUF repo is one command), and `oflm add` recognising a bundle so `register-bundle.py` is
+only for local test builds.
+
 ### Diffusion: the klein DiT GGUF is a NAME map, not a kernel change (2026-10-27)
 
 `unsloth/FLUX.2-klein-4B-GGUF` and `leejet/...` carry **only the DiT** -- no text encoder,
