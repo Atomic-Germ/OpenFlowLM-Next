@@ -985,6 +985,42 @@ leaves the other whole), registers the tag with the bundle's OWN `image_sizes` /
 `--force` through that link unlinked the source's files one at a time (it ate a LICENSE.md
 during testing). `register-bundle.py` is gone.
 
+### A GGUF klein is not usable yet, and not because of us (2026-10-28)
+
+Ran the full e2e -- `klein-from-gguf.py --repo unsloth/FLUX.2-klein-4B-GGUF` with no tuning
+flags: it picked **BF16**, resolved the checkpoint from the README, built the bundle, found
+the SHIPPED kernel set by layout (no 15-minute build), `oflm add`-ed the result and rendered
+it. The automation is right; the file is not.
+
+The BF16 bundle differs from the shipped one in exactly **one of 194 weights**: `w:mod`, from
+slot 56 on. The cause is one tensor:
+
+```
+GGUF  final_layer.adaLN_modulation.1.weight  [6144, 3072] BF16
+HF    norm_out.linear.weight                 [6144, 3072] BF16
+      first half  vs HF first half : rel 1.0e+00
+      first half  vs HF LAST  half : rel 0.0e+00   <- the halves are SWAPPED
+```
+
+`mod_weight` reads that tensor's two 3072-row halves as (shift, scale); with them swapped the
+whole modulation is wrong, and the image grains exactly like the 4-bit one. The Q4_1 file has
+them in the right order (its `w:mod` was byte-identical to the shipped bundle), so the two
+unsloth files disagree with each other -- one of them is a converter bug, and the BF16 one is
+the buggy one (it disagrees with the checkpoint, which the shipped bundle reproduces byte for
+byte).
+
+So **klein GGUF is blocked on the converter, not on this branch**: every file we tried is
+either too lossy (Q4_1: 8% blocks) or internally inconsistent (BF16: swapped modulation).
+The paths that work are the checkpoint (`q4nx-build --open-diffusion -i
+black-forest-labs/FLUX.2-klein-4B`) and the shipped bundle.
+
+Next, in order: try **leejet's** GGUF (a different converter; Q8_0 is near-lossless, so if
+its modulation order is right the image should be clean), and add a **verification gate** to
+the GGUF path -- when the checkpoint is known (it always is: the README names it), range-read
+the few small "conditioning" tensors (modulation, time embedder, embeddings) and REFUSE a file
+that disagrees, naming the tensor. Those are cheap to check, easy for a converter to get
+wrong, and catastrophic when wrong.
+
 **The product path exists** (`361d41a`): `q4nx-build --open-diffusion -i <gguf-repo> -o <dir>`
 takes a GGUF repo alone -- it picks the DiT GGUF, resolves the checkpoint from the README,
 packs the DiT from the GGUF -- and writes a pullable bundle plus `model_info_entry.json`.
