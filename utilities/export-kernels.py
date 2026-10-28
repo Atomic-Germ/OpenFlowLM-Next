@@ -18,6 +18,13 @@ Two kernel families share the one toolchain venv:
     npu_offload/gemm_rtp/check_design_sets.py. This one allocates NPU tensors
     (device="npu"), so it needs pyxrt and an installed NPU.
 
+  * the diffusion family (FLUX.2 [klein] 4B) -- built by
+    open_kernels/export_dit_kernels.py: the dit_gemm/dit_fa/dit_ew streams and the
+    VAE's conv/ew ones, composed into one full ELF per resolution. One family, one
+    command, and it ships like the rest: `oflm image` finds it under the xclbins
+    root, so a user never builds it. Its model is a bundle rather than a q4nx
+    container, which is why it is a third family here and not a spec.
+
 Requirements (assumed present, or set up here):
   * XRT installed at /opt/xilinx/xrt, or wherever XILINX_XRT points
     (xclbinutil/aiebu-asm on PATH, pyxrt under <prefix>/python).
@@ -173,6 +180,39 @@ def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> 
     return len(failed)
 
 
+DIT_FAMILY = "FLUX.2-klein-4B-NPU2"
+# The sizes the schedules carry, and the edits: both sides of a bundle must name the same
+# ones (q4nx/open_diffusion.py's RESOLUTIONS/EDITS), and the layout hash is computed from
+# them, so a mismatch is refused at load rather than running the wrong streams.
+DIT_RESOLUTIONS = "512,1024"
+DIT_EDITS = "512,1024"
+
+
+def export_diffusion_sets(py: Path, force: bool, jobs: int = 4) -> int:
+    """FLUX.2 [klein] 4B's kernel set. Returns the number of failures (0 or 1).
+
+    Built in `build/dit-kernels/<family>` and INSTALLED into `src/xclbins/<family>/open_kernels`:
+    the build directory carries every stream's xclbin (681 MiB), the installed form is the
+    full ELFs and their manifest (16 MiB), and that is what ships and what the engine reads.
+    The exporter keeps its own cache, so a second run is seconds.
+    """
+    script = REPO / "open_kernels" / "export_dit_kernels.py"
+    scratch = REPO / "build" / "dit-kernels" / DIT_FAMILY
+    shipped = REPO / "src" / "xclbins" / DIT_FAMILY / "open_kernels"
+    print(f"-- diffusion: {DIT_FAMILY} (resolutions {DIT_RESOLUTIONS}, edits {DIT_EDITS})", flush=True)
+    cmd = [str(py), str(script), "--resolutions", DIT_RESOLUTIONS, "--edits", DIT_EDITS,
+           "--out", str(scratch), "--jobs", str(jobs)]
+    if force:
+        cmd.append("--force")
+    if subprocess.run(cmd).returncode:
+        return 1
+    # --install copies the runtime files only; src/ must not carry the build tree
+    rc = subprocess.run([str(py), str(script), "--resolutions", DIT_RESOLUTIONS,
+                         "--edits", DIT_EDITS, "--out", str(scratch),
+                         "--install", str(shipped)]).returncode
+    return 1 if rc else 0
+
+
 def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
     """open_npue BERT design sets (needs pyxrt + NPU). Returns 0 on success."""
     spec = json.loads(BERT_SPEC.read_text(encoding="utf-8"))
@@ -249,6 +289,10 @@ def main() -> int:
                     help="skip open_npue BERT embedding sets (they need an NPU at build time)")
     ap.add_argument("--bert-only", action="store_true",
                     help="only build open_npue BERT embedding sets, skip open_kernels dense specs")
+    ap.add_argument("--skip-diffusion", action="store_true",
+                    help="skip the FLUX.2 [klein] diffusion kernel set")
+    ap.add_argument("--diffusion-only", action="store_true",
+                    help="only build the diffusion kernel set")
     ap.add_argument("-j", "--jobs", type=int, default=0,
                    help="parallel kernel builds (default: 0 = auto-detect CPU count)")
     a = ap.parse_args()
@@ -259,6 +303,9 @@ def main() -> int:
     if a.skip_bert and a.bert_only:
         print("FATAL: --skip-bert and --bert-only are mutually exclusive", file=sys.stderr)
         return 1
+    if a.diffusion_only:
+        # --diffusion-only is the narrow run: no dense specs, no BERT
+        a.skip_bert = True
 
     skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
 
@@ -294,17 +341,21 @@ def main() -> int:
     if mlir_aie.is_dir():
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
-    # ---- the two kernel families ---------------------------------------------
+    # ---- the three kernel families -------------------------------------------
     n_failed = 0
-    if not a.bert_only:
+    specs = []
+    if not a.bert_only and not a.diffusion_only:
         specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
         if not specs:
             print("FATAL: no kernel specs found", file=sys.stderr)
             return 1
         n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
-    if not a.skip_bert:
+    if not a.skip_bert and not a.diffusion_only:
         n_failed += export_bert_sets(py, a.force, a.jobs)
+
+    if not a.skip_diffusion:
+        n_failed += export_diffusion_sets(py, a.force, a.jobs)
 
     print(flush=True)
     if n_failed:
@@ -312,8 +363,12 @@ def main() -> int:
         return 1
     if a.bert_only:
         print("kernel export ok: BERT design sets", flush=True)
+    elif a.diffusion_only:
+        print(f"kernel export ok: {DIT_FAMILY} diffusion set", flush=True)
     else:
         suffix = " + BERT design sets" if not a.skip_bert else ""
+        if not a.skip_diffusion:
+            suffix += f" + {DIT_FAMILY} diffusion set"
         print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 

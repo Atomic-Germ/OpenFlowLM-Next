@@ -977,6 +977,18 @@ bundle whose DiT came from `unsloth/FLUX.2-klein-4B-GGUF`'s **Q4_1** file; the t
 -> **4.3 s on the NPU** (text 0.40, steps 3.44, vae 0.42) and a real fox. Bundle layout and
 kernel layout both `c3277a2aa2dd6005`.
 
+**The kernels ship** (`utilities/export-kernels.py` now builds them, so
+`cmake --workflow --preset linux-default` produces `src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
+like the 28 text sets): built in `build/dit-kernels/<family>` (2.3 GiB of per-stream xclbins)
+and INSTALLED into `src/xclbins` (86 MiB: four full ELFs -- 512, 1024, and the two edits --
+plus their manifest). Before this the packaged build had no klein kernels at all, so every
+user would have had to build their own.
+
+Two things to know about it: the layout hash covers the RESOLUTION SET (512-only is
+`c3277a2aa2dd6005`, 512+1024+edits is `e667e5952ca22004`), so a bundle must name the same
+ones; and `--out` is not relocatable once built -- `elf_build/full_elf_config_*.json` bakes
+absolute paths, so moving the directory means deleting `elf_build` and recomposing (~9 min).
+
 **One command** (`klein-from-gguf.py`, the local path until `q4nx-build --open-diffusion`
 takes a GGUF repo and `oflm add` knows what a bundle is):
 
