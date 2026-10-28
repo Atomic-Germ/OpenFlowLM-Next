@@ -977,6 +977,33 @@ bundle whose DiT came from `unsloth/FLUX.2-klein-4B-GGUF`'s **Q4_1** file; the t
 -> **4.3 s on the NPU** (text 0.40, steps 3.44, vae 0.42) and a real fox. Bundle layout and
 kernel layout both `c3277a2aa2dd6005`.
 
+**The product path exists** (`361d41a`): `q4nx-build --open-diffusion -i <gguf-repo> -o <dir>`
+takes a GGUF repo alone -- it picks the DiT GGUF, resolves the checkpoint from the README,
+packs the DiT from the GGUF -- and writes a pullable bundle plus `model_info_entry.json`.
+Verified end to end: the repo's layout `e667e5952ca22004` IS the shipped kernel set's, and
+`oflm image klein-gguf:4b` then reported "Kernels (an xclbins root)" -- nothing beside the
+model -- and produced an image in 4.2 s.
+
+Two CLI fixes that made it work: the converter stack (gguf/mpmath/**torch**) is imported
+where it is used, not at package import (`q4nx/__init__.py` PEP 562 `__getattr__`, `cli.py`
+imports its factories inside the converting branches), so the diffusion path needs numpy and
+ml_dtypes only; and `gguf_source.py` holds the DiT picker/fetcher both this and
+`klein-from-gguf.py` use.
+
+### The EDIT path runs, and is wrong (found 2026-10-27)
+
+`oflm image <tag> "..." --image ref.png` completes -- reference decoded and centre-cropped,
+VAE encode 0.24 s, 6.8 s total -- and the output is **heavily degraded**: on a text image the
+reference's letters ghost through ("major global city an...", "shion, and science") under
+colour noise; on a generated fox it is a noisy silhouette. Text-to-image from the SAME bundle
+is clean, so this is the edit path, not the GGUF conversion and not the quant.
+
+Where to look, in order: the reference latents' scaling/pitch (`pl.enc_buffers`, `inputs`
+`reference_pitch`/`reference_channels`), the VAE encoder packing (`vae_encoder.pack_weights`
+-> `vae_enc_W.bin`) against the decoder's, and whether `kp.plan(R, edit=True)`'s step count
+matches what the bundle was built with (the engine supports 1..50 steps but the CLI has no
+`--steps`, so a 4-step edit cannot be compared at more steps from `oflm image`).
+
 **The kernels ship** (`utilities/export-kernels.py` now builds them, so
 `cmake --workflow --preset linux-default` produces `src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
 like the 28 text sets): built in `build/dit-kernels/<family>` (2.3 GiB of per-stream xclbins)
