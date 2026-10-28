@@ -1,5 +1,50 @@
 # Qwen3.8-27B validation report
 
+## Upstream merge and projection quantization attribution — 2026-10-28
+
+Merged upstream main through `8952f47` in `7f5d636`. No textual conflicts
+occurred. The merged changes add installed-model upgrades to `oflm pull`,
+Windows test fixes and the `AG_TB` attention-GEMM tiling option for Granite.
+The default Qwen tiling and L3 Q4/FP32 arithmetic are unchanged. The model-list
+merge implementation remains intact. Docker application build and CTest pass:
+21 executed tests, 2 skipped, including `oflm_model_registry_merge`,
+`pull_plan` and downloader pinning. The merged settings registry regenerates
+byte-for-byte. Host regression: 1988 passed, 47 skipped. The retained isolated
+L3 projection/table control also passes a post-merge provenance re-audit.
+No retained model/export record was rewritten as a fresh post-merge build.
+
+Added CPU attribution over all 960 current projection controls. Actual captured
+INT16 activations and shifts define the quantized input; two independent weight
+decoders agree exactly. FP64 projections separate signed activation-quantization
+error from the remaining sum-plane/dot/epilogue/accumulation error. Every case
+closes algebraically. Separate audit reconstructs all four NPZ array sets
+byte-for-byte and repeats every measurement.
+
+Activation quantization dominates maximum absolute error in **960/960**
+role/position cases, by **2.97–19.24×** over the arithmetic remainder. Selected
+maxrel measurements share the reference scale within each role/position:
+
+| Role | P125 quantization | P125 remainder | P205 quantization | P205 remainder |
+|---|---:|---:|---:|---:|
+| Q | 4.08024e-5 | 4.30759e-6 | 4.77675e-5 | 7.26463e-6 |
+| Gate | 7.06629e-5 | 4.90734e-6 | 7.22618e-5 | 5.43314e-6 |
+| K | 2.20503e-4 | 1.46467e-5 | 2.16412e-4 | 1.89299e-5 |
+| V | 1.76212e-4 | 1.28938e-5 | 1.71472e-4 | 1.32919e-5 |
+
+The remainder is not isolated accumulation error. Removing a signed term while
+freezing the others is a CPU counterfactual, not a new NPU result. Projection
+dominance at P239 does not supersede its separately observed downstream
+attention/cancellation behavior. Global numerical acceptance remains FAIL.
+No production arithmetic or thresholds changed, and no new NPU build was
+required. Next: test an isolated two-pass INT16 residual-refinement projection,
+preserving exact first-pass controls and checking causal attention before
+considering integration.
+
+TDD: 11 initial failing tests, then 11 passing tests. Full host suite:
+**1999 passed, 47 skipped**. Evidence: `post-prefill-drift/merge-8952f47-*.log`
+and `post-prefill-drift/l3-projection-attribution-v1` under
+`Models/qwen38-27b`, with separate run/audit and RED/GREEN logs.
+
 ## Exact isolated L3 projection control — 2026-10-28
 
 Added a private current-arithmetic Q/gate/K/V replay with activation-table

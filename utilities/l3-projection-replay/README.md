@@ -77,3 +77,45 @@ the exact reconstructed INT16 activation. Keep their signed difference
 separate from the remaining native accumulation/epilogue error. P125/P205 are
 the projection-attribution targets; P239 remains an attention/cancellation
 regression control. Test a precision variant only after this attribution.
+
+## Signed projection attribution — 2026-10-28
+
+`attribute.py` reads the actual audited INT16/shift table, reconstructs its
+activation in FP64, and independently decodes the packed Q4 weights. It
+cross-checks every decoded weight against the existing Q4 decoder before
+computing `W @ x` and `W @ x_quantized` over all 240 positions.
+
+The signed decomposition is:
+
+```text
+activation_quantization = W @ x_quantized - W @ x
+arithmetic_remainder    = native - W @ x_quantized
+total                  = native - W @ x
+```
+
+All effects use the same reference scale within a role/position. The remainder
+includes table sum-plane rounding, dot-product representation, epilogue and
+accumulation; it is not an isolated FP32 accumulation measurement. The frozen
+`without_quantization` counterfactual is not a corrected NPU execution.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/l3-projection-replay/attribute.py run \
+  --capture Models/qwen38-27b/post-prefill-drift/l3-projection-v2 \
+  --out Models/qwen38-27b/post-prefill-drift/l3-projection-attribution-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/l3-projection-replay/attribute.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/l3-projection-attribution-v1
+```
+
+The independent audit repeats all 960 cases and compares four NPZ array sets
+byte-for-byte, including signed vectors and reference projections. INT16
+activation quantization has greater maximum absolute error than the arithmetic
+remainder in **960/960** cases; the ratio ranges from **2.97 to 19.24**.
+At P125/P205, K quantization maxrel is **2.20503e-4 / 2.16412e-4** against
+remainder **1.46467e-5 / 1.89299e-5**. These are conditioned projection errors,
+not final residual errors or full-model acceptance measurements. P239 still
+requires a separate attention/cancellation regression check.
+
+Validation: 11 new tests fail before implementation and pass afterward; full
+host suite **1999 passed, 47 skipped**. The next experiment is an isolated
+two-pass INT16 residual-refinement projection with byte-exact first-pass
+controls, followed by causal attention checks before any production change.
