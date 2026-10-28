@@ -119,3 +119,60 @@ Validation: 11 new tests fail before implementation and pass afterward; full
 host suite **1999 passed, 47 skipped**. The next experiment is an isolated
 two-pass INT16 residual-refinement projection with byte-exact first-pass
 controls, followed by causal attention checks before any production change.
+
+## Two-pass residual refinement — 2026-10-28
+
+`refine.py` reuses the audited one-core binary. For each of 240 positions it
+runs the original FP32 norm, then the exactly representable FP32 residual
+`x - reconstructed_INT16(x)`. The candidate is one explicit **host FP32 add**
+of the two NPU outputs. Every output/table buffer is poisoned before each
+dispatch. The fresh first pass must reproduce all original projections and
+tables bytewise; the second table must exactly match CPU preparation.
+
+```bash
+source utilities/env.sh
+export OPENBLAS_NUM_THREADS=1
+ironvenv/bin/python utilities/l3-projection-replay/refine.py prepare \
+  --source Models/qwen38-27b/post-prefill-drift/l3-projection-v2 \
+  --out Models/qwen38-27b/post-prefill-drift/l3-refinement-v1
+ironvenv/bin/python utilities/l3-projection-replay/refine.py run \
+  --out Models/qwen38-27b/post-prefill-drift/l3-refinement-v1 \
+  --harness Models/qwen38-27b/prefill-sequential-drift/harness-l0-v1/run_kernel
+ironvenv/bin/python utilities/l3-projection-replay/refine.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/l3-refinement-v1
+```
+
+The numerical check independently decodes weights and compares both candidate
+and control with FP64 projections of (a) the captured norm and (b) an unrounded
+norm recomputed from the native layer input. It also checks the correction
+projection itself. Four CPU FP64 attention trajectories start at position zero:
+control, candidate, captured-norm reference and unrounded-norm reference.
+Each uses its own full causal K/V history. Projection maxrel <0.005 and head
+maxabs <0.02 / cosine >0.9999 remain unchanged.
+
+Verified results:
+
+- 480 NPU dispatches; **960/960** exact first-pass projection controls and
+  **480/480** exact tables. The 240 residual inputs reconstruct the original
+  FP32 norms exactly with their first-pass quantized activations.
+- **960/960** candidate projections improve against both references. The
+  captured-norm error reduction is **2.98–19.30×**; the unrounded-norm reduction
+  is **1.95–18.89×**. All correction and primary projection gates pass.
+- Both candidate CPU attention comparisons pass **5760/5760** heads. Maximum
+  head error versus the captured-norm reference falls from **2.80667e-4** to
+  **2.28459e-5**; versus the unrounded-norm reference from **2.79433e-4** to
+  **5.31917e-5**. P125/P205/P239 each improve in these CPU attention comparisons.
+- Separate audit repeats the references and measurements and compares all
+  28 arrays in `numerics.npz` bytewise; all 961 output artifacts are bound.
+- TDD: 11 initial failing tests; 14 final new tests pass. Focused tests:
+  **40 passed**. Full host suite: **2013 passed, 47 skipped**.
+
+`candidate_passed` covers this isolated experiment only. Native attention,
+paired-KV storage, full-layer residuals, full-model propagation and production
+performance have not been validated for the candidate. It doubles projection
+dispatches and weight streaming in this harness; no speed claim is made.
+No new kernels were built and production arithmetic is unchanged.
+
+Next: replay corrected projections through actual NPU attention with causal
+paired-BF16 KV and a byte-exact native control. Keep P239 as a distinct
+attention/cancellation regression case before private full-ax integration.
