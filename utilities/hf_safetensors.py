@@ -18,15 +18,34 @@ import urllib.request
 __all__ = ["index", "tensor", "http_range", "fetch_all", "hf_url"]
 
 
+def _headers(extra: dict | None = None) -> dict:
+    """Request headers, with the HF token when there is one.
+
+    A GATED checkpoint (meta-llama/*, black-forest-labs/FLUX.2-klein-9B) answers 401 to a
+    bare range request while `hf_hub_download` succeeds from the same machine -- the token
+    lives in the hub's cache, and urllib knows nothing about it.
+    """
+    h = dict(extra or {})
+    try:
+        from huggingface_hub import get_token
+
+        tok = get_token()
+        if tok:
+            h["Authorization"] = f"Bearer {tok}"
+    except Exception:
+        pass
+    return h
+
+
 def http_range(url, start, end):
     """Bytes [start, end) of a URL."""
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end - 1}"})
+    req = urllib.request.Request(url, headers=_headers({"Range": f"bytes={start}-{end - 1}"}))
     with urllib.request.urlopen(req, timeout=120) as r:
         return r.read()
 
 
 def fetch_all(url):
-    with urllib.request.urlopen(url, timeout=120) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=_headers()), timeout=120) as r:
         return r.read()
 
 
@@ -63,9 +82,10 @@ def index(repo, prefix=""):
                   and (not p or s["rfilename"].startswith(p + "/"))]
         if p:   # the header lookup below wants names relative to the subfolder
             shards = [sh[len(p) + 1:] for sh in shards]
-        if len(shards) != 1:
-            raise SystemExit(f"{repo}{('/' + p) if p else ''}: {len(shards)} safetensors shards and no index; "
-                             "name the shard explicitly")
+        if not shards:
+            raise SystemExit(f"{repo}{('/' + p) if p else ''}: no safetensors shards")
+        # Several shards and NO index is legal (FLUX.2-klein-9B ships two): each shard's own
+        # header says which tensors it holds, so they are read and merged rather than refused.
     out = {}
     for shard in shards:
         url = hf_url(repo, prefix + shard)

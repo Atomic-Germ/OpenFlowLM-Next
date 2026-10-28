@@ -1006,6 +1006,45 @@ set must name the same ones (512-only is `c3277a2aa2dd6005`, 512+1024+edits is
 `elf_build/full_elf_config_*.json` bakes absolute paths, so moving the directory means
 deleting `elf_build` and recomposing (~9 min).
 
+### 9B: everything builds, the image is wrong -- a NUMERICS gate is what is left (2026-10-28)
+
+Built the whole thing to find out where 9B actually stands:
+
+| step | result |
+|---|---|
+| `export-kernels.py --diffusion-only --diffusion-family FLUX.2-klein-9B-NPU2` | **built**, layout `985e5b18e1f273f2`, 4 ELFs 89.5 MiB, 39 dit_ew streams |
+| `export_bundle --gguf-repo unsloth/FLUX.2-klein-9B-GGUF` (Q8_0) | **built**, 18 GiB, 1310-op schedules (vs the 4B's 1050), same layout |
+| `oflm add ~/klein9b --tag flux2-klein:9b` | **works** (links the 9B set) |
+| `oflm image flux2-klein:9b ... --size 512` | runs, **8.2 s**, and the image is a SOLID COLOUR |
+
+1 step and 4 steps produce the *identical* saturated image, so the fault is upstream of the
+denoiser: the conditioning (TE), the initial latent, or what the VAE is fed -- not the step
+loop. The modulation convention was checked and is right (the 9B Q8_0 measures BFL-ordered,
+so it was flipped), so the prime suspects are the DERIVED packing numbers that no reference
+has confirmed yet: `TE_PAD` 4096, `CTX_LD` 12288, the TE stream layouts at pad 4096, the
+`params.bin` rope tables at EL 4096.
+
+Next: `utilities/dit-chain/chain_test_te.py` at the 9B shapes (the TE chain has a CPU
+reference), then the VAE input. That is a gate, not plumbing -- which is the honest answer to
+"is 9B a spec?": the SHAPE is (one record, derived), the KERNELS are (a dict entry + a
+build), and what remains is the numerics validation every new size needs.
+
+### Six 4B-isms the 9B build exposed (all fixed)
+
+Each was a hard-coded 4B number in code that should have read the Shape:
+
+* `set_streams` never activated the family in `klein_pipeline`, so `gemm_streams()` used the
+  4B globals even for 9B -- `ctx_emb`'s K stayed 7680 and the **layout hash did not move**
+  between two different shapes (the dangerous one: a bundle could have matched the wrong set).
+* `klein_streams` called `qwen3_te_streams` with the 4B encoder's constants for every family.
+* `dit_ew` (design AND `make_test.py`) compile the row element in (`EL = 3072`,
+  `-DEW_EL`): now from `EW_EL`, which the exporter sets per family.
+* `ctx_emb`'s K was the literal 7680 instead of `len(TAPS) * TE_HID`.
+* the packer's ProcessPool workers re-import `klein_pipeline` and start at the DEFAULT shape,
+  so a 9B TE pack built 4B specs -- the family is passed to the pool now.
+* `hf_safetensors` refused a checkpoint with several shards and no index (9B ships two) and
+  sent no HF token, so a GATED checkpoint answered 401 to the modulation check's range read.
+
 ### The shape is DERIVED now, like a text spec (2026-10-28)
 
 `klein_pipeline.shape_from_config(transformer_cfg, text_encoder_cfg)` builds the record from

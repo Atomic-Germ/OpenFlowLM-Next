@@ -36,6 +36,7 @@ import hashlib
 import inspect
 import json
 import sys
+import functools
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -60,8 +61,12 @@ def model_dir() -> Path:
                               "--FLUX.2-klein-4B/snapshots/*"))[0])
 
 
-def _pack_one(sub: str, name: str, cache: str, ckpt: str) -> tuple[str, float]:
+def _pack_one(sub: str, name: str, cache: str, ckpt: str, family: str | None = None) -> tuple[str, float]:
     t0 = time.time()
+    # A pool worker is a fresh interpreter: klein_pipeline starts at its DEFAULT shape, so a
+    # 9B pack would build 4B-shaped specs and fail the shape assert. Activate the family here.
+    if family and family in kp.SHAPES:
+        kp.set_shape(kp.SHAPES[family])
     specs = kp.dit_weight_specs() if sub == "transformer" else kp.te_weight_specs()
     K, N, build = specs[name]
     st = SafeTensors(Path(ckpt) / sub)
@@ -91,7 +96,8 @@ def pack_fingerprint(ckpt: Path) -> str:
 
 
 def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None,
-                  only: tuple[str, ...] = ("transformer", "text_encoder")) -> dict[str, tuple[Path, int]]:
+                  only: tuple[str, ...] = ("transformer", "text_encoder"),
+                  family: str | None = None) -> dict[str, tuple[Path, int]]:
     """{name: (file, bytes)} for every DiT and text-encoder GEMM weight, packing the missing.
     ckpt: the checkpoint directory (default: the HF cache's snapshot).
     only: which halves to pack -- a bundle whose DiT came from a GGUF packs the text
@@ -115,7 +121,7 @@ def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None,
         print(f"packing {len(todo)} weights -> {cache} ({jobs} processes)", flush=True)
         t0 = time.time()
         with ProcessPoolExecutor(jobs) as ex:
-            for i, (n, s) in enumerate(ex.map(_pack_one, [want[n][0] for n in todo], todo,
+            for i, (n, s) in enumerate(ex.map(functools.partial(_pack_one, family=family), [want[n][0] for n in todo], todo,
                                               [str(cache)] * len(todo), [str(ckpt)] * len(todo))):
                 if i % 20 == 0 or i == len(todo) - 1:
                     print(f"  [{i + 1}/{len(todo)}] {n} {s:.1f} s", flush=True)

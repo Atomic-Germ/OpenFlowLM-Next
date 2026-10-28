@@ -188,12 +188,13 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
         packed = _pack_dit_from_gguf(pack_cache, dit_get)
         # its own subdirectory: ensure_packed stamps the cache with the CHECKPOINT's identity
         # and clears every *.bin that does not match, which would drop the DiT packs above
-        packed |= G.ensure_packed(pack_cache / "text_encoder", jobs, ckpt, only=("text_encoder",))
+        packed |= G.ensure_packed(pack_cache / "text_encoder", jobs, ckpt, only=("text_encoder",),
+                                  family=fam)
     else:
         dit = G.SafeTensors(ckpt / "transformer")
         dit_get = dit.get
         kp.validate_sources(dit_get, te.get)
-        packed = G.ensure_packed(pack_cache, jobs, ckpt)
+        packed = G.ensure_packed(pack_cache, jobs, ckpt, family=fam)
     weights, off = {}, 0
     with open(out / "weights.bin", "wb") as f:
         for n, (p, nb) in packed.items():

@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
 
-EL = 3072
+EL = int(os.environ.get("EW_EL", "3072"))   # the family's hidden (klein_pipeline sets it)
 HD = 128
 THETA = 2000.0
 

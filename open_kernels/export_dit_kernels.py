@@ -320,6 +320,12 @@ def set_streams(family: str, resolutions: list[int], vae: bool = True,
     """{set: {stream: spec}}: what main() builds, and each set's marker lists as `streams`.
     edits: the resolutions that also get an edit configuration (each must be a resolution)."""
     assert set(edits) <= set(resolutions), (edits, resolutions)
+    # The pipeline's globals ARE the active family: klein_streams takes its shape as arguments,
+    # but gemm_streams()/ew_streams() read the module-level names (ctx_emb's K is TAPS x TE_HID,
+    # the ew TE widths), so without this a 9B build silently used the 4B's text encoder and the
+    # layout hash did not move. Set it before any stream is built.
+    if family in klein_pipeline.SHAPES:
+        klein_pipeline.set_shape(klein_pipeline.SHAPES[family])
     sets = {"gemm": klein_streams(resolutions, **FAMILIES[family], edits=edits)}
     if family in FA_FAMILIES:
         sets["fa"] = klein_fa_streams(resolutions, **FA_FAMILIES[family], edits=edits)

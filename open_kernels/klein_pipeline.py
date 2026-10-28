@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -365,6 +366,13 @@ def _pack():
 
 
 def _ew_params():
+    """The dit_ew parameter builders, at the ACTIVE shape's row element.
+
+    make_test.py is re-executed on every call (see _load) and reads EW_EL, so setting it here
+    is what keeps its RoPE tables and qk blocks the family's width -- they are 3072-long
+    tables on the 4B and 4096-long on the 9B, and a mismatch fails `fill_params`' size assert.
+    """
+    os.environ["EW_EL"] = str(EL)
     return _load("dit_ew_make_test", HERE / "designs" / "dit_ew" / "make_test.py")
 
 
@@ -399,7 +407,7 @@ def dit_weight_specs() -> dict[str, tuple]:
         "t_emb1": (512, H, lambda g: pad_rows(g("time_guidance_embed.timestep_embedder.linear_1.weight").T, 512)),
         "t_emb2": (H, H, lambda g: g("time_guidance_embed.timestep_embedder.linear_2.weight").T),
         "mod": (H, MOD_N, mod_weight),
-        "ctx_emb": (7680, H, lambda g: g("context_embedder.weight").T),
+        "ctx_emb": (len(TAPS) * TE_HID, H, lambda g: g("context_embedder.weight").T),
         "x_emb": (512, H, lambda g: pad_rows(g("x_embedder.weight").T, 512)),
         "proj_out": (H, 1024, lambda g: pad_cols(g("proj_out.weight").T, 1024)),
     }
@@ -791,7 +799,7 @@ def plan(R: int, steps: int = STEPS, edit: bool = False) -> Plan:
 def gemm_streams() -> dict[str, dict]:
     """dit_gemm streams this pipeline adds to export_dit_kernels.klein_streams."""
     return {"mod": dict(M=512, K=H, N=MOD_N, role="modulation, all steps (M = steps padded)"),
-            "ctx_emb": dict(M=L_TXT, K=7680, N=H, layout={"lda": CTX_LD, "a_size": L_TXT * CTX_LD},
+            "ctx_emb": dict(M=L_TXT, K=len(TAPS) * TE_HID, N=H, layout={"lda": CTX_LD, "a_size": L_TXT * CTX_LD},
                             role="context_embedder (CTX row stride 8192)")}
 
 
