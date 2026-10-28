@@ -977,7 +977,21 @@ bundle whose DiT came from `unsloth/FLUX.2-klein-4B-GGUF`'s **Q4_1** file; the t
 -> **4.3 s on the NPU** (text 0.40, steps 3.44, vae 0.42) and a real fox. Bundle layout and
 kernel layout both `c3277a2aa2dd6005`.
 
-The recipe, end to end (a full run is ~25 min on this box, mostly the kernel build):
+**One command** (`klein-from-gguf.py`, the local path until `q4nx-build --open-diffusion`
+takes a GGUF repo and `oflm add` knows what a bundle is):
+
+    python utilities/dit-chain/klein-from-gguf.py --repo unsloth/FLUX.2-klein-4B-GGUF \
+        --tag klein-gguf:512 --image "a red fox in fresh snow"
+
+It picks the DiT GGUF (Q4_1 first, downloading it), resolves the checkpoint from the repo's
+README, builds the bundle, builds+installs the kernel set for the same resolutions if it is
+not already beside the bundle, registers the tag, and optionally generates an image. A
+second run is seconds; a first run is ~25 min, the kernel build dominating. Verified with
+`--repo` alone (cache hit) as well as `--gguf <file> --repo <owner/name>`: a fox, a
+lighthouse, ramen, a snow leopard and a retriever puppy, all 4.2-4.4 s each.
+
+The four steps it drives, if one of them needs debugging (a full run is ~25 min on this box,
+mostly the kernel build):
 
 ```
 # 1. the bundle: DiT from the GGUF, TE + VAE from the checkpoint (~9 min; 4.5 GB pack cache)
