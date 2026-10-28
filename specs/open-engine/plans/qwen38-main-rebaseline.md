@@ -1,5 +1,48 @@
 # Qwen3.8-27B validation report
 
+## Two-pass L3 projection refinement — 2026-10-28
+
+Added an isolated residual-refinement runner using the existing audited GEMV
+binary. At each position, one NPU pass projects the captured FP32 norm and a
+second projects `x - reconstructed_INT16(x)`. The residual is verified to be
+exactly representable in FP32. One explicit host FP32 addition composes the
+candidate. Independent CPU FP64 references decode the weights and recompute
+both captured-norm and unrounded layer-input-norm projections.
+
+All 480 NPU dispatches complete. **960/960** fresh first-pass projections match
+the original native control bytewise, and **480/480** tables match the CPU
+construction. All **960/960** candidate projections improve against both
+references: **2.98–19.30×** lower maximum error for captured norms and
+**1.95–18.89×** for independently recomputed norms. The correction projections
+and primary projection gates all pass at the unchanged 0.005 maxrel bound.
+
+Four separate causal CPU attention trajectories retain their own K/V histories
+from position zero. Candidate and control both pass the existing 5760 head
+gates against each reference (maxabs <0.02, cosine >0.9999):
+
+| CPU attention reference | Control maximum error | Candidate maximum error |
+|---|---:|---:|
+| Captured FP32 norm | 2.80667e-4 | 2.28459e-5 |
+| Independent unrounded norm | 2.79433e-4 | 5.31917e-5 |
+
+P125, P205 and P239 each improve in these CPU attention comparisons. The
+separate audit reproduces all 28 numerical arrays bytewise and binds 961
+output artifacts. TDD starts with 11 failures; all 14 final new tests pass.
+Focused suite: 40 passed. Full host suite: **2013 passed, 47 skipped**.
+Evidence is retained in `Models/qwen38-27b/post-prefill-drift/l3-refinement-v1`
+and the corresponding preparation/run/audit/RED/GREEN logs. Reproduction is
+documented in `utilities/l3-projection-replay/README.md`.
+
+This is NPU projection arithmetic plus host addition and CPU attention.
+Native attention/KV, full-layer residuals and full-model propagation remain
+unverified for the candidate. Two passes also double projection dispatches
+and weight streaming in this harness; production performance is not measured.
+No new binary was built and no production arithmetic, installed configuration
+or acceptance threshold changed. Global numerical acceptance remains FAIL.
+Next: an exact native attention control followed by corrected projections with
+causal paired-BF16 KV, preserving P239 as a cancellation regression case before
+private full-ax integration.
+
 ## Upstream merge and projection quantization attribution — 2026-10-28
 
 Merged upstream main through `8952f47` in `7f5d636`. No textual conflicts
