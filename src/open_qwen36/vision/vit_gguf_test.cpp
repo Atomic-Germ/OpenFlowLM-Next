@@ -264,6 +264,150 @@ float bf16_round(float f) {
     return out;
 }
 
+// ------------------------------------------------------- Qwen2.5-VL's windowed tower
+// Same file format, different tower: split q/k/v, RMSNorm (no bias), SwiGLU, a merger whose
+// norm is over `hidden`, and attention inside 112-px windows except in the blocks the
+// pattern names. Its metadata has NO merge size and NO FFN width, so those come from the
+// shapes -- which is what this checks.
+Gguf make_projector_qwen25(const Shape& s, size_t seed = 1) {
+    Gguf g;
+    const int H = s.hidden, I = s.inter, M = s.merge * s.merge, P = s.patch, C = s.channels, T = s.temporal;
+    g.m_str("general.architecture", "clip");
+    g.m_u32("clip.has_vision_encoder", 1);
+    g.m_str("clip.projector_type", "qwen2.5vl_merger");
+    g.m_u32("clip.vision.block_count", static_cast<uint32_t>(s.depth));
+    g.m_u32("clip.vision.embedding_length", static_cast<uint32_t>(H));
+    g.m_u32("clip.vision.attention.head_count", static_cast<uint32_t>(s.heads));
+    g.m_u32("clip.vision.projection_dim", static_cast<uint32_t>(s.out));
+    g.m_u32("clip.vision.patch_size", static_cast<uint32_t>(P));
+    g.m_u32("clip.vision.feed_forward_length", 0);          // as the real file: the shapes say it
+    g.m_u32("clip.vision.n_wa_pattern", static_cast<uint32_t>(s.depth));   // every depth-th block is full
+    g.m_f32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
+
+    for (int t = 0; t < T; ++t) {
+        std::vector<float> v(static_cast<size_t>(P) * P * C * H);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = val(seed + 3 * t, i);
+        g.t_f16(t == 0 ? "v.patch_embd.weight" : "v.patch_embd.weight." + std::to_string(t),
+                {static_cast<uint64_t>(P), static_cast<uint64_t>(P), static_cast<uint64_t>(C),
+                 static_cast<uint64_t>(H)}, v);
+    }
+    {   // llama.cpp writes this one and this tower does not read it (2-D RoPE)
+        std::vector<float> v(100);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = val(seed + 5, i);
+        g.t_f32("v.position_embd.weight", {10, 10}, v);
+    }
+    {
+        std::vector<float> v(H);
+        for (int i = 0; i < H; ++i) v[i] = val(seed + 7, i);
+        g.t_f32("v.post_ln.weight", {static_cast<uint64_t>(H)}, v);
+    }
+    auto linear = [&](const std::string& n, int in, int out, size_t sd) {
+        std::vector<float> v(static_cast<size_t>(in) * out);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = val(sd, i);
+        g.t_f32(n + ".weight", {static_cast<uint64_t>(in), static_cast<uint64_t>(out)}, v);
+        std::vector<float> b(out);
+        for (int i = 0; i < out; ++i) b[i] = val(sd + 1, i);
+        g.t_f32(n + ".bias", {static_cast<uint64_t>(out)}, b);
+    };
+    for (int l = 0; l < s.depth; ++l) {
+        const std::string b = "v.blk." + std::to_string(l) + ".";
+        for (const char* nm : {"ln1", "ln2"}) {
+            std::vector<float> v(H);
+            for (int i = 0; i < H; ++i) v[i] = val(seed + 11 + l, i);
+            g.t_f32(b + nm + ".weight", {static_cast<uint64_t>(H)}, v);   // RMSNorm: no bias
+        }
+        linear(b + "attn_q", H, H, seed + 13);
+        linear(b + "attn_k", H, H, seed + 17);
+        linear(b + "attn_v", H, H, seed + 19);
+        linear(b + "attn_out", H, H, seed + 23);
+        linear(b + "ffn_gate", H, I, seed + 29);
+        linear(b + "ffn_up", H, I, seed + 31);
+        linear(b + "ffn_down", I, H, seed + 37);
+    }
+    auto merger = [&](const std::string& pre, int in, int out, size_t sd) {
+        std::vector<float> v(static_cast<size_t>(in) * out);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = val(sd, i);
+        g.t_f32(pre + ".weight", {static_cast<uint64_t>(in), static_cast<uint64_t>(out)}, v);
+        std::vector<float> b(out);
+        for (int i = 0; i < out; ++i) b[i] = val(sd + 1, i);
+        g.t_f32(pre + ".bias", {static_cast<uint64_t>(out)}, b);
+    };
+    merger("mm.0", H * M, H * M, seed + 41);
+    merger("mm.2", H * M, s.out, seed + 43);
+    return g;
+}
+
+int run_qwen25() {
+    using namespace open_qwen36::vision;
+    Shape s;
+    s.depth = 2;
+    s.hidden = 8;
+    s.heads = 2;
+    s.inter = 20;
+    s.out = 6;
+    s.patch = 2;
+    s.temporal = 2;
+    s.merge = 2;
+    s.channels = 3;
+    s.npos = 0;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "oflm-vit-gguf-test" / "qwen25";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "mmproj.gguf").string();
+    make_projector_qwen25(s).write(path);
+    // the window is NOT in the projector; config.json states it (and this is the shape a
+    // GGUF install keeps from the base repo or writes from the projector)
+    {
+        std::ofstream f((dir / "config.json").string());
+        f << R"({"model_type":"qwen2_5_vl","vision_config":{"window_size":8,"fullatt_block_indexes":[1]}})";
+    }
+
+    const VitConfig cfg = VitConfig::from_gguf(path);
+    check(cfg.family == VitFamily::Qwen25VL, "qwen2.5: family is the windowed tower");
+    check(cfg.depth == 2 && cfg.hidden == 8 && cfg.heads == 2 && cfg.head_dim == 4, "qwen2.5: geometry from clip.*");
+    check(cfg.inter == 20, "qwen2.5: FFN width from the block's shape (the metadata says 0)");
+    check(cfg.merge == 2 && cfg.out == 6, "qwen2.5: merge from the merger's width, out from projection_dim");
+    check(cfg.window == 8 && cfg.fullatt.size() == 1 && cfg.fullatt[0] == 1, "qwen2.5: window + full-attention blocks from config.json");
+    check(cfg.temporal == 2 && cfg.channels == 3 && cfg.npos == 0, "qwen2.5: temporal slices, channels, no position table");
+
+    const VitWeights w = load_vit(path, cfg);
+    {
+        const Gguf fresh = make_projector_qwen25(s);   // kept alive: `t` points into it
+        const Tensor* t = nullptr;
+        for (const Tensor& x : fresh.tensors)
+            if (x.name == "v.blk.0.attn_k.weight") t = &x;
+        bool ok = t != nullptr;
+        if (ok)
+            for (int o = 0; ok && o < s.hidden; ++o)
+                for (int i = 0; ok && i < s.hidden; ++i)
+                    ok = near(open_qwen36::bf16_to_f32(w.blocks[0].k.w[static_cast<size_t>(o) * s.hidden + i]),
+                              bf16_round(t->f32[static_cast<size_t>(i) + static_cast<size_t>(s.hidden) * o]));
+        check(ok, "qwen2.5: split k_proj transposed to [out, in]");
+    }
+    check(w.blocks[0].ln1_b.empty(), "qwen2.5: RMSNorm has no bias");
+    check(w.blocks[0].gate.out == s.inter && w.blocks[0].down.in == s.inter, "qwen2.5: SwiGLU gate/up/down shapes");
+    check(w.merger_ln_w.size() == static_cast<size_t>(s.hidden), "qwen2.5: merger norm over hidden");
+    check(w.merger_fc2.out == s.out && w.merger_fc2.in == s.hidden * 4, "qwen2.5: merger fc2 [out, hidden*merge^2]");
+
+    {
+        // a projector whose window cannot be found is refused, not guessed
+        const std::filesystem::path lonely = std::filesystem::temp_directory_path() / "oflm-vit-gguf-test" / "qwen25-nowindow";
+        std::filesystem::create_directories(lonely);
+        const std::string p2 = (lonely / "mmproj.gguf").string();
+        Gguf g2 = make_projector_qwen25(s);
+        for (Meta& m : g2.kv)
+            if (m.key == "clip.vision.n_wa_pattern") m.u32 = 0;   // no pattern either
+        g2.write(p2);
+        bool threw = false;
+        try {
+            VitConfig::from_gguf(p2);
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("window") != std::string::npos;
+        }
+        check(threw, "qwen2.5: refuses a projector with no window anywhere");
+    }
+    return g_failed;
+}
+
 int run() {
     using namespace open_qwen36::vision;
     const Shape s;
@@ -364,16 +508,16 @@ int run() {
     {
         Gguf other = make_projector(s);
         for (Meta& m : other.kv)
-            if (m.key == "clip.projector_type") m.str = "qwen2.5vl_merger";
+            if (m.key == "clip.projector_type") m.str = "siglip_merger";
         const std::string p2 = (dir / "other-projector.gguf").string();
         other.write(p2);
         bool threw = false;
         try {
             VitConfig::from_gguf(p2);
         } catch (const std::exception& e) {
-            threw = std::string(e.what()).find("not implemented") != std::string::npos;
+            threw = std::string(e.what()).find("this reader runs") != std::string::npos;
         }
-        check(threw, "refuses a projector this reader does not run, naming it not implemented");
+        check(threw, "refuses a projector this reader does not run, naming the ones it does");
     }
     {
         Gguf other = make_projector(s);
@@ -395,4 +539,8 @@ int run() {
 
 }  // namespace
 
-int main() { return run(); }
+int main() {
+    const int a = run();
+    const int b = run_qwen25();
+    return (a || b) ? 1 : 0;
+}

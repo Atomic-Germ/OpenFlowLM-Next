@@ -968,6 +968,45 @@ Three pieces made it work beyond the reader:
    `rope_parameters` from `qwen3vl.rope.dimension_sections` ([24,20,20,0] -> [24,20,20],
    interleaved, which is Qwen3-VL's law).
 
+### Qwen2.5-VL: the window is the one thing the projector does not state (2026-10-27)
+
+Same install path, different tower -- and one surprise: **Qwen2.5-VL needs NO new kernel
+set.** Its decoder IS Qwen2.5-3B's (hidden 2048, 36 layers, FF 11008, 16/2, theta 1e6), the
+M-RoPE lives in config.json, and `kernel_hash` ignores `extra` -- so `qwen2vl` hashes
+byte-identically to `qwen25-3b` and runs on `Qwen2.5-3B-Instruct-NPU2`
+(`test_gguf_section.py::test_a_qwen2vl_checkpoint_hashes_to_its_text_sibling`).
+
+Verified on the NPU, no environment: `oflm add mradermacher/Qwen2.5-VL-3B-Instruct-i1-GGUF`
+(i1 has Q4_1; the projector is the non-i1 repo's `mmproj-fp16.gguf`), then
+`oflm serve qwen2.5-vl:3b`: text "The capital of France is Paris.", and `paris.png` ->
+"The image contains a text block with information about the capital of France, Paris."
+(tower 32 blocks in 1.1 s, 624 image tokens, no deepstack).
+
+The tower's own differences, all of which the reader handles from the FILE:
+
+* **`clip.projector_type = qwen2.5vl_merger`** -- split `v.blk.N.attn_q/k/v` (Qwen3-VL
+  fuses them), `ffn_gate/up/down` (SwiGLU), `ln1/ln2` with NO bias (RMSNorm),
+  `v.post_ln` (weight only), `mm.0`/`mm.2`, and **no patch bias**.
+* **The metadata omits the merge size and the FFN width** (`clip.vision.feed_forward_length`
+  is literally 0). Both come from shapes: `mm.0` is `[hidden*merge^2, hidden*merge^2]`,
+  `v.blk.0.ffn_gate.weight` is `[hidden, inter]`.
+* **The window's edge is NOWHERE in the projector.** llama.cpp states only
+  `clip.vision.n_wa_pattern` (every Nth block attends over the whole image); the 112 px
+  window is an architecture constant. `qwen25_from_gguf` reads `window_size` (and
+  `fullatt_block_indexes`) from config.json's `vision_config`, derives the block list from
+  the pattern when only that is present, and REFUSES with a message naming both numbers
+  when neither is available. That is why `repair_config_from_gguf` now KEEPS an existing
+  `vision_config` and only fills what the projector states -- Qwen2.5-VL's own config has
+  `window_size` 112 and `fullatt_block_indexes [7,15,23,31]`.
+* **`mrope_interleaved` is family law**, not a constant: Qwen3-VL interleaves the three
+  axes' rotary pairs, Qwen2.5-VL does not. The install takes a stated value first, else
+  `qwen3vl` -> true and everything else -> false.
+
+`check-mmproj.py` earns its keep here too: Qwen2.5-VL's checkpoint has ONE fused
+`attn.qkv` (llama.cpp splits it) under a bare `visual.` prefix (Qwen3-VL's is
+`model.visual.`), so the script resolves prefixes and slices the fused third. All 11
+tensors agree to max|d|/rms ~1e-6.
+
 ### Two bugs that only showed up at load (both pinned by tests now)
 
 1. **`core.cpp` skipped the GGUF section when the chunk laws matched.** It compared

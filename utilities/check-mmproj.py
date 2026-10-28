@@ -211,27 +211,68 @@ def main(argv=None):
           f"hidden {hidden}, patch {patch}, blocks {kv.get('clip.vision.block_count')}")
 
     failed = 0
-    # (projector tensor, HF tensor, how the C++ reads it)
-    checks = [
-        ("v.patch_embd.weight", "model.visual.patch_embed.proj.weight", "patch conv, slice 0"),
-        ("v.patch_embd.weight.1", "model.visual.patch_embed.proj.weight", "patch conv, slice 1"),
-        ("v.blk.0.attn_qkv.weight", "model.visual.blocks.0.attn.qkv.weight", "fused qkv, [in,out] -> [out,in]"),
-        ("v.blk.0.attn_out.weight", "model.visual.blocks.0.attn.proj.weight", "o_proj"),
-        ("v.blk.0.ffn_up.weight", "model.visual.blocks.0.mlp.linear_fc1.weight", "fc1"),
-        ("mm.0.weight", "model.visual.merger.linear_fc1.weight", "merger fc1"),
-        ("mm.2.weight", "model.visual.merger.linear_fc2.weight", "merger fc2"),
-        ("v.deepstack.5.fc1.weight", "model.visual.deepstack_merger_list.0.linear_fc1.weight", "deepstack fc1"),
-        ("v.position_embd.weight", "model.visual.pos_embed.weight", "position table"),
-    ]
-    for gname, hname, what in checks:
+    # (projector tensor, HF tensor, how the C++ reads it). The two towers differ in almost
+    # every name: Qwen3-VL fuses qkv and has a 2-layer GELU MLP; Qwen2.5-VL keeps q/k/v
+    # apart with a SwiGLU MLP and a 2-D position table the tower ignores.
+    proj = kv.get("clip.projector_type")
+    if proj == "qwen2.5vl_merger":
+        checks = [
+            ("v.patch_embd.weight", "patch_embed.proj.weight", "patch conv, slice 0"),
+            ("v.patch_embd.weight.1", "patch_embed.proj.weight", "patch conv, slice 1"),
+            # Qwen2.5-VL's checkpoint keeps ONE fused qkv and llama.cpp splits it; the
+            # third index says which slice to compare against.
+            ("v.blk.0.attn_q.weight", "blocks.0.attn.qkv.weight", "q_proj (1/3 of qkv)", 0),
+            ("v.blk.0.attn_k.weight", "blocks.0.attn.qkv.weight", "k_proj (2/3 of qkv)", 1),
+            ("v.blk.0.attn_v.weight", "blocks.0.attn.qkv.weight", "v_proj (3/3 of qkv)", 2),
+            ("v.blk.0.attn_out.weight", "blocks.0.attn.proj.weight", "o_proj"),
+            ("v.blk.0.ffn_gate.weight", "blocks.0.mlp.gate_proj.weight", "gate"),
+            ("v.blk.0.ffn_up.weight", "blocks.0.mlp.up_proj.weight", "up"),
+            ("v.blk.0.ffn_down.weight", "blocks.0.mlp.down_proj.weight", "down"),
+            ("mm.0.weight", "merger.mlp.0.weight", "merger fc1"),
+            ("mm.2.weight", "merger.mlp.2.weight", "merger fc2"),
+        ]
+    else:
+        checks = [
+            ("v.patch_embd.weight", "patch_embed.proj.weight", "patch conv, slice 0"),
+            ("v.patch_embd.weight.1", "patch_embed.proj.weight", "patch conv, slice 1"),
+            ("v.blk.0.attn_qkv.weight", "model.visual.blocks.0.attn.qkv.weight", "fused qkv, [in,out] -> [out,in]"),
+            ("v.blk.0.attn_out.weight", "blocks.0.attn.proj.weight", "o_proj"),
+            ("v.blk.0.ffn_up.weight", "model.visual.blocks.0.mlp.linear_fc1.weight", "fc1"),
+            ("mm.0.weight", "model.visual.merger.linear_fc1.weight", "merger fc1"),
+            ("mm.2.weight", "model.visual.merger.linear_fc2.weight", "merger fc2"),
+            ("v.deepstack.5.fc1.weight", "model.visual.deepstack_merger_list.0.linear_fc1.weight", "deepstack fc1"),
+            ("v.position_embd.weight", "model.visual.pos_embed.weight", "position table"),
+        ]
+    def resolve(name, third=None):
+        """The checkpoint's tensor for a name, under either tower prefix.
+
+        Qwen3-VL wraps it (`model.visual.`), Qwen2.5-VL does not (`visual.`) -- and both
+        are written differently again by each converter, which is the point of reading the
+        checkpoint rather than trusting a name.
+        """
+        for cand in (name, "model." + name, "visual." + name, "model.visual." + name):
+            if cand in st:
+                vals, shape = safetensor(st[cand])
+                if third is not None:
+                    rows = shape[0] // 3
+                    if rows * 3 != shape[0]:
+                        raise SystemExit(f"{cand} is not a 3-way fused qkv")
+                    vals = vals[third * rows * shape[1]:(third + 1) * rows * shape[1]]
+                    shape = [rows, shape[1]]
+                return vals, shape
+        return None, None
+
+    for entry in checks:
+        gname, hname, what = entry[0], entry[1], entry[2]
+        third = entry[3] if len(entry) > 3 else None
         if gname not in tensors:
             print(f"  skip  {gname} (not in this projector)")
             continue
-        if hname not in st:
+        svals, sshape = resolve(hname, third)
+        if svals is None:
             print(f"  skip  {gname} ({hname} not in the checkpoint)")
             continue
         gvals = gguf_tensor(a.mmproj, tensors, data_base, gname)
-        svals, sshape = safetensor(st[hname])
         ty, dims, _ = tensors[gname]
         # both sides are row-major in their own layout; compare the raw storage after
         # the mapping this reader performs

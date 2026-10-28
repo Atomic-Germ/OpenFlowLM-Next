@@ -152,8 +152,11 @@ def test_config_model_type_resolves_family():
         {"architectures": ["Qwen3ForCausalLM"]}) == "qwen3"
     assert oflm_add.family_from_config_dict(
         {"architectures": ["GraniteForCausalLM"]}) == "granite"
-    # Vision-language shapes never fold onto a text family.
-    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) is None
+    # A VISION family is its own family, never folded onto the text one it borrows kernels
+    # from (qwen2vl runs on qwen2's set, and the adapter that prepares images is chosen by
+    # the former).
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) == "qwen2vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen3_vl"}) == "qwen3vl"
     # Unknown shapes and garbage yield None, not an error.
     assert oflm_add.family_from_config_dict({"model_type": "mixtral"}) is None
     assert oflm_add.family_from_config_dict({}) is None
@@ -1022,3 +1025,13 @@ def test_a_gguf_vl_install_describes_its_tower_from_the_projector(tmp_path):
     assert cfg["image_token_id"] == 151655 and cfg["vision_start_token_id"] == 151652
     assert cfg["rope_parameters"]["mrope_section"] == [24, 20, 20]
     assert cfg["rope_parameters"]["mrope_interleaved"] is True
+
+
+def test_a_vision_checkpoint_is_named_by_its_arch_not_its_kernels():
+    """Qwen2.5-VL runs on the plain Qwen2.5-3B set (same decoder; M-RoPE is config), so the
+    KERNEL family is qwen2. The model is still qwen2vl -- that is what picks the adapter
+    that prepares images -- so the arch has to win over the kernel set."""
+    assert oflm_add.GGUF_ARCH_FAMILIES["qwen2vl"] == "qwen2vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) == "qwen2vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl_text"}) == "qwen2vl"
+    assert oflm_add.GGUF_ARCH_FAMILIES["qwen3vl"] == "qwen3vl"

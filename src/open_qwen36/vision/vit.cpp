@@ -680,6 +680,106 @@ VitConfig VitConfig::qwen3vl_from_tensors(const std::string& vision_q4nx_path, i
     return c;
 }
 
+namespace {
+
+/// Qwen2.5-VL's window and full-attention blocks.
+///
+/// The mmproj states the PATTERN (`clip.vision.n_wa_pattern`: every Nth block attends over
+/// the whole image) but never the window's edge, which llama.cpp keeps as an architecture
+/// constant. config.json's `vision_config` has both (`window_size`, and the explicit
+/// `fullatt_block_indexes` list), and a GGUF install keeps or writes one -- so read them
+/// there, and derive the list from the pattern when only the pattern is available.
+bool qwen25_attention(const std::string& config_json_path, int depth, int patch, int merge,
+                      int pattern, int& window, std::vector<int>& fullatt) {
+    std::ifstream f(config_json_path);
+    if (f) {
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        if (j.is_object() && j.contains("vision_config") && j["vision_config"].is_object()) {
+            const nlohmann::json& v = j["vision_config"];
+            window = v.value("window_size", 0);
+            if (v.contains("fullatt_block_indexes") && v["fullatt_block_indexes"].is_array())
+                for (const auto& e : v["fullatt_block_indexes"]) fullatt.push_back(e.get<int>());
+        }
+    }
+    if (fullatt.empty() && pattern > 0)
+        for (int i = 0; i < depth; ++i)
+            if ((i + 1) % pattern == 0) fullatt.push_back(i);
+    if (window > 0) return true;
+    if (pattern <= 0) return false;
+    // Qwen2.5-VL's published window is 112 px = eight 14-px patches, and llama.cpp bakes
+    // the same relation in. Checked below against patch*merge, so a different patch size
+    // cannot silently inherit it.
+    window = 8 * patch;
+    return window % (patch * merge) == 0;
+}
+
+}  // namespace
+
+/// Qwen2.5-VL's projector: the windowed tower, which llama.cpp also splits into one
+/// [P, P, C, hidden] conv per temporal slice. Its metadata has no merge size and no FFN
+/// width (`clip.vision.feed_forward_length` is 0), so those come from the shapes: the
+/// merger's fc1 is [hidden*merge^2, hidden*merge^2] and a block's ffn_gate is [hidden, inter].
+VitConfig qwen25_from_gguf(const GgufFile& g, const std::string& mmproj_path) {
+    auto num = [&](const char* k) {
+        if (!g.kv_has(k)) throw std::runtime_error("vit: " + mmproj_path + " has no " + k);
+        return g.kv_u64(k);
+    };
+    VitConfig c;
+    c.family = VitFamily::Qwen25VL;
+    c.depth = static_cast<int>(num("clip.vision.block_count"));
+    c.hidden = static_cast<int>(num("clip.vision.embedding_length"));
+    c.heads = static_cast<int>(num("clip.vision.attention.head_count"));
+    c.out = static_cast<int>(num("clip.vision.projection_dim"));
+    c.patch = static_cast<int>(num("clip.vision.patch_size"));
+    c.eps = g.kv_has("clip.vision.attention.layer_norm_epsilon")
+                ? static_cast<float>(g.kv_f64("clip.vision.attention.layer_norm_epsilon"))
+                : 1e-6f;
+    c.npos = 0;                                  // 2-D RoPE; there is no learned table
+    if (c.hidden <= 0 || c.heads <= 0 || c.hidden % c.heads)
+        throw std::runtime_error("vit: clip.vision.embedding_length is not a multiple of head_count");
+    c.head_dim = c.hidden / c.heads;
+
+    const GgufFile::TensorInfo& pe = g.tensor("v.patch_embd.weight");
+    if (pe.dims.size() != 4 || static_cast<int>(pe.dims[0]) != c.patch ||
+        static_cast<int>(pe.dims[1]) != c.patch || static_cast<int>(pe.dims[3]) != c.hidden)
+        throw std::runtime_error("vit: " + mmproj_path + ": v.patch_embd.weight is not [P, P, C, hidden]");
+    c.channels = static_cast<int>(pe.dims[2]);
+    c.temporal = 1;
+    while (g.has("v.patch_embd.weight." + std::to_string(c.temporal))) ++c.temporal;
+
+    const GgufFile::TensorInfo& gate = g.tensor("v.blk.0.ffn_gate.weight");   // [hidden, inter]
+    if (gate.dims.size() != 2 || static_cast<int>(gate.dims[0]) != c.hidden)
+        throw std::runtime_error("vit: v.blk.0.ffn_gate.weight is not [hidden, inter]");
+    c.inter = static_cast<int>(gate.dims[1]);
+
+    const GgufFile::TensorInfo& mm0 = g.tensor("mm.0.weight");                // [hidden*M, hidden*M]
+    if (mm0.dims.size() != 2 || static_cast<int>(mm0.dims[0]) != static_cast<int>(mm0.dims[1]))
+        throw std::runtime_error("vit: mm.0.weight is not square");
+    const int width = static_cast<int>(mm0.dims[0]);
+    if (width % c.hidden) throw std::runtime_error("vit: the merger width is not a multiple of hidden");
+    int merge = 1;
+    while (merge * merge * c.hidden < width) ++merge;
+    if (merge * merge * c.hidden != width)
+        throw std::runtime_error("vit: the merger width is not hidden times a square merge factor");
+    c.merge = merge;
+
+    const int pattern = g.kv_has("clip.vision.n_wa_pattern")
+                            ? static_cast<int>(g.kv_u64("clip.vision.n_wa_pattern")) : 0;
+    const std::string cfg = (std::filesystem::path(mmproj_path).parent_path() / "config.json").string();
+    if (!qwen25_attention(cfg, c.depth, c.patch, c.merge, pattern, c.window, c.fullatt))
+        throw std::runtime_error(
+            "vit: " + mmproj_path + " is Qwen2.5-VL's windowed projector, which does not state its "
+            "window's edge; config.json beside it must carry vision_config.window_size (and "
+            "fullatt_block_indexes, or clip.vision.n_wa_pattern). Qwen2.5-VL-3B's are 112 and [7,15,23,31].");
+    for (int i : c.fullatt)
+        if (i < 0 || i >= c.depth)
+            throw std::runtime_error("vit: fullatt block " + std::to_string(i) + " is outside the tower");
+    if (c.window % (c.patch * c.merge))
+        throw std::runtime_error("vit: window " + std::to_string(c.window) + " is not a whole number of merge units");
+    return c;
+}
+
 /// The tower a llama.cpp `mmproj` describes, from the FILE.
 ///
 /// Every number this reader needs is in the file: `clip.vision.*` states the geometry
@@ -697,10 +797,10 @@ VitConfig VitConfig::from_gguf(const std::string& mmproj_path) {
         throw std::runtime_error("vit: " + mmproj_path +
                                  " carries no vision encoder (clip.has_vision_encoder is false)");
     const std::string proj = g.kv_has("clip.projector_type") ? g.kv_str("clip.projector_type") : std::string();
-    if (proj != "qwen3vl_merger")
+    if (proj != "qwen3vl_merger" && proj != "qwen2.5vl_merger")
         throw std::runtime_error("vit: " + mmproj_path + " is a '" + proj +
-                                 "' projector; this reader runs 'qwen3vl_merger' only. (Qwen2.5-VL's "
-                                 "windowed projector is not implemented here.)");
+                                 "' projector; this reader runs 'qwen3vl_merger' and 'qwen2.5vl_merger'");
+    if (proj == "qwen2.5vl_merger") return qwen25_from_gguf(g, mmproj_path);
 
     auto num = [&](const char* k) {
         if (!g.kv_has(k)) throw std::runtime_error("vit: " + mmproj_path + " has no " + k);
@@ -987,11 +1087,77 @@ Linear gguf_linear(const GgufFile& g, const std::string& base, int out, int in) 
 /// nothing downstream of this is the closed engine's vision_mm. So the only work beyond
 /// reading is a transpose for every matmul, and the patch embed's split back into the
 /// Conv3d this tower expects.
+namespace {
+
+/// Qwen2.5-VL's tower from a projector: split q/k/v, RMSNorm (weight only), SwiGLU, and a
+/// merger whose norm runs over `hidden` before the 2x2 concat -- the same shape the
+/// container loader reads, with llama.cpp's names.
+VitWeights load_vit_gguf_qwen25(const GgufFile& g, const VitConfig& cfg, const std::string& path) {
+    const int H = cfg.hidden, I = cfg.inter, M = cfg.merge * cfg.merge, P = cfg.patch, C = cfg.channels,
+              T = cfg.temporal;
+    VitWeights w;
+    {
+        w.patch.out = H;
+        w.patch.in = cfg.patch_dim();
+        w.patch.w.assign(static_cast<size_t>(H) * w.patch.in, 0);
+        for (int t = 0; t < T; ++t) {
+            const std::string nm = t == 0 ? std::string("v.patch_embd.weight")
+                                          : "v.patch_embd.weight." + std::to_string(t);
+            const GgufFile::TensorInfo& ti = g.tensor(nm);
+            if (ti.dims.size() != 4 || static_cast<int>(ti.dims[0]) != P || static_cast<int>(ti.dims[1]) != P ||
+                static_cast<int>(ti.dims[2]) != C || static_cast<int>(ti.dims[3]) != H)
+                throw std::runtime_error("vit: " + nm + " is not [" + std::to_string(P) + ", " +
+                                         std::to_string(P) + ", " + std::to_string(C) + ", " +
+                                         std::to_string(H) + "]");
+            const std::vector<float> src = g.f32_all(nm);
+            for (int h = 0; h < H; ++h)
+                for (int c = 0; c < C; ++c)
+                    for (int ph = 0; ph < P; ++ph)
+                        for (int pw = 0; pw < P; ++pw)
+                            w.patch.w[((static_cast<size_t>(h) * C + c) * T + t) * P * P + ph * P + pw] =
+                                f32_to_bf16(src[static_cast<size_t>(pw) + P * (ph + static_cast<size_t>(P) * (c + static_cast<size_t>(C) * h))]);
+        }
+        w.patch.b.assign(static_cast<size_t>(H), 0.f);    // Conv3d(bias=False) on this tower
+    }
+    w.blocks.resize(cfg.depth);
+    for (int i = 0; i < cfg.depth; ++i) {
+        const std::string b = "v.blk." + std::to_string(i) + ".";
+        VitBlock& B = w.blocks[i];
+        B.ln1_w = g.f32_all(b + "ln1.weight");            // RMSNorm: no bias on this tower
+        B.ln2_w = g.f32_all(b + "ln2.weight");
+        B.q = gguf_linear(g, b + "attn_q", H, H);
+        B.k = gguf_linear(g, b + "attn_k", H, H);
+        B.v = gguf_linear(g, b + "attn_v", H, H);
+        B.proj = gguf_linear(g, b + "attn_out", H, H);
+        B.gate = gguf_linear(g, b + "ffn_gate", I, H);
+        B.up = gguf_linear(g, b + "ffn_up", I, H);
+        B.down = gguf_linear(g, b + "ffn_down", H, I);
+    }
+    w.merger_ln_w = g.f32_all("v.post_ln.weight");
+    if (w.merger_ln_w.size() != static_cast<size_t>(H))
+        throw std::runtime_error("vit: v.post_ln.weight is not [hidden] - it normalises before the 2x2 concat");
+    w.merger_fc1 = gguf_linear(g, "mm.0", H * M, H * M);
+    w.merger_fc2 = gguf_linear(g, "mm.2", cfg.out, H * M);
+
+    // 16 per block (2 norms, 7 linears with bias), then the patch embed's slices, the
+    // position table llama.cpp writes and this tower does not read (2-D RoPE), post_ln and
+    // the merger's two linears.
+    const size_t want = 16 * static_cast<size_t>(cfg.depth) + static_cast<size_t>(T) + 6;
+    const size_t have = g.tensor_names().size();
+    if (have != want)
+        throw std::runtime_error("vit: " + path + " holds " + std::to_string(have) +
+                                 " tensors where this tower reads " + std::to_string(want) +
+                                 " - list its names before loading it");
+    return w;
+}
+
+}  // namespace
+
 VitWeights load_vit_gguf(const std::string& path, const VitConfig& cfg) {
-    if (cfg.family != VitFamily::Qwen3VL)
-        throw std::runtime_error("vit: a GGUF projector is read for the Qwen3-VL tower only "
-                                 "(Qwen2.5-VL's windowed tower is not implemented here)");
     GgufFile g(path);
+    if (cfg.family == VitFamily::Qwen25VL) return load_vit_gguf_qwen25(g, cfg, path);
+    if (cfg.family != VitFamily::Qwen3VL)
+        throw std::runtime_error("vit: a GGUF projector is read for the Qwen3-VL and Qwen2.5-VL towers");
     const int H = cfg.hidden, I = cfg.inter, M = cfg.merge * cfg.merge, P = cfg.patch, C = cfg.channels,
               T = cfg.temporal;
     VitWeights w;

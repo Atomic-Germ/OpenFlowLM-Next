@@ -55,3 +55,31 @@ def test_reads_gguf_names_both_gguf_quant_laws():
     s = _spec("qwen3-4b")
     for q, want in (("q4_1", False), ("q4_1_f32", True), ("q4_1_gguf", True), ("q8", False)):
         assert replace(s, quant=q).reads_gguf is want, q
+
+
+QWEN25VL_GGUF = {
+    "general.architecture": "qwen2vl",
+    "qwen2vl.embedding_length": 2048,
+    "qwen2vl.block_count": 36,
+    "qwen2vl.attention.head_count": 16,
+    "qwen2vl.attention.head_count_kv": 2,
+    "qwen2vl.attention.layer_norm_rms_epsilon": 1e-06,
+    "qwen2vl.feed_forward_length": 11008,
+    "qwen2vl.rope.dimension_sections": [16, 24, 24, 0],
+    "qwen2vl.rope.freq_base": 1000000.0,
+    "tokenizer.ggml.tokens": ["x"] * 151936,
+}
+
+
+def test_a_qwen2vl_checkpoint_hashes_to_its_text_sibling():
+    """A VL checkpoint's decoder IS the text model's; its M-RoPE sections live in
+    config.json (the row table is rewritten per image row), not in the kernels. So it must
+    hash to the plain text set -- otherwise every VL model needs a duplicate kernel set
+    that differs in nothing the NPU executes."""
+    vl = ModelSpec.from_gguf_metadata(QWEN25VL_GGUF)
+    text = _spec("qwen25-3b")
+    assert vl.family == "qwen2" and text.family == "qwen2"
+    assert (vl.hidden, vl.num_layers, vl.intermediate) == (2048, 36, 11008)
+    assert vl.rope_theta == text.rope_theta == 1_000_000.0
+    assert vl.qk_norm is False
+    assert vl.kernel_hash() == text.kernel_hash()

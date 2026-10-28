@@ -57,6 +57,10 @@ struct VitConfig {
     /// the tensors are plain rather than pre-tiled for the closed engine's vision_mm.
     /// Everything is cross-checked against the tensor shapes, so a file that does not
     /// describe the tower this reader runs is refused rather than believed.
+    ///
+    /// Both towers this reader runs have one: `qwen3vl_merger` and `qwen2.5vl_merger`.
+    /// The second keeps its window's edge out of the projector entirely, so it is read
+    /// from config.json beside it (see `qwen25_from_gguf` in vit.cpp).
     static VitConfig from_gguf(const std::string& mmproj_path);
     static VitConfig qwen25_from_config_text(const std::string& config_json);
     /// Whichever of the two the container asks for, by config.json's model_type. The

@@ -912,6 +912,49 @@ def _qwen3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     )
 
 
+def _qwen2_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """Qwen2 / Qwen2-VL / Qwen2.5-VL from a GGUF's metadata (llama.cpp's key names).
+
+    The same decoder keys as qwen3 without the q/k norms, and `qwen2vl`'s are identical
+    apart from the M-RoPE sections -- which are a CONFIG field, not a kernel one (the
+    ptab's inv_freq is 1-D data and every manifest's row table is rewritten per row for
+    images), so a VL checkpoint hashes to its text sibling and runs on its kernels.
+    """
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    heads = k("attention.head_count")
+    hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    return ModelSpec(
+        family="qwen2",
+        hidden=k("embedding_length"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=k("attention.head_count_kv"),
+        head_dim=hd,
+        rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
+        rope_theta=float(k("rope.freq_base")),
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
 def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     """Llama 3: GQA without q/k norms, full RoPE with the llama3 frequency scaling, no gate, silu FFN.
 
@@ -1554,12 +1597,17 @@ GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qw
                  # stays qwen3vl, which is what picks the vision adapter. Its rope base is
                  # 5e6, not qwen3-4b's 1e6, so it needs its own set (the ptab's inv_freq is
                  # export-time data and kernel_hash keeps rope_theta).
-                 "qwen3vl": _qwen3_gguf, "qwen3_vl": _qwen3_gguf, "llama": _llama3_gguf,
+                 "qwen3vl": _qwen3_gguf, "qwen3_vl": _qwen3_gguf,
+                 # Qwen2 family: qwen2, and the two VL arches (qwen2vl covers both
+                 # Qwen2-VL and Qwen2.5-VL in llama.cpp). Same decoder, no q/k norms; the
+                 # M-RoPE sections live in config.json, so the spec hashes as plain qwen2.
+                 "qwen2": _qwen2_gguf, "qwen2vl": _qwen2_gguf, "llama": _llama3_gguf,
                  "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
+              _qwen2_gguf: "qwen2",
               _qwen25vl_hf: "qwen2",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",

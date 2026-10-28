@@ -361,6 +361,7 @@ GGUF_ARCH_FAMILIES = {
     "qwen3next": "qwen3.5",
     "qwen35moe": "qwen3.6-moe",
     "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
+    "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -387,6 +388,9 @@ CONFIG_MODEL_FAMILIES = {
     "qwen3_next": "qwen3.5",
     "qwen3_vl": "qwen3vl",
     "qwen3_vl_text": "qwen3vl",
+    "qwen2_vl": "qwen2vl",
+    "qwen2_5_vl": "qwen2vl",
+    "qwen2_5_vl_text": "qwen2vl",
 }
 
 
@@ -1258,8 +1262,12 @@ def spec_from_gguf_source(source):
         return None
 
 
-def projector_vision_config(target):
+def projector_vision_config(target, base=None):
     """config.json's `vision_config` for a GGUF install, translated from the projector.
+
+    `base` is whatever the installed config already carries: a repo that ships its own
+    `vision_config` (Qwen2.5-VL does) keeps every value it states -- the window's edge and
+    the full-attention blocks are NOT in the projector -- and the projector fills the rest.
 
     Qwen3-VL's adapter reads the tower's geometry from config.json's `vision_config` --
     the container ships one -- while a GGUF model's tower is described in the mmproj, in
@@ -1308,13 +1316,18 @@ def projector_vision_config(target):
                 taps.add(int(nm.split(".")[2]))
             except (IndexError, ValueError):
                 pass
-    vc["deepstack_visual_indexes"] = sorted(taps)
+    if taps:
+        vc["deepstack_visual_indexes"] = sorted(taps)
     # the temporal patch size is the number of patch_embed slices
     t = 1
     while f"v.patch_embd.weight.{t}" in names:
         t += 1
     vc["temporal_patch_size"] = t
-    return {k: v for k, v in vc.items() if v is not None}
+    out = dict(base or {})
+    for k, v in vc.items():
+        if v is not None and not out.get(k):
+            out[k] = v
+    return out
 
 
 def projector_special_ids(target):
@@ -1350,7 +1363,7 @@ def repair_config_from_gguf(target):
         cfg = {}
     has_projector = (Path(target) / "mmproj.gguf").is_file()
     complete = bool(cfg.get("vocab_size") and cfg.get("hidden_size") and cfg.get("num_hidden_layers"))
-    if complete and (not has_projector or cfg.get("vision_config")):
+    if complete and (not has_projector or (cfg.get("vision_config") and cfg.get("vision_model_weight"))):
         return []
     if not (Path(target) / "model.gguf").is_file():
         return []
@@ -1383,12 +1396,17 @@ def repair_config_from_gguf(target):
     arch = str(md.get("general.architecture") or "")
     sections = md.get(f"{arch}.rope.dimension_sections")
     if isinstance(sections, list) and len(sections) >= 3 and sum(int(x) for x in sections[:3]) > 0:
+        # Qwen3-VL interleaves the three axes' rotary pairs; Qwen2.5-VL does not (it lays
+        # them out in sections). A config that states it wins; otherwise the arch decides.
+        stated = cfg.get("rope_parameters") or cfg.get("rope_scaling")
+        interleaved = (bool(stated["mrope_interleaved"])
+                       if isinstance(stated, dict) and "mrope_interleaved" in stated else arch in ("qwen3vl",))
         built["rope_parameters"] = {"rope_type": "default",
                                     "mrope_section": [int(x) for x in sections[:3]],
-                                    "mrope_interleaved": True}
+                                    "mrope_interleaved": interleaved}
     # A GGUF VL model's tower is the mmproj: translate it into the vision_config the
     # adapter reads, and name the file so the engine needs no guessing.
-    vc = projector_vision_config(target)
+    vc = projector_vision_config(target, cfg.get("vision_config"))
     if vc:
         built["vision_config"] = vc
         built["vision_model_weight"] = "mmproj.gguf"
@@ -3120,10 +3138,21 @@ def main():
         if spec is None and gguf_mode and gguf_source is not None:
             # a gated base leaves a stub config; the GGUF names its own geometry
             spec = spec_from_gguf_source(gguf_source)
+        # WHAT THE MODEL IS comes first: a vision tower is a property of the checkpoint, not
+        # of the kernels it borrows. Qwen2.5-VL runs on the plain Qwen2.5-3B set (same
+        # decoder, and the M-RoPE lives in config.json), so the kernel family is `qwen2`
+        # while the model is `qwen2vl` -- and the adapter that prepares images is picked by
+        # the latter. For a text model the two agree, so this only changes VL installs.
+        if gguf_mode and gguf_source is not None:
+            arch_fam = family_from_gguf_arch(gguf_source)
+            if arch_fam:
+                log(f"[INFO] family '{arch_fam}' from the GGUF architecture")
+                content_families.append(arch_fam)
         fam, set_name = family_from_kernels(system_registry, spec, kernel_roots)
         if fam:
             log(f"[INFO] family '{fam}' from the kernel set '{set_name}' (the same geometry)")
-            content_families.append(fam)
+            if fam not in content_families:
+                content_families.append(fam)
             geom_set = set_name
         fam, base_name = family_from_base_chain(system_registry, get_base_chain())
         if fam and fam not in content_families:
