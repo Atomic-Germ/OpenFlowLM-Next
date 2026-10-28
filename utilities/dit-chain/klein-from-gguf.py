@@ -40,6 +40,26 @@ def log(msg):
     print(msg, flush=True)
 
 
+def _shipped_kernels(layout):
+    """A kernel set whose layout matches, under any xclbins root (or beside a model).
+
+    Same rule the engine and `oflm add` use: a bundle names its kernels by layout hash, and
+    the set that ships with the app is the normal answer -- building one is the exception.
+    """
+    import os
+
+    roots = [Path(p) for p in os.environ.get("OFLM_XCLBIN_PATH", "").split(os.pathsep) if p]
+    roots += [REPO / "src" / "xclbins", Path.home() / ".config" / "oflm" / "xclbins"]
+    for root in roots:
+        for m in sorted(Path(root).glob("*/open_kernels/diffusion_kernels.json")):
+            try:
+                if json.loads(m.read_text()).get("layout") == layout:
+                    return m.parent
+            except (OSError, ValueError):
+                continue
+    return None
+
+
 def run(cmd, what):
     log(f"-- {what}")
     rc = subprocess.run([str(c) for c in cmd]).returncode
@@ -102,13 +122,18 @@ def main(argv=None) -> int:
          "--out", out, "--pack-cache", Path(a.pack_cache).expanduser(), "--jobs", a.jobs],
         f"bundle -> {out}")
 
-    # 4. the kernels, for the same resolutions (the layout hash ties them to this bundle)
+    # 4. the kernels, for the same resolutions (the layout hash ties them to this bundle).
+    # A set that SHIPS with the app is enough: the engine looks beside the model first and
+    # then under the xclbins roots, so building one is only for a bundle whose layout no
+    # installed set carries.
     layout = json.loads((out / "config.json").read_text())["layout"]
     installed = out / "open_kernels" / "diffusion_kernels.json"
     if a.skip_kernels:
         log("-- kernels: skipped (--skip-kernels)")
     elif installed.is_file() and json.loads(installed.read_text()).get("layout") == layout:
         log(f"-- kernels: already beside the bundle (layout {layout})")
+    elif (shipped := _shipped_kernels(layout)) is not None:
+        log(f"-- kernels: {shipped} already matches layout {layout}")
     else:
         built = REPO / "src" / "xclbins" / "FLUX.2-klein-4B-NPU2" / "open_kernels"
         run([sys.executable, REPO / "open_kernels" / "export_dit_kernels.py",
