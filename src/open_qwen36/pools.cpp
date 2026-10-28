@@ -252,21 +252,32 @@ void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst) {
     }
 }
 
-void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst) {
+void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst, double div) {
     // A small weight (a layernorm) as bf16: the q4nx container stores it bf16;
     // a GGUF may store it f32 / f16 / bf16 -- convert exactly as the container does.
+    // `div` divides in double before the single rounding, so a folded scale costs no extra one.
     size_t n = 0;
     const uint8_t* src = raw(f, name, 0, &n);
     auto* g = dynamic_cast<const GgufFile*>(&f);
+    auto bf16_div = [&](size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t u;
+            std::memcpy(&u, src + 2 * i, 2);
+            const uint16_t b = f32_to_bf16(static_cast<float>(bf16_to_f32(u) / div));
+            std::memcpy(dst + 2 * i, &b, 2);
+        }
+    };
     if (!g) {
         if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
-        std::memcpy(dst, src, n);
+        if (div == 1.0) std::memcpy(dst, src, n);
+        else bf16_div(n / 2);
         return;
     }
     switch (g->tensor(name).type) {
         case GgufFile::Type::BF16: {
             if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
-            std::memcpy(dst, src, n);
+            if (div == 1.0) std::memcpy(dst, src, n);
+            else bf16_div(n / 2);
             break;
         }
         case GgufFile::Type::F16: {
@@ -274,7 +285,7 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
             for (size_t i = 0; i < bytes / 2; ++i) {
                 uint16_t u;
                 std::memcpy(&u, src + 2 * i, 2);
-                const float v = fp16_to_f32(u);
+                const float v = static_cast<float>(fp16_to_f32(u) / div);
                 const uint16_t b = f32_to_bf16(v);
                 std::memcpy(dst + 2 * i, &b, 2);
             }
@@ -285,7 +296,7 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
             for (size_t i = 0; i < bytes / 2; ++i) {
                 float v;
                 std::memcpy(&v, src + 4 * i, 4);
-                const uint16_t b = f32_to_bf16(v);
+                const uint16_t b = f32_to_bf16(div == 1.0 ? v : static_cast<float>(v / div));
                 std::memcpy(dst + 2 * i, &b, 2);
             }
             break;
@@ -293,6 +304,19 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
         default:
             fail(name + " is " + GgufFile::type_name(g->tensor(name).type) + "; a layernorm must be f32 / f16 / bf16");
     }
+}
+
+double scalar_value(const WeightFile& f, const std::string& name) {
+    size_t n = 0;
+    const uint8_t* src = raw(f, name, 0, &n);
+    auto* g = dynamic_cast<const GgufFile*>(&f);
+    const bool f32 = g ? g->tensor(name).type == GgufFile::Type::F32 : n == 4;
+    const bool f16 = g && g->tensor(name).type == GgufFile::Type::F16;
+    if ((f32 && n != 4) || (!f32 && n != 2)) fail(name + " is " + std::to_string(n) + " B, not one value");
+    if (f32) { float v; std::memcpy(&v, src, 4); return v; }
+    uint16_t u;
+    std::memcpy(&u, src, 2);
+    return f16 ? fp16_to_f32(u) : bf16_to_f32(u);
 }
 
 namespace {
@@ -700,10 +724,21 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         }
     } else if (op.op == "put") {
         const std::string name = with_layer(op.tensor, layer);
-        if (dynamic_cast<const GgufFile*>(&m)) {
+        // div_running: the product of a per-layer scalar over every layer before this one
+        // (Gemma 4's layer_output_scale; the residual is carried divided by it, which the
+        // RMSNorms that read it cannot see, so the block outputs added to it are divided too)
+        double div = 1.0;
+        if (!op.div_running.empty())
+            for (int j = 0; j < layer; ++j) {
+                std::string s = op.div_running;
+                s.replace(s.find("{j}"), 3, std::to_string(j));
+                div *= scalar_value(m, s);
+            }
+        if (!(div > 0.0) || !std::isfinite(div)) fail(name + ": div_running product " + std::to_string(div));
+        if (dynamic_cast<const GgufFile*>(&m) || div != 1.0) {
             // a GGUF's small weights may be f32/f16: convert to the blob's bf16 layout
             bounds(op, op.cap, dst_bytes);
-            pack_norm(m, name, op.cap, dst + op.dst);
+            pack_norm(m, name, op.cap, dst + op.dst, div);
         } else {
             size_t n = 0;
             const uint8_t* src = raw(m, name, 0, &n);
@@ -812,9 +847,12 @@ void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const 
                        const std::vector<int>& section, bool interleaved, uint8_t* r) {
     // RoPE over the first rotary_dim dims of a head, half-split pairs (i, i + rot/2), the recipe's theta:
     // [i32 pos | i32 nf | cos f32[rot/2] @512 | sin f32[rot/2] right after] (attn.h reads [cos | sin] at +512)
-    const size_t half = m.rotary_dim / 2;
-    if (512 + 8 * half > m.ptab_row) fail("the rotary dim does not fit the position record");
-    std::memset(r, 0, m.ptab_row);
+    // the table's own pairs and record size (Gemma 4 has two tables of different widths);
+    // a table that names neither is the layout's, which is every other family
+    const size_t half = (g.rotary_dim ? g.rotary_dim : m.rotary_dim) / 2;
+    const size_t row_bytes = g.per_row ? g.per_row : m.ptab_row;
+    if (512 + 8 * half > row_bytes) fail("the rotary dim does not fit the position record");
+    std::memset(r, 0, row_bytes);
     uint64_t start, nf64;
     stream_patch::attn_window(row, g.window, &start, &nf64);
     int32_t valid = static_cast<int32_t>(row - start), nf = static_cast<int32_t>(nf64);
@@ -835,7 +873,7 @@ void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const 
 void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* t) {
     for (size_t p = 0; p < rows; ++p) {
         const double pos[3] = {static_cast<double>(p), static_cast<double>(p), static_cast<double>(p)};
-        build_ptab_record(m, g, p, pos, {}, false, t + p * m.ptab_row);
+        build_ptab_record(m, g, p, pos, {}, false, t + p * (g.per_row ? g.per_row : m.ptab_row));
     }
 }
 

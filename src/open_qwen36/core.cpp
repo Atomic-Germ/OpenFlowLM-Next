@@ -172,9 +172,15 @@ nlohmann::json derive_config(const GgufFile& g) {
         c["vocab_size"] = u("vocab_size");
     else
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
+    // A per-layer value is an ARRAY in the metadata (Gemma 4's head_count_kv is 8 on sliding
+    // layers, 1 on full ones) and reads back as ""; it has no single value to derive, so it is
+    // left to config.json, and check_model refuses by name if nothing supplies it.
+    auto scalar = [&](const char* key, const std::string& k) {
+        if (g.kv_has(arch + "." + k) && !g.kv_str(arch + "." + k).empty()) c[key] = u(k);
+    };
     c["num_attention_heads"] = u("attention.head_count");
-    c["num_key_value_heads"] = u("attention.head_count_kv");
-    c["intermediate_size"] = u("feed_forward_length");
+    scalar("num_key_value_heads", "attention.head_count_kv");
+    scalar("intermediate_size", "feed_forward_length");
     if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
@@ -231,6 +237,12 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        // A multimodal config nests the decoder's fields under text_config (Gemma 4 12B's
+        // gemma4_unified); the kernel set checks the decoder, so lift them -- a top-level key
+        // of the same name wins, which keeps the wrapper's own model_type.
+        if (j.contains("text_config") && j["text_config"].is_object())
+            for (const auto& [key, value] : j["text_config"].items())
+                if (!j.contains(key)) j[key] = value;
         if (gguf_) {
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())
@@ -524,8 +536,12 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.moe2 = stream_patch::moe2_table(k.words, name, g);
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
-        k.attn = stream_patch::attn_table(k.words, name, w_->attn);
-        k.geom = w_->attn;
+        // the kernel's own rows: Gemma 4's two layer types have different ones
+        stream_patch::AttnGeometry g = w_->attn;
+        g.kv_row = d.kv_row;
+        g.ptab_row = d.ptab_row;
+        k.attn = stream_patch::attn_table(k.words, name, g);
+        k.geom = g;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
     } else if (d.patch == "attnrows") {
@@ -2053,6 +2069,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         xrt::bo& lg = buffer("logits", 0);
         read_back(lg, w_->vocab * 4, 0);
         std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+        softcap_logits();
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
@@ -2267,7 +2284,17 @@ void Core::tail_logits(const float* row) {
     xrt::bo& lg = buffer("logits", 0);
     read_back(lg, w_->vocab * 4, 0);
     std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+    softcap_logits();
     timing_.lmhead_ms = ms_since(t1);
+}
+
+// Gemma 4's final_logit_softcapping: c * tanh(z / c), on the host, on the real logits. Monotone,
+// so a greedy argmax is the same with or without it; sampling at temperature is not.
+void Core::softcap_logits() {
+    const double c = w_->final_logit_softcapping;
+    if (c <= 0.0) return;
+    const float cf = static_cast<float>(c), inv = static_cast<float>(1.0 / c);
+    for (float& z : logits_host_) z = cf * std::tanh(z * inv);
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,

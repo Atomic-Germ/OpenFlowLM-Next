@@ -594,6 +594,28 @@ def _raw(m, name: str):
                        f"(a tied head must be materialised as its own q4 tensor)") from None
 
 
+def _scalar(m, name: str) -> float:
+    """One f32 or bf16 value, as pools.cpp's scalar_value reads it from a container."""
+    b = _u8(_raw(m, name))
+    if len(b) == 4:
+        return float(b.view(np.float32)[0])
+    if len(b) == 2:
+        return float(_bf16_to_f32(b.view(np.uint16))[0])
+    raise ValueError(f"{name} is {len(b)} B, not one value")
+
+
+def _div_running(op: dict, m, layer: int) -> float:
+    """put's div_running: the product, in double, of a per-layer scalar over the layers
+    before this one (Gemma 4's layer_output_scale), as pools.cpp computes it."""
+    div = 1.0
+    if op.get("div_running"):
+        for j in range(layer):
+            div *= _scalar(m, op["div_running"].replace("{j}", str(j)))
+    if not (div > 0.0 and np.isfinite(div)):
+        raise ValueError(f"{_name(op, 'tensor', layer)}: div_running product {div}")
+    return div
+
+
 def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
     kind = op["op"]
     if kind == "std_perm":
@@ -701,6 +723,11 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         b = _u8(_raw(m, _name(op, "tensor", layer)))
         if len(b) > op["cap"]:
             raise ValueError(f"{op['tensor']}: {len(b)} B does not fit its {op['cap']} B slot")
+        div = _div_running(op, m, layer)
+        if div != 1.0:
+            # bf16 -> divide in double -> one rounding to bf16, as pools.cpp's pack_norm
+            v = _bf16_to_f32(b.view(np.uint16)).astype(np.float64) / div
+            b = _bf16_rne(v.astype(np.float32)).view(np.uint8)
         dst[op["dst"]:op["dst"] + len(b)] = b
     elif kind == "lmhead_q8":
         # The q8 lm_head's 128-row supertile order. The file holds chunk (rowblock32, ktile) at

@@ -156,6 +156,15 @@ if G.RB > 1:                                           # attn.h defaults it to 1
 QKVB = G.QKVB
 if QKVB:                                               # same: only a family that has a bias sees the flag
     ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
+if G.VNORM:                                            # Gemma 4 (OPEN-FAMILY-GEMMA4); like the two above,
+    ATTN_FLAGS.append("-DATTN_VNORM=1")                # only a family that has them sees these flags
+if G.SCALE:
+    ATTN_FLAGS.append(f"-DATTN_SCALE={G.SCALE!r}f")
+if G.ROPE_PAIR:
+    ATTN_FLAGS.append(f"-DATTN_ROPE_PAIR={G.ROPE_PAIR}")
+QLOCAL = bool(G.QLOCAL)
+if QLOCAL:
+    ATTN_FLAGS.append("-DATTN_QLOCAL=1")
 NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position record; which holds cos / sin
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
@@ -194,8 +203,9 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     og_ty = np.ndarray[(OGH * G.HD,), np.dtype[bfloat16]]   # attn_fin writes kOGH heads at a time
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
-    fq = (np.ndarray[(2 * QW,), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
-          if G.VEXP else np.ndarray[(QW,), np.dtype[np.float32]])
+    QWL = NHL * G.HD if G.QLOCAL else QW               # ATTN_QLOCAL: this core's heads only
+    fq = (np.ndarray[(2 * QWL,), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
+          if G.VEXP else np.ndarray[(QWL,), np.dtype[np.float32]])
     fml = np.ndarray[(2 * G.MLS,), np.dtype[np.float32]]   # [m | l], stride MLS (padded when ATTN_VEXP)
     foacc = np.ndarray[(NHL * G.HD,), np.dtype[np.float32]]   # this core's heads only
     i32 = np.int32
@@ -316,11 +326,22 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         if stop == 1:
             return
         # o against og (K = QW)
-        oe = acq(xin, G.OG_ELEMS)
-        for i in range(G.OG_ELEMS):
-            f_prep(oe[i], tab, QW, i)
-        role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
-        xin.release(G.OG_ELEMS)
+        if G.OG_ELEMS <= 2:
+            oe = acq(xin, G.OG_ELEMS)
+            for i in range(G.OG_ELEMS):
+                f_prep(oe[i], tab, QW, i)
+            role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
+            xin.release(G.OG_ELEMS)
+        else:
+            # Gemma 4's global layers: q is 16 x 512 wide, so og is four x elements and the
+            # depth-2 x fifo cannot hold it at once. The prep places each element in the
+            # table by its index, so taking them one at a time -- as down's h already does --
+            # builds the same table; every family with og <= 2 elements is untouched.
+            for i in range(G.OG_ELEMS):
+                oe1 = xin.acquire(1)
+                f_prep(oe1, tab, QW, i)
+                xin.release(1)
+            role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
         if stop == 2:
             return
         # up | gate per band against xm (K = HID), silu -> h band
@@ -406,15 +427,31 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         else:
             f_meta(e[0], e[1], qn, kn, cs, pb)
         ain.release(1 + NPTAB)
-        for h in range_(G.Q_AIN_ELEMS):
-            e = ain.acquire(1)
-            if bias_in is None:
-                f_q(e, qn, cs, qs, h)
-            else:
-                b = bias_in.acquire(1)
-                f_q(e, b, qn, cs, qs, h)
-                bias_in.release(1)
-            ain.release(1)
+        if QLOCAL:
+            # every core still takes every q element off the broadcast, but stores only its
+            # own heads' -- numbered from 0, which is where attn.h ATTN_QLOCAL looks for them
+            assert bias_in is None and h0 % G.HPE == 0 and NHL % G.HPE == 0
+            e0, ne = h0 // G.HPE, NHL // G.HPE
+            for n_skip in (e0, None, G.Q_AIN_ELEMS - e0 - ne):
+                if n_skip is None:
+                    for h in range_(ne):
+                        e = ain.acquire(1)
+                        f_q(e, qn, cs, qs, h)
+                        ain.release(1)
+                elif n_skip > 0:
+                    for _ in range_(n_skip):
+                        ain.acquire(1)
+                        ain.release(1)
+        else:
+            for h in range_(G.Q_AIN_ELEMS):
+                e = ain.acquire(1)
+                if bias_in is None:
+                    f_q(e, qn, cs, qs, h)
+                else:
+                    b = bias_in.acquire(1)
+                    f_q(e, b, qn, cs, qs, h)
+                    bias_in.release(1)
+                ain.release(1)
         for h in range_(G.K_AIN_ELEMS):
             e = ain.acquire(1)
             if bias_in is None:

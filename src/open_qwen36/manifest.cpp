@@ -60,6 +60,9 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.dst_rows = j.value("dst_rows", 0ull);
     p.split = j.value("split", "");
     p.via = j.value("via", "");
+    p.div_running = j.value("div_running", "");
+    if (!p.div_running.empty() && (p.op != "put" || p.div_running.find("{j}") == std::string::npos))
+        fail(where, p.op + " " + p.tensor + ": div_running names a per-layer {j} tensor, on a put");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
@@ -169,6 +172,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.rope_inv_freq = get<std::vector<double>>(lay, "rope_inv_freq", lw);
     if (m.rope_inv_freq.size() != m.rotary_dim / 2) fail(lw, "rope_inv_freq has " + std::to_string(m.rope_inv_freq.size()) + " values, the rotary dim wants " + std::to_string(m.rotary_dim / 2));
     m.rout_idx_off = lay.value("rout_idx_off", 1024ull);
+    m.final_logit_softcapping = lay.value("final_logit_softcapping", 0.0);
+    if (m.final_logit_softcapping < 0.0 || !std::isfinite(m.final_logit_softcapping))
+        fail(lw, "final_logit_softcapping must be finite and non-negative");
     m.has_moe = lay.contains("moe");
     if (m.has_moe) {
     const json& moe = lay["moe"];
@@ -197,6 +203,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         d.rb = v.value("rb", 1ull);
+        d.kv_row = v.value("kv_row", static_cast<uint64_t>(m.kv_row));
+        d.ptab_row = v.value("ptab_row", static_cast<uint64_t>(m.ptab_row));
+        if (!d.kv_row || !d.ptab_row) fail(where, "kernel " + k + ": a zero kv_row / ptab_row");
         // attn_stepb*.cc build RB 2 and 4 only; any other count would pad the stream for
         // rows the kernel never takes, and the core waits on its fifo forever
         if (d.rb != 1 && d.rb != 2 && d.rb != 4)
@@ -605,14 +614,18 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             rg.inv_freq = v.value("inv_freq", m.rope_inv_freq);
             rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
-            if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            rg.rotary_dim = v.value("rotary_dim", static_cast<uint64_t>(m.rotary_dim));
+            if (rg.inv_freq.size() != rg.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            if (512 + 8 * (rg.rotary_dim / 2) > rg.per_row)
+                fail(where, "global " + k + ": " + std::to_string(rg.rotary_dim) + " rotated dims do not fit a " +
+                     std::to_string(rg.per_row) + "-byte record");
             const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
             if (has_long != has_switch)
                 fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
             if (has_long) {
                 rg.long_inv_freq = v["long_inv_freq"].get<std::vector<double>>();
                 rg.switch_row = v["switch_row"].get<uint64_t>();
-                if (rg.long_inv_freq.size() != m.rotary_dim / 2)
+                if (rg.long_inv_freq.size() != rg.rotary_dim / 2)
                     fail(where, "global " + k + ": long_inv_freq has " + std::to_string(rg.long_inv_freq.size()) + " values");
             }
             m.per_row_globals[k] = rg;
