@@ -150,6 +150,63 @@ do not close sequential full-model accuracy. Next attribute signed boundary
 changes on a common residual scale, with exact retained mixed-oracle controls
 and actual native KV, before choosing a precision experiment.
 
+## Signed L3 attribution with native KV
+
+`l3_attribution.py` uses the audited native/boundary captures and the all-layer
+CPU attribution. It requires their exact source, input, report and audit binding.
+At P125/P205/P239 it first reconstructs both independent-reference and
+native-input mixed-oracle outputs byte-for-byte, including the earlier signed
+local and total error vectors. Every native KV snapshot must be the exact prefix
+of the final snapshot; decode all four `[K_hi, K_lo, V_hi, V_lo]` planes.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/l3_attribution.py run \
+  --boundaries Models/qwen38-27b/post-prefill-drift/l3-boundaries-v1 \
+  --baseline Models/qwen38-27b/post-prefill-drift/all-layers-v1 \
+  --out Models/qwen38-27b/post-prefill-drift/l3-attribution-v1
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-sequential-drift/l3_attribution.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/l3-attribution-v1
+```
+
+Use a new output directory. This is CPU analysis of one decoded layer; it does
+not dispatch NPU work or change model/kernel files. Independent FP64 attention
+histories consume every position through P239. The ordered chain replaces entry
+norm, Q/K/V/gate projections, native KV, attention output, output projection,
+residual addition, FFN norm, FFN activation, down partials and closing addition.
+All differences share the stored final-reference scale and must close as signed
+vectors. Scalar maxima cannot be added. `local_total` preserves the earlier
+implementation gap; `total` includes propagated input/history effects.
+
+`kv_path` includes K normalization/RoPE and KV representation/storage after the
+captured projections. `attention_remainder` includes unobserved Q preparation,
+gating, softmax/PV and output arithmetic. `ffn_activation` combines unobserved
+up/gate projections and SiLU; it is not a direct measurement of those individual
+stages. These boundaries do not permit a finer attribution without new captures.
+
+Each `without_*` prediction removes one signed effect while freezing all others.
+The decomposition depends on replacement order, and cancellation can make a
+prediction worse. Neither these CPU predictions nor diagnostic completion count
+as a precision correction or model acceptance. A separate audit repeats the
+causal computations and requires every saved NPZ array to match byte-for-byte.
+
+### Validated signed L3 checkpoint — 2026-10-28
+
+`l3-attribution-v1` and its separate audit complete: six exact mixed-oracle
+outputs, three byte-exact NPZ replays and 240 immutable native KV prefixes.
+The input inventory binds 8069 files; one layer's mixed/FP64 materialized
+weights total 4.16024 GiB. All 15 new tests pass; host suite 1973 passed / 47 skipped.
+
+Entry-projection effects dominate P125/P205 (1.62978e-5 / 1.83049e-5), whereas
+P239 is dominated by the attention remainder (1.09365e-5). Native-KV effects
+are at most 1.48067e-7. Frozen predictions without the entry-projection effect
+change total maxrel from 1.85447e-5 to 2.24690e-6 at P125, from 1.09918e-5 to
+7.31309e-6 at P205, and from 3.47135e-6 to 3.64379e-6 at P239 (worse).
+
+Next establish an exact isolated Q/K/V/gate projection control on captured
+FP32 entry norms before selecting a precision variant. P239 remains a separate
+attention/cancellation control. No native correction or model acceptance is
+established by this CPU attribution; preserve the overall sequential FAIL.
+
 ## Historical expanded export
 
 CPU-only causal attribution at L60/P37–39 and L33/P240–242 using the verified

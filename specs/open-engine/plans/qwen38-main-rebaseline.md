@@ -1,6 +1,61 @@
 # Qwen3.8-27B validation report
 
 
+## Signed L3 attribution with real native KV — 2026-10-28
+
+Added CPU attribution bound to the audited L3 captures, boundary checks and
+all-layer replay. All **six mixed-oracle controls** reconstruct byte-for-byte:
+independent-reference and native-input histories at P125/P205/P239. Earlier local
+and total error vectors also reproduce exactly. All **240 native KV snapshots**
+are exact prefixes of the final snapshot; both BF16 planes contribute to each
+reconstructed K/V value. A separate audit repeats the calculations and verifies
+all arrays in **three NPZ artifacts** byte-for-byte.
+
+The ordered FP64 chain replaces entry norm, Q/K/V/gate projections, native KV,
+attention output, output projection, residual addition, FFN norm, FFN activation,
+down partials and closing addition. Signed effects close on a common stored
+final-reference scale. `propagated` retains incoming input/history effects and
+`reference_math` separates mixed-oracle arithmetic from the FP64 path.
+
+| Position | Total maxrel | Entry projection effect | Native KV path effect | Attention remainder effect | Without entry-projection effect (CPU prediction) |
+|---|---:|---:|---:|---:|---:|
+| P125 | 1.85447e-5 | 1.62978e-5 | 1.13714e-7 | 4.26585e-6 | 2.24690e-6 |
+| P205 | 1.09918e-5 | 1.83049e-5 | 1.48067e-7 | 8.35565e-7 | 7.31309e-6 |
+| P239 | 3.47135e-6 | 6.72911e-7 | 3.48445e-8 | 1.09365e-5 | 3.64379e-6 |
+
+Input projections dominate the local decomposition at P125/P205; the remaining
+attention arithmetic dominates P239. Native KV contributes much less at these
+points. Entry-norm effects are 2.73307e-6 / 3.45915e-7 / 3.11342e-6. Combined
+FFN up/gate/SiLU effects stay below 1.151e-7, and conditioned down effects below
+1.442e-7. These are effects after propagation through the FP64 downstream tail,
+not raw local boundary errors or evidence about every model position.
+
+The attention remainder includes unobserved Q preparation, gating, softmax/PV
+and output arithmetic; the data cannot attribute it to softmax alone. The KV
+path includes K normalization/RoPE and cache representation/storage. Separate
+raw FFN up/gate projections are not captured. The decomposition depends on the
+replacement order, and scalar maxima cannot be summed. Removing one effect
+while freezing the others is a CPU counterfactual: it improves P125/P205 for
+entry projection, but worsens P239. It does not predict a corrected full-model
+trajectory or justify changing the unchanged acceptance thresholds.
+
+Next isolate the Q/K/V/gate projection path using captured FP32 entry norms
+and current packed weights. Require exact native projection identity before
+inspecting activation-table preparation/accumulation or trying a precision
+variant. Preserve P239 as a cancellation/regression control; its distinct
+attention remainder needs separate Q/attention instrumentation. The full-model
+sequential numerical **FAIL** remains unresolved.
+
+TDD: ten initial failures precede implementation; all **15 new tests** and
+**40 focused tests** pass. Full host suite: **1973 passed, 47 skipped**. This
+stage uses 8069 bound inputs and about **4.16024 GiB** of materialized mixed/FP64
+weights for one layer. No NPU dispatch, kernel/library build, production change
+or installed runtime change occurred. Evidence:
+`Models/qwen38-27b/post-prefill-drift/l3-attribution-v1`, its separate audit,
+`l3-attribution-summary.json` and adjacent RED/GREEN/run/audit logs.
+
+
+
 ## Current full-ax L3 replay and boundary checks — 2026-10-28
 
 Added a one-layer native replay for current L3 using sequential L2 inputs from
