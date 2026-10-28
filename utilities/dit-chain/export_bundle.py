@@ -262,7 +262,9 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--checkpoint", default=None, help="default: the HF cache's snapshot")
+    ap.add_argument("--checkpoint", default=None,
+                    help="the FLUX.2 diffusers checkpoint (text encoder + VAE). Default: resolved "
+                         "from --gguf-repo's README (its base_model), like the text models' base chain")
     ap.add_argument("--resolutions", default="512,1024")
     ap.add_argument("--edits", default="", help="resolutions that also get an edit configuration")
     ap.add_argument("--out", required=True)
@@ -272,10 +274,23 @@ def main() -> int:
     ap.add_argument("--transformer-gguf", default=None,
                     help="take the DiT from this GGUF instead of --checkpoint's transformer/ "
                          "(the text encoder and VAE still come from the checkpoint)")
+    ap.add_argument("--gguf-repo", default=None,
+                    help="the HF repo the GGUF came from: its README's base_model is the "
+                         "checkpoint to fetch (a GGUF carries only the DiT)")
+    ap.add_argument("--checkpoint-cache", default=None,
+                    help="where resolved checkpoints live (default $OFLM_DIT_CHECKPOINT_CACHE "
+                         "or ~/.cache/oflm/dit-checkpoints)")
     a = ap.parse_args()
-    if not a.checkpoint and a.transformer_gguf:
-        ap.error("--transformer-gguf still needs --checkpoint: the text encoder and the VAE "
-                 "have no GGUF")
+    if not a.checkpoint:
+        if not a.gguf_repo:
+            ap.error("give --checkpoint, or --gguf-repo so the checkpoint can be resolved from "
+                     "the GGUF's README (a GGUF carries only the DiT)")
+        sys.path.insert(0, str(HERE))
+        from klein_checkpoint import resolve as resolve_checkpoint
+
+        ckpt, repo = resolve_checkpoint(a.gguf_repo, Path(a.checkpoint_cache) if a.checkpoint_cache else None)
+        a.checkpoint = str(ckpt)
+        print(f"checkpoint: {a.checkpoint} (from {repo})", flush=True)
     build(Path(a.checkpoint) if a.checkpoint else G.model_dir(), Path(a.out).resolve(),
           [int(r) for r in a.resolutions.split(",")], a.jobs,
           Path(a.pack_cache) if a.pack_cache else None,

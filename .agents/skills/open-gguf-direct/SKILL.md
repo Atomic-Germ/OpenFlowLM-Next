@@ -1006,9 +1006,23 @@ Two traps that only show at run time:
 Edits are not exercised yet: they need `--edits 512` on BOTH sides (the VAE encoder streams)
 and a reference image.
 
-Still to do for the product path: `q4nx-build --open-diffusion --transformer-gguf` (so a
-GGUF repo is one command), and `oflm add` recognising a bundle so `register-bundle.py` is
-only for local test builds.
+**The checkpoint is resolved from the GGUF's repo, not passed by hand** (`klein_checkpoint.py`,
+the same climb the text models use for tokenizers and configs):
+
+    unsloth/FLUX.2-klein-4B-GGUF  --README frontmatter-->  base_model:
+                                        black-forest-labs/FLUX.2-klein-4B
+
+so `export_bundle.py --gguf-repo unsloth/FLUX.2-klein-4B-GGUF --transformer-gguf <file>`
+fetches only `text_encoder/`, `vae/`, `tokenizer/`, `LICENSE.md` from the base into
+`~/.cache/oflm/dit-checkpoints/<owner>--<name>` (never the 8 GB `transformer/`), and reuses
+it next time. A converter that leaves `base_model` empty (leejet's does) falls back to the
+repo's own name minus `-GGUF`.
+
+Still to do for the product path: `q4nx-build --open-diffusion <gguf-repo>` (so a GGUF repo
+is one command), and `oflm add` recognising a bundle so `register-bundle.py` is only for
+local test builds. The hard-coded geometry checks in `q4nx/open_diffusion.py`
+(`TRANSFORMER`, `TEXT_ENCODER`) are the next "replace the constant with the file" candidates
+now that the checkpoint is resolved rather than named.
 
 ### Diffusion: the klein DiT GGUF is a NAME map, not a kernel change (2026-10-27)
 
