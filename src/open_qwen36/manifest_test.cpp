@@ -499,7 +499,9 @@ int main(int argc, char** argv) {
             // dx / ln / lm plus the block prefill route's four: the attention dispatch's own
             // xclbin ("dxa"), the ONE context every projection shape streams over ("gemm"), and
             // the attention products' two ("ag_s", "ag_pv": 8 and 4 columns wide at head dim 128)
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") &&
+                  d.contexts.size() == 7 && d.contexts.count("ag_s") && d.contexts.count("ag_pv"),
+                  "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
