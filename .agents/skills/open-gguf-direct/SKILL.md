@@ -985,6 +985,27 @@ leaves the other whole), registers the tag with the bundle's OWN `image_sizes` /
 `--force` through that link unlinked the source's files one at a time (it ate a LICENSE.md
 during testing). `register-bundle.py` is gone.
 
+### Where the diffusion kernels are built (2026-10-28)
+
+The exporter lives in **`open_kernels/export_dit_kernels.py`**, not `utilities/` -- that dir
+holds only the wrapper that drives every kernel family for a build:
+
+    utilities/export-kernels.py --diffusion-only                      # every family
+    utilities/export-kernels.py --diffusion-only --diffusion-family FLUX.2-klein-9B-NPU2
+
+The wrapper asks the exporter for the family list (`export_dit_kernels.py --list-families`)
+instead of hard-coding it: it hard-coded the 4B for a day, so a packaged build would have
+shipped 4B kernels only as soon as a 9B family existed. Per family it builds in
+`build/dit-kernels/<family>` (hundreds of MiB of per-stream xclbins, cached) and INSTALLS the
+runtime form into `src/xclbins/<family>/open_kernels` (the full ELFs + manifest, tens of
+MiB), which is what ships and what `find_kernels` reads.
+
+Two things that bite: the layout hash covers the RESOLUTION and EDIT lists, so a bundle and a
+set must name the same ones (512-only is `c3277a2aa2dd6005`, 512+1024+edits is
+`e667e5952ca22004`); and `--out` is not relocatable after a build --
+`elf_build/full_elf_config_*.json` bakes absolute paths, so moving the directory means
+deleting `elf_build` and recomposing (~9 min).
+
 ### The shape is DERIVED now, like a text spec (2026-10-28)
 
 `klein_pipeline.shape_from_config(transformer_cfg, text_encoder_cfg)` builds the record from
