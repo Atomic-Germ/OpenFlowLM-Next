@@ -1034,56 +1034,41 @@ imports its factories inside the converting branches), so the diffusion path nee
 ml_dtypes only; and `gguf_source.py` holds the DiT picker/fetcher both this and
 `klein-from-gguf.py` use.
 
-### The image texture is NOT steps and NOT quantisation (measured 2026-10-27)
+### klein from a GGUF: the modulation convention was the whole story (2026-10-28)
 
-`oflm image --steps` now exists (default 0 = the bundle's own, 1..50, printed in the summary
-line). Measured on the Q4_1 bundle, same prompt and seed:
+Long story, worth keeping because every step looked like a different bug.
 
-| steps | 1 | 2 | 3 | 4 | 8 | 16 |
-|---|---|---|---|---|---|---|
-| NPU | 1.7 s | 2.6 | 3.5 | 4.5 | 7.8 | 15.0 |
-| look | **cleanest** | textured | textured | textured | more | worst |
+1. **`oflm image --steps`** exists now (default 0 = the bundle's own, 1..50, printed). Measured
+   on the Q4_1 bundle: 1/2/3/4/8/16 steps = 1.7/2.6/3.5/4.5/7.8/15.0 s, and the texture does
+   not improve -- 1 is smoothest, 16 worst. The default was already 4; step count was never it.
+2. **Q4_1 vs the shipped bf16 bundle**: 114 of 194 packed weights byte-identical, the 80 that
+   differ are exactly the DiT blocks at **8.3% RMS** -- Q4_1 really is too lossy for this
+   distilled 4-step model. (`pack_b_cols` of the checkpoint's own bf16 is byte-identical to
+   the shipped bundle, so the packer and pipeline are exact.)
+3. **But a Q8_0 file was just as grainy**, and so was a BF16 one -- at 1.0% and 0% weight
+   error. That ruled precision out and pointed at the one weight that differed:
+   `w:mod`, from slot 56 on.
+4. **The cause**: `final_layer.adaLN_modulation.1.weight` holds its two 3072-row halves as
+   (scale, shift) in **BFL's original** and (shift, scale) in **diffusers**. BOTH converters
+   tried (unsloth, leejet) emit BFL's order; `mod_weight` reads diffusers'. So the whole
+   modulation -- shift, scale and gate for every block -- was wrong. The two orders are exact
+   mirror images, so it can be *decided*, not guessed.
 
-The default was already 4 (the bundle's own), so the "it must be doing 1 step" hunch was
-wrong -- but the observation was right: more steps do not clean it up, and 16 is worse.
+`gguf_weights.detect_bfl_modulation()` range-reads `norm_out.linear.weight` from the
+checkpoint (already resolved for the TE and VAE) and compares both orders to the bit;
+`GgufWeights(bfl_modulation=True)` flips that one tensor. With it, **leejet's Q8_0 bundle
+correlates 0.9946 with the shipped bf16 bundle's image** (mean|d| 2.68/255) and runs in
+4.2 s -- GGUF-direct klein now matches the shipped quality.
 
-Then the quant: a **Q8_0** DiT bundle (same repo, same pipeline, `--resolutions 512,1024
---edits 512,1024` to match the shipped kernel layout) at 4 steps is **visually identical**
-to Q4_1's -- same grain. So it is not 4-bit noise either.
+| DiT source | verdict |
+|---|---|
+| BF16 / F16 / **Q8_0** (with the convention fixed) | matches the shipped bundle |
+| Q4_1 | 8.3% block error -- visibly grainy, avoid |
 
-And the step rebinding is sound: `schedule_512.json`'s 181 ops x 4 phases obey
-`off_k = off_0 + k*stride` exactly (checked offline), which is the law `Engine::Impl::rebind`
-applies.
-
-**ANSWERED (2026-10-28): the DiT quantisation, and klein is brutal about it.**
-
-`oflm pull flux2-klein:4b` (the shipped bf16 bundle), same prompt, seed, 4 steps, same
-kernels: a CLEAN, photographic fox. Then the bundles were compared file by file:
-
-```
-identical: bundle.json keys, layout e667e5952ca22004, all four schedules, tf/dt/qin (both
-           sizes), params.bin, embed.bin, vae_W/S, vae_enc_W/S, tokenizer.json   -- byte-for-byte
-114 of 194 packed weights                                              -- byte-identical
-80 differing                                                          -- exactly the DiT blocks
-```
-
-and, decisively, **the checkpoint's bf16 packed by `pack_b_cols` is byte-identical to the
-shipped bundle** (rel 0.000e+00). So the packer, the schedules, the TE, the VAE and the step
-machinery are all exactly right; the only difference is the DiT's weights:
-
-| DiT source | weight error vs shipped | image |
-|---|---|---|
-| checkpoint bf16 / BF16 GGUF | 0 | clean |
-| Q8_0 GGUF | 1.0% RMS | grainy |
-| Q4_1 GGUF | 8.3% RMS | the same grain |
-
-Q8_0 and Q4_1 look the SAME because this distilled 4-step trajectory saturates: about 1% of
-weight error is already too much. So a GGUF klein is a FORMAT convenience, not a size win --
-take the repo's BF16 or F16 file. `gguf_source.QUANTS` now prefers BF16/F16 and
-`klein-from-gguf.py` warns when it has to use a lossy one.
-
-(For the record, 1 vs 4 steps was never like-for-like: a non-bundle step count recomputes
-sigmas in C++ and is a different trajectory.)
+`gguf_source.QUANTS` prefers BF16/F16/Q8_0 and warns on Q4_1. The general lesson for any
+other model family: **when a GGUF names its base repo, check the small conditioning tensors
+against it** (modulation, time embedder, embeddings) -- they are cheap to read, easy for a
+converter to permute, and catastrophic when wrong.
 
 ### The EDIT path was never broken either (corrected 2026-10-28)
 

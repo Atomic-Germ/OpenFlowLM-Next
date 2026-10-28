@@ -13,21 +13,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# The quants gguf_weights decodes, best first -- and for klein "best" means PRECISION, not
-# size. Measured 2026-10-28 against the shipped bf16 bundle (same prompt, seed, 4 steps):
+# The quants gguf_weights decodes, best first. Measured 2026-10-28 against the shipped bf16
+# bundle (same prompt, seed, 4 steps, and the modulation convention detected):
 #
-#   * the checkpoint's bf16, packed by our code, is BYTE-IDENTICAL to the shipped bundle;
-#   * a Q8_0 DiT (1.0% weight error) and a Q4_1 DiT (8.3%) produce the SAME grainy image;
-#   * the shipped bf16 bundle is clean, and no other file differs at all -- 114 of 194
-#     packed weights are byte-identical, and the 80 that differ are exactly the blocks.
+#   * the checkpoint's bf16 packed by our code is BYTE-IDENTICAL to the shipped bundle;
+#   * a Q8_0 DiT correlates 0.9946 with it (mean|d| 2.68/255) -- indistinguishable in
+#     practice, and half the size;
+#   * a Q4_1 DiT is 8.3% off on the block weights and is visibly grainy.
 #
-# So this distilled 4-step model needs a lossless DiT: the quantisation is the whole
-# difference. BF16/F16 first; the lossy ones are still decoded (a user may ask) but the
-# image is visibly worse.
-QUANTS = ["BF16", "F16", "Q8_0", "Q4_1"]
+# (A grainy Q8_0 was a red herring for a day: the real cause was the adaLN tensor's halves
+# being BFL-ordered, which gguf_weights now detects and corrects.)
+QUANTS = ["Q8_0", "BF16", "F16", "Q5_1", "Q5_0", "Q4_1", "Q4_0"]
 
-# The ones that visibly degrade klein (see above), for the warning.
-LOSSY = ("Q8_0", "Q4_1", "Q5_0", "Q5_1", "Q4_0")
+# The ones that visibly degrade klein, for the warning.
+LOSSY = ("Q4_1", "Q4_0")
 
 CACHE = Path(os.environ.get("OFLM_DIT_GGUF_CACHE") or Path.home() / ".cache" / "oflm" / "dit-gguf")
 
