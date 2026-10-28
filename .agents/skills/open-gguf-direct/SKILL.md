@@ -968,6 +968,43 @@ Three pieces made it work beyond the reader:
    `rope_parameters` from `qwen3vl.rope.dimension_sections` ([24,20,20,0] -> [24,20,20],
    interleaved, which is Qwen3-VL's law).
 
+### Gemma 4 is a FAMILY project, not a projector one (surveyed 2026-10-27)
+
+Asked to do Gemma 4 next; the survey says the mmproj is the last 10% of it, not the first.
+State of the tree:
+
+* **no open kernels** -- `Gemma4-{E2B,E4B,12B}-IT-NPU2` have no `open_kernels/`, and
+  `open_kernels/recipes/` has no gemma4 family (gemma3's recipe is a different decoder);
+* **no open-engine path** -- none of `modeling_gemma4*.cpp` calls
+  `AutoModel::_shared_select_open_engine`, so those models only ever run their closed DLLs;
+* **no tower** -- `vit.cpp` has Qwen3-VL and Qwen2.5-VL only; Gemma 4's is a third kind.
+
+And the architecture is different enough that it is not "gemma3 with a spec"
+(`google/gemma-4-12B-it`'s config, read 2026-10-27):
+
+```
+layers 48, 16 heads / 8 KV, head_dim 256, global_head_dim 512   <- TWO head widths
+attention_k_eq_v True              <- K and V share a projection
+final_logit_softcapping 30
+sliding_window 1024, layer_types mixing sliding/full
+rope per layer type: full {partial_rotary_factor 0.25, theta 1e6, proportional}
+                     sliding {theta 1e4, default}
+vocab 262144, tie_word_embeddings
+vision: model_patch_size 48 (pooling 3), patch_size 16, mm_posemb_size 1120,
+        pooling_kernel_size 3, num_soft_tokens 280, mm_embed_dim/output 3840
+```
+
+The attention kernel is compiled for ONE head_dim, so 256 in the sliding layers and 512 in
+the global ones is two kernel shapes in one model; `k_eq_v` is a third projection layout;
+`partial_rotary_factor` 0.25 at 512 is a ptab the recipes have not built; softcapping is a
+tail op. All of that is ahead of "read the projector".
+
+Genuinely useful now: a Gemma 4 mmproj DOES exist, in the official QAT repo
+(`google/gemma-4-12B-it-qat-q4_0-gguf` -> `mmproj-gemma-4-12b-it-qat-q4_0.gguf`) and in
+unsloth's (`mmproj-BF16/F16/F32.gguf`), so the file side of the question is answered -- and
+the reader built today (config from `clip.vision.*`, plain tensors, name map) is the shape
+that tower will need too.
+
 ### Qwen2.5-VL: the window is the one thing the projector does not state (2026-10-27)
 
 Same install path, different tower -- and one surprise: **Qwen2.5-VL needs NO new kernel
