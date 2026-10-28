@@ -1041,143 +1041,17 @@ take the repo's BF16 or F16 file. `gguf_source.QUANTS` now prefers BF16/F16 and
 (For the record, 1 vs 4 steps was never like-for-like: a non-bundle step count recomputes
 sigmas in C++ and is a different trajectory.)
 
-### The EDIT path runs, and is wrong (found 2026-10-27)
+### The EDIT path was never broken either (corrected 2026-10-28)
 
-`oflm image <tag> "..." --image ref.png` completes -- reference decoded and centre-cropped,
-VAE encode 0.24 s, 6.8 s total -- and the output is **heavily degraded**: on a text image the
-reference's letters ghost through ("major global city an...", "shion, and science") under
-colour noise; on a generated fox it is a noisy silhouette. Text-to-image from the SAME bundle
-is clean, so this is the edit path, not the GGUF conversion and not the quant.
+An earlier note here said edits came out heavily degraded. They do -- on a 4-bit DiT, with
+the rest of the pipeline identical. The same edit (`--image paris.png`, "make it a night
+scene", 4 steps) on the shipped **bf16** bundle gives exactly what an edit should: a night
+sky with stars, silhouetted trees, a lit horizon, water reflections -- and the reference
+image's own text preserved ("major global city an...", "shion, and science"). 6.8 s
+(encode 0.24, steps 5.75, vae 0.41).
 
-Where to look, in order: the reference latents' scaling/pitch (`pl.enc_buffers`, `inputs`
-`reference_pitch`/`reference_channels`), the VAE encoder packing (`vae_encoder.pack_weights`
--> `vae_enc_W.bin`) against the decoder's, and whether `kp.plan(R, edit=True)`'s step count
-matches what the bundle was built with (the engine supports 1..50 steps but the CLI has no
-`--steps`, so a 4-step edit cannot be compared at more steps from `oflm image`).
-
-**The kernels ship** (`utilities/export-kernels.py` now builds them, so
-`cmake --workflow --preset linux-default` produces `src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
-like the 28 text sets): built in `build/dit-kernels/<family>` (2.3 GiB of per-stream xclbins)
-and INSTALLED into `src/xclbins` (86 MiB: four full ELFs -- 512, 1024, and the two edits --
-plus their manifest). Before this the packaged build had no klein kernels at all, so every
-user would have had to build their own.
-
-Two things to know about it: the layout hash covers the RESOLUTION SET (512-only is
-`c3277a2aa2dd6005`, 512+1024+edits is `e667e5952ca22004`), so a bundle must name the same
-ones; and `--out` is not relocatable once built -- `elf_build/full_elf_config_*.json` bakes
-absolute paths, so moving the directory means deleting `elf_build` and recomposing (~9 min).
-
-**One command** (`klein-from-gguf.py`, the local path until `q4nx-build --open-diffusion`
-takes a GGUF repo and `oflm add` knows what a bundle is):
-
-    python utilities/dit-chain/klein-from-gguf.py --repo unsloth/FLUX.2-klein-4B-GGUF \
-        --tag klein-gguf:512 --image "a red fox in fresh snow"
-
-It picks the DiT GGUF (Q4_1 first, downloading it), resolves the checkpoint from the repo's
-README, builds the bundle, builds+installs the kernel set for the same resolutions if it is
-not already beside the bundle, registers the tag, and optionally generates an image. A
-second run is seconds; a first run is ~25 min, the kernel build dominating. Verified with
-`--repo` alone (cache hit) as well as `--gguf <file> --repo <owner/name>`: a fox, a
-lighthouse, ramen, a snow leopard and a retriever puppy, all 4.2-4.4 s each.
-
-The four steps it drives, if one of them needs debugging (a full run is ~25 min on this box,
-mostly the kernel build):
-
-```
-# 1. the bundle: DiT from the GGUF, TE + VAE from the checkpoint (~9 min; 4.5 GB pack cache)
-python utilities/dit-chain/export_bundle.py --checkpoint ~/klein-ckpt \
-    --transformer-gguf flux-2-klein-4b-Q4_1.gguf --resolutions 512 \
-    --out ~/klein-bundle --pack-cache ~/klein-pack
-
-# 2. the kernels for the SAME resolutions (the layout hash must match, and it names them)
-python open_kernels/export_dit_kernels.py --resolutions 512            # ~15 min
-python open_kernels/export_dit_kernels.py --resolutions 512 \
-    --install ~/klein-bundle/open_kernels --out src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels
-
-# 3. a tag, then an image
-python utilities/dit-chain/register-bundle.py ~/klein-bundle --tag klein-gguf:512
-oflm image klein-gguf:512 "a red fox in fresh snow, photograph" --size 512
-```
-
-Two traps that only show at run time:
-
-* **the text encoder is not in the GGUF.** `_pack_dit_from_gguf` covers the DiT; the TE is
-  still packed from the checkpoint (`generate.ensure_packed(..., only=("text_encoder",))`).
-  Without it the engine fails at load with "schedule names an unknown buffer w:te0.qkv".
-* **the pack cache is stamped with the CHECKPOINT's identity**, and a mismatch deletes every
-  `*.bin` in it -- so the TE packs need their own subdirectory or they wipe the DiT packs.
-
-Edits are not exercised yet: they need `--edits 512` on BOTH sides (the VAE encoder streams)
-and a reference image.
-
-**The checkpoint is resolved from the GGUF's repo, not passed by hand** (`klein_checkpoint.py`,
-the same climb the text models use for tokenizers and configs):
-
-    unsloth/FLUX.2-klein-4B-GGUF  --README frontmatter-->  base_model:
-                                        black-forest-labs/FLUX.2-klein-4B
-
-so `export_bundle.py --gguf-repo unsloth/FLUX.2-klein-4B-GGUF --transformer-gguf <file>`
-fetches only `text_encoder/`, `vae/`, `tokenizer/`, `LICENSE.md` from the base into
-`~/.cache/oflm/dit-checkpoints/<owner>--<name>` (never the 8 GB `transformer/`), and reuses
-it next time. A converter that leaves `base_model` empty (leejet's does) falls back to the
-repo's own name minus `-GGUF`.
-
-**The geometry checks now ask the TENSORS** (`klein_pipeline.validate_sources`): the
-hand-written `TRANSFORMER`/`TEXT_ENCODER` dicts in `q4nx/open_diffusion.py` are gone. They
-restated the schedule's own constants, so they could only catch a checkpoint whose
-config.json disagreed -- one whose config agreed while its tensors did not passed and packed
-garbage. Now the weights the schedule names must build at their (K, N): a sample covering
-every kind (the singles, first/last double and single block, first/last text-encoder layer)
-plus `fill_params`, which reads every norm, plus the embedding table's width against the
-row the schedule pads to. It runs before the 7.5 GiB pack (20 s on a warm cache) and is the
-only check that works for a GGUF DiT, which has no config.json at all.
-
-Proved both ways: the real sources pass; a DiT one row short is rejected ("x_emb: (512,
-3071) where the schedule needs (512, 3072)"), a text encoder with a 256-wide error is
-rejected at the concat, and one with no qk norms is rejected by `fill_params`.
-
-The layout hash stays hard -- it is the LINK key, computed identically on both sides
-(`layout_hash(set_streams(family, resolutions))`), and it is what stops a 1050-op schedule
-from reading streams built for another shape.
-
-Still to do for the product path: `q4nx-build --open-diffusion <gguf-repo>` (so a GGUF repo
-is one command), and `oflm add` recognising a bundle so `register-bundle.py` is only for
-local test builds.
-
-### Diffusion: the klein DiT GGUF is a NAME map, not a kernel change (2026-10-27)
-
-`unsloth/FLUX.2-klein-4B-GGUF` and `leejet/...` carry **only the DiT** -- no text encoder,
-no VAE -- so "klein from GGUF" is: DiT from the GGUF, TE from Qwen3-4B (a model this branch
-already runs), VAE from the BFL/Comfy safetensors (no GGUF of a VAE exists anywhere). The
-engine is unchanged: it replays `klein_pipeline`'s schedule against a bundle.
-
-`utilities/dit-chain/gguf_weights.py` is the adapter: a `SafeTensors.get`-compatible view of
-the GGUF in **HF layout**, so `dit_weight_specs()` and `fill_params()` take it as they take
-a checkpoint. Everything it does is names and orientation:
-
-* the GGUF speaks **BFL names** (`double_blocks.0.img_attn.qkv`, `img_in`,
-  `final_layer.linear`) where diffusers has `transformer_blocks.0.attn.to_q`, `x_embedder`,
-  `proj_out`; the modulations are `*.lin` vs `*.linear` and `final_layer.adaLN_modulation.1`
-  vs `norm_out.linear`;
-* ggml stores a matmul `[in, out]` -- which is the same bytes as HF's `[out, in]` read
-  row-major, so **the reshape is `dims[::-1]` and there is NO transpose**. Reshaping `dims`
-  and transposing gives the right SHAPE with scrambled values (it passed the shape check and
-  failed the numeric one);
-* the fused tensors split along the OUTPUT axis: `qkv` -> thirds (q, k, v),
-  `single_blocks.N.linear1` -> `to_qkv_mlp_proj`, `linear2` -> `to_out`.
-
-Verified against `black-forest-labs/FLUX.2-klein-4B` by byte range (no 8 GB download):
-BF16 tensors are **exact** (x_embedder, proj_out, the time embedder, the qk norm), and the
-Q4_1 ones agree at cos 0.9967 / mean error 6.4% of rms -- what 4 bits costs, not a mapping
-error. `--check` builds all 86 schedule weights at their (K, N).
-
-A quantized source also changes the METRIC: the worst element of a Q4_1 tensor is about the
-tensor's own rms, so `max|d|/rms < 1e-2` can never pass. Use cosine + mean error, and
-`exact` where the source is BF16.
-
-Still to wire: `export_bundle.py --transformer-gguf` (the packing path is
-`build(get) -> kp.pack_b_cols(b)`, so it is the same three lines with `gguf.get`), and
-`q4nx-build --open-diffusion` passing the file through.
+So there is ONE root cause behind the grainy images, the grainy edits and the "deepdream"
+look: the DiT's precision. Everything else measured byte-identical to the shipped bundle.
 
 ### Gemma 4 is a FAMILY project, not a projector one (surveyed 2026-10-27)
 
