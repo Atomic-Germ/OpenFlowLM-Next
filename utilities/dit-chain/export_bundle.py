@@ -307,13 +307,17 @@ def main() -> int:
 
         ckpt, repo = resolve_checkpoint(a.gguf_repo, Path(a.checkpoint_cache) if a.checkpoint_cache else None)
         a.checkpoint = str(ckpt)
+        # the CONVERSION source is the checkpoint, not the quant repo: that is what the
+        # modulation-convention check reads (a GGUF repo has no transformer/)
+        if not a.reference_repo:
+            a.reference_repo = repo
         print(f"checkpoint: {a.checkpoint} (from {repo})", flush=True)
     build(Path(a.checkpoint) if a.checkpoint else G.model_dir(), Path(a.out).resolve(),
           [int(r) for r in a.resolutions.split(",")], a.jobs,
           Path(a.pack_cache) if a.pack_cache else None,
           [int(r) for r in a.edits.split(",") if r],
           Path(a.transformer_gguf) if a.transformer_gguf else None,
-          a.reference_repo or a.gguf_repo)
+          a.reference_repo)
     return 0
 
 

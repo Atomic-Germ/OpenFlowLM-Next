@@ -119,8 +119,7 @@ def main(argv=None) -> int:
     run([sys.executable, HERE / "export_bundle.py",
          "--gguf-repo", repo, "--transformer-gguf", gguf,
          "--resolutions", ",".join(str(r) for r in resolutions), "--edits", a.edits,
-         "--out", out, "--pack-cache", Path(a.pack_cache).expanduser(), "--jobs", a.jobs,
-         "--reference-repo", repo],
+         "--out", out, "--pack-cache", Path(a.pack_cache).expanduser(), "--jobs", a.jobs],
         f"bundle -> {out}")
 
     # 4. the kernels, for the same resolutions (the layout hash ties them to this bundle).
