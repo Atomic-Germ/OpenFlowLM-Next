@@ -1057,9 +1057,21 @@ FLUX.2-klein-9B`, minus `transformer/`), then compare the latents step by step. 
 gate, not a guess.
 
 Also: `--size 1024` at 9B fails with `mmap ... Cannot allocate memory` (a 539 MB mapping at
-a 25.5 GB offset) -- a device BO allocation, NOT host RAM: the loader reads one weight at a
-time into a device BO and peak host RSS for the whole 16.9 GB model is **205 MB**, so
-there is no second copy of the weights in memory.
+a 25.5 GB offset). **This box is UMA** -- the NPU's "device" memory is the same 46 GB of
+physical RAM -- so the 9B's budget is the sum of both sides: 16.89 GB of weights (resident,
+they are BOs like everything else; the loader only streams them file->BO one at a time, so
+the *process* peaks at 205 MB RSS, which says nothing about the pool) + 1.66 GB of buffers
+at 512 + 4.92 GB at 1024 = ~21.8 GB. That fits in 46 GB, so the 1024 ENOMEM is a device-heap
+/ address-space limit rather than a plain shortage -- and it is why anything that also holds
+a few GB of tmpfs (an 8.5 GB `/tmp/opencode` did it three times) OOMs the box. Keep build
+and test scratch in `./tmp`, on disk.
+
+**v0.1.0 gate (2026-10-28, decided with the maintainer):** the 4B ships; the 9B ships only
+if the CPU reference localises the layout fault and it is fixable. If the reference shows no
+difference we can act on, 9B is simply not in v0.1.0 -- the 4B's quality and its cost per
+image (4.4 s vs 8.0 s) make that the better default, and nothing in the shipped bundle
+depends on 9B (its kernel set is a separate family directory). Do not leave the 9B's
+artifacts (18 GiB bundle, 16 GiB pack cache) in the way of the release build.
 
 ### Verifying a diffusion family's kernels without the whole pipeline (2026-10-28)
 
