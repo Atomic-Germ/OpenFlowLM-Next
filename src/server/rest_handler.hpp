@@ -131,6 +131,9 @@ public:
         std::function<void(const json&)> send_response,
         StreamResponseCallback send_streaming_response);
 
+    /// Thread-safe reader for the currently loaded chat model tag.
+    std::string loaded_model_tag() const;
+
 private:
     using ModelLoad = openai_compat::ModelLoad;
     /// \param model_field_present the request carried a "model" key. Without it an
@@ -143,7 +146,6 @@ private:
     /// routes and read by GET /api/ps, which is not queued. These two are the
     /// only way either side touches it across threads (#135).
     void set_current_model_tag(const std::string& tag);
-    std::string loaded_model_tag() const;
     /// The tag an image request names (or --imagemodel's, when it names none), resolved
     /// and checked BEFORE anything is unloaded. Empty json and *tag set, or the 400.
     json resolve_image_model(const json& request, std::string* tag);

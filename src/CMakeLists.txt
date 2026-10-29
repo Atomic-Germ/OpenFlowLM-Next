@@ -1513,6 +1513,16 @@ if(MSVC)
 endif()
 add_test(NAME multipart COMMAND multipart_test)
 
+# OTel/Prometheus metrics exposition and content negotiation. Header-only; no device.
+add_executable(metrics_test server/metrics_test.cpp)
+target_include_directories(metrics_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(metrics_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+endif()
+add_test(NAME metrics COMMAND metrics_test)
+
 # OPEN-VISION-IMAGE-READ: the reader's own PNG decoder, against fixtures whose
 # expected RGB24 was computed outside this code. Links NOTHING -- no ffmpeg, no
 # zlib, no device, no weights -- which is the point: it passes on a machine whose

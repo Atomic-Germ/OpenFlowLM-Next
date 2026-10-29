@@ -139,6 +139,10 @@ public:
         std::lock_guard<std::mutex> lock(active_requests_mutex_);
         return active_requests_.size(); 
     }
+    size_t get_npu_queued_requests() {
+        std::lock_guard<std::mutex> lock(npu_queue_mutex_);
+        return npu_request_queue_.size();
+    }
 
 private:
     ///@brief do accept
