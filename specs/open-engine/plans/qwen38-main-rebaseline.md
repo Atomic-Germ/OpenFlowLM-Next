@@ -1,5 +1,50 @@
 # Qwen3.8-27B validation report
 
+## Full-depth private ax refinement — 2026-10-29
+
+Connected the integrated two-pass Q/gate/K/V kernel to the shared runtime in
+private control/candidate bundles. Only ax binaries differ from the parent
+46-set export. Each composite has a separate identity binding the parent,
+private build and role; runtime/packing semantics and instruction bytes remain
+unchanged. Fresh plain and capture-only CLIs use unchanged shared arithmetic,
+pin 589/590 compiler dependencies and pass CTest **4/4 each**.
+
+Four resident NPU processes complete **64 layers × (257 prompt positions +
+one continuation)**. All **324 fresh control captures** reproduce the retained
+standard run byte-for-byte. Within each role, all **260 plain/trace outputs**
+match. Generated tokens, last-prompt aliases and all **258 argmax values** per
+role agree with the independent CPU reference. The separate audit recomputes
+every measurement and confirms execution completion with numerical **FAIL**.
+
+| Independent sequential gate | Control | Candidate |
+|---|---:|---:|
+| Passing residual rows | 16,416 / 16,512 | 16,434 / 16,512 |
+| Worst residual maxrel | 0.0992221863, L58/P205 | 0.0620054922, L60/P220 |
+| Passing logit vectors | 254 / 258 | 255 / 258 |
+| Minimum logit correlation | 0.9963255072 | 0.9992857176 |
+| Final continuation residual maxrel | 0.0010046688 | 0.0003540250 |
+
+Residuals: **9121 improved, 6584 regressed, 807 tied**; 43 formerly failing
+rows pass, while 25 formerly passing rows fail. Logit correlations improve in
+157 positions and regress in 101. Keep these regressions explicit: L60/P220
+increases from 0.0512518332 to 0.0620054922, and the earliest temporal failure
+L54/P125 increases from 0.0056958381 to 0.0066132466. L58/P205 improves from
+0.0992221863 to 0.0395745564 but still fails. Candidate logit failures remain
+at P205, P213 and P220. Thresholds remain maxrel <0.005 and correlation >0.9999.
+
+The shallowest candidate failure is now **L50/P205**, maxrel 0.0117765736;
+the preceding L49/P205 is 0.0018135651. Next capture the candidate's causal
+DeltaNet/FFN boundaries there, retaining L54/P125 and L60/P220 as separate
+regression controls. This experiment proves cross-layer propagation, not
+uniform improvement or production acceptance. Hybrid boundary coverage,
+resident reset/isolation and production performance remain separate gates.
+
+TDD: four initially failing contract tests, seven new tests in total; full host
+suite **2064 passed, 47 skipped**. Evidence: `Models/qwen38-27b/refined-runtime/`
+(`plain-v1`, `trace-v1`, `prepared-v1`, `native-v1`). Runbook:
+`utilities/refined-runtime/README.md`; new skill: `open-qwen38-refined-runtime`.
+The production export and installed model configuration are unchanged.
+
 ## Private full-ax projection refinement on the NPU — 2026-10-29
 
 Integrated the previously staged two-pass Q/gate/K/V correction in a private
