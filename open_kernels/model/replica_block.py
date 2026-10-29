@@ -118,6 +118,27 @@ def attention_block(q, k, v, gate, qn, kn, inv_freq, kv, pos0, *, nh, kvh, hd, t
     return og
 
 
+def attention_prep(q, k, v, qn, kn, inv_freq, kv, pos0, *, nh, kvh, hd, t_real=None, eps=1e-6):
+    """attention_block up to its products, for when they run on the NPU (OPEN-PREFILL-ATTN):
+    returns Q [T, nh*hd] normed, roped and scaled by 1/sqrt(hd) (zero past t_real), and writes
+    the block's K / V rows to kv as attention_block does. qn / kn None skip that norm (prep
+    "rope", a family with no q/k norm)."""
+    T = q.shape[0]
+    t_real = T if t_real is None else t_real
+    Q = np.zeros((T, nh * hd))
+    for t in range(t_real):
+        p = pos0 + t
+        qh, kh = q[t].reshape(nh, hd), k[t].reshape(kvh, hd)
+        if qn is not None:
+            qh = rms(qh, qn, eps)
+        if kn is not None:
+            kh = rms(kh, kn, eps)
+        Q[t] = (rope(qh, p, inv_freq) / np.sqrt(hd)).reshape(-1)
+        kv[p, :kvh * hd] = bf16_round(rope(kh, p, inv_freq).reshape(-1))
+        kv[p, kvh * hd:] = bf16_round(v[t])
+    return Q
+
+
 def router_block(xm, Wr, topk):
     """(probs [T, E], idx [T, topk], w [T, topk]): softmax over the experts, the top-k by
     probability (lowest index on a tie, as router_fin picks), renormalised."""
@@ -178,8 +199,15 @@ def run_case(case):
                             head_dim=c["head_dim"], t_real=c["t_real"])
     og_att = attention_block(c["q"], c["k"], c["v"], c["gate"], c["qn"], c["kn"], c["inv_freq"], kv, c["pos0"],
                              nh=c["nh"], kvh=c["kvh"], hd=c["hd"], t_real=c["t_real"])
+    # the products' host half, both preps: its normed K / V rows are attention_block's (out_kv)
+    kv_qk, kv_rope = c["kv"].copy(), c["kv"].copy()
+    geo = dict(nh=c["nh"], kvh=c["kvh"], hd=c["hd"], t_real=c["t_real"])
+    q_qk = attention_prep(c["q"], c["k"], c["v"], c["qn"], c["kn"], c["inv_freq"], kv_qk, c["pos0"], **geo)
+    q_rope = attention_prep(c["q"], c["k"], c["v"], None, None, c["inv_freq"], kv_rope, c["pos0"], **geo)
+    assert np.array_equal(kv_qk, kv)
     probs, idx, w = router_block(c["xm"], c["Wr"], c["topk"])
-    return dict(og_lin=og_lin, conv_state=conv_state, S=S, og_att=og_att, kv=kv, probs=probs, idx=idx, w=w)
+    return dict(og_lin=og_lin, conv_state=conv_state, S=S, og_att=og_att, kv=kv, probs=probs, idx=idx, w=w,
+                q_prep_qknorm=q_qk, q_prep_rope=q_rope, kv_prep_rope=kv_rope)
 
 
 def write_fixture(out: Path, case: dict, res: dict) -> None:
