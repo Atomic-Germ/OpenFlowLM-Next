@@ -1,5 +1,60 @@
 # Qwen3.8-27B validation report
 
+## Private full-ax projection refinement on the NPU — 2026-10-29
+
+Integrated the previously staged two-pass Q/gate/K/V correction in a private
+full-ax build. Main cores prepare the high table from native FP32 entry norm,
+subtract its reconstructed INT16 activation to obtain the residual, prepare a
+second table and evaluate both with the same production GEMV entry. Each
+weight element is streamed once and used twice before release. Completed
+projection bands are summed on the NPU; no host correction or forced OG input
+is supplied. Original six-buffer ABI, DMA sequence, output projection, FFN and
+attention workers are retained. Production source files are unchanged.
+
+The first candidate failed exact identity. An isolated real-input probe showed
+that vector accumulator subtraction/addition did not reproduce host IEEE FP32:
+240/240 high tables matched, only 162/240 low tables and 2/240 sums matched,
+with 1532 differing sum elements. Added a private integer binary32 RNE helper
+for both operations. Host tests cover random finite values, subnormals,
+cancellation, ties and signed zero. The corrected NPU probe matches **all 240
+high tables, 240 low tables and 240 sums**; a separate audit binds 480 captures.
+
+Fresh integrated control/candidate runs complete **480 dispatches** with each
+role retaining its own causal KV from position zero. All **720 native control
+captures** match. Candidate identity against the independently audited staged
+experiment is exact for **960 projections, 240 complete scratch buffers,
+240 causal KV prefixes and 240 residuals**. Independent audit binds 1440
+captures and recomputes residual/head measurements against retained references.
+Output/FFN sublayer gates transfer through complete scratch/residual identity
+to the audited sweep; this stage does not re-dequantize their reference weights.
+
+All **5760 primary and 5760 conditioned candidate heads** pass; all **240
+residual cases** pass. Retained primary maxrel is 1.896555707e-5 with
+**178 improvements, 61 regressions and one tie**. Full-model-reference maxrel
+is 3.757162146e-5 with **155 improvements, 83 regressions and two ties**.
+P46/P148 and the earlier P239 attention-only regression remain recorded.
+Integration reproduces the staged candidate, including its regressions.
+
+The instruction streams are byte-identical. Main-core .text grows from
+9920 to **12,528 bytes**; main-core L1 end from 51,456 to **54,016 bytes**.
+Both 15-core builds stay below the unchanged limits: overall maximum .text
+13,760/16,384, L1 end 59,920/65,536, stack 6144. Control/candidate pin 858/868
+compiler inputs. Diagnostic probe: one core, .text 4400, L1 end 34,304,
+stack 6144, 813 pinned inputs.
+
+TDD: **14 new tests** with initial failures; full host suite **2057 passed,
+47 skipped**. Evidence under `Models/qwen38-27b/post-prefill-drift/`:
+`l3-refined-ax-control-v2`, `l3-refined-ax-candidate-v2`, `l3-refined-ax-v2`,
+`l3-refined-probe-v4` and `l3-refined-diagnosis-v2`. Earlier failed builds/runs
+and source snapshots are retained. Reproduction: `utilities/l3-refined-ax/README.md`
+and new `open-qwen38-refined-ax` skill.
+
+Next use a separate runtime build to validate the private candidate's effect
+through all 64 layers. Inputs in this local replay remain original captured
+L3 residuals; it does not establish cross-layer propagation. Full-model numerical
+acceptance remains FAIL, and production performance/request isolation remain
+separate gates. No installed service, registry or production export was changed.
+
 ## Refined L3 tail across all 240 positions — 2026-10-29
 
 Extended the private forced-OG output/FFN replay from three selected positions
