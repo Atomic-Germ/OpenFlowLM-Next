@@ -1,5 +1,54 @@
 # Qwen3.8-27B validation report
 
+## Refined candidate causal linear sublayers — 2026-10-29
+
+Isolated the three retained candidate failures with unchanged production lx
+binaries: **L50/P205**, **L54/P125** and **L60/P220**. Each fresh process holds
+one packed layer and replays every captured candidate input from position zero,
+without injecting captured state. All **553 NPU dispatches** complete, and all
+**553 output residuals match the full-depth candidate bytewise**. A separate
+audit binds **1659 output/scratch/state captures**. The freshly rebuilt generic
+harness pins 326 compiler dependencies; no xclbin was rebuilt or promoted.
+
+Independent CPU analysis reconstructs all three original reference outputs
+bytewise, carries separate causal mixed/FP64 histories and checks production
+FP32 post-output, Z/out/residual, FFN front and both down partials. All **553
+entry/conv/composed-state cases**, **26,544 strict recurrence head cases**, and
+selected projection/FFN gates pass. Original thresholds are unchanged.
+
+| Target | Total residual maxrel | Propagated effect maxrel | Local implementation gap maxrel |
+|---|---:|---:|---:|
+| L50/P205 | 0.0117765736 | 0.0117388648 | 0.0000377089 |
+| L54/P125 | 0.0066132466 | 0.0066087116 | 0.0000045350 |
+| L60/P220 | 0.0620054922 | 0.0619942402 | 0.0000112520 |
+
+Signed vectors telescope through the nonlinear FFN; their maxima must not be
+added. Current-input effects dominate (0.0117169752 / 0.0066125725 /
+0.0619976021), while input-history effects are 0.0000294601 / 0.0000044469 /
+0.0000170087. Thus the selected failures primarily amplify drift already in
+their inputs; this evidence does not justify changing their passing local
+DeltaNet/FFN arithmetic. The implementation gap includes accumulated local
+state error, not only the selected position. Raw up/gate projections are not
+retained in scratch and are not claimed as separately observed.
+
+Separate analysis re-audit reproduces all arrays and metrics. Both analysis
+commands intentionally exit 1 with complete execution, local PASS and numerical
+**FAIL**. Full-model acceptance remains blocked. Next trace earlier current-input
+drift sources along the candidate prefix, separating new local error from
+amplification (P205 grows from 0.0004254134 at L48 to 0.0018135651 at L49;
+L31 is another earlier growth point). Retain these three downstream controls.
+
+Evidence: `Models/qwen38-27b/refined-sublayers/` (`harness-v1`, `native-v2`,
+`analysis-v1`). The first preparation/run is retained as a failed preflight,
+before NPU dispatch; it is not successful hardware evidence. Runbook:
+`utilities/refined-sublayers/README.md`; new skill: `open-qwen38-refined-sublayers`.
+Baseline `dea2a4f`: 2064 passed / 47 skipped; final suite **2073 passed / 47
+skipped**, nine new tests including six RED-to-GREEN controls. Retained plain
+and trace shared CLI builds each pass CTest **4/4**. Peak materialized weight
+copies: 4.2814 GiB, one layer at a time. Production binaries, L1/shim geometry,
+catalogue, installed models and services are unchanged. Performance is not
+measured; capture timings are not production benchmarks.
+
 ## Full-depth private ax refinement — 2026-10-29
 
 Connected the integrated two-pass Q/gate/K/V kernel to the shared runtime in
