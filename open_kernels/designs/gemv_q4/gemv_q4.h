@@ -63,10 +63,18 @@ static constexpr unsigned kTileK = 256;       // K per chunk
 #ifndef GEMV_Q4_SCALES_F32
 #define GEMV_Q4_SCALES_F32 0
 #endif
+// 1: Q4_0-native chunks (a bytes prototype): d at [0:512), codes at [512:4608), the min is -8 * d.
+#ifndef GEMV_Q4_0_NATIVE
+#define GEMV_Q4_0_NATIVE 0
+#endif
 #if GEMV_Q4_SCALES_F32
 static constexpr unsigned kDBytes = 1024;
 static constexpr unsigned kMetaBytes = 2048;
 static constexpr unsigned kTileBytes = 6144;
+#elif GEMV_Q4_0_NATIVE
+static constexpr unsigned kDBytes = 512;
+static constexpr unsigned kMetaBytes = 512;
+static constexpr unsigned kTileBytes = 4608;
 #else
 static constexpr unsigned kDBytes = 512;
 static constexpr unsigned kMetaBytes = 1024;
@@ -224,7 +232,12 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     const aie::vector<bfloat16, kRows> lo = aie::sub(part, hi).template to_vector<bfloat16>();
 
     const aie::vector<bfloat16, kRows> d32 = load_scale(dp + kb * kRows);
+#if GEMV_Q4_0_NATIVE
+    (void)mp;
+    const aie::vector<bfloat16, kRows> m32 = aie::mul(d32, (bfloat16)-8.0f).template to_vector<bfloat16>();   // exact
+#else
     const aie::vector<bfloat16, kRows> m32 = load_scale(mp + kb * kRows);
+#endif
     auto [de, dod] = aie::interleave_unzip(d32, d32, 1);
     auto [me, mo] = aie::interleave_unzip(m32, m32, 1);
     const aie::vector<bfloat16, kRows> dperm = aie::concat(de.template extract<16>(0), dod.template extract<16>(0));

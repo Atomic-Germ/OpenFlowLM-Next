@@ -34,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "xrt/xrt_bo.h"
@@ -58,7 +59,7 @@ struct CoreConfig {
     size_t max_ctx = 4096;   ///< KV rows per attention layer and RoPE records: the context capacity
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
-    std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    std::string prefill_mode;  ///< OPEN-PREFILL-MODE: fast | lean | bfp16, "" = the default route (core.cpp kDefaultPrefillRoute)
     bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 
@@ -110,7 +111,12 @@ struct StepTiming {
     double moe_run_ms = 0;    ///< the mx dispatch itself
     double moe_read_ms = 0;   ///< xres back
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
+    double prep_ms = 0;       ///< OPEN-PREFILL-GLUE-PREP: the prep dispatches (rope, Q pack, cache write), host-blocked time
+    double rope_ms = 0, qpack_ms = 0, qsync_ms = 0;   ///< the host path's rope + cache write, Q pack, and the Q / cache syncs (of mid)
     double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
+    /// per layer-major dense GEMM step: the host stage before it, its pack, syncs, NPU wait, untile and the stage after
+    struct GemmStageMs { double prep = 0, pack = 0, sync = 0, wait = 0, untile = 0, post = 0; };
+    GemmStageMs gemm_stage[6];
 };
 
 /// The config.json fields a manifest checks, derived from a GGUF's metadata
@@ -257,6 +263,7 @@ public:
     /// Whether step_gemm_prompt() can run this kernel set: a block route whose every
     /// layer is a MoE kind, and OFLM_OPEN_LAYER_MAJOR not set to 0.
     bool layer_major_ok() const;
+    bool host_attn_fits() const;
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
     /// sequential path needs. Off by default; costs a tail per token.
@@ -273,6 +280,8 @@ public:
     /// Row j's logits from the last step_rows(want_logits = true).
     const float* rows_logits(size_t j);
     double rows_ms() const { return rows_ms_; }
+    struct RowsPhase { double embed_ms = 0, patch_ms = 0, submit_ms = 0, blocked_ms = 0, layers_ms = 0, head_ms = 0, total_ms = 0; };
+    const RowsPhase& rows_phase() const { return rows_phase_; }
 
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
@@ -309,6 +318,7 @@ private:
         std::vector<stream_patch::AttnPatch> attn;
         std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
+        std::map<int, xrt::run> runs;        ///< per layer: the decode walk's commands, built once and restarted
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
 
@@ -349,6 +359,7 @@ private:
     ///     only as the probe that established that. Never a default.
     /// OFLM_OPEN_SUBMIT_AHEAD sets it.
     int submit_ahead_ = 0;
+    bool run_reuse_ = true;                    ///< one-dispatch layers and a shared-context tail restart their run (OFLM_OPEN_RUN_REUSE=0 builds anew)
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
     /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
     /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
@@ -375,6 +386,12 @@ private:
     std::string prefill_route_;  ///< "fast" | "lean" on a set that carries both, "" on a set with one route
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
+    bool attn_fa_on_ = true;     ///< a dense set's attn_fa in place of the host attention (OFLM_OPEN_ATTN_FA=0 off)
+    size_t af_blocks_ = 0;       ///< af_q#b / af_o#b buffers allocated: one Q and one O a 256-token block
+    bool attn_prep_on_ = false;  ///< attn_fa prep stream does the bfp16 route rope / Q pack / cache write (on with the bfp16 route; OFLM_OPEN_PREFILL_PREP=0 / 1 forces)
+    bool prep_run_ = false;      ///< this prompt runs it (prep_setup)
+    size_t prep_pos0_ = 0;       ///< its first position
+    std::map<std::tuple<int, size_t, size_t>, xrt::bo> kv_sub_;   ///< (layer, block, pos0) -> the cache rows the block writes
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
     bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
@@ -385,6 +402,7 @@ private:
     void apply_thread_budget() const;
     bool moe_redispatch_ = false;  ///< OFLM_OPEN_MOE_REDISPATCH: run each MoE pass twice and print both
     std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
+    bool y_rows_ = false;   ///< gemm_phase hands `post` y as [T, N] token rows (a bfp16 step), not [N, T]
     std::map<std::string, std::vector<float>> split_y_;   ///< a split step's hi + lo, per y global (gemm_run)
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
@@ -452,11 +470,19 @@ private:
         std::vector<float> xn, og, h, q, gate;
     };
     StageScratch ss_;
+    /// The dense kind's layer-major rows: residual after attention, normed rows, silu(gate) * up, host K / V windows.
+    struct DenseScratch {
+        std::vector<float> og, xm, gate, K, V, q, xn_next;
+        std::vector<double> res1;
+    };
+    DenseScratch ds_;
+    int xn_ready_ = -1;     ///< the layer whose input norm ds_.xn_next already holds, or -1
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
     double rows_ms_ = 0;
+    RowsPhase rows_phase_;
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the
@@ -538,8 +564,8 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
         xrt::run r;
         bool active() const { return k != nullptr; }
     };
-    /// Build the command, set its arguments and start() it. Nothing waits.
-    Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer);
+    /// Build the command (or, with `reuse`, restart this layer's last one), set its arguments and start() it. Nothing waits.
+    Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer, bool reuse = false);
     /// Wait for `f`, with run_split's timeout / "late or hung" handling, and record it in the
     /// trace. Returns {elapsed, blocked}: elapsed is start() to done (the dispatch's own cost),
     /// blocked is how long THIS call sat in wait() -- the same number serially, and the only
@@ -634,12 +660,25 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// layer-major one; the cached rows below it are pulled off the device on `first` only.
     void block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t pos0, size_t row0, bool first);
     /// One GEMM step over B blocks: block b + 1 runs on the NPU while post(b, [N, T] y) runs on the host.
+    /// `raw`: a bfp16 step hands post the c-tiled y itself (block_host bfp16_c_row reads it), not token rows.
+    /// `y_dev`: block b's y stays on the device in the global y_dev[b] and nothing reads it back (post is not called).
     void gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
                     const std::function<const float*(size_t)>& prep,
-                    const std::function<void(size_t, const float*)>& post);
+                    const std::function<void(size_t, const float*)>& post, int slot = -1, bool raw = false,
+                    const std::function<void()>& before_last_post = nullptr,
+                    const std::vector<std::string>* y_dev = nullptr);
+    /// Decide whether the prompt's blocks go through attn_fa's prep stream and, if so, write each block's table and records.
+    void prep_setup(size_t B, size_t T, size_t N, size_t pos0);
+    /// OPEN-PREFILL-BFP16-FFN gate|up then down from H per block; one H buffer, as down(b) ends before gate|up(b + 1) starts
+    void glu_phase(int l, const Step& gu, const Step& dn, size_t B, size_t T, size_t hid,
+                   const std::function<const float*(size_t)>& prep,
+                   const std::function<void(size_t, const float*)>& post);
     /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
     void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
     void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);
+    /// The dense kind over the whole prompt (OPEN-PREFILL-HOST-ATTN): host attention, each GEMM step over every block.
+    void step_gemm_prompt_dense(const std::vector<int>& ids, bool want_logits);
+    void layer_dense_staged(int l, std::vector<double>& xres, size_t B, size_t T, size_t N, size_t pos0);
     /// Block b's residual, post-norm and router after the out / o GEMM, into moe_ at row b * T.
     void staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres);
     /// ffn_block's two GEMMs as two phases over the layer's rows; a dense FFN writes the output into xres.

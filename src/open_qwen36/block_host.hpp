@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
+
 namespace open_qwen36 {
 namespace host {
 
@@ -36,6 +38,18 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
 /// x [T, K] fp32 -> the GEMM's tiled bf16 activation layout ([K, T] "k,n" order, 64 x 32
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
+
+/// x [T, K] fp32 -> the A operand, T * K / 8 * 9 bytes. T a multiple of m * rows, K of k.
+void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint8_t* out);
+/// ... into token rows: out [M, n_real], n_real a multiple of the tile's n.
+void bfp16_untile_rows(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* out);
+/// The kernel's c-tiled fp32 output of an M x N product -> y [n_real, M] (the GEMM's own [N, T] order).
+void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y);
+/// Token row r's columns [ct n, ct n + n) of a c-tiled M x N output: a stage reading y once needs no untiled copy
+inline const float* bfp16_c_row(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t r, size_t ct) {
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+    return c + (r / rb) * J * blk + (r % rb) * t.n + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk;
+}
 
 struct DeltaGeom {
     size_t T = 0, t_real = 0, hid = 0;
@@ -97,6 +111,14 @@ struct AttnGeom {
 void attention_block(const AttnGeom& g, const float* q, const float* k, const float* v, const float* gate,
                      const float* qn, const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems,
                      float* og);
+
+/// AVX2/FMA host attention helpers kept in block_host.cpp so core.cpp retains
+/// its normal compile flags. scores_f32 returns the maximum score; exp_sum_f32
+/// overwrites scores with exponentials and returns their sum.
+float scores_f32(const float* K, size_t stride, const float* q, size_t hd, size_t n, float scale, float* s);
+double exp_sum_f32(float* s, size_t n, float mx);
+void axpy_f32(float* out, float a, const float* v, size_t n);
+int argmax_bf16_row(const float* p, size_t n);
 
 /// The host half of the block attention when its products run on the NPU (OPEN-PREFILL-ATTN):
 /// what attention_block does before its products and nothing after. Q [T, nh*hd] fp32 out,
