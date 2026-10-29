@@ -557,7 +557,9 @@ manifest `kvslice` 8) with one 64-lane exponential a block and the fused-Horner 
 not bit-identical to the 4-row kernel (the running max moves once a block of 8, and the polynomial is shorter), so the gates are
 correlation, not bytes: logits against the 4-row kernel over 20 steps with corr >= 0.9998 and the same top-1, every greedy prompt
 identical, Uno IDENTICAL, and `--rows-check 17` ROWS PASS, which holds `dxl` to `dx` because both compile the same block structure.
-`ATTN_RB=4` / `ATTN_EXPA=0` give the old kernel back for an A/B build.
+`ATTN_RB=4` / `ATTN_EXPA=0` give the old kernel back for an A/B build. `dx_attn` (the block route's `dxB`, which Granite runs only
+under `OFLM_OPEN_HOST_ATTN=0`) has no per-core windows and `attn_stepb.cc` has no 8-row body, so it keeps the 4-row kernel
+(`attnknobs.unwindowed_rb`).
 
 **Acceptance criteria:**
 - `decode_gates.py corr` of the set against the 4-row set: corr min >= 0.9998 and top-1 equal 20 of 20, with the prompt prefilled

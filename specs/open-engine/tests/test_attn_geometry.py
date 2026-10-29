@@ -262,6 +262,8 @@ def test_block8_is_granite_only_and_forced_back_by_the_probe(unvalidated, monkey
     monkeypatch.setenv("ATTN_RB", "4")
     assert DR.geometry(load_spec(SPECS / "granite42-3b.json")).RB == 4
     from recipes import attnknobs
+    # dx_attn (the block route's dxB) has no per-core windows: attn_stepb.cc stops at 4 rows
+    assert [attnknobs.unwindowed_rb(r) for r in (1, 2, 4, 8)] == [1, 2, 4, 4]
     flags = attnknobs.tree8_flags(4)
     assert "-DATTN_EXPA=2" in flags
     monkeypatch.setenv("ATTN_EXPA", "0")

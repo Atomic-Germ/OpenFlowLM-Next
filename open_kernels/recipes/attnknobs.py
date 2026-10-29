@@ -77,6 +77,12 @@ TREE8_STACK = 0x3000       # the tree spills past the usual 0x1800 stack, and th
 BLOCK8_MEASURED = ("granite",)
 
 
+def unwindowed_rb(rb: int) -> int:
+    """The row block of an attention walk without per-core windows (designs/dense/dx_attn.py, the block route's dxB):
+    attn_stepb.cc has bodies for 2 and 4 rows, so BLOCK8's 8 is 4 there -- the kernel that walk compiled before."""
+    return min(rb, 4)
+
+
 def tree8_flags(unroll: int) -> list[str]:
     # 4 rows unrolled fit dx's attention core, only 1 fits dxl's beside its skip and pack kernels.
     fl = ["-DATTN_TREE8=1", f"-DATTN_T8_UNROLL={unroll}", "-DATTN_EXP32=1", "-DATTN_KVH_MUL=1"]

@@ -59,6 +59,7 @@ sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes import dense as QR  # noqa: E402
+from recipes.attnknobs import unwindowed_rb  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
@@ -77,8 +78,10 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM   # elements per position record; whic
 ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
               f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
               f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
-if G.RB > 1:
-    ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")
+# dx.py's 8-row block (OPEN-ATTN-BLOCK8) is only on its per-core windows, which this dispatch has not got
+RB = unwindowed_rb(G.RB)
+if RB > 1:
+    ATTN_FLAGS.append(f"-DATTN_RB={RB}")
 if QKVB:                                               # same as dx.py: only a family with a bias sees the flag
     ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
 if NPTAB > 1:                                          # same as dx.py
@@ -86,7 +89,7 @@ if NPTAB > 1:                                          # same as dx.py
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL, same as dx.py
     if _k != "ATTN_RB":
         ATTN_FLAGS.append(f"-D{_k}={_v}")
-ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+ACORES, NHL = G.ACORES, G.NHL
 # og elements, as dx.py has them now: attn_fin writes kOGH = min(NHL, HPO) heads per element,
 # and each core -- core 0 included -- emits its own N_OG of them on its own fifo. The earlier
 # form this file was copied from put core 0's og on the KV-row fifo (so an og element had to
