@@ -103,6 +103,60 @@ TDD: eight initial failures, ten final new tests. Full host suite:
 **2036 passed, 47 skipped**. Logs retain both unsuccessful attempts and the
 successful build/preparation/run/audit under `l3-tail-*`.
 
-Next expand the tail check to all 240 causal positions before integrating the
-projection correction into a private full-ax implementation. Full-model
-numerical acceptance remains FAIL; this is not a performance result.
+## Complete 240-position sweep
+
+`sweep.py` extends the forced-tail experiment to positions 0–239 using the same
+audited binary. It requires the successful selected-position run as an immutable
+baseline; the original `replay.py` and its preparation remain unchanged.
+
+```bash
+source utilities/env.sh
+export OPENBLAS_NUM_THREADS=1
+ironvenv/bin/python utilities/l3-tail-replay/sweep.py prepare \
+  --source Models/qwen38-27b/post-prefill-drift/l3-attention-v1 \
+  --baseline Models/qwen38-27b/post-prefill-drift/l3-tail-v2 \
+  --build Models/qwen38-27b/post-prefill-drift/l3-tail-build-v3 \
+  --out Models/qwen38-27b/post-prefill-drift/l3-tail-sweep-v1
+ironvenv/bin/python utilities/l3-tail-replay/sweep.py run \
+  --out Models/qwen38-27b/post-prefill-drift/l3-tail-sweep-v1 \
+  --harness Models/qwen38-27b/prefill-sequential-drift/harness-l0-v1/run_kernel
+ironvenv/bin/python utilities/l3-tail-replay/sweep.py audit \
+  --out Models/qwen38-27b/post-prefill-drift/l3-tail-sweep-v1
+```
+
+The 480 dispatches produce 1440 raw captures. All 720 native controls must
+match exactly before numerical evaluation. Both trajectories start position
+zero with full zeroed state/scratch buffers; later positions restore the
+original preceding captures. Candidate upstream attention and KV remain
+native-exact. No candidate layer residual feeds the next case.
+
+The selected positions must reproduce all 18 earlier raw captures, all 39
+numerical arrays and every measurement bytewise or exactly as appropriate.
+The independent audit recomputes 13 arrays at each of the 240 positions and
+binds all 1680 capture/NPZ artifacts. Complete coverage is mandatory; passing
+tolerances, improvement, regression and ties are reported separately.
+
+This full-prefix boundary replay does not integrate projection correction or
+establish full-model propagation, resident request isolation or performance.
+
+## Full-prefix result (2026-10-29)
+
+All 480 dispatches and 720 native byte-exact controls pass. Every primary,
+conditioned-tail, output-projection, front and split-down gate passes at all
+240 positions. Maximum primary maxabs falls from 9.813558640e-4 to
+4.720937790e-4 (2.08×); candidate maximum maxrel is 1.896555707e-5.
+
+Improvement is not uniform: **178 improved, 61 regressed, one tied** against
+that local independent reference. P46 has the largest absolute increase
+(6.055370581e-5 → 4.496528269e-4); P148 the largest ratio (16.15×).
+Against the retained full-model CPU residual, **155 improved, 83 regressed,
+two tied**; all 240 comparisons pass, maximum candidate maxrel 3.757162146e-5.
+Keep these references and their regression lists separate. Maximum conditioned
+tail and output-projection maxrel are 4.355034422e-6 and 1.110671606e-5.
+
+Standalone audit reproduces all 3120 numerical arrays and all measurements;
+all 18 raw and 39 numerical selected-position overlaps match. Seven initial
+RED tests become seven passing tests; full host suite **2043 passed, 47 skipped**.
+Next validate a private integrated refinement against the retained complete
+prefix, including P46/P148 and the earlier P239 attention-only regression.
+Full-model numerical acceptance remains FAIL.
