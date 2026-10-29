@@ -27,7 +27,7 @@ NON_SETTING_FLAGS = {
     "--force", "--host", "--image", "--imagegen", "--imagemodel",
     "--json", "--keep-all", "--max-batch", "--out", "--port",
     "--prompt", "--prompt-name", "--q-len", "--quiet", "--seed",
-    "--size", "--socket", "--preemption", "--img-pre-resize",
+    "--size", "--steps", "--socket", "--preemption", "--img-pre-resize",
 }
 NON_SETTING_ENV_VARS = {
     # install layout / paths
@@ -46,6 +46,10 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
     "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN",
     "OFLM_OPEN_HOST_ATTN", "OFLM_OPEN_HOST_ATTN_DECODE",
+    # bring-up probes: dump a layer's activations / a packed pool, or opt back into the
+    # f32 pool twin to isolate a numerics question. Diagnostics, never a preference.
+    "OFLM_GGUF_POOL_F32", "OFLM_OPEN_DUMP_POOLS",
+    "OFLM_OPEN_LAYER_DUMP", "OFLM_OPEN_LAYER_NAN",
     "OFLM_OPEN_LAYER_MAJOR", "OFLM_OPEN_MOE_BATCH",
     "OFLM_OPEN_MOE_BATCH_LOG", "OFLM_OPEN_MOE_REDISPATCH",
     "OFLM_OPEN_OMP_PASSIVE", "OFLM_OPEN_OMP_THREADS",
