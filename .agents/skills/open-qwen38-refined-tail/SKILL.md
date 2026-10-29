@@ -1,6 +1,6 @@
 ---
 name: open-qwen38-refined-tail
-description: Build a private full-ax forced-OG replay and validate refined L3 attention through production output projection and FFN at P125/P205/P239 with exact native controls.
+description: Build a private full-ax forced-OG replay and validate refined L3 attention through production output projection and FFN at selected positions and across all 240 positions with exact native controls.
 ---
 
 # Refined native attention through the complete L3 tail
@@ -36,8 +36,9 @@ run. The refined inputs include two NPU projection passes plus a host FP32 sum.
   (for `dnx_factored.h` and related shared helpers). Check actual compiler
   dependencies, generated/copy bytes, linked ELFs and allocated MLIR.
 - Each control/candidate dispatch restores the original preceding KV prefix
-  and scratch and the original current layer input. Positions are fixed at
-  125, 205 and 239; no previous candidate-layer output is fed into another case.
+  and scratch and the original current layer input. The selected replay fixes
+  positions at 125, 205 and 239; the sweep uses 0–239. No previous
+  candidate-layer output is fed into another case.
 - Require all nine full native controls bytewise (act, state, xres at all three
   positions) before interpretation. Candidate upstream Q/gate/K/V/OG and KV
   must also match the original captures exactly.
@@ -70,5 +71,37 @@ full-model reference errors also improve at all three. The P239 attention-only
 regression must still remain documented; downstream residual improves here.
 Separate audit binds 18 captures and three NPZ files, reproducing 39 arrays
 bytewise. Ten new tests; full host suite 2036 passed, 47 skipped.
-Next extend the forced-tail validation to all 240 causal positions before
-private full-ax projection-refinement integration.
+
+## Full-prefix sweep
+
+Reuse the audited binary and selected-position run; do not edit their pinned
+sources or overwrite captures. `utilities/l3-tail-replay/sweep.py` provides:
+
+```bash
+python utilities/l3-tail-replay/sweep.py prepare \
+  --source <audited attention run> --baseline <audited selected tail run> \
+  --build <same private build> --out <fresh sweep>
+python utilities/l3-tail-replay/sweep.py run --out <sweep> --harness <audited run_kernel>
+python utilities/l3-tail-replay/sweep.py audit --out <sweep>
+```
+
+Keep `OPENBLAS_NUM_THREADS=1` for exact numerical overlap. This runs 480
+single-layer dispatches. At position zero both trajectories load full zeroed
+state and scratch; all other positions restore the original preceding state.
+Require all 720 native controls, 18 raw selected-position overlaps and 39
+selected numerical-array overlaps. Audit all 1440 raw captures and 240 NPZ
+files, recomputing all 3120 arrays. Report improved, regressed and tied positions
+separately for the primary and full-model references. A tolerance PASS is not
+a claim of universal improvement. No candidate residual propagates to another
+case; integrated projection refinement needs its own validation.
+
+
+Verified sweep: `Models/qwen38-27b/post-prefill-drift/l3-tail-sweep-v1`.
+All 480 dispatches, 720 native controls and 240 local gate cases pass. Audit
+reproduces 3120 arrays across 1680 artifacts. Primary maximum maxabs falls
+2.08×, but 178 positions improve, 61 regress and one ties. Preserve P46
+(largest absolute increase), P148 (largest ratio) and P239 (earlier attention
+regression). Full-model-reference comparisons have 155 improvements, 83
+regressions and two ties. No tolerance was relaxed. Seven new TDD tests;
+full host suite 2043 passed, 47 skipped. Next validate private integrated
+refinement against all retained positions; model acceptance remains FAIL.

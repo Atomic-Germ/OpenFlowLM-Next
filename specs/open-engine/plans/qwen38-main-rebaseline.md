@@ -1,5 +1,48 @@
 # Qwen3.8-27B validation report
 
+## Refined L3 tail across all 240 positions — 2026-10-29
+
+Extended the private forced-OG output/FFN replay from three selected positions
+to every position 0–239. Reused the audited 15-core binary and one L3 weight
+pool. Both trajectories start with zeroed state/scratch at position zero and
+restore the original preceding captures for subsequent positions. This checks
+all boundaries independently; candidate residuals do not propagate to the next
+case and projection refinement is not integrated into full-ax.
+
+All **480 NPU dispatches** complete. All **720 native control captures** match
+bytewise; candidate upstream attention and KV remain native-exact. Selected
+P125/P205/P239 reproduce all 18 raw captures, 39 arrays and their measurements.
+Every primary residual, conditioned-tail, output-projection, FFN-front and
+split-down gate passes at all **240 positions**, with unchanged maxrel <0.005.
+
+| Independent residual reference | Improved / regressed / tied | Control worst maxabs | Candidate worst maxabs | Candidate worst maxrel |
+|---|---:|---:|---:|---:|
+| Local unrounded-norm causal attention + FP64 tail | 178 / 61 / 1 | 9.813558640e-4 | 4.720937790e-4 | 1.896555707e-5 |
+| Retained full-model CPU residual | 155 / 83 / 2 | 1.304626465e-3 | 1.045227051e-3 | 3.757162146e-5 |
+
+The primary maximum falls by 2.08×, but **61 positions regress**. Largest primary
+absolute increase: P46, 6.055370581e-5 → 4.496528269e-4. Largest relative increase:
+P148, 1.245369650e-5 → 2.010812854e-4 (16.15×). Retain both cases, the separate
+model-reference regressions, and P239's earlier attention-only regression.
+Do not infer universal improvement from the aggregate maximum or tolerance PASS.
+Maximum conditioned-tail maxrel is 4.355034422e-6; output-projection maxrel is
+1.110671606e-5. All 240 retained model-reference comparisons also pass, but they
+include propagated input effects and must remain separate from the local oracle.
+
+The standalone audit recomputes **3120 numerical arrays bytewise** and binds
+**1680 artifacts** (1440 raw captures + 240 NPZ files), with complete ordered
+coverage and immutable source/build/input/harness provenance. TDD: seven initial
+failures, seven new passing tests. Full host suite: **2043 passed, 47 skipped**.
+Evidence: `l3-tail-sweep-v1` and `l3-tail-sweep-*.log` under
+`Models/qwen38-27b/post-prefill-drift/`. Commands and contracts are documented in
+`utilities/l3-tail-replay/README.md` and `open-qwen38-refined-tail`.
+
+Next build a private integrated projection-refinement candidate and compare
+its projections, attention/KV and complete residual with these retained 240
+cases, explicitly preserving the regression cases. Full-model numerical
+acceptance remains FAIL. Production performance and request isolation still
+require separate validation; this stage changes validation tools only.
+
 ## Refined attention through the full L3 tail — 2026-10-28
 
 Added a private full-ax replay that feeds audited refined FP32 attention output
