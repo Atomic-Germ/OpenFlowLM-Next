@@ -244,9 +244,17 @@ def image_tokens(R: int) -> int:
     return (R // PATCH_PX) ** 2
 
 
+def euler_tile_rows() -> int:
+    """Tokens per dit_ew euler element: EL bf16 = (EL / 128) tokens x 128 channels.
+
+    24 on the 4B (24 x 128 = 3072); 32 on the 9B (32 x 128 = 4096). The element is one
+    row element, so it follows the family's hidden size."""
+    return EL // 128
+
+
 def euler_elems(T_img: int) -> int:
-    """dit_ew euler's tile24 elements (24 tokens x 128 channels), whole per core."""
-    n = -(-T_img // 24)
+    """dit_ew euler's elements ((EL/128) tokens x 128 channels), whole per core."""
+    n = -(-T_img // euler_tile_rows())
     return n + (-n) % 16
 
 
@@ -629,7 +637,7 @@ def plan(R: int, steps: int = STEPS, edit: bool = False) -> Plan:
     T_img = image_tokens(R)
     T_ref = T_img if edit else 0
     T = T_img + T_ref + L_TXT
-    Tp = 24 * euler_elems(T_img)
+    Tp = euler_tile_rows() * euler_elems(T_img)      # the euler's padded token count
     pl = Plan(R, steps, edit=edit)
     key = pl.key
     B = pl.buffers

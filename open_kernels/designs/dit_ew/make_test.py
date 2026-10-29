@@ -161,10 +161,10 @@ def main() -> int:
         bufs = {"X": qkv, "B": qkv, "P": with_pad(qk_params(wq, wk).reshape(3, EL))}
         spec |= {"a": row(T, 0, 3 * EL), "b": row(T, EL, 3 * EL), "y": row(T), "z": row(T),
                  "p_off": EL, "n_par": 3, "tok0": 0, "n_txt": n_txt, "grid_w": grid_w,
-                 "heads": 24}
+                 "heads": EL // HD}
         g = np.arange(T)
         for name, cols, w in (("Y", slice(0, EL), wq), ("Z", slice(EL, 2 * EL), wk)):
-            h = qkv[:, cols].astype(np.float64).reshape(T, 24, HD)
+            h = qkv[:, cols].astype(np.float64).reshape(T, EL // HD, HD)
             hn = h / np.sqrt((h ** 2).mean(-1, keepdims=True) + 1e-6) * bf(w).astype(np.float64)
             ref[name] = rope_ref(hn, g, n_txt, grid_w).reshape(T, EL)
     elif op == "swiglu":
@@ -175,9 +175,10 @@ def main() -> int:
         g, u = ff[:, :3 * EL].astype(np.float64), ff[:, 3 * EL:].astype(np.float64)
         ref["Y"] = g / (1 + np.exp(-g)) * u
     elif op == "euler":
-        n = -(-T // 24)
+        rows = EL // 128                                # euler tiles: rows tokens x 128 ch
+        n = -(-T // rows)
         n += (-n) % 16                                  # whole elements per core
-        Tp = n * 24
+        Tp = n * rows
         x = np.zeros((Tp, 128), bfloat16)
         x[:T] = bf(rng.standard_normal((T, 128)))
         v = np.zeros((Tp, 1024), bfloat16)

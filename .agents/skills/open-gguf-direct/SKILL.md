@@ -1006,6 +1006,85 @@ set must name the same ones (512-only is `c3277a2aa2dd6005`, 512+1024+edits is
 `elf_build/full_elf_config_*.json` bakes absolute paths, so moving the directory means
 deleting `elf_build` and recomposing (~9 min).
 
+### 9B: the solid colour is FIXED; the layout is not (2026-10-28, later the same day)
+
+The solid colour / all-NaN image had ONE root cause, and it was not numerics in the
+narrow sense: **`dit_ew` was still built at EL 3072 for a hidden of 4096.** An earlier edit
+had put `EL = int(os.environ["EW_EL"])` *inside the module docstring* (the assignment below
+it, `EL = 3072`, stayed live), so the design's DMA moved 3 chunks of 1024 per row instead
+of 4. The last 1024 columns of every ew output were never written: the LN output was 25%
+zeros (`Zn[:, 3072:] == 0` for every row), the qk norm divided by zero, and the velocity
+went NaN. Three separate traps hid it:
+
+* the build **stamp was the spec alone**, so a 9B build silently reused a 4B-EL xclbin
+  (`build_stream` compares `shape.json` to the stamp; the design source and `EW_EL` were
+  in neither). The stamp is now `spec + design_fingerprint(design) + ew_el`.
+* `stream_job` was dead code with a second, unfixed copy of every build's env. Deleted.
+* the layout hash keys the SPECS, not the compiler env, so the mismatched set installed
+  cleanly and only the image was wrong.
+
+Then the 9B ran -- and hit two more real 4B-isms, both caught by running it:
+
+* **euler's "tile24"** view is 24 tokens x 128 channels = 3072 = the 4B hidden. At EL 4096
+  the kernel wrote 4096 elements into a 3072-element DMA region, so the DMA never
+  completed: `Error: ew/r512_euler: state 8` (ERT_CMD_STATE_TIMEOUT). It is
+  `EL / 128` tokens (`euler_tile_rows()`), 32 on the 9B.
+* `V` and `LAT` were sized `24 * euler_elems(...)` -> `view past the end of V` once the
+  tile was right. Both follow `euler_tile_rows()` now.
+
+**Where 9B actually stands: it runs, and every part verifies, but the image has no spatial
+layout.** 512 in 8.0-8.4 s (text 0.6, steps 7.0-7.3, vae 0.4). The prompt drives the
+palette correctly (a fox is red/brown fur, "aerial city at night" is purple with lights),
+so the text encoder and the text->image path work; what is missing is where things go, and
+more steps converge to finer texture rather than an image. Measured against the 4B: the
+velocity field's low-pass energy is 0.47 vs the 4B's 0.66 at step 0, and the final latents'
+neighbour correlation is 0.26 vs 0.47 -- degraded, not destroyed.
+
+Everything measurable was then checked at 9B and PASSED, which is the useful part of this
+entry (the gates, and how to run them, below): all six `dit_ew` ops, `dit_fa` at
+L=1536/heads=32, `dit_gemm` at its 9B shapes (plain, `epi` with the SwiGLU, `a_gather`,
+`proj_out`/`img_out`), all 118 DiT weights against the BFL checkpoint by value, and
+`gguf_weights.py --check --family` 118/118 by shape. The layouts are all derived and
+consistent (`gap` = ldc-N = 2H, `first_cb` = h3/1024, `a_col` = h3, `FU` = 3H+2H+2MLP,
+CTX_LD = taps x TE_HID with no spill at 9B because TE_PAD == TE_HID).
+
+So the remaining fault is in something the per-op gates cannot see -- a schedule-level
+detail, or the *strided* attention layout (the harness refuses strided streams, and the
+hand-built substitute is not a valid setup because `run_kernel` cannot bind one buffer four
+times). Next step is a CPU reference: `diffusers>=0.37` + a 4-step 512 run of the 9B on
+the CPU (the checkpoint is already at `~/.cache/oflm/dit-checkpoints/black-forest-labs--
+FLUX.2-klein-9B`, minus `transformer/`), then compare the latents step by step. That is a
+gate, not a guess.
+
+Also: `--size 1024` at 9B fails with `mmap ... Cannot allocate memory` (a 539 MB mapping at
+a 25.5 GB offset) -- a device BO allocation, NOT host RAM: the loader reads one weight at a
+time into a device BO and peak host RSS for the whole 16.9 GB model is **205 MB**, so
+there is no second copy of the weights in memory.
+
+### Verifying a diffusion family's kernels without the whole pipeline (2026-10-28)
+
+`open_kernels/harness` builds on Linux (`cmake -S open_kernels/harness -B <dir>`); each
+design's `make_test.py` + `compare.py` then gates one op against a float64 reference:
+
+```bash
+# dit_ew: EL comes from EW_EL, and the test vectors follow it
+EW_EL=4096 python3 open_kernels/designs/dit_ew/make_test.py --op qk --out <t>
+DE_SPEC="$(cat <t>/spec.json)" EW_EL=4096 python3 open_kernels/build_design.py \
+    open_kernels/designs/dit_ew/dit_ew.py <t>/build
+EW_EL=4096 python3 open_kernels/designs/dit_ew/make_test.py --op qk --out <t> --build <t>/build
+<dir>/run_kernel <t>/run.cfg && python3 open_kernels/designs/dit_ew/compare.py <t>
+
+# dit_fa / dit_gemm can also take an EXPORTED stream (no rebuild):
+python3 open_kernels/designs/dit_fa/make_test.py --kernels build/dit-kernels/<FAM>/fa \
+    --stream r512_attn --out <t>            # compact-layout streams only
+python3 open_kernels/designs/dit_gemm/make_test.py --kernels build/dit-kernels/<FAM> \
+    --stream txt_qkv --out <t>
+```
+
+Keep these in `./tmp`, NOT `/tmp`: `/tmp` is tmpfs here and three runs OOMed `opencode`
+itself. Cap the generators (`ulimit -v 8000000`) -- `make_test.py` on the `mod` stream
+(M=512, K=4096, N=245760) builds an 8 GB float64 reference and took the box to 41 GB RSS.
+
 ### 9B: everything builds, the image is wrong -- a NUMERICS gate is what is left (2026-10-28)
 
 Built the whole thing to find out where 9B actually stands:

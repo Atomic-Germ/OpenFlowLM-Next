@@ -312,10 +312,22 @@ def detect_bfl_modulation(gguf_path, hf_repo, prefix: str = "transformer/") -> b
 
 
 # --------------------------------------------------------------------------- checks
-def check_shapes(gw):
-    """Every weight the schedule needs resolves and builds at its (K, N)."""
+def check_shapes(gw, family: str | None = None):
+    """Every weight the schedule needs resolves and builds at its (K, N).
+
+    `family` activates that Shape in klein_pipeline. Without it the check runs at the
+    module's default (the 4B), so a 9B GGUF reported all 86 weights as FAIL with the 4B's
+    widths -- a check that lies is worse than none. TE_HID is not derivable from a DiT
+    GGUF (ctx_emb's K is taps x TE_HID), so the family is named rather than guessed.
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "open_kernels"))
     import klein_pipeline as kp
+
+    if family:
+        if family not in kp.SHAPES:
+            raise SystemExit(f"unknown family {family!r}; known: {sorted(kp.SHAPES)}")
+        kp.set_shape(kp.SHAPES[family])
+        print(f"  checking against {family} (H={kp.H} MLP={kp.MLP} TE_HID={kp.TE_HID})")
 
     failed = 0
     specs = kp.dit_weight_specs()
@@ -404,6 +416,8 @@ def main(argv=None):
     ap.add_argument("gguf", help="the klein DiT GGUF")
     ap.add_argument("--check", action="store_true", help="every schedule weight resolves and has the right shape")
     ap.add_argument("--safetensors", help="the transformer/ checkpoint directory (or an HF repo id) to compare values against")
+    ap.add_argument("--family", help="the kernel family whose Shape to check against (e.g. FLUX.2-klein-9B-NPU2); "
+                                     "default: klein_pipeline's own default, the 4B")
     a = ap.parse_args(argv)
     if not a.check and not a.safetensors:
         ap.error("--check and/or --safetensors is required")
@@ -412,7 +426,7 @@ def main(argv=None):
     print(f"{a.gguf}: {gw.gguf.kv.get('general.architecture')} / {len(gw.gguf.names())} tensors")
     failed = 0
     if a.check:
-        failed += check_shapes(gw)
+        failed += check_shapes(gw, a.family)
     if a.safetensors:
         failed += check_values(gw, a.safetensors)
     return 1 if failed else 0

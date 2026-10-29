@@ -444,10 +444,26 @@ def _read_json(p: Path):
         return None
 
 
+def design_fingerprint(design: Path) -> str:
+    """A short hash of the design and its kernel sources.
+
+    Part of every build stamp: a stamp of the spec alone let a rebuilt design reuse an old
+    xclbin, which is how a 9B set kept a 4B-EL dit_ew (EL 3072 for a hidden of 4096) and
+    produced a solid-colour image. Same reason EW_EL is in the ew stamp."""
+    import hashlib
+    h = hashlib.sha256()
+    files = [design] + sorted(design.parent.glob("*.cc")) + sorted(design.parent.glob("*.h"))
+    for f in files:
+        h.update(f.name.encode())
+        h.update(f.read_bytes())
+    return h.hexdigest()[:16]
+
+
 def build_stream(name: str, stamp: dict, env_vars: dict, design: Path, out: Path,
                  force: bool) -> Path:
     bdir = out / "build" / name
-    what = " ".join(f"{k}={v}" for k, v in stamp.items())
+    stamp = {**stamp, "src": design_fingerprint(design)}
+    what = " ".join(f"{k}={v}" for k, v in stamp.items() if k != "src")
     if not force and (bdir / "final.xclbin").is_file() and _read_json(bdir / "shape.json") == stamp:
         print(f"  {name:16s} {what}  (kept)")
         return bdir
@@ -470,34 +486,6 @@ def build_many(jobs: dict[str, tuple], force: bool, workers: int = 4) -> dict[st
     with ThreadPoolExecutor(workers) as ex:
         futs = {n: ex.submit(build_stream, n, *j, force) for n, j in jobs.items()}
         return {n: f.result() for n, f in futs.items()}
-
-
-def stream_job(kset: str, s: dict, out: Path, fa_exp_fix: int = 0) -> tuple:
-    """build_many's (stamp, env, design, out) for one stream spec of a kernel set."""
-    if kset == "gemm":
-        return ({"M": s["M"], "K": s["K"], "N": s["N"],
-                 **({"layout": s["layout"]} if "layout" in s else {})},
-                {"DG_M": s["M"], "DG_K": s["K"], "DG_N": s["N"],
-                 "DG_LAYOUT": json.dumps(s.get("layout", {}))}, DESIGN, out)
-    if kset == "fa":
-        keys = ("L", "heads", "kv_heads", "causal", "valid_len", "layout")
-        lay = s.get("layout", {})
-        return ({**{k: s[k] for k in keys}, "exp_fix": fa_exp_fix, "tau": FA_TAU},
-                {"DF_L": s["L"], "DF_HEADS": s["heads"], "DF_KV_HEADS": s["kv_heads"],
-                 "DF_CAUSAL": s["causal"], "DF_VALID_LEN": s["valid_len"],
-                 "DF_EXP_FIX": fa_exp_fix, "DF_TAU": FA_TAU,
-                 "DF_QKV_LD": lay.get("qkv_ld", 0), "DF_K_COL": lay.get("k_col", 0),
-                 "DF_V_COL": lay.get("v_col", 0), "DF_O_LD": lay.get("o_ld", 0),
-                 "DF_O_COL": lay.get("o_col", 0), "DF_O_INTERLEAVE": lay.get("o_interleave", 0)},
-                FA_DESIGN, out)
-    if kset == "ew":
-        return (s, {"DE_SPEC": json.dumps(s)}, EW_DESIGN, out)
-    if kset in ("conv", "conv1"):
-        taps = {"DC_TAPS": 9 if kset == "conv" else 1}
-        return (s | taps, {"DC_SPEC": json.dumps(s), **taps}, CONV_DESIGN, out)
-    if kset == "vew":
-        return (s, {"VE_SPEC": json.dumps(s)}, VEW_DESIGN, out)
-    raise ValueError(kset)
 
 
 def assemble(out: Path, dirs: dict[str, Path], marker: Path, meta: dict) -> None:
@@ -656,6 +644,10 @@ def main() -> int:
         print(f"OK: {len(fa_streams)} dit_fa streams over one xclbin -> {fa_out}")
 
     if not args.no_ew:
+        # check_spec validates against the design's row element, so the family's must be in
+        # the environment before the design is imported (it is read once, at import).
+        ew_el = FAMILIES[args.family]["hidden"]
+        os.environ["EW_EL"] = str(ew_el)
         sys.path.insert(0, str(HERE / "designs" / "dit_ew"))
         from dit_ew import check_spec  # noqa: E402
 
@@ -668,8 +660,10 @@ def main() -> int:
         marker = ew_out / "dit_ew.json"
         marker.unlink(missing_ok=True)
         print(f"dit_ew set for {args.family}: {len(ew_streams)} streams -> {ew_out}")
-        ew_el = FAMILIES[args.family]["hidden"]
-        dirs = build_many({n: (s, {"DE_SPEC": json.dumps(s), "EW_EL": str(ew_el)}, EW_DESIGN, ew_out)
+        # dit_ew compiles the row element in, and the same spec is legal at more than one
+        # EL -- so EW_EL is part of the build stamp as well as the environment.
+        dirs = build_many({n: (s | {"ew_el": ew_el},
+                               {"DE_SPEC": json.dumps(s), "EW_EL": str(ew_el)}, EW_DESIGN, ew_out)
                            for n, s in ew_streams.items()}, args.force, args.jobs)
         assemble(ew_out, dirs, marker, {
             "family": args.family,

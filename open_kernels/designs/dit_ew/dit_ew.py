@@ -21,15 +21,12 @@ in through the memtile and split between the pair; two output streams (Y, Z) joi
 on the way out -- 6 memtile S2MM and 6 MM2S, the channel budget, which is why it is 2
 cores per column and not 4. The ops are DDR-bound: 16 cores are plenty.
 
-The unit of work is a row element of # The row element is the family's transformer hidden: a compile-time constant in the kernel
-# (the DMA shapes and -DEW_EL below are built from it), so a family with a different hidden
-# size is a REBUILD of this design with EW_EL set, not a different stream spec.
-EL = int(os.environ.get("EW_EL", "3072")) bf16 (FLUX.2 [klein]'s hidden size; a
-q/k row is 24 heads). A stream reads a "view" of a buffer: T tokens, each E consecutive
+The unit of work is a row element of EL bf16 (the transformer hidden: 3072 on FLUX.2
+[klein] 4B, 4096 on the 9B; a 4B q/k row is 24 heads). A stream reads a "view" of a buffer: T tokens, each E consecutive
 elements of 3072 starting at column `off`, row stride `ld` (the fused QKV/MLP buffers
 are read in place). Column c takes tokens [c*T/8, (c+1)*T/8); within a column the
 elements alternate between its two cores. Euler reads latents in "tile24" views instead
-(24 tokens x 128 channels per element).
+(EL / 128 tokens x 128 channels per element: 24 on the 4B, 32 on the 9B).
 
 Parameter vectors (P) ride stream A ahead of the rows. The pair's split hands
 alternate elements to its two cores, and a shim BD cannot repeat with stride 0, so one
@@ -66,11 +63,27 @@ from aie.iron.device import Tile
 HERE = Path(__file__).resolve().parent
 KERNEL_SRC = str(HERE / "ew.cc")
 
-EL = 3072
+# The row element is a compile-time constant in the kernel: the DMA shapes, the chunk count
+# per row and -DEW_EL are all built from it, so a family with another hidden size is a
+# REBUILD of this design with EW_EL set (export_dit_kernels passes the family's hidden), not
+# a different stream spec.
+EL = int(os.environ.get("EW_EL", "3072"))
 CHUNK = 1024                      # innermost DMA dimension (a shim BD's d0 is <= 1023 words)
 N_COLS, PER_COL = 8, 2
 N_PAR_MAX = 3
 STACK = 0x800
+L1_BYTES = 64 * 1024              # aie2p data memory per core tile
+
+
+def l1_depth(el: int, n_par: int = N_PAR_MAX) -> int:
+    """Depth of the per-core A and Y row FIFOs: 2 when the tile's 64 KB allows it.
+
+    A core holds `n_par` parameter elements of EL bf16 (the modulation, or the qk weights
+    and RoPE tables) plus its row FIFOs (A, B, Y, Z). At EL 3072 (4B) six rows + par is
+    55 KB and double buffering fits; at EL 4096 (9B) that is 73 KB, over the tile, so the
+    9B runs the rows single-buffered (57 KB). EW_EL is part of the build stamp, so the two
+    shapes are separate builds rather than one silently reusing the other."""
+    return 2 if n_par * el * 2 + 6 * el * 2 + STACK + 2048 <= L1_BYTES else 1
 
 (R_NPAR, R_CNT_LN, R_CNT_RES, R_CNT_QK, R_CNT_BIN, R_CNT_UN, R_W, R_IDX_GATE, R_IDX_SHIFT,
  R_IDX_SCALE, R_BINOP, R_ROW0, R_ROW_STEP, R_N_TXT, R_GRID_W, R_HEADS, R_NORM, R_UNIT_GATE,
@@ -102,8 +115,11 @@ def check_spec(s: dict) -> str | None:
 def _col_pattern(v: dict, c: int):
     """(offset, sizes, strides) of column c's share of a view."""
     if v.get("kind") == "tile24":
+        # One row element of (EL / 128) tokens x 128 channels -- 24 tokens on the 4B,
+        # 32 on the 9B. "tile24" is the name the 4B gave it; the size follows EL.
+        rows = EL // 128
         per = v["n"] // N_COLS
-        return (v["off"] + c * per * 24 * v["ld"], [per, 24, 128], [24 * v["ld"], v["ld"], 1])
+        return (v["off"] + c * per * rows * v["ld"], [per, rows, 128], [rows * v["ld"], v["ld"], 1])
     per = v["T"] // N_COLS
     return (v["off"] + c * per * v["ld"], [per, v["E"] * EL // CHUNK, CHUNK],
             [v["ld"], CHUNK, 1])
@@ -138,7 +154,8 @@ def dit_ew(X: In, B: In, P: In, Y: Out, Z: Out, *, spec: CompileTime[str]):
     A3, B3, Y3, Z3 = [], [], [], []
     A1, B1, Y1, Z1 = {}, {}, {}, {}
     for c in range(N_COLS):
-        for name, lst, l1, depth in (("A", A3, A1, 2), ("B", B3, B1, 1)):
+        dep = l1_depth(EL)
+        for name, lst, l1, depth in (("A", A3, A1, dep), ("B", B3, B1, 1)):
             f = ObjectFifo(l2_ty, name=f"{name}_L3L2_{c}", depth=2)
             lst.append(f)
             parts = f.cons().split(offs, tile=Tile(c, 1), obj_types=[el_ty] * PER_COL,
@@ -146,7 +163,7 @@ def dit_ew(X: In, B: In, P: In, Y: Out, Z: Out, *, spec: CompileTime[str]):
                                    depths=[depth] * PER_COL)
             for r in range(PER_COL):
                 l1[(c, r)] = parts[r].cons()
-        for name, lst, l1, depth in (("Y", Y3, Y1, 2), ("Z", Z3, Z1, 1)):
+        for name, lst, l1, depth in (("Y", Y3, Y1, dep), ("Z", Z3, Z1, 1)):
             f = ObjectFifo(l2_ty, name=f"{name}_L2L3_{c}", depth=2)
             lst.append(f)
             parts = f.prod().join(offs, tile=Tile(c, 1), obj_types=[el_ty] * PER_COL,
