@@ -45,8 +45,13 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+# The pipeline's own modules live in open_kernels/. In a source checkout that is
+# <repo>/open_kernels (two levels up from utilities/dit-chain); in an INSTALLED tree the
+# converter sits at share/oflm/dit-chain and the modules at share/oflm/open_kernels (one
+# level up). parents[2] alone resolved to share/ once installed, which is why a fresh RPM
+# failed with "No module named 'klein_pipeline'".
+ROOT = HERE.parents[1] if (HERE.parents[1] / "open_kernels").is_dir() else HERE.parents[2]
 sys.path.insert(0, str(ROOT / "open_kernels"))
 sys.path.insert(0, str(ROOT / "open_kernels" / "harness"))
 sys.path.insert(0, str(HERE))

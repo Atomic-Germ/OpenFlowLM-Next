@@ -1112,6 +1112,12 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     install(DIRECTORY "${_oflm_utilities_src}/dit-chain/"
         DESTINATION "${OFLM_SHARE_DESTINATION}/dit-chain"
         PATTERN "__pycache__" EXCLUDE)
+    # The converter is Python and imports the pipeline's own modules -- klein_pipeline,
+    # vae_decoder/vae_encoder, and the packers under designs/. Only the .py is needed; the
+    # kernels it drives are the xclbins installed above.
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/open_kernels"
+        FILES_MATCHING PATTERN "*.py")
 
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
@@ -1708,7 +1714,11 @@ set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
 set(CPACK_DEBIAN_PACKAGE_NAME "openflowlm")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Atomic-Germ <openflowlm@atomic-germ>")
 set(CPACK_DEBIAN_PACKAGE_SECTION "science")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, libxrt-npu2")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, python3-numpy, python3-ml-dtypes, libxrt-npu2")
+# The diffusion converter (share/oflm/dit-chain) imports numpy and ml_dtypes. Both are in
+# every distro's repo, and nothing here needs a specific version, so they are declared rather
+# than vendored: dnf/apt resolve them.
+set(CPACK_RPM_PACKAGE_REQUIRES "python3-numpy, python3-ml-dtypes")
 # shlibdeps can only derive libc6/libstdc++6/... on a host with a *populated*
 # Debian package database. An absent or empty dpkg status (typical on Fedora,
 # and the CI image) would silently contribute nothing, leaving the package
