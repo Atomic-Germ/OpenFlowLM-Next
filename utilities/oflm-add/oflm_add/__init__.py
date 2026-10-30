@@ -3262,6 +3262,8 @@ def main():
                          "text-only checkpoint takes.")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and exit")
     ap.add_argument("--quiet", action="store_true", help="Less output")
+    ap.add_argument("--verbose", action="store_true",
+                    help="show which GGUF candidates were passed over, and why")
     args = ap.parse_args()
 
     # Hugging Face is the default hub; --modelscope opts in explicitly and a
@@ -3604,8 +3606,12 @@ def main():
     # --- acquire model files ---
     if gguf_mode and not args.quiet:
         log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
-        for n, why in sorted(gguf_refused.items()):
-            log(f"[INFO]   skipping {n}: {why}")
+        # Which candidates we passed over is our business, not the user's: a dozen lines of
+        # "skipping X: quant Y not supported" reads as errors and trains people to ignore
+        # the output. Available under --verbose for a dev chasing a repo.
+        if getattr(args, "verbose", False):
+            for n, why in sorted(gguf_refused.items()):
+                log(f"[INFO]   skipping {n}: {why}")
     if local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
