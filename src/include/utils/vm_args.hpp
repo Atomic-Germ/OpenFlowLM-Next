@@ -23,9 +23,9 @@ inline void print_help(po::options_description& general) {
     std::cout << std::endl;
     std::cout << "Commands:" << std::endl;
     std::cout << "  run <model_tag>     - Run the model interactively" << std::endl;
-    std::cout << "  serve <model_tag>   - Start the  server" << std::endl;
-    std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
-    std::cout << "  add <repo>          - Install and register a converted Q4NX model" << std::endl;
+    std::cout << "  serve <model_tag>   - Start the server" << std::endl;
+    std::cout << "  pull <model_tag>    - Download curated model files if not present" << std::endl;
+    std::cout << "  add <repo>          - Install and register a model from GGUF or Q4NX repo" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
     std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
