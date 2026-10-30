@@ -1117,7 +1117,8 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     # kernels it drives are the xclbins installed above.
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/"
         DESTINATION "${OFLM_SHARE_DESTINATION}/open_kernels"
-        FILES_MATCHING PATTERN "*.py")
+        FILES_MATCHING PATTERN "*.py"
+        PATTERN "build*" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
