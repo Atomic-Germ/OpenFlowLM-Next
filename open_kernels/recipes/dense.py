@@ -445,7 +445,11 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
             and not spec.attn_gate):
         prep = "qknorm_rope"
-    elif spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate:
+    # Not under AG16=1 (below): its kernels take a 16-row B tile, but the engine does not read
+    # attn_block.n_tile and block_host.cpp tiles K^T and V by (64, 32), so a K2 export would pair
+    # the two layouts. Without a prep it keeps its dxB route until the engine packs n_tile 16.
+    elif (spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate and not qkv_bias(spec)
+            and os.environ.get("AG16") != "1"):
         prep = "rope"
     # without a prep the engine never reads it, and its products need not even tile (Granite's 5 row blocks)
     if prep and set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
