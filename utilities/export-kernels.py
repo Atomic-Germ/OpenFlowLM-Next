@@ -295,7 +295,40 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
     return len(failed)
 
 
+def ensure_toolchain():
+    """Put the tree's MLIR-AIE toolchain on PATH when the caller has not.
+
+    The export runs from CMake (the `export_kernels` target) as well as by hand, and a plain
+    `cmake --workflow --preset linux-default` has not sourced `utilities/env.sh`. The toolchain
+    lives in the tree's `ironvenv`: `aiecc`/`aie-opt` in `ironvenv/bin`, and PEANO_INSTALL_DIR
+    from the llvm-aie package beside it (Peano stays off PATH -- its clang would shadow the
+    system one -- and aiecc is handed it through that variable).
+
+    Returns None when aiecc is already available, "" when nothing could be found, else a short
+    description of what was added.
+    """
+    if shutil.which("aiecc"):
+        return None
+    root = Path(__file__).resolve().parents[1]
+    venv_bin = root / "ironvenv" / "bin"
+    if not (venv_bin / "aiecc").is_file():
+        return ""
+    os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
+    if not os.environ.get("PEANO_INSTALL_DIR"):
+        for cand in sorted((root / "ironvenv" / "lib").glob("python3*/site-packages/llvm-aie")):
+            os.environ["PEANO_INSTALL_DIR"] = str(cand)
+            break
+    return f"{venv_bin} (tree ironvenv)"
+
+
 def main() -> int:
+    added = ensure_toolchain()
+    if added == "":
+        print("export-kernels: aiecc is not on PATH and there is no ironvenv/bin/aiecc in the "
+              "tree; source utilities/env.sh to build kernels", flush=True)
+        return 2
+    if added:
+        print(f"export-kernels: using {added} for aiecc", flush=True)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--specs", default="", help="comma-separated open_kernels spec names (empty = all)")
     ap.add_argument("--skip-specs", default="",
