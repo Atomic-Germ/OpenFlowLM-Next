@@ -1104,6 +1104,14 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     install(DIRECTORY "${_oflm_utilities_src}/q4nx-build/configs/"
         DESTINATION "${OFLM_SHARE_DESTINATION}/utilities/q4nx-build/configs"
         PATTERN "__pycache__" EXCLUDE)
+    # The GGUF -> bundle converter that `oflm add` drives for a diffusion model. It is not a
+    # user tool -- the user runs `oflm add` -- but it has to be IN the package: without it the
+    # installed app cannot repack and says "this build has no converter", which is exactly the
+    # regression that made diffusion installable only from a source checkout. `oflm_add`'s
+    # dit_builder() looks beside the package, i.e. here.
+    install(DIRECTORY "${_oflm_utilities_src}/dit-chain/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/dit-chain"
+        PATTERN "__pycache__" EXCLUDE)
 
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
