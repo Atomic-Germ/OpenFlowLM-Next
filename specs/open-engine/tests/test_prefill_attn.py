@@ -65,6 +65,21 @@ def test_a_dense_family_says_which_attention_the_host_half_computes():
         assert not [k for k in m["builds"] if k.startswith("ag_")], name
 
 
+def test_k2_keeps_its_dxb_route_under_ag16(monkeypatch):
+    """AG16=1's kernels take a 16-row B tile the engine does not pack (block_host.cpp tiles by
+    (64, 32) and reads no attn_block.n_tile), so K2 gets no `prep` there: no attn_block, no
+    ag_* or ag16_* kernels, and the products never meet the 32-row packing."""
+    from recipes.load import load_spec
+    from recipes.manifest import manifest
+
+    monkeypatch.setenv("AG16", "1")
+    specs = ROOT / "open_kernels" / "recipes" / "specs"
+    for name in ("k2-horizon-7b.json", "k2-horizon-3.7b.json"):
+        m = manifest(load_spec(specs / name))
+        assert "attn_block" not in m["layer_types"]["dense"]["gemm_block"], name
+        assert not [k for k in m["builds"] if k.startswith("ag")], name
+
+
 # ---- the kernel and the route: manual, on the NPU
 # Verification (designs/attn_block, WSL ironenv142 for the builds, run_kernel.exe on Windows):
 # 1. python make_test.py --L 2048; build build_s2048 (AG_K=256 AG_N=2048) and build_pv2048
