@@ -2763,6 +2763,27 @@ def read_gguf_inventory(source, limit_mb=32):
         return None
 
 
+def gguf_params_size_token(gguf_source):
+    """A tag size marker from the GGUF's own tensors, or None.
+
+    The last resort for a repo whose slug carries no size marker -- an April-Fool's joke repo,
+    a fine-tune named after its author's cat. Every parameter count is in the header, so the
+    size is derivable from the file, which is what "match by shape" has to mean. Only a
+    tag/kernel-matching hint: the weights are verified by hash, never by this number.
+    """
+    inv = read_gguf_inventory(gguf_source)
+    if not inv:
+        return None
+    _kv, tensors = inv
+    total = 0
+    for _name, _type, dims in tensors:
+        n = 1
+        for d in dims:
+            n *= int(d)
+        total += n
+    return size_token_from_bytes(total)
+
+
 def family_from_gguf_arch(gguf_source):
     """details.family from a GGUF's general.architecture, or None.
 
@@ -3516,6 +3537,23 @@ def main():
             if size_guess is None:
                 size_guess = size_token_from_bytes(
                     estimate_size_dict(get_peeked_config()))
+            if size_guess is None:
+                # The file itself: the parameter count is in the header, so a repo whose
+                # name says nothing still installs at its real size. The chosen GGUF is not
+                # known yet here (that happens after the tag), so peek ANY .gguf in the
+                # repo -- every quant of one model has the same parameter count.
+                names = ([p.name for p in local_dir.iterdir() if p.suffix == ".gguf"]
+                         if local_dir else
+                         [n for n in root_file_names(tree) if n.endswith(".gguf")])
+                if names:
+                    pick = sorted(names)[0]
+                    if local_dir:
+                        src = str(local_dir / pick)
+                    elif modelscope:
+                        src = f"https://modelscope.ai/models/{repo}/resolve/master/{pick}"
+                    else:
+                        src = f"https://huggingface.co/{repo}/resolve/main/{pick}"
+                    size_guess = gguf_params_size_token(src)
             if size_guess is None:
                 raise
             log(f"[INFO] tag size '{size_guess}' guessed for '{dir_name}'; "
