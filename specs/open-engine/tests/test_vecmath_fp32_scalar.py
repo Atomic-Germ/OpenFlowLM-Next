@@ -122,3 +122,24 @@ def test_scalar_only_split_is_accurate_enough_and_was_not_the_defect():
     l = bf16(inv - h)
     err = abs(float(inv) - (float(h) + float(l)))
     assert err < 2e-6, f'scalar split error {err:.3e} is too small to explain the defect'
+
+
+def test_gemv_epilogue_three_term_split_was_tried_and_did_not_help():
+    """A recorded negative result, so nobody repeats it.
+
+    The Q4 epilogue also splits a value into bf16 hi/lo (`part`, which reaches
+    ~2^24). Making it a three-term split was implemented, built into all 46 sets
+    and measured: qkv went 4.909e-06 -> 5.070e-06 and z 1.388e-05 -> 1.317e-05,
+    i.e. nothing or slightly worse. It was reverted.
+
+    So the epilogue split is NOT the qkv limiter, and the remaining plausible
+    cause (the int16 activation table) is bounded by a quantisation the datapath
+    cannot avoid: 1.57e-05 on a 5120-wide block-quantised row, which is 3x the
+    error actually measured. That is why this file pins the NORM fix: the norm
+    was the stage that could be fixed.
+    """
+    QUANT, MEASURED, CEILING = 1.565e-5, 5.07e-6, 4.129e-6
+    assert QUANT > MEASURED, 'the quantisation bound must exceed what is measured'
+    assert MEASURED > CEILING, 'qkv is still above the ceiling, but not by quantisation'
+    src = (ROOT / 'open_kernels/designs/gemv_q4/gemv_q4.h').read_text()
+    assert 'q4_split3' not in src, 'the reverted GEMV experiment must not be in the tree'
