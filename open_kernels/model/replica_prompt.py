@@ -50,6 +50,10 @@ def main() -> int:
     ap.add_argument("--layers", type=int, default=-1, help="stop after N layers (default: all)")
     ap.add_argument("--out", default=str(HERE / "out_prompt"))
     ap.add_argument("--think", action="store_true")
+    ap.add_argument("--ids", default="",
+                    help="explicit token ids (comma separated), instead of encoding the message: "
+                         "the engine's --ids takes the same list, which is how a single decode "
+                         "step is compared (OFLM_OPEN_LAYER_DUMP)")
     a = ap.parse_args()
 
     from tokenizers import Tokenizer
@@ -59,13 +63,25 @@ def main() -> int:
     spec = spec_from_model_dir(md)
     if spec.family != "qwen35":
         sys.exit(f"replica_prompt: {spec.family} is not implemented (qwen35 only)")
-    tk = Tokenizer.from_file(str(md / "tokenizer.json"))
-    ids = prompt_ids(tk, a.message, a.think)
+    if a.ids:
+        ids = [int(x) for x in a.ids.replace(" ", "").split(",") if x]
+    else:
+        tk = Tokenizer.from_file(str(md / "tokenizer.json"))
+        ids = prompt_ids(tk, a.message, a.think)
     print(f"prompt: {len(ids)} ids: {','.join(map(str, ids))}", flush=True)
 
-    q = Q4NX(md / "model.q4nx")
-    q.native_q8 = lambda n: False            # the q4_1 the packer writes, as make_decode's default for this size
-    q.hidden = spec.hidden
+    gguf = md / "model.gguf"
+    if gguf.is_file():
+        # A GGUF install has no container: read the file's own tensors. The values are the
+        # file's, not the pool's, so this reference and the engine differ by the pool's
+        # requantisation (~1e-2); a near-zero correlation is a bug, not that difference.
+        from gguf_ref import GgufWeights
+        q = GgufWeights(gguf, spec)
+        print(f"weights: {gguf.name} (dequantised from the file)", flush=True)
+    else:
+        q = Q4NX(md / "model.q4nx")
+        q.native_q8 = lambda n: False        # the q4_1 the packer writes, as make_decode's default for this size
+        q.hidden = spec.hidden
     plain = q.matmul_w
     cache: dict = {}
     q.matmul_w = lambda name, o, i: cache[name] if name in cache else cache.setdefault(name, plain(name, o, i))
@@ -84,7 +100,12 @@ def main() -> int:
             xs[t], conv, S, K, V = R35.layer_decode(q, spec, l, xs[t], conv, S, K, V, t)
             xs[t] = np.asarray(xs[t], np.float32)
         xs[-1].astype(np.float32).tofile(out / f"ref_prompt_res{l}.bin")
-        print(f"  layer {l:2d} {spec.layer_types[l]:17s} |res| {np.linalg.norm(xs[-1]):10.3f}  ({time.time() - t0:.0f} s)",
+        # maxabs over EVERY position, which is what the engine's OFLM_OPEN_LAYER_NAN line
+        # reports for a prefill ("xres after layers nan=0 maxabs=..."). Comparing the last
+        # position's maxabs against that number compares two different vectors.
+        allres = np.asarray(xs, np.float32)
+        print(f"  layer {l:2d} {spec.layer_types[l]:17s} |res| {np.linalg.norm(xs[-1]):10.3f} "
+              f"maxabs(all pos) {np.abs(allres).max():10.6f}  ({time.time() - t0:.0f} s)",
               flush=True)
     _, logits = R35.final_logits(q, spec, xs[-1])
     logits = np.asarray(logits, np.float32)

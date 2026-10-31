@@ -45,6 +45,16 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 > * **qwen3.5 GGUF-direct is refused by name** (`GGUF_DIRECT_UNREADY`): it installs,
 >   loads and emits gibberish -- the q4_1/f32 twin's numerics, bucket 3. The q4nx
 >   container is correct; `--force` installs it anyway for the numerics work.
+> * **The GGUF numeric gate exists** (`open_kernels/model/gguf_ref.py` +
+>   `replica_prompt.py --model-dir <gguf install> [--ids ...]`): a GGUF *tensor* reader
+>   (F32/F16/Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K) with the HF-name map, so the fp64 reference
+>   runs on the file. It agrees with the container reference at layer 0 to cos 0.9946 on
+>   Qwen3.5-0.8B, and the engine's GGUF layer 0 is cos 0.1153 against that container
+>   oracle -- so the bug is in the twin's pack of the linear-attention layer, not in the
+>   weights or the mapping. Compare `OFLM_OPEN_DUMP_POOLS` dumps per `dst` offset next.
+> * **Qwen3.5's VLM uses the Qwen3-VL tower** (`clip.projector_type: qwen3vl_merger`;
+>   the wrapper is `Qwen3_5ForConditionalGeneration` with a `qwen3_5` vision_config), so a
+>   Qwen3.5-VL install's vision side is qwen3vl's, while its text arch is `qwen35`.
 
 > **Branch scope (2026-10-25):** this document describes the *whole*
 > GGUF-direct feature, which is spread across branches. On **this branch

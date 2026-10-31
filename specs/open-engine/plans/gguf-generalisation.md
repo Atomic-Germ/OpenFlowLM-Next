@@ -101,13 +101,49 @@ Both are one field each, and both currently refuse a model that would run.
 
 ## 3. Qwen3.5 numerics  (bucket 3 -- the one that "works" and lies)
 
-Every Qwen3.5 tune tested (4B/2B/0.8B, prithivMLmods and mradermacher) installs, loads, and
-emits gibberish. That is worse than a refusal.
+**Status: the instrument exists, and the bug is localized to one layer type.**
 
-* Start from the skill's q4_1-vs-f32 twin notes; the CPU reference is the gate.
-* **Until it passes, refuse qwen3.5 GGUF-direct by name.** A stated limitation is honest; a
-  fluent wrong answer is not. That is a one-line change in the family table, and it can be
-  removed the moment the numerics pass.
+Every Qwen3.5 tune tested (4B/2B/0.8B, three authors, plus a Qwen3.5 derivative with a joke
+name) installs, loads, and emits gibberish. The record in the skill settles the "was it ever
+good" question: on the open kernels Qwen3.5-4B **segfaulted in prefill at layer 0** and
+Qwen3.8-4B produced garbage -- so this is new work, not a regression. What worked was the
+closed container path, which is AMD's and has to go.
+
+**The missing instrument is built** (`open_kernels/model/gguf_ref.py`): a GGUF *tensor*
+reader (the vendored one is metadata-only) with the block dequantizers (F32/F16, Q4_0,
+Q4_1, Q8_0, Q4_K, Q5_K, Q6_K) and the HF-name map llama.cpp's conversion implies, so
+`replica_prompt.py --model-dir <a GGUF install>` runs the fp64 reference on the file itself.
+`--ids` gives it the same token list the engine's `--ids` takes.
+
+Measured on Qwen3.5-0.8B (24 layers, 18 linear + 6 full, rotary_dim 64 of head_dim 256,
+tied head = token_embd at Q6_K), one token, position 0:
+
+| probe | result |
+|---|---|
+| embedding row vs the engine's `embed t=... maxabs` | **bit-exact**, 5 of 5 rows |
+| ref(GGUF) vs ref(container built from the same GGUF) at layer 0 | **cos 0.9946** |
+| engine vs ref(container) at layer 0 | **cos 0.1153** |
+
+So the mapping is right (a container built from the same file agrees to 0.5%), the weights
+are right, and the ENGINE's GGUF pack of layer 0 -- a linear-attention (DeltaNet) layer --
+places something wrongly. The container path is the oracle the kernels were validated
+against; the GGUF twin is not.
+
+Next, and it is mechanical: `OFLM_OPEN_DUMP_POOLS=<dir>` dumps layer 0's packed pool, and
+both manifests carry each tensor's `dst` offset, so the GGUF twin's pool can be diffed
+against the container twin's per op. The candidates are the three tensors whose layout
+differs between the two sources -- `ssm_conv1d` (GGUF [channels][taps] vs container
+[taps][channels]), `ssm_alpha`/`ssm_beta` ([heads][hidden] both ways, but one is Q8_0 and
+requantized), and `ssm_out` (Q5_K -> q4_1 in the twin, q8 in the container set).
+
+**Also found:** `OFLM_GGUF_POOL_F32=1` does not load at all for this model -- "GGUF-direct
+block prefill is not implemented for MoE models" on a DENSE model, so the f32 twin's
+manifest is being read as MoE. That blocks the q4_1-vs-f32 A/B and needs fixing before the
+numerics can be attributed to the pool law rather than to placement.
+
+Until the numbers pass, qwen3.5 GGUF-direct is refused by name (`GGUF_DIRECT_UNREADY` in
+oflm-add), with `--force` for this work.
+
 
 ## 4. Missing sizes  (bucket 2 -- the scripted path, now driven by `oflm add`)
 
