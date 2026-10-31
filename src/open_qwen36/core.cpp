@@ -799,7 +799,12 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 HostConsts& h = hc_[l];
                 auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
                 if (!qf)
-                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
+                    // Not necessarily MoE: this branch is every layer kind the dense one above
+                    // does not cover, and a HYBRID family's twin lands here too (Qwen3.5's
+                    // linear-attention layers, OFLM_GGUF_POOL_F32). Naming the kind is the
+                    // difference between a fixable report and a wrong one.
+                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for the '" +
+                                             gb.kind + "' layer kind (only the dense one is)");
                 auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)

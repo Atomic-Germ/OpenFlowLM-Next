@@ -42,9 +42,21 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 >   `text_config` included -- the top level has no `hidden_size`), the bytes/quant guess,
 >   then the serving set's name. `mradermacher/GRaPE-1.5-i1-GGUF` (arch qwen35, name says
 >   1.5) installs as `qwen3.5`, `4.2b`, on `Qwen3.5-4B-NPU2` with nothing from the name.
-> * **qwen3.5 GGUF-direct is refused by name** (`GGUF_DIRECT_UNREADY`): it installs,
->   loads and emits gibberish -- the q4_1/f32 twin's numerics, bucket 3. The q4nx
->   container is correct; `--force` installs it anyway for the numerics work.
+> * **qwen3.5 GGUF-direct is refused by name** (`GGUF_DIRECT_UNREADY`): it used to install,
+>   load and emit gibberish. The THREE pack bugs are fixed (see below), the 0.8B answers
+>   correctly on the open kernels, and the entry stays until the shipped set carries the
+>   fixed pack and a 4B is measured. `--force` installs it now.
+> * **Three GGUF pack bugs, all ours** (qwen35 only, which is why only qwen35 was broken):
+>   `conv_transpose` read `ssm_conv1d` as [taps][channels] when a GGUF stores
+>   [channels][taps]; `lmhead_q8`'s GGUF branch wrote the file's raster instead of the
+>   pool's supertile raster (logits cos 0.33 with hidden states at 0.998); and the fused
+>   q|gate is per head in a GGUF (`[q_h|gate_h|...]`) vs `[all q|all gate]` in the pool
+>   (cos 0.14 for the tensor). `qgate_rows`/`qgate_gate` on the op carry the third, emitted
+>   only for a GGUF source. A manifest change, not a kernel change.
+> * **`OFLM_GGUF_POOL_F32=1` does not load for qwen35**: "block prefill is not implemented
+>   for the 'linear' layer kind". The f32 twin's route has no hybrid layer kind -- and the
+>   message used to say "MoE", which is wrong and misled the diagnosis. Dense models are
+>   fine; qwen35 is hybrid.
 > * **The GGUF numeric gate exists** (`open_kernels/model/gguf_ref.py` +
 >   `replica_prompt.py --model-dir <gguf install> [--ids ...]`): a GGUF *tensor* reader
 >   (F32/F16/Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K) with the HF-name map, so the fp64 reference

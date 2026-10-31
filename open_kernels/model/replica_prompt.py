@@ -63,10 +63,10 @@ def main() -> int:
     spec = spec_from_model_dir(md)
     if spec.family != "qwen35":
         sys.exit(f"replica_prompt: {spec.family} is not implemented (qwen35 only)")
+    tk = Tokenizer.from_file(str(md / "tokenizer.json"))
     if a.ids:
         ids = [int(x) for x in a.ids.replace(" ", "").split(",") if x]
     else:
-        tk = Tokenizer.from_file(str(md / "tokenizer.json"))
         ids = prompt_ids(tk, a.message, a.think)
     print(f"prompt: {len(ids)} ids: {','.join(map(str, ids))}", flush=True)
 

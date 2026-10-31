@@ -307,7 +307,7 @@ _LAYER_NORM = {
     "linear_attn.qkv_proj.weight": "attn_qkv.weight",
     "linear_attn.ssm_out_proj.weight": "ssm_out.weight",
     "self_attn.gate_proj.weight": "attn_gate.weight",
-    "self_attn.q_proj.weight": "attn_q.weight",
+    "self_attn.q_proj.weight": ("attn_q.weight", "qgate"),
     "self_attn.k_proj.weight": "attn_k.weight",
     "self_attn.v_proj.weight": "attn_v.weight",
     "self_attn.o_proj.weight": "attn_output.weight",
@@ -317,6 +317,16 @@ _LAYER_NORM = {
 }
 _TOP = {"model.embed_tokens.weight": "token_embd.weight",
         "model.norm.weight": "output_norm.weight"}
+
+
+def _deinterleave_qgate(w, heads, head_rows):
+    """[q_head|gate_head] per head (llama.cpp) -> [all q | all gate] (the pool's order)."""
+    order = np.empty(2 * heads * head_rows, int)
+    for i in range(heads):
+        order[i * head_rows:(i + 1) * head_rows] = i * 2 * head_rows + np.arange(head_rows)
+        base = heads * head_rows + i * head_rows
+        order[base:base + head_rows] = i * 2 * head_rows + head_rows + np.arange(head_rows)
+    return np.ascontiguousarray(w[order])
 
 
 class GgufWeights:
@@ -353,9 +363,14 @@ class GgufWeights:
     def _get(self, hf):
         if hf in self._cache:
             return self._cache[hf]
-        name, transpose = self._map(hf)
+        name, transform = self._map(hf)
         w = self.g.dequant(name, 0, self.g.rows(name))
-        if transpose:
+        if transform == "qgate":
+            # llama.cpp writes a FUSED q|gate per head ([q_h|gate_h|...]); the pool (and
+            # the reference's slicing) wants [all q | all gate]. Same values, cos 0.14 if
+            # left alone -- this is the order the container is built in.
+            w = _deinterleave_qgate(w, self.spec.num_heads, self.spec.head_dim)
+        elif transform:
             w = np.ascontiguousarray(w.T)
         w = w.reshape(-1) if w.shape[0] == 1 else w
         self._cache[hf] = w

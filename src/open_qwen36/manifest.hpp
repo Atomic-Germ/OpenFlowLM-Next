@@ -40,6 +40,13 @@ struct PackOp {
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
     uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)
     uint64_t rows = 0, cols = 0, elem = 0;                              ///< transpose
+    uint64_t qgate_rows = 0;                                            ///< std_perm_gguf: rows per
+                                                                        ///< head-half of a FUSED q|gate
+                                                                        ///< tensor (0 = not fused). The
+                                                                        ///< GGUF orders it per head
+                                                                        ///< [q_h|gate_h|...], the pool
+                                                                        ///< [all q|all gate]
+    bool qgate_gate = false;                                            ///< ... and which half this op takes
     std::string split;                                                  ///< std_perm of a q8 source: "hi" |
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)

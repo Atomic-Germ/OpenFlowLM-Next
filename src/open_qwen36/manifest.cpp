@@ -44,6 +44,8 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.nch = j.value("nch", 0ull);
     p.in_dim = j.value("in_dim", 0ull);
     p.chunk0 = j.value("chunk0", 0ull);
+    p.qgate_rows = j.value("qgate_rows", 0ull);
+    p.qgate_gate = j.value("qgate_gate", false);
     p.src_dim = j.value("src_dim", 0ull);
     p.rg = j.value("rg", 0ull);
     p.experts = j.value("experts", 0ull);

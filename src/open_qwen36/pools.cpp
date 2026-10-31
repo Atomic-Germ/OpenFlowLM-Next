@@ -598,6 +598,12 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         bounds(op, op.nch * ch, dst_bytes);
         auto perm = std_perm(op.nch, op.in_dim);
         const size_t ncol = op.in_dim / 256;
+        // A FUSED q|gate projection is ordered differently by the two sources: a .q4nx
+        // container holds [all q | all gate], while llama.cpp writes it per head --
+        // [q_head0 | gate_head0 | q_head1 | ...] -- so a pool chunk that should hold q's
+        // rows reads the gate's instead (Qwen3.5-0.8B: cos 0.14 for the whole tensor).
+        // `qgate_rows` is the rows per head-half, which is what the interleave steps by.
+        const size_t qgate_hpb = op.qgate_rows ? op.qgate_rows / 32 : 0;
         // The requant path decodes a row at a time: with a K-quant source that is the
         // whole load-time cost of a GGUF model (a Q4_K_M 8B took minutes). Every chunk
         // is independent -- it reads its own rows of the mapping and writes its own
@@ -608,7 +614,16 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             uint8_t* d = dst + op.dst + c * ch;
             // the file's chunk this pool chunk reads: the op's range (chunk0)
             // and the permutation inside it
-            const size_t fc = op.chunk0 + perm[c];
+            size_t fc = op.chunk0 + perm[c];
+            if (qgate_hpb) {
+                // relative to THIS op's half: the gate op's chunk0 is already the second
+                // half, so its first rowblock is chunk0/ncol, not 0. The file's rowblock
+                // for that half is then (r / hpb) * 2*hpb + (r % hpb) [+ hpb for the gate].
+                const size_t rb0 = op.chunk0 / ncol;
+                const size_t r = fc / ncol - rb0, kt = fc % ncol;
+                fc = ((r / qgate_hpb) * 2 * qgate_hpb + (r % qgate_hpb) +
+                      (op.qgate_gate ? qgate_hpb : 0)) * ncol + kt;
+            }
             const size_t row0 = 32 * (fc / ncol);                 // rows
             const size_t blk0 = (fc % ncol) * 8;                  // k blocks (32 values each)
             for (size_t r = 0; r < 32; ++r) {
@@ -836,11 +851,16 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                     // offset into the tensor's data: row * blocks_per_row * 34
                     const uint8_t* rp = base + row * blocks_per_row * q8blk;
                     for (size_t kt = 0; kt < ncol; ++kt) {
-                        // raw GGUF is row-major: the pool reads chunks in plain
-                        // raster order, so no supertile permutation is applied
-                        // (the memcpy path above permutes because the q4nx
-                        // container stores the head in supertile order).
-                        const size_t k = (row / 32) * ncol + kt;
+                        // The POOL is in supertile raster, not the file's: the q4nx
+                        // branch above maps pool chunk k to file chunk
+                        // (4*(k/per_band) + k%4)*nk + (k%per_band)/4, so a file chunk
+                        // rb*nk + kt belongs at pool chunk (rb/4)*(4*nk) + 4*kt + (rb%4).
+                        // Writing the file's own raster here scrambles every 128-row
+                        // band: the head then produces plausible, wrong logits (Qwen3.5-0.8B
+                        // GGUF-direct: logit cos 0.33 while every layer's hidden state was
+                        // at 0.998 -- the container path permutes, which is why it works).
+                        const size_t rb = static_cast<size_t>(row) / 32;
+                        const size_t k = (rb / 4) * (4 * ncol) + 4 * kt + (rb % 4);
                         if (k * CH8 + CH8 > dst_bytes) continue;
                         const size_t base_col = kt * 256;
                         const unsigned rr = static_cast<unsigned>(row % 32);
@@ -875,11 +895,16 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                 } else {
                     g.embed_row(name, row, op.in_dim, rowbuf.data());
                     for (size_t kt = 0; kt < ncol; ++kt) {
-                        // raw GGUF is row-major: the pool reads chunks in plain
-                        // raster order, so no supertile permutation is applied
-                        // (the memcpy path above permutes because the q4nx
-                        // container stores the head in supertile order).
-                        const size_t k = (row / 32) * ncol + kt;
+                        // The POOL is in supertile raster, not the file's: the q4nx
+                        // branch above maps pool chunk k to file chunk
+                        // (4*(k/per_band) + k%4)*nk + (k%per_band)/4, so a file chunk
+                        // rb*nk + kt belongs at pool chunk (rb/4)*(4*nk) + 4*kt + (rb%4).
+                        // Writing the file's own raster here scrambles every 128-row
+                        // band: the head then produces plausible, wrong logits (Qwen3.5-0.8B
+                        // GGUF-direct: logit cos 0.33 while every layer's hidden state was
+                        // at 0.998 -- the container path permutes, which is why it works).
+                        const size_t rb = static_cast<size_t>(row) / 32;
+                        const size_t k = (rb / 4) * (4 * ncol) + 4 * kt + (rb % 4);
                         if (k * CH8 + CH8 > dst_bytes) continue;
                         const size_t base_col = kt * 256;
                         const unsigned rr = static_cast<unsigned>(row % 32);
@@ -961,6 +986,24 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (!src) {
             src = raw(m, name, taps * groups * width * 2, &n);
             if (n != taps * groups * width * 2) fail(name + " is not bf16[" + std::to_string(taps) + ", " + std::to_string(groups * width) + "]");
+        }
+        // A GGUF stores the filter CHANNELS-major: llama.cpp's fastest dim is the tap, so
+        // `ssm_conv1d.weight` is [channels][taps], while a .q4nx container stores it
+        // taps-major. The shuffle below is written for taps-major, so re-order first --
+        // without this the flat values are read taps-major and every channel gets another
+        // channel's filter. (Qwen3.5-0.8B GGUF-direct: layer 0 came out at cos 0.12 against
+        // the same weights through a container, and this was the only differing tensor.)
+        if (auto* gg = dynamic_cast<const GgufFile*>(&m)) {
+            const auto& d = gg->tensor(name).dims;
+            if (d.size() == 2 && static_cast<uint64_t>(d[0]) == taps &&
+                static_cast<uint64_t>(d[1]) == groups * width) {
+                std::vector<uint8_t> t(taps * groups * width * 2);
+                for (uint64_t c = 0; c < groups * width; ++c)
+                    for (uint64_t tp = 0; tp < taps; ++tp)
+                        std::memcpy(&t[(tp * groups * width + c) * 2], src + (c * taps + tp) * 2, 2);
+                tmp.swap(t);
+                src = tmp.data();
+            }
         }
         bounds(op, taps * groups * width * 2, dst_bytes);
         for (uint64_t g = 0; g < groups; ++g)

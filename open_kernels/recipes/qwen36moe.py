@@ -210,10 +210,15 @@ def mixed_check(spec: ModelSpec, who: str, roles) -> None:
 
 
 def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: int,
-            in_dim: int, chunk0: int | None = None) -> dict:
+            in_dim: int, chunk0: int | None = None, qgate: str | None = None) -> dict:
     """The pack op for one weight projection: `std_perm` at q4_1 (unchanged), `q8_perm` at
     q8 (twice the pool elements, 16-row half-tiles). `chunk0` is a SOURCE file-chunk offset
-    in either format, so the fused [q | gate] split reads the same way."""
+    in either format, so the fused [q | gate] split reads the same way.
+
+    `qgate` ("q" | "gate") marks one half of a FUSED q|gate projection read from a GGUF,
+    where llama.cpp orders the rows PER HEAD -- [q_head0 | gate_head0 | q_head1 | ...] --
+    while the pool wants [all q | all gate]. A container is already in the pool's order,
+    so the flag is only emitted for a GGUF source."""
     q = spec.quant_of(role)
     if q in ("q4_1_f32", "q4_1_gguf"):    # both read a GGUF source; the chunk law differs
         pop = "std_perm_gguf"
@@ -224,6 +229,9 @@ def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: 
     op: dict = {"op": pop, "tensor": tensor, "dst": dst}
     if chunk0 is not None:
         op["chunk0"] = chunk0
+    if qgate and pop == "std_perm_gguf":
+        op["qgate_rows"] = spec.head_dim          # rows per head-half: the interleave step
+        op["qgate_gate"] = qgate == "gate"
     op["nch"] = role_chunks(spec, role, rows, cols)
     op["in_dim"] = in_dim
     return op
