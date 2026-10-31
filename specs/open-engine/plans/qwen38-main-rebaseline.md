@@ -1,5 +1,54 @@
 # Qwen3.8-27B validation report
 
+## Refined candidate upstream drift scan — 2026-10-31
+
+Traced the refined candidate and control across **all 64 layers** at P125/P205/
+P220 using retained native outputs and unchanged independent references. The
+scan completes **384 cases** with **192 byte-exact original reference rows**
+and three byte-exact downstream attribution controls. A separate CPU audit
+reconstructs every causal trajectory, NPZ array, metric and regression.
+
+Every selected local implementation gap passes **192/192** in both roles under
+the existing maxrel gate, while full residuals pass **159/192 control** and
+**156/192 candidate** in this failure-focused subset. Candidate total error
+improves in 86 rows, regresses in 97 and ties in nine. L51/P205 is repaired;
+L55/P125, L55/P220, L60/P125 and L62/P125 become new failures. This is not the
+aggregate 257-position acceptance matrix.
+
+| Candidate case | Current input | Input history | Local gap | Total maxrel |
+|---|---:|---:|---:|---:|
+| L0/P205 | 0 | 0 | 0.0000073863 | 0.0000073863 |
+| L0/P220 | 0 | 0 | 0.0000141479 | 0.0000141479 |
+| L31/P125 | 0.0000224587 | 0.0000538285 | 0.0000018260 | 0.0000657616 |
+| L31/P220 | 0.0002067694 | 0.0000071203 | 0.0000020132 | 0.0002157697 |
+| L49/P205 | 0.0018092996 | 0.0000163031 | 0.0000098344 | 0.0018135651 |
+| L50/P205 | 0.0117169752 | 0.0000294601 | 0.0000377089 | 0.0117765736 |
+
+Signed effect maxima do not add, and effects can cancel. L31/L49 do not
+introduce a large new local error; L31/P125 is primarily history-driven while
+L31/P220 and L49/P205 amplify current-input drift. Small local errors begin at
+L0 (0.0000073863 at P205, 0.0000141479 at P220) and are distributed across
+earlier layers; L6/P125 and L7/P205 are alternate early-source probes. A
+correction needs controlled causal propagation before any downstream
+improvement can be claimed, so the locally passing late amplification layers
+must not be edited first.
+
+Next isolate current-production L0 at P125/P205/P220 and attribute its local
+error across entry/projection/post/FFN boundaries, retaining L6/P125 and
+L7/P205 as alternate probes and L31/P125 as a history-amplification control.
+
+No kernels, xclbins, catalogue entries, packing, production export, installed
+models or services changed. No NPU run was needed; this is CPU reference
+analysis over audited open-NPU captures, not inference fallback. Merged-tree
+host suite: **2093 passed, 47 skipped**; retained CLI CTest **4/4 each**;
+settings registry byte-identical and merged settings CI passes. After the merge,
+`retained-v1` re-verified the stored evidence (complete, 384 cases, 192
+reference rows, 3 controls, numerical FAIL) without relabelling old builds.
+19 contract tests pass. Full-model numerical acceptance, reset/isolation and
+performance remain open. Evidence: `Models/qwen38-27b/refined-upstream/`
+(`scan-v1`, `retained-v1`); runbook `utilities/refined-upstream/README.md`;
+skill `open-qwen38-refined-upstream`.
+
 ## Refined candidate causal linear sublayers — 2026-10-29
 
 Isolated the three retained candidate failures with unchanged production lx
