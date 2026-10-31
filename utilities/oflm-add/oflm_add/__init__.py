@@ -1356,6 +1356,18 @@ def _projectors_in(repo, modelscope):
             if n and n.lower().endswith(".gguf") and "mmproj" in os.path.basename(n).lower()]
 
 
+# llama.cpp's `clip.projector_type` -> the tower design a person names. The projector is
+# how a VLM install says which VISION side it needs; the GGUF's text arch cannot (Qwen3.5's
+# VLM says `qwen35` and carries a Qwen3-VL tower).
+VISION_TOWERS = {
+    "qwen3vl_merger": "the Qwen3-VL tower",
+    "qwen2.5vl_merger": "the Qwen2.5-VL tower",
+    "qwen2vl_merger": "the Qwen2-VL tower",
+    "gemma3": "the Gemma 3 tower",
+    "gemma4": "the Gemma 4 tower",
+}
+
+
 def install_projector(target, repo, modelscope=False, quiet=False, force=False):
     """Fetch this model's vision projector as `mmproj.gguf`, or return "".
 
@@ -1397,8 +1409,16 @@ def install_projector(target, repo, modelscope=False, quiet=False, force=False):
         except OSError:
             pass
         return ""
-    log(f"[INFO]   {pick} is a '{kv.get('clip.projector_type')}' projector for a "
-        f"{kv.get('clip.vision.embedding_length')}-wide, {kv.get('clip.vision.block_count')}-block tower")
+    # The projector's own type names the TOWER DESIGN, and that is the useful fact: a
+    # Qwen3.5 VLM's README names text checkpoints as its base models, and its tower is
+    # Qwen3-VL's (llama.cpp writes `qwen3vl_merger` for it). Without this, an install that
+    # lists two text bases and a `qwen3vl_merger` projector reads like it picked the wrong
+    # base model.
+    ptype = str(kv.get("clip.projector_type") or "")
+    design = VISION_TOWERS.get(ptype)
+    log(f"[INFO]   {pick} is a '{ptype}' projector for a "
+        f"{kv.get('clip.vision.embedding_length')}-wide, {kv.get('clip.vision.block_count')}-block tower"
+        + (f" ({design}; the base model(s) above are the TEXT checkpoints)" if design else ""))
     return "mmproj.gguf"
 
 
