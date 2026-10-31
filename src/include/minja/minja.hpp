@@ -2338,6 +2338,13 @@ private:
 
         while (it != end) {
             if (!consumeToken(",").empty()) {
+              // A TRAILING comma is legal in a Python/Jinja literal (`[1, 2,]`), and
+              // upstream minja (commit 3e4c61c) rejects it: the branch below demands
+              // an expression after every comma. Gemma 3's translation template is the
+              // one that found this -- a 600-entry `set languages = {...,}` -- and the
+              // model loaded on the NPU and then died in the template parser.
+              if (!consumeToken("]").empty())
+                return std::make_shared<ArrayExpr>(get_location(), std::move(elements));
               auto expr = parseExpression();
               if (!expr) throw std::runtime_error("Expected expression in array");
               elements.push_back(std::move(expr));
@@ -2371,6 +2378,11 @@ private:
 
         while (it != end) {
             if (!consumeToken(",").empty()) {
+                // Same trailing-comma allowance as parseArray: `{"a": 1,}` is legal
+                // Jinja and upstream minja rejects it. Gemma 3's translation template
+                // ends its 600-entry language map with a comma.
+                if (!consumeToken("}").empty())
+                    return std::make_shared<DictExpr>(get_location(), std::move(elements));
                 parseKeyValuePair();
             } else if (!consumeToken("}").empty()) {
                 return std::make_shared<DictExpr>(get_location(), std::move(elements));
