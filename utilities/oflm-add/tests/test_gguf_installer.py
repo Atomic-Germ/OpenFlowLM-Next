@@ -92,14 +92,19 @@ def test_quant_suffix_must_run_to_end_of_stem():
     assert oflm_add.gguf_quant_of("Model-Q8_0.gguf") == "Q8_0"
 
 
-def test_choose_gguf_prefers_q4_k_m_over_q8_0_and_names_impostors():
+def test_choose_gguf_prefers_the_pools_own_format_then_the_most_precise_source():
+    """The pool is q4_1, so a Q4_1 file is packed near-exactly; anything else is requantized
+    and the source's precision is all that is left. Measured on the same Qwen3.5-4B: Q4_1
+    matched the fp64 reference at cos 0.993 per layer, Q4_K_M at 0.75 -- so Q6_K (which
+    requantizes cleanly) beats Q4_K, and a size-first order is the wrong one."""
     chosen, refused = oflm_add.choose_gguf_file([
-        "M-Q4_0_4_4.gguf",
-        "M-Q8_0.gguf",
+        "M-Q4_0_4_4.gguf",   # an impostor: never reads as Q4_0
         "M-Q4_K_M.gguf",
+        "M-Q6_K.gguf",
         "M-IQ2_M.gguf",
     ])
-    assert chosen == "M-Q4_K_M.gguf"
+    assert chosen == "M-Q6_K.gguf"
+    assert oflm_add.choose_gguf_file(["M-Q4_1.gguf", "M-Q6_K.gguf"])[0] == "M-Q4_1.gguf"
     # The impostor names its full suffix: it must never read as Q4_0.
     assert refused["M-Q4_0_4_4.gguf"].startswith("quant Q4_0_4_4 not supported")
 

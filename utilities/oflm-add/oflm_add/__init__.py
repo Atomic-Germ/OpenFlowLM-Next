@@ -70,7 +70,20 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # end for Q6_K on gemma3-4b). Order is install preference: exact first,
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4"]
+# Which GGUF to take when a repo offers several, for GGUF-DIRECT.
+#
+# The pool the kernels stream is q4_1 (recipes/spec.py QUANT_FORMATS), so the source's
+# format decides how many quantisation steps the weights take on the way in:
+#   * Q4_1 -- packed near-exactly (the file's fp16 d/m widen to f32/bf16). Measured on the
+#     Qwen3.5-4B: the engine matched the fp64 reference at cos 0.993 per layer.
+#   * Q4_0 -- re-encoded exactly (the implicit -8 becomes q4_1's min), scales widened.
+#   * Q6_K / Q8_0 / Q5_K / Q4_K / IQ4_* -- DEQUANTIZED and re-quantized to q4_1, so the
+#     source's error is added to q4_1's. The same 4B as Q4_K_M measured cos 0.75: still
+#     coherent, but two lossy steps where one would do.
+# Hence exact formats first, then the requantized ones by how precise the SOURCE is (Q6_K
+# and Q8_0 requantize to something very close to a clean q4_1; IQ4 is the worst of both).
+# Size is the trade: Q8_0 is twice the download of Q4_1 for no gain over it.
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q6_K", "Q8_0", "Q5_K", "Q4_K", "IQ4"]
 # Whether a GGUF can be used is NOT a property of the family NAME: it is a
 # property of the kernel set the install links. The recipe emits the manifest's
 # f32-scale twin ("gguf" section) and the export builds its kernel set; the
