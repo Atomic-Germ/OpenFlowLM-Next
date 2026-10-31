@@ -3,6 +3,34 @@ name: open-gguf-direct
 description: Direct GGUF loading for the open engines (supersedes q4nx for compatible quants). Use when adding GGUF support to another engine, debugging a GGUF model that refuses to load, rebuilding the f32-scale kernel variants, extending to MoE, or changing the pack ops.
 ---
 
+> **2026-10-31 — the matching rules changed. Read this before debugging a refusal.**
+>
+> * **The file is the authority for a GGUF install.** `oflm add` derives the spec from
+>   the GGUF's own metadata FIRST; a repo's `config.json` is only a fallback for what
+>   the file cannot carry (tokenizer, chat template, vision tower). Peeking the config
+>   first refused `translategemma-4b-it`, whose config omits `rope_scaling` while the
+>   GGUF says `factor 8.0` — a model whose geometry matched `Gemma3-4B-NPU2` exactly.
+> * **`vocab` is not in `kernel_hash`.** The head kernel is compiled per row count, and
+>   the pack zero-fills the rows past the model's own, so a set built for a padded
+>   vocabulary SERVES a narrower head and not the reverse. That one-sided rule lives in
+>   `ModelSpec.serves()` (matching) and `Manifest::check_model` (`config vocab_size <=
+>   set rows`), never in the hash. Gemma 3 4B: set 262208 rows, GGUF 262144.
+> * **One matching path.** `oflm_add.scan_kernel_sets()` — geometry plus the head-row
+>   requirement — returns the set, its name (a label only) and the reason each other set
+>   was refused. The refusal message is built from those reasons. There is no
+>   name-based lookup except `--xclbin-from`/`--open-kernels`.
+> * **A missing size is built by `oflm add`**, not handed to the user as a command: it
+>   writes the spec it derived from the file (with `extra.model` = `<repo name>-NPU2`,
+>   the export destination) and runs `utilities/build-new-spec.py --spec <name>`. Only
+>   without a checkout (installed package, no recipes/toolchain) does it say the size is
+>   ours to ship. Verified end to end with `unsloth/Qwen3-VL-8B-Instruct-GGUF`.
+> * **`minja` rejects a trailing comma** in a dict/array literal (upstream 3e4c61c),
+>   which Jinja allows. Gemma 3's translation template ends a 600-entry language map
+>   with one — the model loads on the NPU and then dies in the template parser. Patched
+>   in `src/include/minja/minja.hpp` (both parsers).
+> * **gemma3-1b is a DESIGN wall, not a catalogue point**: hidden 1152 is not a multiple
+>   of the 256-wide q4 k-tile. `candidates/gemma3-1b.json` is that wall recorded.
+
 > **Branch scope (2026-10-25):** this document describes the *whole*
 > GGUF-direct feature, which is spread across branches. On **this branch
 > (`feat/gguf-direct`)** some cited files do **not exist** — they live on

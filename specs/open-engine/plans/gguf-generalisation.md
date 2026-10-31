@@ -1,45 +1,64 @@
 # Plan: GGUF generalisation -- closing the false gates
 
-**Status:** proposed. The hard part is done and shipped: container, loader, kernel linking,
+**Status:** in progress. The hard part is done and shipped: container, loader, kernel linking,
 packaging, and diffusion end to end from a GGUF. What remains is *generalisation within
 families* -- and most of it is the tool telling the truth about why something failed.
 
 **Evidence base:** twelve `oflm add` runs against the installed package (2026-10-31), sorted
-into five buckets. Bucket 1 is first because it hides or fakes the others.
+into five buckets. Bucket 1 is closed; bucket 2's first case (Qwen3-VL-8B) is built and
+running; 3 (qwen3.5 numerics), 4 (two parser gaps) and 5 (ASR, embedding) are open.
 
-## 1. The kernel hash mixes packing with geometry  (bucket 1 -- sweeps the field)
+## 1. Bucket 1 -- closed, and it was TWO false gates, not one
 
-Measured, gemma-3-4b-it against the shipped set:
+Measured, gemma-3-4b-it against the shipped set: every field equal (hidden 2560, 34
+layers, 8/4 heads, head_dim 256, rope 1e6, sliding 1024) except `vocab` -- 262208 in
+the set (a container's padding), 262144 in the GGUF. That was real, but it was not the
+whole bucket.
 
-    Gemma3-4B-NPU2 set spec:   vocab 262208   real_vocab 262145
-    gemma-3-4b-it GGUF:        token_embd [2560, 262144]
+**1a. The spec came from the wrong place.** `oflm add` peeked `config.json` before the
+GGUF. `mradermacher/translategemma-4b-it-i1` ships a config with no `rope_scaling`,
+while the GGUF's metadata says `factor 8.0` -- the law llama.cpp actually applied. So a
+model whose geometry matched `Gemma3-4B-NPU2` exactly was refused, `geom_set` came back
+empty, and the gate fell back to a *name* from the registry: "no GGUF-direct open kernel
+set found for Translategemma-4B-Instruct-NPU2". Two messages, one family, both wrong.
+Now, for a GGUF install, the file is the authority; config.json is a fallback for what
+the file cannot carry (tokenizer, chat template, vision tower). `rope_ignore` also gets
+the source now (it was being passed `None`).
 
-Everything else is equal -- hidden 2560, 34 layers, 8/4 heads, head_dim 256, rope 1e6,
-sliding window 1024. Only `vocab` differs, by 64: the set was built from a container whose
-vocabulary was padded to 262208, the GGUF reports the model's own 262144. Because `vocab` is
-in `ModelSpec.kernel_hash`, a *packing* choice rejects every GGUF of the family, and the
-message says "different geometry", which sends the user to build kernels that are already
-installed.
+**1b. `vocab` in `kernel_hash` -- but not as this plan guessed.** The head kernel is
+compiled per row count (bands and their split), so vocab is not simply "not geometry":
+the relation is ASYMMETRIC. A set built for a padded vocabulary serves a narrower head,
+because the pack zero-fills the rows past the model's own (`pools.cpp`: "padded rows:
+zeroed scales/codes"); a wider head cannot be served. A hash cannot express one-sided
+containment, so:
 
-Change:
-* `kernel_hash` covers what the kernels tile: geometry, head layout, rope, norm, activation,
-  quant law. **Vocabulary padding is not geometry** -- hash the chunk-rounded value (the
-  tiling-relevant one) and validate the real vocabulary at load, where it belongs.
-* The same applies to any other field that is a container's packing choice rather than a fact
-  about the model. Audit the spec for them while doing this (`real_vocab` already exists and
-  is the right shape).
-* **One matching path.** Today two messages disagree for the same family:
-  `gemma-3-4b-it` says "no set matches this geometry, the nearest is different", while
-  `translategemma-4b-it` says "no GGUF-direct set found for Translategemma-4B-Instruct-NPU2"
-  -- i.e. it built a set name from the model instead of matching by geometry. Geometry
-  decides; the name is a hint for the tag only.
-* `build-new-spec.py` writes hashes into `recipes/catalogue.py` and the frozen test lists, so
-  this change ripples there: regenerate, and expect the tests to name any catalogue entry
-  whose hash moved.
+* `vocab` left `ModelSpec.kernel_hash` (`_KERNEL_INDEPENDENT`), with the reason written
+  where the field list is;
+* `ModelSpec.serves(model)` carries the one-sided requirement -- same geometry, and at
+  least as many head rows -- and is what every matching site now asks;
+* `Manifest::check_model` accepts `config vocab_size <= set rows` and refuses wider, so
+  the install cannot succeed and the load fail (it would have: `vocab_size` was an
+  equality check).
 
-Verify with, in this order: `gemma-3-4b-it` (fernandoruiz, Q4_0), `translategemma-4b-it`
-(mradermacher, i1), `gemma-4-E4B-it` (unsloth), and **Qwen3-VL-4B must still install** (it
-works today; it is the regression check).
+**1c. One matching path.** `scan_kernel_sets()` replaces the name lookup plus the
+separate geometry check. It returns the set, its name (a label only -- the tag, the
+xclbin link) and *why each other set was refused*, and the refusal message is built from
+those notes. A set of the same family at a different geometry is named as such; an
+unrelated alphabetical neighbour is not.
+
+**1d. A missing size is BUILT, not handed over as a command.** When nothing installed
+serves the geometry, `oflm add` writes the spec it already derived from the file and runs
+`utilities/build-new-spec.py --spec <name>` itself (spec, build, gates, catalogue,
+rebuild, register). It needs a checkout; an installed package has no recipes and no
+toolchain, and there the message says the size is ours to ship, with the shape -- not
+"run this python script", which the user cannot do. Verified: `unsloth/Qwen3-VL-8B-Instruct-GGUF`
+built `Qwen3-VL-8B-Instruct-NPU2`, installed, and answered a prompt on the NPU.
+
+**Also found by 1a:** `minja` (vendored, upstream 3e4c61c) rejects a TRAILING COMMA in a
+dict/array literal, which Jinja allows. Gemma 3's translation template ends a 600-entry
+language map with one: the model loaded on the NPU and died in the template parser.
+Patched locally in `src/include/minja/minja.hpp` (both parsers).
+
 
 ## 2. Two parser gaps  (bucket 4 -- cheap, and both are "read what llama.cpp wrote")
 
@@ -64,14 +83,25 @@ emits gibberish. That is worse than a refusal.
   fluent wrong answer is not. That is a one-line change in the family table, and it can be
   removed the moment the numerics pass.
 
-## 4. Missing sizes  (bucket 2 -- the scripted path)
+## 4. Missing sizes  (bucket 2 -- the scripted path, now driven by `oflm add`)
 
-`Qwen3-VL-8B`, `gemma3-1b`. Exactly the Qwen sizes precedent: `build-new-spec.py` (SPEC →
-BUILD → GATE → CATALOGUE → REBUILD → REGISTER), then the size is a record. Nothing here
-should need a new code path -- if it does, that is the finding.
+`oflm add` builds the set itself when nothing installed serves the geometry (1d above), so
+this is no longer a bucket of "run this command".
+
+* **Qwen3-VL-8B: done.** Built, installed, runs (`20/36 layers resident`, coherent reply).
+  The spec, its frozen `spec_hash` and its expected name were written by the scripts --
+  nothing hand-edited.
+* **gemma3-1b: a DESIGN step, not a catalogue point.** hidden 1152 is not a multiple of
+  the 256-wide q4 k-tile, so the recipe refuses the shape by name ("hidden and
+  intermediate must be multiples of 256") and `build-new-spec.py` moves the spec to
+  `recipes/candidates/`. The fix is a 128-wide k-tile (pool layout, gemv, lm_head) or a
+  padded hidden -- a recipe change, and it is the same wall `candidates/gemma-3-1b-it.json`
+  already recorded. Do not expect a size inside a family to be a subset of the process:
+  the *widths* decide, and a width can need a design.
 
 Same pass: **derive the packaging list from imports** rather than remembering it (the
 converter's modules, `open_kernels/*.py`), so "our module isn't installed" stops recurring.
+
 
 ## 5. ASR, then embedding  (bucket 5 -- not started)
 
