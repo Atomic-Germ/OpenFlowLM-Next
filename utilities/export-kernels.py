@@ -96,6 +96,15 @@ def llvm_aie_bin() -> Path | None:
     return matches[-1] if matches else None
 
 
+def mlir_aie_bin() -> Path | None:
+    """The mlir-aie wheel's bin: aiecc lives HERE, not in the venv's bin/.
+
+    Every child (export_dit_kernels -> compose_elf) calls `aiecc` by bare name, so this
+    directory has to be on PATH, not just the interpreter switched to the venv."""
+    matches = sorted(VENV.glob("lib/python*/site-packages/mlir_aie/bin"))
+    return matches[-1] if matches else None
+
+
 def ensure_venv() -> Path:
     py = venv_python()
     # Nix builds provide a pre-assembled IRON venv with the correct wheels.
@@ -335,6 +344,9 @@ def main() -> int:
     path_parts = []
     if aie_bin:
         path_parts.append(str(aie_bin))
+    aiecc_bin = mlir_aie_bin()
+    if aiecc_bin:
+        path_parts.append(str(aiecc_bin))
     path_parts.append(str(XRT_BIN))
     path_parts.append(os.environ.get("PATH", ""))
     os.environ["PATH"] = os.pathsep.join(path_parts)
@@ -345,7 +357,7 @@ def main() -> int:
             [str(XRT_PY)] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
         )
 
-    for tool in ("clang", "xclbinutil", "aiebu-asm"):
+    for tool in ("clang", "aiecc", "xclbinutil", "aiebu-asm"):
         if not shutil.which(tool):
             print(f"FATAL: {tool} not on PATH (Peano/XRT)", file=sys.stderr)
             return 1
