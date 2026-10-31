@@ -235,3 +235,27 @@ def test_a_sibling_manifest_keeps_the_sets_head_and_takes_the_models_loop():
     assert own.real_vocab == 262144, "the logits are masked at the model's own id count"
     assert own.num_layers == 36 and own.layer_types == ("dense",) * 36
     assert own.kernel_hash() == base.kernel_hash()
+
+
+def test_a_sibling_manifest_takes_the_models_config_facts():
+    """The check compares THIS model's config, so the model's `extra` wins over the base's.
+
+    LFM2 publishes its FFN width before transformers' two-thirds adjustment (12288 where the
+    kernels run 8192); the base set's record carries no such fact, so a sibling built only
+    from the base refused a correct model at load.
+    """
+    from recipes.spec import ModelSpec
+
+    base = ModelSpec(family="lfm2", hidden=1024, num_layers=16, layer_types=("short_conv",) * 16,
+                     vocab=65536, real_vocab=64400, num_heads=32, num_kv_heads=8, head_dim=64,
+                     rotary_dim=64, rope_theta=1e6, qk_norm=True, attn_gate=False,
+                     intermediate=8192, conv_kernel=3, extra={"model": "LFM2-1.2B-NPU2"})
+    model = ModelSpec(family="lfm2", hidden=1024, num_layers=16, layer_types=("short_conv",) * 16,
+                      vocab=65536, real_vocab=64400, num_heads=32, num_kv_heads=8, head_dim=64,
+                      rotary_dim=64, rope_theta=1e6, qk_norm=True, attn_gate=False,
+                      intermediate=8192, conv_kernel=3,
+                      extra={"model_type": "lfm2", "published_intermediate": 12288})
+    own = oflm_add.sibling_spec(base, model)
+    assert own.extra["published_intermediate"] == 12288
+    assert own.extra["model"] == "LFM2-1.2B-NPU2", "the base's facts still fill the rest"
+    assert own.kernel_hash() == base.kernel_hash()

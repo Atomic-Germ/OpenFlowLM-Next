@@ -274,7 +274,16 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
 
 
 def hf_config_check(spec: ModelSpec) -> dict:
-    return D.hf_config_check(spec)
+    d = D.hf_config_check(spec)
+    # LFM2's config publishes the FFN width BEFORE transformers' two-thirds adjustment
+    # (12288 on the 1.2B), while the kernels run 8192 -- and a spec record carries one
+    # number, so a set may have been built from either spelling. Both are accepted: the
+    # engine reads an array as "any of these", the same shape Granite's attention
+    # multiplier uses for a value a container and a GGUF legitimately write differently.
+    pub = spec.extra.get("published_intermediate")
+    d["intermediate_size"] = sorted({int(spec.intermediate), int(spec.intermediate * 3 // 2)}
+                                    | ({int(pub)} if pub else set()))
+    return d
 
 
 GEN_KERNELS = "designs/dense/gen_kernels.py"

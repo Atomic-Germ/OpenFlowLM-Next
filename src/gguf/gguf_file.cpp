@@ -57,13 +57,25 @@ void rd_value(uint32_t t, const uint8_t*& p, const uint8_t* end, std::string& ou
         case 6: { float v; std::memcpy(&v, p, 4); p += 4; out = std::to_string(v); break; }
         case 7: out = std::to_string(rd_u8(p) != 0); break;
         case 8: out = rd_str(p, end); break;
-        case 9: {  // array: element type + count; the values are skipped
+        case 9: {  // array: element type + count
             const uint32_t et = rd_u32(p);
             const uint64_t n = rd_u64(p);
+            // A SMALL array is KEPT, comma-joined: llama.cpp writes per-layer counts as an
+            // array (`lfm2.attention.head_count_kv` is one value per block, 0 for the
+            // short-conv layers), and the engine needs the attention layers' value. A big
+            // one (the tokenizer's vocab) is skipped wholesale, as it always was: keeping it
+            // would put megabytes into `meta_` for nothing.
+            const bool keep = n <= 64;
+            std::string joined;
             for (uint64_t i = 0; i < n; ++i) {
-                std::string skip;
-                rd_value(et, p, end, skip);
+                std::string one;
+                rd_value(et, p, end, one);
+                if (keep) {
+                    if (i) joined += ',';
+                    joined += one;
+                }
             }
+            if (keep) out = joined;
             break;
         }
         case 10: out = std::to_string(rd_u64(p)); break;
@@ -259,6 +271,10 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich, bool pos
     // llama.cpp's conventions (utilities/q4nx-build/configs/*.json hold the
     // same map on the conversion side).
     if (name == "model.embed_tokens.weight") return "token_embd.weight";
+    // LFM2's container spells the table `model.token_embd.weight` (utilities/q4nx-build/
+    // configs/lfm2.json maps it to the same `token_embd.weight`), so both container
+    // spellings resolve to the one GGUF tensor.
+    if (name == "model.token_embd.weight") return "token_embd.weight";
     if (name == "model.norm.weight") return "output_norm.weight";
     if (name == "lm_head.weight") return "output.weight";
     std::string n = name;
@@ -314,9 +330,42 @@ const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
         n = "token_embd.weight";
         it = tensors_.find(n);
     }
+    if (it == tensors_.end() && n == "output_norm.weight") {
+        // The final norm, by SHAPE rather than by architecture name: llama.cpp's arches do
+        // not agree on it (Qwen/Llama/Gemma: output_norm.weight; LFM2: token_embd_norm.weight),
+        // but the structure is identical in every one -- a top-level 1-D tensor of `hidden`
+        // values that is not the embedding table. A name table here would need an entry per
+        // architecture; this needs none.
+        n = final_norm_name();
+        it = n.empty() ? tensors_.end() : tensors_.find(n);
+    }
     if (it == tensors_.end()) fail("no tensor " + name + " in " + path_);
     return it->second;
 }
+
+std::string GgufFile::final_norm_name() const {
+    auto emb = tensors_.find("token_embd.weight");
+    if (emb == tensors_.end() || emb->second.dims.empty()) return {};
+    const uint64_t hidden = emb->second.dims[0];          // fastest dim of [hidden, vocab]
+    std::vector<std::string> found;
+    for (const auto& [n, t] : tensors_) {
+        if (n.rfind("blk.", 0) == 0) continue;             // per-layer tensors
+        if (n == "token_embd.weight") continue;            // the embedding table itself
+        if (t.dims.size() != 1 || t.dims[0] != hidden) continue;
+        found.push_back(n);
+    }
+    if (found.size() == 1) return found[0];
+    // Several candidates: a norm is the one whose name says so. Still shape-first -- the
+    // candidates all have the right shape, and the name only breaks the tie.
+    std::string norm;
+    for (const auto& n : found)
+        if (n.find("norm") != std::string::npos) {
+            if (!norm.empty()) return {};                  // ambiguous: refuse, do not guess
+            norm = n;
+        }
+    return norm;
+}
+
 
 const uint8_t* GgufFile::raw(const std::string& name, size_t* nbytes) const {
     const TensorInfo& t = tensor(name);
@@ -365,10 +414,40 @@ std::string GgufFile::kv_str(const std::string& key) const {
 }
 
 uint64_t GgufFile::kv_u64(const std::string& key) const {
+    const std::string s = kv_str(key);
     try {
-        return std::stoull(kv_str(key));
+        return std::stoull(s);
     } catch (const std::logic_error&) {
-        fail("metadata " + key + " is not a number (" + kv_str(key) + ")");
+        // A PER-LAYER array (llama.cpp writes some keys one value per block). The spec
+        // carries ONE count for the whole model, so the values must agree; zero entries are
+        // the layers that do not use the key at all -- LFM2's short-conv blocks have no kv
+        // heads, so `lfm2.attention.head_count_kv` is [0, 0, 8, 0, ...] and the answer is 8.
+        uint64_t seen = 0;
+        bool any = false;
+        size_t i = 0;
+        while (i <= s.size()) {
+            const size_t j = s.find(',', i);
+            const std::string part = s.substr(i, j == std::string::npos ? std::string::npos : j - i);
+            if (!part.empty()) {
+                uint64_t v = 0;
+                try {
+                    v = std::stoull(part);
+                } catch (const std::logic_error&) {
+                    fail("metadata " + key + " is not a number (" + s + ")");
+                }
+                if (v) {
+                    if (any && v != seen)
+                        fail("metadata " + key + " differs per layer (" + s + "); the kernels "
+                             "run one value for the whole model");
+                    seen = v;
+                    any = true;
+                }
+            }
+            if (j == std::string::npos) break;
+            i = j + 1;
+        }
+        if (any) return seen;
+        fail("metadata " + key + " is not a number (" + s + ")");
     }
 }
 

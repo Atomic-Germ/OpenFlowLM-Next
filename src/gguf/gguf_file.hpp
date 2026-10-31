@@ -75,6 +75,10 @@ public:
     void drop_pages() override;
 
     const TensorInfo& tensor(const std::string& name) const;
+    /// The final norm's tensor name, resolved by SHAPE: a top-level 1-D tensor of `hidden`
+    /// values that is not the embedding table (llama.cpp names it output_norm.weight for
+    /// Qwen/Llama/Gemma and token_embd_norm.weight for LFM2). Empty when ambiguous.
+    std::string final_norm_name() const;
     /// HF-style name -> GGUF name (the manifest speaks the q4nx/HF convention;
     /// a GGUF speaks llama.cpp's blk.N.attn_q one). Unknown names pass through.
     /// `sandwich`: the GGUF has Gemma's post_ffw_norm, which changes one norm's meaning.

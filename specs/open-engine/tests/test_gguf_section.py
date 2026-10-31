@@ -83,3 +83,20 @@ def test_a_qwen2vl_checkpoint_hashes_to_its_text_sibling():
     assert vl.rope_theta == text.rope_theta == 1_000_000.0
     assert vl.qk_norm is False
     assert vl.kernel_hash() == text.kernel_hash()
+
+
+def test_a_speculative_mtp_tail_is_not_part_of_the_kernel_geometry():
+    """llama.cpp appends a multi-token-prediction block (NextN/MTP) and counts it in
+    block_count; GGUF-direct does not implement that block yet, so the spec describes the
+    layers the kernels run. Qwen3.8-4B-Distill: 33 blocks, one MTP -> 32."""
+    from recipes.spec import _spec_layers
+
+    assert _spec_layers({"qwen35.nextn_predict_layers": 1}, "qwen35", 33) == 32
+    assert _spec_layers({"qwen35.mtp_num_hidden_layers": 2}, "qwen35", 34) == 32
+    assert _spec_layers({}, "qwen35", 33) == 33
+    try:
+        _spec_layers({"qwen35.nextn_predict_layers": 33}, "qwen35", 33)
+    except Exception as exc:
+        assert "tail" in str(exc)
+    else:
+        raise AssertionError("a whole-model MTP count must be refused")

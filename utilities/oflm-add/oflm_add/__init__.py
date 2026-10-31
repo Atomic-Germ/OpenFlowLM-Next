@@ -28,8 +28,8 @@ the second place open_qwen36::Engine::find_kernels looks.
 The script never rewrites the system model list or the system xclbins; it
 writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
 symlink into ~/.config/oflm/xclbins/ for the new model directory. Custom OFLM
-models never ship xclbins (they are closed source), so the kernel symlink is
-always taken from the matching official model, keyed by family (engine) and
+models usually do not ship xclbins (they are closed source), so the kernel symlink
+is always taken from the matching official model, keyed by family (engine) and
 size -- e.g. Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2. OpenFlowLM discovers
 both automatically -- it reads the user registry in preference to the shipped
 one and resolves each model's kernels under whichever xclbin root carries that
@@ -1554,9 +1554,13 @@ def repair_config_from_gguf(target):
     except (OSError, ValueError):
         cfg = {}
     has_projector = (Path(target) / "mmproj.gguf").is_file()
-    complete = bool(cfg.get("vocab_size") and cfg.get("hidden_size") and cfg.get("num_hidden_layers"))
-    if complete and (not has_projector or (cfg.get("vision_config") and cfg.get("vision_model_weight"))):
-        return []
+    # The FILE is the authority for a GGUF install, even over a config that looks complete.
+    # empero-ai/Qwen3.8-4B ships a config saying 32 layers while its distilled GGUF has 33
+    # blocks (the last is an MTP/NextN tail the kernels do not run), and an earlier install
+    # can leave a config rebuilt from that count -- either way the engine refuses the model
+    # at load ("num_hidden_layers = 33, the kernel set was built for 32"). The keys below are
+    # the file's own numbers, so they are written whenever they differ; the vision wrapper is
+    # the one thing the GGUF does not carry, which is what `has_projector` is for.
     if not (Path(target) / "model.gguf").is_file():
         return []
     inv = read_gguf_inventory(str(Path(target) / "model.gguf"), limit_mb=96)
@@ -2739,9 +2743,15 @@ def sibling_spec(base_spec, model_spec):
     kernel does not have.
     """
     import dataclasses
+    # `extra` is not hashed, and the manifest's `hf_config_check` is built from it: LFM2
+    # publishes its FFN width before transformers' two-thirds adjustment (12288 where the
+    # kernels run 8192), and Granite records whether its multiplier was folded. Those are
+    # facts about THIS model's config, so the model's own keys win over the base's -- with
+    # the base's filling anything the model does not state.
     return dataclasses.replace(base_spec, num_layers=model_spec.num_layers,
                                layer_types=tuple(model_spec.layer_types),
-                               real_vocab=model_spec.real_vocab)
+                               real_vocab=model_spec.real_vocab,
+                               extra={**base_spec.extra, **model_spec.extra})
 
 
 def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
@@ -3982,9 +3992,9 @@ def main():
             log(f"[INFO] xclbins from the set built for this model ({built_set})")
         elif official:
             note = f" ({official_note})" if official_note else ""
-            log(f"[INFO] xclbins from official {src_tag}{note}")
+            log(f"[INFO] xclbins from {src_tag}{note}")
         else:
-            log("[WARN] No official model matched; no xclbins link. Pass --xclbin-from NAME (or --no-xclbin).")
+            log("[WARN] No official model matched; no xclbins link. Try passing --xclbin-from NAME")
 
     if args.dry_run:
         print(f"repo directory : {dir_name}")

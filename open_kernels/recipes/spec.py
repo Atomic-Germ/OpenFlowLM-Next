@@ -484,13 +484,34 @@ def _qwen36moe_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
+def _spec_layers(md: Mapping[str, Any], a: str, n: int) -> int:
+    """The layers the KERNELS run: `block_count` minus the speculative (MTP / NextN) tail.
+
+    llama.cpp appends a multi-token-prediction block (or a few) to models that ship one and
+    records them as `<arch>.nextn_predict_layers` (Qwen3.5 writes `mtp_num_hidden_layers`
+    in its config). GGUF-direct does not implement that block yet -- it is a second forward
+    pass, not another layer -- so the spec must describe the 32 blocks the kernels run, not
+    the 33 in the file: with the file's count, the model matched no set, a sibling was built
+    for 33 layers, and the config (32) then disagreed with it at load
+    ("config.json layer_types differ from the kernel set's (32 layers)"). The tensors of the
+    tail blocks are simply not packed.
+    """
+    mtp = md.get(f"{a}.nextn_predict_layers")
+    if mtp is None:
+        mtp = md.get(f"{a}.mtp_num_hidden_layers")
+    mtp = int(mtp or 0)
+    if mtp < 0 or mtp >= n:
+        raise SpecError(f"{a}: nextn/mtp layers {mtp} is not a tail of block_count {n}")
+    return n - mtp
+
+
 def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _spec_layers(md, a, k("block_count"))
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -693,13 +714,25 @@ def _lfm2_layer_types(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
     return tuple(FULL if l in idxs else SHORT_CONV for l in range(n))
 
 
+def _lfm2_published_ff(cfg: Mapping[str, Any]) -> int:
+    """The FFN width the CONFIG states, before transformers' two-thirds adjustment.
+
+    `Lfm2Config.__post_init__` lets `block_ff_dim` override `intermediate_size`, and
+    `Lfm2MLP` then takes two thirds of it. So config.json says 12288 where the kernels run
+    8192 on the 1.2B: the manifest's `hf_config_check` has to compare the PUBLISHED value,
+    or the engine refuses a correct model at load ("intermediate_size = 12288, the kernel
+    set was built for 8192").
+    """
+    return int(cfg["block_ff_dim"] if "block_ff_dim" in cfg else _need(cfg, "intermediate_size"))
+
+
 def _lfm2_ff_dim(cfg: Mapping[str, Any]) -> int:
     """The FFN width, by transformers' own rule: `block_ff_dim` overrides `intermediate_size`
     (`Lfm2Config.__post_init__`), then `Lfm2MLP` takes two thirds of it, applies the
     multiplier and rounds up to `block_multiple_of`. The 1.2B's 12288 lands on 8192, which is
     what its gate / up projections hold -- reading `intermediate_size` raw would have worked
     here by luck and given 5632 on a container that ships only the unadjusted width."""
-    ff = int(cfg["block_ff_dim"] if "block_ff_dim" in cfg else _need(cfg, "intermediate_size"))
+    ff = _lfm2_published_ff(cfg)
     if not cfg.get("block_auto_adjust_ff_dim", True):
         return ff
     ff = int(2 * ff / 3)
@@ -754,7 +787,10 @@ def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         intermediate=_lfm2_ff_dim(cfg),
         norm_eps=float(cfg.get("norm_eps", cfg.get("rms_norm_eps", 1e-5))),
         quant="q4_1",
-        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+        extra={"model_type": cfg["model_type"], "source": "hf_config",
+               # what config.json publishes, for the manifest's hf_config_check (the
+               # kernels run the adjusted width; `extra` is not hashed)
+               "published_intermediate": _lfm2_published_ff(cfg)},
     )
 
 
