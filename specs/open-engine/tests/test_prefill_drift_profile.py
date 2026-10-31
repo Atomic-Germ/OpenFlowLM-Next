@@ -27,6 +27,14 @@ def load():
     return m
 
 
+def load_acc():
+    s = importlib.util.spec_from_file_location(
+        'production_acceptance', ROOT/'utilities/prefill-drift-profile/production_acceptance.py')
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
 def matrix(layers, rows, value):
     return np.full((layers, rows), value, dtype=np.float64)
 
@@ -68,6 +76,59 @@ def test_ratio_reports_how_much_better_the_passing_route_is():
     rel = {"sequential": matrix(2, 4, 3e-5), "hybrid": matrix(2, 4, 1e-6)}
     verdict = m.classify(rel, positions=list(range(4)))
     assert verdict['ratio'] == pytest.approx(30.0)
+
+
+def _case(name, rows):
+    return {'routes': [{'route': r, 'first': f} for r, f in rows.items()]}
+
+
+def _first(passed, total, logits=True):
+    return {'residuals': [{'passed': p} for p in [True] * passed + [False] * (total - passed)],
+            'logits_passed': logits}
+
+
+def test_production_acceptance_uses_the_route_the_engine_selects():
+    """Averaging the three schedules -- or failing on the route production does
+    not use at that length -- answers a question the engine never asks."""
+    m = load_acc()
+    block = {'cases': {n: _case(n, {'hybrid': _first(4, 4), 'block_major': _first(4, 4),
+                                    'sequential': _first(2, 4, False)})
+                       for n in ('255', '256', '257')}}
+    short = {'plain': [{'route': 'sequential', 'passed': True},
+                       {'route': 'hybrid', 'passed': True},
+                       {'route': 'block_major', 'passed': True}]}
+    out = m.production_acceptance(block, short)
+    assert out['passed'] is True
+    assert all(row['passed'] for row in out['lengths'])
+    # The non-production route's failures are kept visible, not hidden.
+    assert out['excluded_non_production']['rows']['255']['residuals_passed'] == 2
+
+
+def test_production_acceptance_fails_when_the_selected_route_fails():
+    m = load_acc()
+    block = {'cases': {n: _case(n, {'hybrid': _first(3, 4, False), 'block_major': _first(4, 4),
+                                    'sequential': _first(3, 4, False)})
+                       for n in ('255', '256', '257')}}
+    short = {'plain': [{'route': 'sequential', 'passed': True}]}
+    assert m.production_acceptance(block, short)['passed'] is False
+
+
+def test_production_acceptance_fails_when_the_short_route_fails():
+    """Below the threshold production runs step() per token; if that fails the
+    verdict must fail, even though the long route passes."""
+    m = load_acc()
+    block = {'cases': {n: _case(n, {'hybrid': _first(4, 4), 'block_major': _first(4, 4),
+                                    'sequential': _first(4, 4)})
+                       for n in ('255', '256', '257')}}
+    short = {'plain': [{'route': 'sequential', 'passed': False}]}
+    assert m.production_acceptance(block, short)['passed'] is False
+
+
+def test_production_acceptance_requires_the_audit_beside_the_capture(tmp_path):
+    m = load_acc()
+    (tmp_path / 'report.json').write_text('{"complete": true, "model_acceptance": false}')
+    with pytest.raises(ValueError):
+        m.audit_report(tmp_path)
 
 
 def test_first_failing_layer_is_the_shallowest_crossing():
