@@ -41,6 +41,7 @@ xclbin and nowhere else (see src/open_qwen36/README.md).
 from __future__ import annotations
 
 import argparse
+import atexit
 import concurrent.futures
 import contextlib
 import hashlib
@@ -50,6 +51,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -509,7 +511,13 @@ def main() -> int:
     # spec's gen could overwrite the sources another spec was compiling, and
     # the xclbin that came out was silently wrong. So each spec stages its
     # own copy of the design tree and compiles from that.
-    stage_root = HERE / f".staging_{spec.spec_hash()[7:26]}"  # strip "sha256:", keep 19 chars
+    # A UNIQUE stage per run, removed on exit. It used to be named after the spec's hash, so
+    # a build that ran as root left a root-owned staging dir under a name the next run had to
+    # remove-and-reuse -- and one such dir then failed every later export for that spec on
+    # `shutil.rmtree` (PermissionError), hundreds of lines above the message the log ends on.
+    # Nothing can strand now: the name is never reused, and the cleanup is best-effort.
+    stage_root = Path(tempfile.mkdtemp(prefix=".staging_", dir=HERE))
+    atexit.register(shutil.rmtree, stage_root, ignore_errors=True)
 
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)

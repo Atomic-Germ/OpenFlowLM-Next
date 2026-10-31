@@ -157,9 +157,20 @@ one)". The f32 twin's *route* has no hybrid layer kind; the message used to say 
 and sent us looking at the wrong thing (the user was right: dense models are not broken,
 qwen3.5 is hybrid). That blocks the q4_1-vs-f32 A/B, not the model.
 
-**Also for the record:** the kernel BUILD dirs under `open_kernels/designs/*/build_*` are
-root-owned from an earlier root build, so `export-kernels.py` cannot rebuild a design until
-they are handed back (`sudo chown -R`); a manifest-only regeneration does not need them.
+**A full build is the cmake workflow, and that is the only entry point that matters.** Clone
+the repo, run `cmake --workflow --preset linux-package`, install the RPM: every family and
+every size is built from `recipes/specs/*.json` plus the diffusion families, and the package
+carries them. Verified after the qwen35 fix: 448 MB installed, 2886 xclbins + 8 ELFs, all
+five qwen35 sizes, and Qwen3.5-4B's manifest inside the RPM carries the `qgate` ops. A spec
+is added by `oflm add <repo>` from the repo root (SPEC -> BUILD -> GATE -> CATALOGUE ->
+REBUILD -> REGISTER); from anywhere else it says so instead. No hand-run export, no
+hand-edited manifest.
+
+**The staging dir is now unique per run and removed on exit** (`tempfile.mkdtemp` + `atexit`).
+It used to be named after the spec's hash, so a leftover made every later export of that spec
+die on `shutil.rmtree` -- hundreds of lines above the diffusion message the log ends on, which
+is what made that failure read as a klein-8B problem. `cmake --build build --target
+clean-kernels` sweeps the scratch (and `distclean-kernels` the exported sets too).
 
 
 

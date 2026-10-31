@@ -50,10 +50,19 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 >   roots order alone let the installed copy shadow a fresh `export-kernels.py` build in the
 >   tree -- the exact loop of testing a pack fix. A kernel fix lands in a rebuild, so the
 >   rebuild wins.
-> * **The kernel build dirs can be root-owned** (`open_kernels/designs/*/build_*` from an
->   earlier root build), which makes `export-kernels.py` fail with a PermissionError on
->   `.lock`. A manifest-only regeneration (`python -m recipes.manifest --spec <name> --out
->   <set>/open_kernels/manifest.json`) does not need them.
+> * **A full kernel build is the cmake workflow, and nothing else.** Clone the repo and run
+>   `cmake --workflow --preset linux-package`; the export target builds every family and
+>   every size from `recipes/specs/*.json` (empty `--specs` = all) and the diffusion
+>   families, and the RPM carries them. No hand-run export, no hand-edited manifest: a
+>   manifest is generated from the recipe, and a spec is added by `oflm add` from the repo
+>   root (SPEC -> BUILD -> GATE -> CATALOGUE -> REBUILD -> REGISTER).
+> * **The export stages under a unique name and removes it on exit** (`tempfile.mkdtemp` +
+>   `atexit`). It used to reuse `.staging_<spec hash>`, so a leftover could make every
+>   later export of that spec die on `shutil.rmtree` (PermissionError) -- several hundred
+>   lines above the diffusion message the log ends on, which is what made that failure look
+>   like a klein-8B problem. `cmake --build build --target clean-kernels` sweeps the scratch
+>   (and `distclean-kernels` also the exported sets); a leftover it cannot remove is
+>   reported with its `sudo rm -rf` instead of raised.
 > * **Three GGUF pack bugs, all ours** (qwen35 only, which is why only qwen35 was broken):
 >   `conv_transpose` read `ssm_conv1d` as [taps][channels] when a GGUF stores
 >   [channels][taps]; `lmhead_q8`'s GGUF branch wrote the file's raster instead of the

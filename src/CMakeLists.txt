@@ -1426,6 +1426,23 @@ if(OFLM_BUILD_KERNELS AND NOT WIN32)
                 "-j" "${OFLM_KERNEL_JOBS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
         VERBATIM)
+
+    # Kernel-side cleaning. CMake owns the target name `clean` (build outputs), so these are
+    # their own: `clean-kernels` drops the scratch an export leaves (open_kernels/.staging_*,
+    # build/dit-kernels, build/attn-gate), and `distclean-kernels` also drops the exported
+    # sets in src/xclbins, which makes the next build re-export every kernel from the cached
+    # design builds. A leftover this user cannot remove (a root-run staging dir) is reported
+    # with its `sudo rm -rf`, not raised: that is the failure these targets exist to end.
+    add_custom_target(clean-kernels
+        COMMENT "Removing kernel-export scratch"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/clean-kernels.py"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        VERBATIM)
+    add_custom_target(distclean-kernels
+        COMMENT "Removing kernel-export scratch and the exported sets"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/clean-kernels.py" --sets
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        VERBATIM)
 endif()
 
 # ———————————————————————————————————————————————
