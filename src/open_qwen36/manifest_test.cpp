@@ -509,6 +509,22 @@ int main(int argc, char** argv) {
                   g.kernels.at("dxB").context == g.kernels.at("dxB_local").context,
                   "gemma3: dxB / dxB_local share a stream and context, own windows");
             check(g.contexts.size() == 5, "gemma3: kernels (dx/ln/lm plus the route's dxa and gemm)");
+            {
+                // The vocabulary is a PACKING fact, not geometry: the head is compiled for
+                // the set's 262208 padded rows and the pack zero-fills the rest, so the
+                // same model's GGUF (llama.cpp writes its own 262144) must load -- and a
+                // head wider than the set's rows must not.
+                json ok = matching_config(g);
+                g.check_model(ok, "gemma3");
+                json narrow = ok;
+                narrow["vocab_size"] = 262144;
+                g.check_model(narrow, "gemma3");
+                check(true, "gemma3: a head narrower than the set's padded rows is accepted");
+                json wide = ok;
+                wide["vocab_size"] = 262272;
+                refused(g, wide, "wider than the kernel set's head",
+                        "gemma3: a head wider than the set's rows is refused");
+            }
             refused_manifest(argv[3], "not the attention-only", "gemma3: an attn_kernel sharing dx's stream (dx_local) is refused",
                              [](json& j) { j["layer_types"]["dense_local"]["gemm_block"]["attn_kernel"] = "dx_local"; });
             uint64_t s0, n0, s1, n1;

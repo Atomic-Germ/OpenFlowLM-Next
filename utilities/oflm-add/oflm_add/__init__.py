@@ -221,14 +221,14 @@ def tree_xclbins():
 def gguf_kernel_set(name, roots):
     """The kernel set for an official model that carries the GGUF-direct build.
 
-    The roots are searched in order (the user's, the system's, the tree's), and
-    the first set whose manifest has the "gguf" section wins. The system's set
-    may predate the f32-scale twins, so this is how a fresh set is found rather
-    than refusing the GGUF.
+    Kept for `--xclbin-from NAME`, where the user names a set explicitly. The
+    automatic path does NOT use it: a set chosen by NAME was the second matching
+    path, and it is what refused a model whose geometry the installed sets
+    already served (translategemma: a registry name with no set of that name on
+    disk). `scan_kernel_sets` is the one path -- geometry decides, and the name
+    is only ever a label.
     """
     if not name:
-        # No official match and no geometry match: the caller wants the "no
-        # GGUF-direct set" refusal, not a TypeError from Path / None.
         return None
     for root in roots:
         if not root:
@@ -238,36 +238,169 @@ def gguf_kernel_set(name, roots):
             return mj.parent
     return None
 
-def _require_same_geometry(kdir, spec, respec, model_name, source=None):
-    """Refuse a GGUF install whose kernel set is a DIFFERENT geometry.
 
-    The set is found by directory name (the official entry's, or the model's),
-    and a size the registry does not carry used to fall back to the nearest
-    official size -- so a Qwen3-14B GGUF resolved to Qwen3-8B's kernels and the
-    install "succeeded". The kernels decide the arithmetic, so a set whose
-    manifest `spec` has a different kernel_hash cannot run this model.
+def scan_kernel_sets(spec, roots, source=None, need_gguf=False):
+    """Every installed kernel set that can run this model, and why the rest cannot.
+
+    Returns (dir, name, notes): the first set that SERVES the model (its geometry
+    and at least as many head rows as the model needs), the set's directory name,
+    and one line per set that was considered and refused. The notes are what the
+    refusal message is built from, so the reason a model does not install is the
+    reason it actually does not -- not a name lookup that missed.
+
+    `need_gguf` is the GGUF-direct requirement: the set must carry the nested
+    "gguf" manifest section, which is the f32-scale build the GGUF weight file is
+    packed for. A set can have the right geometry and predate that build; the
+    note says so, because "build this size's kernels" would be wrong.
     """
     ModelSpec = _model_spec_class()
-    spec = spec or respec
-    if spec is None or ModelSpec is None:
-        return
-    mj = Path(kdir) / "manifest.json"
-    try:
-        d = json.loads(mj.read_text(encoding="utf-8"))
-        laid = d.get("spec")
-        ignore = rope_ignore(source)
-        if not laid or ModelSpec.from_dict(laid).kernel_hash(ignore) == spec.kernel_hash(ignore):
-            return
-    except (OSError, ValueError):
-        return
-    base = (get_base_chain() or [""])[0] if "get_base_chain" in globals() else ""
-    hint = f" --repo {base}" if base else " --repo <this model's base repo>"
-    raise SystemExit(
-        f"{model_name}: no open kernel set matches this model's geometry.\n"
-        f"  the nearest official set ({Path(kdir).parent.name}) is a DIFFERENT geometry, "
-        f"so it cannot run this model.\n"
-        f"Build this size's kernels first:\n"
-        f"  python utilities/build-new-spec.py{hint}")
+    if spec is None:
+        return None, None, ["this model's geometry could not be read from its file "
+                            "(no recipe for its architecture, and no config.json)"]
+    if ModelSpec is None:
+        return None, None, ["no open-kernels checkout to compare a spec with"]
+    ignore = rope_ignore(source)
+    notes = []
+    same_family = []                   # this family, a different geometry
+    seen_names = set()                 # the user's xclbins link the system's; count once
+    seen = 0
+    for root in roots:
+        if not root:
+            continue
+        for m in sorted(Path(root).glob("*/open_kernels/manifest.json")):
+            try:
+                d = json.loads(m.read_text(encoding="utf-8"))
+                laid = d.get("spec")
+                if not laid:
+                    continue
+                gap = ModelSpec.from_dict(laid).serves(spec)
+            except (OSError, ValueError):
+                continue
+            name = m.parents[1].name
+            seen += 1
+            if gap is None:
+                if need_gguf and "gguf" not in d:
+                    if name not in seen_names:
+                        seen_names.add(name)
+                        notes.append(f"{name} has this geometry but no GGUF-direct build "
+                                     f"(its manifest has no 'gguf' section)")
+                    continue
+                return m.parent, name, notes
+            if gap == "a different geometry":
+                # Only a set of the SAME family is worth naming: it is the one the
+                # user would expect to serve this model, so "same family, different
+                # size" is the useful sentence, and an alphabetical neighbour from
+                # another family is noise.
+                if laid.get("family") == spec.family and name not in seen_names:
+                    seen_names.add(name)
+                    same_family.append(name)
+                continue
+            if name not in seen_names:
+                seen_names.add(name)
+                notes.append(f"{name} has this geometry but {gap}")
+    if same_family:
+        shown = ", ".join(same_family[:3]) + (" ..." if len(same_family) > 3 else "")
+        notes.insert(0, f"{shown}: this family, a different geometry")
+    if not notes:
+        notes.append("no installed set has this geometry"
+                     if seen else "no kernel sets are installed")
+    return None, None, notes
+
+
+def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
+    """The message when no installed set can run a model -- saying which reason.
+
+    Three cases, and they used to share one message that told the user to build
+    kernels even when the kernels were on disk: a geometry nothing covers (a real
+    build), a geometry a set covers but cannot carry (a wider head), and a set
+    that has the geometry but predates the GGUF-direct build.
+
+    `build` is the build-new-spec command line when this checkout can build the size
+    itself -- after `build_geometry` has already tried and failed. Without one (an
+    installed package: no recipes, no toolchain) the answer is that the size is ours
+    to ship, not the user's to build.
+    """
+    head = f"{model_name}: no open kernel set can run this model (family '{family}')."
+    body = "".join(f"\n  {n}" for n in notes)
+    if any("no GGUF-direct build" in n for n in notes):
+        return (f"{head}{body}\n"
+                f"The kernels are installed; this build of the set predates GGUF-direct.\n"
+                f"Re-export the set with:\n"
+                f"  python utilities/export-kernels.py")
+    if any("row head" in n for n in notes):
+        return (f"{head}{body}\n"
+                f"The set's head cannot be widened at install time; this size needs its\n"
+                f"own kernels." + (f"\n  {build}" if build else ""))
+    if build:
+        return (f"{head}{body}\n"
+                f"Building this size's kernels did not succeed. To retry:\n  {build}")
+    # No checkout: the user cannot build anything, and telling them to run a script
+    # that is not installed is the same false gate in a different place.
+    return (f"{head}{body}\n"
+            f"This size's kernels are not part of this release. They are built from the\n"
+            f"geometry above and shipped with the app -- please report it with the family\n"
+            f"and the shape, and the next release will carry the set.")
+
+
+def kernel_set_name(dir_name):
+    """The kernel set directory a build for this model is written to.
+
+    The registry's convention (`Qwen3-VL-4B-Instruct-NPU2`) with the repo's container
+    suffix removed, because the export takes its destination from the spec's
+    `extra.model` and `oflm add` links a converted model's kernels by that directory.
+    """
+    n = dir_name or ""
+    while True:
+        stripped = re.sub(r"[-_.](gguf|q4nx|i1)$", "", n, flags=re.IGNORECASE)
+        if stripped == n:
+            break
+        n = stripped
+    if not n:
+        return ""
+    return n if n.lower().endswith("-npu2") else f"{n}-NPU2"
+
+
+def build_geometry(spec, family, size, dir_name="", quiet=False):
+    """Build the kernel set for a geometry nothing installed serves.
+
+    The geometry is already known -- it came out of the model's own file -- so this
+    is the scripted form of the advice `oflm add` used to print. The spec is written
+    where `build-new-spec.py` looks for it and that script does the rest: build,
+    gate against the fixtures, catalogue the validated points, rebuild through the
+    validated path, register the frozen hashes.
+
+    Returns the set's open_kernels directory, or None when this tree cannot build (an
+    installed package has no recipes and no toolchain -- there the size is ours to
+    ship, and `kernel_set_refusal` says so).
+    """
+    checkout = open_kernels_checkout()
+    if checkout is None:
+        return None
+    root = Path(checkout).parent
+    script = root / "utilities" / "build-new-spec.py"
+    specs = Path(checkout) / "recipes" / "specs"
+    if not script.is_file() or not specs.is_dir():
+        return None
+    name = f"{family.replace('.', '')}-{size}".lower() if size else family.replace(".", "")
+    path = specs / f"{name}.json"
+    if not path.is_file():
+        import dataclasses
+        # `extra.model` is the export destination (src/xclbins/<name>) and the name
+        # `oflm add` links a converted model's kernels by: ours to derive from the
+        # repo's own name, never something the user is asked to add.
+        own = dataclasses.replace(spec, extra=dict(spec.extra, source="gguf",
+                                                   model=kernel_set_name(dir_name)))
+        path.write_text(own.to_json(), encoding="utf-8")
+    log(f"[INFO] no installed kernel set serves this geometry; building it "
+        f"({path.relative_to(root)} -- this is the build a release ships, and it "
+        f"takes a while)")
+    import subprocess
+    rc = subprocess.run([sys.executable, str(script), "--spec", name], cwd=str(root)).returncode
+    if rc != 0:
+        return None
+    kdir, _set, _notes = scan_kernel_sets(spec, [tree_xclbins()], need_gguf=True)
+    return kdir
+
 
 
 SYSTEM_LIST_CANDIDATES = [
@@ -883,44 +1016,35 @@ def rope_ignore(source) -> tuple[str, ...]:
     return ()
 
 
-def family_from_kernels(system_registry, spec, roots, source=None):
+def family_of_set(system_registry, kdir, name):
+    """The family a kernel set runs: the registry's for its official name, else
+    the family its manifest's spec was built for (a set of ours the registry does
+    not list)."""
+    fam = family_of_official(system_registry, name)
+    if fam:
+        return fam
+    try:
+        laid = json.loads((Path(kdir) / "manifest.json").read_text(encoding="utf-8")).get("spec")
+    except (OSError, ValueError):
+        laid = None
+    return (laid or {}).get("family")
+
+
+def family_from_kernels(system_registry, spec, roots, source=None, need_gguf=False):
     """The family of the installed kernel set whose GEOMETRY this model needs.
 
     The kernels decide the engine, and so the family: a fine-tune of a
     supported model runs on the base model's kernels -- the depth is the
     manifest's business, not the kernels' -- and the installed set's directory
     is named after the official model, which the registry ties to a family.
-    The match is the kernel geometry (the recipes' kernel_hash), so it is the
-    kernels that decide, not the depth or the tokenizer's id count.
-    Returns (family, set name).
+    The match is `scan_kernel_sets` (geometry plus the head-row requirement),
+    so it is the kernels that decide, not the depth, the tokenizer's id count,
+    or the model's name. Returns (family, set name).
     """
-    ModelSpec = _model_spec_class()
-    if spec is None or ModelSpec is None:
+    kdir, name, _notes = scan_kernel_sets(spec, roots, source=source, need_gguf=need_gguf)
+    if kdir is None:
         return None, None
-    ignore = rope_ignore(source)
-    want = spec.kernel_hash(ignore)
-    for root in roots:
-        if not root:
-            continue
-        for m in sorted(Path(root).glob("*/open_kernels/manifest.json")):
-            try:
-                d = json.loads(m.read_text(encoding="utf-8"))
-                s = d.get("spec")
-                if not s or ModelSpec.from_dict(s).kernel_hash(ignore) != want:
-                    continue
-            except Exception:
-                continue
-            name = m.parents[1].name
-            fam = family_of_official(system_registry, name)
-            if fam:
-                return fam, name
-            # A set the registry does not list (our own conversion of a model we
-            # do not ship as a container) still knows what it is: the manifest's
-            # spec carries the family the kernels were built for.
-            laid = s.get("family") if isinstance(s, dict) else None
-            if laid:
-                return laid, name
-    return None, None
+    return family_of_set(system_registry, kdir, name), name
 
 
 def spec_from_config_dict(cfg):
@@ -2208,6 +2332,13 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
         return
     src = system_root / source_name
     if not src.is_dir():
+        # A set built by `oflm add` itself lands in the tree's src/xclbins, not in the
+        # installed tree: link the one that exists rather than warning about the one
+        # that does not.
+        tree = tree_xclbins()
+        if tree and (tree / source_name).is_dir():
+            src = tree / source_name
+    if not src.is_dir():
         if not quiet:
             log(f"[WARN] Official model has no xclbins directory: {source_name}")
         return
@@ -2424,9 +2555,29 @@ def model_spec(model_dir):
                 pass
 
 
+def sibling_spec(base_spec, model_spec):
+    """The spec a sibling kernel set's manifest is written for.
+
+    The BASE's compiled geometry -- widths, head layout, rope law and `vocab` (the
+    row count the head kernel was built for) -- with the MODEL's own loop and
+    tokenizer: its depth, its layer sequence, and the id count the logits are
+    masked at.
+
+    `vocab` is the field that must NOT come from the model. A set built for a
+    padded vocabulary serves a narrower head (the pack zero-fills the rest), but
+    the head kernel's band count and split are compiled from the SET's row count;
+    writing the model's own here would hand the engine a band count the compiled
+    kernel does not have.
+    """
+    import dataclasses
+    return dataclasses.replace(base_spec, num_layers=model_spec.num_layers,
+                               layer_types=tuple(model_spec.layer_types),
+                               real_vocab=model_spec.real_vocab)
+
+
 def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
     """A kernel set for this model built from the kernels of an installed set
-    that serves the same GEOMETRY, with this model's own manifest.
+    that serves the same GEOMETRY, with a manifest for THIS model.
 
     The kernels are width-keyed: the depth is the manifest's business (the
     layer loop it drives), so a fine-tune of a different depth runs on the base
@@ -2435,9 +2586,16 @@ def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
     and asking for a rebuild here would put a kernel build between the user and
     a model that runs today.
 
+    The manifest is the BASE set's spec with this model's own loop: its depth,
+    its layer sequence and its tokenizer's id count. Everything else stays the
+    base's, and `vocab` most of all -- that is the row count the head kernel was
+    COMPILED for, not a property of the model (the pack zero-fills the rows past
+    the model's own). Writing the model's own vocab here would hand the engine a
+    band count the compiled kernel does not have.
+
     The sibling set is a directory of the base's kernel files (hard-linked
-    where the filesystem allows it) plus this model's manifest, and it is what
-    the model links to. Returns the directory, or None.
+    where the filesystem allows it) plus that manifest, and it is what the model
+    links to. Returns the directory, or None.
     """
     spec = model_spec(model_dir)
     if spec is None:
@@ -2459,7 +2617,10 @@ def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
             if not s:
                 continue
             ModelSpec = _model_spec_class()
-            if ModelSpec is None or ModelSpec.from_dict(s).kernel_hash() != want:
+            if ModelSpec is None:
+                continue
+            base_spec = ModelSpec.from_dict(s)
+            if base_spec.serves(spec) is not None:
                 continue
         except Exception:
             continue
@@ -2482,7 +2643,11 @@ def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
                 except OSError:
                     shutil.copy2(f, dst)
             from recipes.manifest import manifest
-            (out / "manifest.json").write_text(json.dumps(manifest(spec), indent=1) + "\n",
+            # The base set's spec (the compiled geometry, `vocab` included) with this
+            # model's own loop and tokenizer bound. `want` above is the same for both,
+            # so the only fields that can differ are the ones the manifest is for.
+            own = sibling_spec(base_spec, spec)
+            (out / "manifest.json").write_text(json.dumps(manifest(own), indent=1) + "\n",
                                                encoding="utf-8")
         except Exception as exc:
             if not quiet:
@@ -3447,12 +3612,22 @@ def main():
     # than the installed copy).
     kernel_roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root(), tree_xclbins()]
     spec = None
-    geom_set = None                     # the set whose GEOMETRY this model needs
+    geom_dir = None                     # the set whose GEOMETRY this model needs
+    geom_set = None                     # ... and its directory name (a label from here on)
+    geom_notes = []                     # why the sets that do not serve it do not
     if args.family is None:
-        spec = spec_from_config_dict(get_peeked_config())
-        if spec is None and gguf_mode and gguf_source is not None:
-            # a gated base leaves a stub config; the GGUF names its own geometry
+        # THE FILE FIRST. For a GGUF install the weight file is the model: its metadata
+        # names the architecture, the widths, the rope law and the head, and llama.cpp
+        # already baked the conversion's choices into it. A config.json in the repo (or
+        # in its base model's repo) is a HINT for what the GGUF does not carry --
+        # tokenizer, chat template, vision tower -- never the source of the geometry.
+        # Peeking it first is what made a translategemma GGUF "a different geometry"
+        # from the Gemma 3 4B set it matches exactly: the repo's config has no
+        # rope_scaling, while the GGUF's metadata says factor 8.0, which is what runs.
+        if gguf_mode and gguf_source is not None:
             spec = spec_from_gguf_source(gguf_source)
+        if spec is None:
+            spec = spec_from_config_dict(get_peeked_config())
         # WHAT THE MODEL IS comes first: a vision tower is a property of the checkpoint, not
         # of the kernels it borrows. Qwen2.5-VL runs on the plain Qwen2.5-3B set (same
         # decoder, and the M-RoPE lives in config.json), so the kernel family is `qwen2`
@@ -3463,12 +3638,14 @@ def main():
             if arch_fam:
                 log(f"[INFO] family '{arch_fam}' from the GGUF architecture")
                 content_families.append(arch_fam)
-        fam, set_name = family_from_kernels(system_registry, spec, kernel_roots)
-        if fam:
-            log(f"[INFO] family '{fam}' from the kernel set '{set_name}' (the same geometry)")
-            if fam not in content_families:
-                content_families.append(fam)
-            geom_set = set_name
+        geom_dir, geom_set, geom_notes = scan_kernel_sets(
+            spec, kernel_roots, source=gguf_source, need_gguf=gguf_mode)
+        if geom_set:
+            fam = family_of_set(system_registry, geom_dir, geom_set)
+            if fam:
+                log(f"[INFO] family '{fam}' from the kernel set '{geom_set}' (the same geometry)")
+                if fam not in content_families:
+                    content_families.append(fam)
         fam, base_name = family_from_base_chain(system_registry, get_base_chain())
         if fam and fam not in content_families:
             log(f"[INFO] family '{fam}' from the base model '{base_name}'")
@@ -3576,7 +3753,14 @@ def main():
     # build-all.sh). A GGUF repository never carries model.q4nx, so a missing
     # kernel set stops here with a direct error rather than falling back to the
     # q4nx file list.
+    #
+    # The set comes from the SAME scan that named the family, so this is one
+    # path: geometry (and the head-row requirement) decides, and a set found by
+    # name is only ever the one the user named with --open-kernels. Before this,
+    # a model whose geometry an installed set already served could be refused
+    # because the registry named a set that is not on disk.
     gguf_kernel_dir = None
+    built_set = None                   # the set this install built for a new size
     if gguf_mode:
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
@@ -3584,31 +3768,47 @@ def main():
             # open_kernels manifest. Just confirm the family is recognized.
             xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
         else:
-            # The set that carries the section: the one the install links, or a
-            # fresher one with the same name (a rebuild adds the f32-scale
-            # twins; the installed copy may predate it).
             if args.open_kernels:
                 kdir = Path(args.open_kernels) if manifest_supports_gguf(
                     Path(args.open_kernels) / "manifest.json") else None
+                if kdir is None:
+                    raise SystemExit(
+                        f"{repo_arg}: --open-kernels {args.open_kernels} has no GGUF-direct "
+                        f"build (its manifest has no 'gguf' section)")
             else:
-                kdir = gguf_kernel_set(xclbin_source, kernel_roots)
-            if kdir is None:
-                bases = get_base_chain()
-                base_hint = f" --repo {bases[0]}" if bases else ""
-                raise SystemExit(
-                    f"{repo_arg}: no GGUF-direct open kernel set found for "
-                    f"{xclbin_source or dir_name} (family '{family}').\n"
-                    f"Build the kernel set for this model size with:\n"
-                    f"  python utilities/build-new-spec.py{base_hint}")
-            if not args.open_kernels:
-                _require_same_geometry(kdir, spec, spec_from_config_dict(get_peeked_config()),
-                                       dir_name, gguf_source)
+                kdir = geom_dir
+                if kdir is None and not args.dry_run and spec is not None:
+                    # The geometry is known and this tree has the recipes, so the build
+                    # is ours to run -- not a command to hand the user. `--dry-run` says
+                    # it would happen and stops there.
+                    kdir = build_geometry(spec, family, size_token, dir_name,
+                                         quiet=args.quiet)
+                    if kdir:
+                        # kdir is <root>/<set name>/open_kernels, so the name is the
+                        # directory that CONTAINS open_kernels.
+                        geom_set = kdir.parent.name
+                        geom_notes = []
+                        built_set = geom_set
+                        # The closed set for this size does not exist (we just built the
+                        # open one), so do not link the nearest official size's xclbins
+                        # under this model: a GGUF model runs on the open kernels, and a
+                        # symlink to a different geometry would be a lie in the registry.
+                        xclbin_source = geom_set
+                if kdir is None and not args.dry_run:
+                    raise SystemExit(kernel_set_refusal(
+                        repo_arg, family, geom_notes, get_base_chain(),
+                        build=f"python utilities/build-new-spec.py --spec "
+                              f"{family.replace('.', '')}-{size_token}".lower()))
             gguf_kernel_dir = kdir
-            if str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
+            if kdir and str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
                 log(f"[INFO] GGUF-direct kernels: {kdir}")
 
     if not args.dry_run:
-        if official:
+        if built_set:
+            # The registry's nearest entry is only the model's template here (size,
+            # details); the kernels are the set this install just built.
+            log(f"[INFO] xclbins from the set built for this model ({built_set})")
+        elif official:
             note = f" ({official_note})" if official_note else ""
             log(f"[INFO] xclbins from official {src_tag}{note}")
         else:
@@ -3623,6 +3823,17 @@ def main():
         if gguf_mode:
             print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
+            if family not in EMBEDDING_FAMILIES:
+                # The geometry decision, in the dry run: which set serves this file,
+                # or why none does. This is what makes `oflm add --dry-run <repo>` the
+                # scripted answer to "will this install?".
+                if gguf_kernel_dir:
+                    print(f"gguf kernels   : {gguf_kernel_dir}")
+                elif spec is not None and open_kernels_checkout() is not None:
+                    print(f"gguf kernels   : (would build {family}-{size_token}: "
+                          f"{'; '.join(geom_notes)})")
+                else:
+                    print(f"gguf kernels   : (none: {'; '.join(geom_notes)})")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
             bases = get_base_chain()

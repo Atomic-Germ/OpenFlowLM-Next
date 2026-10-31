@@ -149,3 +149,89 @@ def test_override_without_a_manifest_is_refused(tmp_path, model_dir):
     empty.mkdir()
     with pytest.raises(SystemExit):
         oflm_add.setup_open_kernels(model_dir, model_dir.name, [], override=empty)
+
+
+def test_building_a_missing_size_writes_the_spec_and_runs_the_script(tmp_path, monkeypatch):
+    """A geometry nothing serves is BUILT here, not handed to the user as a command.
+
+    The spec comes from the model's own file (so a gated base repo cannot change the
+    geometry), lands where build-new-spec.py looks for it, and that script does the
+    build/gate/catalogue work.
+    """
+    from recipes.spec import ModelSpec
+
+    checkout = tmp_path / "open_kernels"
+    (checkout / "recipes" / "specs").mkdir(parents=True)
+    (tmp_path / "utilities").mkdir()
+    marker = tmp_path / "ran"
+    (tmp_path / "utilities" / "build-new-spec.py").write_text(
+        f"open({str(marker)!r}, 'w').write('ok')\n", encoding="utf-8")
+    monkeypatch.setattr(oflm_add, "open_kernels_checkout", lambda: checkout)
+
+    spec = ModelSpec(family="qwen3", hidden=4096, num_layers=36, layer_types=("dense",) * 36,
+                     vocab=151936, real_vocab=151669, num_heads=32, num_kv_heads=8,
+                     head_dim=128, rotary_dim=128, rope_theta=5e6, qk_norm=True,
+                     attn_gate=False, intermediate=12288)
+    oflm_add.build_geometry(spec, "qwen3vl", "8b")
+    written = checkout / "recipes" / "specs" / "qwen3vl-8b.json"
+    assert written.is_file(), "the spec goes where build-new-spec.py looks"
+    assert ModelSpec.from_json(written.read_text()).kernel_hash() == spec.kernel_hash()
+    assert marker.read_text() == "ok", "the build script runs (not a printed instruction)"
+
+
+def test_a_failed_build_returns_none_so_the_refusal_can_say_so(tmp_path, monkeypatch):
+    from recipes.spec import ModelSpec
+
+    checkout = tmp_path / "open_kernels"
+    (checkout / "recipes" / "specs").mkdir(parents=True)
+    (tmp_path / "utilities").mkdir()
+    (tmp_path / "utilities" / "build-new-spec.py").write_text("raise SystemExit(1)\n",
+                                                              encoding="utf-8")
+    monkeypatch.setattr(oflm_add, "open_kernels_checkout", lambda: checkout)
+    spec = ModelSpec(family="qwen3", hidden=4096, num_layers=36, layer_types=("dense",) * 36,
+                     vocab=151936, real_vocab=151669, num_heads=32, num_kv_heads=8,
+                     head_dim=128, rotary_dim=128, rope_theta=5e6, qk_norm=True,
+                     attn_gate=False, intermediate=12288)
+    assert oflm_add.build_geometry(spec, "qwen3vl", "8b") is None
+
+
+def test_no_checkout_means_no_build_and_no_script_advice(tmp_path, monkeypatch):
+    """An installed package has no recipes and no toolchain: the size is ours to ship."""
+    from recipes.spec import ModelSpec
+
+    monkeypatch.setattr(oflm_add, "open_kernels_checkout", lambda: None)
+    spec = ModelSpec(family="qwen3", hidden=4096, num_layers=36, layer_types=("dense",) * 36,
+                     vocab=151936, real_vocab=151669, num_heads=32, num_kv_heads=8,
+                     head_dim=128, rotary_dim=128, rope_theta=5e6, qk_norm=True,
+                     attn_gate=False, intermediate=12288)
+    assert oflm_add.build_geometry(spec, "qwen3vl", "8b") is None
+    msg = oflm_add.kernel_set_refusal("repo", "qwen3vl", ["no installed set has this geometry"])
+    assert "build-new-spec.py" not in msg, "no script the user cannot run"
+    assert "not part of this release" in msg
+
+
+def test_a_sibling_manifest_keeps_the_sets_head_and_takes_the_models_loop():
+    """The base set's `vocab` (the head kernel's compiled row count) must survive.
+
+    A sibling set is the base's kernels with this model's manifest: the depth, the
+    layer sequence and the tokenizer's id count come from the model, everything else
+    -- `vocab` above all -- stays the base's. Writing the model's own vocab would tell
+    the engine a band count the compiled head does not have.
+    """
+    from recipes.spec import ModelSpec
+
+    def spec(vocab, real_vocab, layers, family="qwen3"):
+        return ModelSpec(family=family, hidden=2560, num_layers=layers,
+                         layer_types=("dense",) * layers, vocab=vocab, real_vocab=real_vocab,
+                         num_heads=8, num_kv_heads=4, head_dim=128, rotary_dim=128,
+                         rope_theta=1e6, qk_norm=True, attn_gate=False, intermediate=10240)
+
+    base = spec(262208, 262145, 34)          # a container padded to whole head bands
+    model = spec(262144, 262144, 36)         # the same model's GGUF, its own token count
+    assert base.serves(model) is None, "the set serves the narrower head"
+
+    own = oflm_add.sibling_spec(base, model)
+    assert own.vocab == 262208, "the head stays the one the kernel was compiled for"
+    assert own.real_vocab == 262144, "the logits are masked at the model's own id count"
+    assert own.num_layers == 36 and own.layer_types == ("dense",) * 36
+    assert own.kernel_hash() == base.kernel_hash()

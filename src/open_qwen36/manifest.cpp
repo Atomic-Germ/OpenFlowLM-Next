@@ -767,6 +767,20 @@ void Manifest::check_model(const json& config, const std::string& where, bool mo
             }
             if (got != want.get<std::vector<std::string>>())
                 fail(where, "config.json layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
+        } else if (key == "vocab_size") {
+            // The head kernel is COMPILED for the set's row count (its bands and their
+            // split), and the pack zero-fills the rows past the model's own
+            // (pools.cpp: "padded rows: zeroed scales/codes"). So a set built from a
+            // container whose vocabulary was padded serves a model whose head is
+            // narrower -- a GGUF of the same family, where llama.cpp writes the
+            // model's own token count (Gemma 3 4B: 262144 against the set's 262208).
+            // Wider is still a refusal: those rows are not in the kernels.
+            if (!got_ptr) lacks(key);
+            const size_t got = got_ptr->get<size_t>(), rows = want.get<size_t>();
+            if (got > rows)
+                fail(where, "config.json vocab_size " + std::to_string(got) +
+                                " is wider than the kernel set's head (" + std::to_string(rows) +
+                                " rows; the set cannot carry rows it was not built for)");
         } else {
             // an absent key means its default when the manifest names one (Phi-3's optional
             // fields); the comparison is the same either way, so the check stays two-way

@@ -604,7 +604,9 @@ def test_gguf_repo_without_kernels_fails_directly_instead_of_q4nx_fallback(tmp_p
         oflm_add.main()
     except SystemExit as e:
         msg = str(e)
-        assert "no GGUF-direct open kernel set found" in msg
+        # The refusal names the real reason: with no kernel sets at all, nothing can
+        # say which geometry this file has (the fixture carries only the arch key).
+        assert "no open kernel set can run this model" in msg
         assert "build-new-spec.py" in msg
         assert "model.q4nx" not in msg
     else:
@@ -796,6 +798,9 @@ def test_a_set_the_registry_does_not_list_still_names_its_family(tmp_path):
     class _Spec:                       # the model's own spec, same geometry
         def kernel_hash(self, ignore=()):
             return "sha256:same"
+
+        def serves(self, model):
+            return None                # same geometry, and the head fits
 
     model_spec = _Spec()
     orig = oflm_add._model_spec_class

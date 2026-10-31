@@ -308,10 +308,21 @@ class ModelSpec:
     # The spec fields that do NOT change the compiled kernels: the depth (the
     # manifest drives the layer loop; the kernel is the same for any depth),
     # the layer sequence (WHICH designs a model needs is what matters, not how
-    # many of each it stacks), the tokenizer's id count (the head is built for
-    # `vocab` rows; the real count only masks the logits at runtime) and the
-    # informational extras.
-    _KERNEL_INDEPENDENT = ("num_layers", "real_vocab", "extra", "layer_types")
+    # many of each it stacks), the tokenizer's id count (the real count only
+    # masks the logits at runtime) and the informational extras.
+    #
+    # `vocab` is here for the same reason, and it took a false gate to see it:
+    # the head is compiled for the SET's row count, and a model whose head is
+    # narrower is packed into it with the rows past its own zero-filled
+    # (pools.cpp: "padded rows: zeroed scales/codes"). So a set built for a
+    # container whose vocabulary was padded serves a GGUF of the same family
+    # whose head is smaller -- Gemma 3 4B is exactly that (the set has 262208
+    # rows, the GGUF 262144) -- and a packing choice must not read as
+    # geometry. The one direction that is NOT free is the other one: rows the
+    # set does not have cannot be packed, so `serves()` below carries the
+    # asymmetry the hash cannot. Do not compare vocabs in the hash; ask
+    # `serves()`.
+    _KERNEL_INDEPENDENT = ("num_layers", "real_vocab", "extra", "layer_types", "vocab")
 
     def kernel_hash(self, ignore: tuple[str, ...] = ()) -> str:
         """The hash of the geometry the KERNELS depend on.
@@ -333,6 +344,31 @@ class ModelSpec:
         # compile the same kernel -- the hash must not tell them apart.
         d["norm_eps"] = float(f"{self.norm_eps:g}")
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
+    def serves(self, model: "ModelSpec") -> str | None:
+        """None when a kernel set built for THIS spec can run `model`, else why not.
+
+        `kernel_hash` says two models need the same xclbins. This says whether the set
+        that was BUILT for this spec can carry that model's weights, which is a weaker
+        and one-sided relation because the pack zero-fills:
+
+          * a model whose head is narrower than the set's is packed into it, the rows
+            past the model's own left zero (pools.cpp), so the set serves it;
+          * a model whose head is wider is not -- the rows are simply not in the set,
+            and the head kernel would stream past its pool.
+
+        A container that padded its vocabulary is therefore not a different geometry
+        from the same model's GGUF, which is what a hash over `vocab` claimed (Gemma 3
+        4B: set 262208 rows, GGUF 262144, every other field equal). The check belongs
+        here, where a set is chosen, not in the hash, where it refused a model the set
+        serves.
+        """
+        if self.kernel_hash() != model.kernel_hash():
+            return "a different geometry"
+        if self.vocab < model.vocab:
+            return (f"a {self.vocab}-row head and this model's is {model.vocab} "
+                    f"(the set cannot carry rows it was not built for)")
+        return None
 
     # ---- sources
     @classmethod
