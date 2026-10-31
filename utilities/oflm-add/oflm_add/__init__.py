@@ -264,6 +264,7 @@ def scan_kernel_sets(spec, roots, source=None, need_gguf=False):
     same_family = []                   # this family, a different geometry
     seen_names = set()                 # the user's xclbins link the system's; count once
     seen = 0
+    serving = []                       # every set that serves, newest manifest first
     for root in roots:
         if not root:
             continue
@@ -285,7 +286,12 @@ def scan_kernel_sets(spec, roots, source=None, need_gguf=False):
                         notes.append(f"{name} has this geometry but no GGUF-direct build "
                                      f"(its manifest has no 'gguf' section)")
                     continue
-                return m.parent, name, notes
+                try:
+                    stamp = m.stat().st_mtime
+                except OSError:
+                    stamp = 0.0
+                serving.append((stamp, m.parent, name))
+                continue
             if gap == "a different geometry":
                 # Only a set of the SAME family is worth naming: it is the one the
                 # user would expect to serve this model, so "same family, different
@@ -298,6 +304,15 @@ def scan_kernel_sets(spec, roots, source=None, need_gguf=False):
             if name not in seen_names:
                 seen_names.add(name)
                 notes.append(f"{name} has this geometry but {gap}")
+    if serving:
+        # Several sets can serve one geometry (a per-model sibling, the installed copy, and
+        # a freshly exported one in the tree). The NEWEST manifest wins: a kernel fix lands
+        # in a rebuild, and a stale installed copy must not shadow it -- which is exactly
+        # what a dev tree hits after `export-kernels.py` (the old roots order let the
+        # installed set win and silently ran the old pack).
+        serving.sort(key=lambda s: s[0], reverse=True)
+        _stamp, kdir, name = serving[0]
+        return kdir, name, notes
     if same_family:
         shown = ", ".join(same_family[:3]) + (" ..." if len(same_family) > 3 else "")
         notes.insert(0, f"{shown}: this family, a different geometry")
@@ -343,17 +358,11 @@ def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
 
 
 # Families whose GGUF-direct numerics are not right yet. A model that installs, loads and
-# emits fluent gibberish is worse than one that refuses: every Qwen3.5 GGUF-direct model
-# tested (4B/2B/0.8B, three authors, plus a Qwen3.5 derivative with a joke name) packs
-# and runs and returns nonsense -- the q4_1-vs-f32 twin's numerics, bucket 3 of
-# specs/open-engine/plans/gguf-generalisation.md. The q4nx container of the same model is
-# correct, so that is what the message points at. Remove an entry the moment its numerics
-# pass the CPU reference.
-GGUF_DIRECT_UNREADY = {
-    "qwen3.5": ("the text is wrong: the weights pack and the kernels run, but every "
-                "Qwen3.5 GGUF-direct model tested emits gibberish (the q4_1 / f32 twin's "
-                "numerics). The q4nx container of the same model is correct."),
-}
+# emits fluent gibberish is worse than one that refuses, so a family lands here until its
+# text is measured. Empty today: qwen3.5 came off the list when its three pack bugs were
+# fixed (conv_transpose's layout, lmhead_q8's pool raster, and the per-head [q|gate] order)
+# and Qwen3.5-0.8B started answering; the sets for 0.8B/2B/4B/9B/27B carry the fixed pack.
+GGUF_DIRECT_UNREADY: dict[str, str] = {}
 
 
 def kernel_set_name(dir_name):

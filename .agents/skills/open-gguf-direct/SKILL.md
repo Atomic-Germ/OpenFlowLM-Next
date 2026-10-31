@@ -42,10 +42,18 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 >   `text_config` included -- the top level has no `hidden_size`), the bytes/quant guess,
 >   then the serving set's name. `mradermacher/GRaPE-1.5-i1-GGUF` (arch qwen35, name says
 >   1.5) installs as `qwen3.5`, `4.2b`, on `Qwen3.5-4B-NPU2` with nothing from the name.
-> * **qwen3.5 GGUF-direct is refused by name** (`GGUF_DIRECT_UNREADY`): it used to install,
->   load and emit gibberish. The THREE pack bugs are fixed (see below), the 0.8B answers
->   correctly on the open kernels, and the entry stays until the shipped set carries the
->   fixed pack and a 4B is measured. `--force` installs it now.
+> * **qwen3.5 GGUF-direct is OPEN again** (`GGUF_DIRECT_UNREADY` is empty): the three pack
+>   bugs are fixed, the five sets' manifests (0.8B/2B/4B/9B/27B) were regenerated from the
+>   recipe, and the 0.8B answers while the 4B matches the fp64 reference at logit cos 0.993
+>   (same argmax). 2B/9B/27B carry the fixed pack but are unmeasured.
+> * **`oflm add` prefers the NEWEST manifest** among the sets that serve a geometry. The
+>   roots order alone let the installed copy shadow a fresh `export-kernels.py` build in the
+>   tree -- the exact loop of testing a pack fix. A kernel fix lands in a rebuild, so the
+>   rebuild wins.
+> * **The kernel build dirs can be root-owned** (`open_kernels/designs/*/build_*` from an
+>   earlier root build), which makes `export-kernels.py` fail with a PermissionError on
+>   `.lock`. A manifest-only regeneration (`python -m recipes.manifest --spec <name> --out
+>   <set>/open_kernels/manifest.json`) does not need them.
 > * **Three GGUF pack bugs, all ours** (qwen35 only, which is why only qwen35 was broken):
 >   `conv_transpose` read `ssm_conv1d` as [taps][channels] when a GGUF stores
 >   [channels][taps]; `lmhead_q8`'s GGUF branch wrote the file's raster instead of the

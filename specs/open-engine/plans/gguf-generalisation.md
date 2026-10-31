@@ -135,14 +135,32 @@ last-position logits are within the pool law, and the model answers coherently. 
 changed, not the kernels -- the shipped set needs a rebuild (or its manifest regenerated) to
 carry it.
 
+**The family is open.** The five sets' manifests were regenerated from the recipe
+(`qwen35-0.8b/2b/4b/9b/27b` -> `src/xclbins/<set>/open_kernels/manifest.json`; the kernels
+are untouched, and a manifest is the only thing the pack fix changes). `GGUF_DIRECT_UNREADY`
+is empty again, so `oflm add` accepts qwen3.5 GGUF-direct. Measured:
+
+| size | evidence |
+|---|---|
+| 0.8B | answers ("Hello! How can I assist you today?", 17+25 -> 42, Paris); every layer 0.965-0.995 vs the reference |
+| 4B | last-position logits **cos 0.993**, same argmax (mradermacher's i1 is a quant of the BASE checkpoint, so it completes text rather than answering -- the numerics are right, the model is not instruct) |
+| 2B / 9B / 27B | sets carry the fixed pack; unmeasured here |
+
+**`oflm add` picks the NEWEST manifest among the sets that serve a geometry.** It used to
+take the first root (and I had made the installed one win), so a fresh `export-kernels.py`
+in the tree was silently shadowed by the installed copy -- the exact workflow of testing a
+pack fix. A kernel fix lands in a rebuild, so the rebuild wins.
+
 **Still open, and unrelated to the pack:** `OFLM_GGUF_POOL_F32=1` does not load --
 "GGUF-direct block prefill is not implemented for the 'linear' layer kind (only the dense
 one)". The f32 twin's *route* has no hybrid layer kind; the message used to say "MoE models"
 and sent us looking at the wrong thing (the user was right: dense models are not broken,
 qwen3.5 is hybrid). That blocks the q4_1-vs-f32 A/B, not the model.
 
-qwen3.5 GGUF-direct is still refused by name in `oflm add` (`GGUF_DIRECT_UNREADY`) until the
-shipped set carries the fixed pack and a 4B is measured; `--force` installs it now.
+**Also for the record:** the kernel BUILD dirs under `open_kernels/designs/*/build_*` are
+root-owned from an earlier root build, so `export-kernels.py` cannot rebuild a design until
+they are handed back (`sudo chown -R`); a manifest-only regeneration does not need them.
+
 
 
 

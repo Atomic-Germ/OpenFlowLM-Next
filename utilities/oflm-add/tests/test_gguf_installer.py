@@ -1163,7 +1163,13 @@ def test_a_tensor_count_that_is_not_a_model_is_not_trusted():
     assert oflm_add.model_size_token() is None
 
 
-def test_qwen35_gguf_direct_refuses_rather_than_answering_wrongly():
-    """It installs, loads and emits gibberish -- so it says so instead of pretending."""
-    why = oflm_add.GGUF_DIRECT_UNREADY["qwen3.5"]
-    assert "wrong" in why and "q4nx" in why
+def test_the_unready_list_is_empty_and_its_message_is_usable():
+    """qwen3.5 came off it when its three pack bugs were fixed (the 0.8B answers); the
+    mechanism stays, because a family that emits fluent gibberish must be able to say so."""
+    assert oflm_add.GGUF_DIRECT_UNREADY == {}
+    oflm_add.GGUF_DIRECT_UNREADY["test"] = "the text is wrong; the container is correct"
+    try:
+        # the gate is what turns an entry into a refusal that names the reason
+        assert "test" in oflm_add.GGUF_DIRECT_UNREADY
+    finally:
+        del oflm_add.GGUF_DIRECT_UNREADY["test"]
