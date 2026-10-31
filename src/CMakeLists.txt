@@ -1488,6 +1488,25 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# chat_template: the Jinja dialect a shipped chat template is written in. NO device,
+# NO weights, NO network -- minja is a header. The shipped Qwen3.x template asks
+# `enable_thinking is undefined`, and minja implemented `defined` but not `undefined`,
+# so every chat request to that family was refused with a well-formed 400 and the
+# server stayed up. The smoke test above cannot see this: the model simply cannot
+# answer anything, which looks like a client problem.
+add_executable(chat_template_test server/chat_template_test.cpp)
+target_include_directories(chat_template_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(chat_template_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(chat_template_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
+endif()
+add_test(NAME OPEN-CHAT-TEMPLATE
+         COMMAND chat_template_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/../chat_templates/qwen3.x/chat_template.jinja")
+
 # PULL-STALE, PULL-RECORD, PULL-FORCE: which files `oflm pull` fetches. No network, no device.
 add_executable(pull_plan_test pull/pull_plan_test.cpp pull/install_record.cpp)
 target_include_directories(pull_plan_test PRIVATE
