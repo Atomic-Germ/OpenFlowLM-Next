@@ -100,8 +100,22 @@ def tail_batch(model,spec,xs):
     return head_batch(model,hn,spec.vocab)
 
 
-def prompt_cases(ids,boundaries):
-    lengths=(255,256,257) if boundaries else (len(ids),)
+def prompt_cases(ids,boundaries,lengths=None):
+    """Shared causal prefixes of the prompt.
+
+    The defaults stay exactly as they were so every retained preparation keeps its
+    inventory and hash. `lengths` lets a caller exercise a longer prompt: with the
+    block width at T=256 the 255/256/257 trio already spans a block boundary
+    (B=2), but a longer prefix is what gives more than one block of state carry.
+    """
+    if lengths is None:
+        lengths=(255,256,257) if boundaries else (len(ids),)
+    else:
+        lengths=tuple(int(n) for n in lengths)
+        if (not lengths or len(set(lengths))!=len(lengths)
+                or any(n<=0 or n>len(ids) for n in lengths)):
+            raise ValueError('invalid or oversized prefix lengths')
+        lengths=tuple(sorted(lengths))
     if not ids or len(ids)<max(lengths):raise ValueError('insufficient tokens for requested prefixes')
     return {n:ids[:n] for n in lengths}
 
@@ -175,7 +189,9 @@ def prepare(a):
         source[str(p.resolve())]=digest(p)
     tk=Tokenizer.from_file(str(a.model/'tokenizer.json'))
     ids=prompt_ids(tk,a.message,False)
-    cases=prompt_cases(ids,boundaries);ids=cases[max(cases)]
+    want=getattr(a,'lengths',None)
+    cases=prompt_cases(ids,boundaries,lengths=want.split(',') if want else None)
+    ids=cases[max(cases)]
     if any(type(t)!=int or not 0<=t<spec.real_vocab for t in ids) or len(ids)+1>m['max_ctx_default']:
         raise ValueError('invalid prompt ids/context')
     dirs={n:out/str(n) if boundaries else out for n in cases}
@@ -304,6 +320,9 @@ def main():
     p.add_argument('--message',default='What is 2 + 2?')
     p.add_argument('--layers',type=int,choices=(4,64),default=4)
     p.add_argument('--boundaries',action='store_true',help='prepare shared causal prefixes of 255/256/257 tokens; message must be long enough')
+    p.add_argument('--lengths',default=None,
+                   help='explicit comma-separated prefix lengths instead of 255,256,257; '
+                        'a longer one exercises more than one block of state carry')
     p=sub.add_parser('run');p.add_argument('--out',type=Path,required=True);p.add_argument('--cli',type=Path,required=True)
     a=ap.parse_args();return prepare(a) if a.command=='prepare' else run(a)
 
