@@ -40,6 +40,31 @@ def digest(path):
     return h.hexdigest()
 
 
+def eos_status(tokenizer_config, generation_config):
+    """Does the runtime have an EOS array it can actually stop on?
+
+    `automodel.cpp` refuses a model when `tokenizer_config["eos_token_id"]` is
+    missing or is not an array, and the runtime stops generation only on an id it
+    finds there. HF Qwen-family repos ship the field as null with the end-of-turn
+    token in `eos_token`, and the stop set can also live in
+    `generation_config.json`. The converter has helpers for both (resolve the
+    token string, merge generation_config's ids) but a package that skipped them
+    looks complete and then refuses to serve, which is what happened here.
+    """
+    cfg = tokenizer_config or {}
+    gen = generation_config or {}
+    raw = cfg.get('eos_token_id')
+    ids = raw if isinstance(raw, list) else []
+    gen_ids = gen.get('eos_token_id')
+    gen_ids = gen_ids if isinstance(gen_ids, list) else ([gen_ids] if gen_ids is not None else [])
+    present = isinstance(raw, list) and bool(raw)
+    missing = [int(t) for t in gen_ids if int(t) not in ids]
+    return dict(present=present, ids=[int(t) for t in ids],
+                generation_ids=[int(t) for t in gen_ids],
+                agrees=present and not missing,
+                resolved=missing)
+
+
 def ops_of(plan):
     """Flatten the plan into (layer_type, where, op) triples.
 
@@ -176,12 +201,26 @@ def check(model_dir, kernels, report=None):
         result['model_files'] = {n: (model_dir / n).is_file() for n in
                                  ('config.json', 'model.q4nx', 'tokenizer.json',
                                   'tokenizer_config.json', 'chat_template.jinja')}
+        # Phase 25 checks that belong to the package, not to kernel code: the
+        # runtime must be able to stop, and the chat template must ship.
+        tokenizer_config = json.loads((model_dir / 'tokenizer_config.json').read_text()) \
+            if (model_dir / 'tokenizer_config.json').is_file() else {}
+        generation_config = json.loads((model_dir / 'generation_config.json').read_text()) \
+            if (model_dir / 'generation_config.json').is_file() else {}
+        result['eos'] = eos_status(tokenizer_config, generation_config)
+        template = model_dir / 'chat_template.jinja'
+        result['chat_template'] = dict(
+            present=template.is_file(),
+            has_im_end='<|im_end|>' in template.read_text(errors='replace') if template.is_file() else False,
+            in_tokenizer_config='chat_template' in tokenizer_config)
         passed = (not missing and not unused and hashes_present
                   and result['kernels_toolchain_key_agrees'] and result['real_vocab_agrees']
                   and manifest['manifest_version'] == 4
                   and manifest['family'] == 'qwen35'
                   and post == dict(dtype='float32', offset=393216, bytes=24576)
-                  and all(result['model_files'].values()))
+                  and all(result['model_files'].values())
+                  and result['eos']['agrees']
+                  and result['chat_template']['present'])
         result.update(complete=True, passed=bool(passed))
     except Exception as error:
         result['error'] = str(error)

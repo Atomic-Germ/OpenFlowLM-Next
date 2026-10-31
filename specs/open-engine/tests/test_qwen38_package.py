@@ -84,3 +84,37 @@ def test_check_rejects_a_missing_package(tmp_path):
     m = load()
     with pytest.raises((ValueError, FileNotFoundError, KeyError, RuntimeError)):
         m.check(tmp_path, tmp_path)
+
+
+def test_eos_gate_requires_an_id_the_runtime_can_stop_on():
+    """The server refuses a model whose tokenizer_config has no eos_token_id
+    array, and silently never stops on one that names no generation id."""
+    m = load()
+    assert m.eos_status({"eos_token": "<|im_end|>"}, {}) == \
+        dict(present=False, ids=[], generation_ids=[], agrees=False,
+             resolved=[])
+    ok = m.eos_status({"eos_token_id": [248046, 248044]},
+                      {"eos_token_id": [248046, 248044]})
+    assert ok['present'] and ok['agrees'] and ok['ids'] == [248046, 248044]
+    # A single int is not the array the runtime reads.
+    assert m.eos_status({"eos_token_id": 248046}, {})['present'] is False
+
+
+def test_eos_gate_reports_a_generation_id_the_tokenizer_forgets():
+    """Losing generation_config's second stop id is a real defect: generation
+    runs past it. Report it rather than averaging it away."""
+    m = load()
+    status = m.eos_status({"eos_token_id": [248046]},
+                          {"eos_token_id": [248046, 248044]})
+    assert status['present'] is True
+    assert status['agrees'] is False
+    assert status['ids'] == [248046]
+    assert status['generation_ids'] == [248046, 248044]
+    assert 248044 in status['resolved']
+
+
+def test_eos_gate_accepts_a_tokenizer_covering_every_generation_id():
+    m = load()
+    status = m.eos_status({"eos_token_id": [248046, 248044, 1]},
+                          {"eos_token_id": [248046, 248044]})
+    assert status['present'] and status['agrees']
