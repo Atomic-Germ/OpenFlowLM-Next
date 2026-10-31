@@ -84,6 +84,35 @@ def test_the_measured_npu_error_sits_inside_the_two_term_bound():
     assert three < 8.45e-06 < two
 
 
+def test_measured_old_and_new_kernel_errors():
+    """Hardware measurement, recorded so a regression shows up as a number.
+
+    Same fixture, same FP64 reference, the real `ln_nr32.cc` on the NPU:
+      old (2-term mac_vv/mac_vs)  7.0843e-06
+      new (3-term mul3bv/mul3)    1.4299e-06
+    The ceiling is the block route's whole-layer 4.129e-06.
+    """
+    OLD, NEW, CEILING = 7.0843e-06, 1.4299e-06, 4.129e-06
+    assert NEW < CEILING < OLD, 'the fix must move this stage under the ceiling'
+    assert OLD / NEW > 4.0, 'the improvement should be several-fold, not marginal'
+
+
+def test_the_norm_kernels_use_the_three_term_multiply():
+    """Pins the wiring: all three norm entry points must use the 24-bit product,
+    because any one left on the two-term path re-introduces the error.
+
+    Checked on CALLS, not on the text: the files legitimately mention
+    `mac_vv`/`mac_vs` in the comment that explains why they are gone.
+    """
+    import re
+    call_mac = re.compile(r'\bmac_v[vs]\s*\(')
+    for name in ('ln_nr32.cc', 'ln_xn.cc', 'ln.cc'):
+        src = (ROOT / 'open_kernels/designs/ln' / name).read_text()
+        assert 'mul3bv_32(' in src, f'{name} does not use the fp32 x bf16 product'
+        assert 'mul3_32(' in src, f'{name} does not use the fp32 x fp32 product'
+        assert not call_mac.search(src), f'{name} still CALLS the two-term split'
+
+
 def test_scalar_only_split_is_accurate_enough_and_was_not_the_defect():
     """The correction that matters: splitting the SCALAR into two bf16 pieces
     reconstructs it to ~1.6e-6, well below the 8.45e-06 measured. An earlier
