@@ -94,7 +94,9 @@ def _check(spec: ModelSpec) -> None:
         # PR #148 implements the >32-head case (glue_ab_w.cc's 64-lane tile and the
         # half-outer walk in glue_side_fills), so the old "fused wide glue needs 3 input
         # DMA channels" refusal is gone: head count no longer gates this recipe.
-        if fills > LIMITS["shim_fills"]:
+        # The FP32 route has 17 sequential fills, bounded by Pipeline(3);
+        # its half-tile schedule is hardware-validated independently.
+        if fills > LIMITS["shim_fills"] and not M.linear_fp32(spec):
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
                 f"(each xn half, then both accumulators' weight tiles for it, then small and conv), "
@@ -114,7 +116,7 @@ def _check(spec: ModelSpec) -> None:
 
 def xn_side_elems(spec: ModelSpec) -> int:
     """4 KB elements the layer-entry norm output arrives in on the glue's `side` channel."""
-    return roundup(spec.hidden * 2, ELEM) // ELEM
+    return roundup(spec.hidden * (4 if M.linear_fp32(spec) else 2), ELEM) // ELEM
 
 
 def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
@@ -122,7 +124,7 @@ def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
     4 KB element of the projection -- 64 rows at 32 lanes, 32 rows at the 27B's 64 -- and a
     half carries min(2048, HID - h*2048) rows. Equal halves only when HID is a multiple of
     2048 -- at HID 2560 the two halves are 32 and 8 tiles."""
-    rows = ELEM // 2                                  # bf16 rows in one 4 KB element
+    rows = ELEM // (4 if M.linear_fp32(spec) else 2)
     per_tile = ELEM // (2 * ab_lanes(spec))
     return [min(rows, spec.hidden - h * rows) // per_tile for h in range(xn_side_elems(spec))]
 
@@ -241,6 +243,16 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+def paired_prefill(spec: ModelSpec) -> bool:
+    """The independently validated dense wide input/weight precision route."""
+    return (spec.hidden == 5120 and spec.intermediate == 17408 and
+            spec.lin_key_heads == 16 and spec.lin_value_heads == 48 and
+            spec.lin_key_dim == spec.lin_value_dim == 128 and spec.conv_kernel == 4 and
+            spec.num_heads == 24 and spec.num_kv_heads == 4 and spec.head_dim == 256 and
+            spec.rotary_dim == 64 and spec.norm_eps == 1e-6 and
+            all(spec.quant_of(role) == "q4_1" for role in ("attn", "linear", "linear_out", "ffn")))
+
+
 def gemm_route(spec: ModelSpec) -> dict | None:
     """The block prefill route (OPEN-PREFILL-BATCH): `qwen36moe.gemm_route` over this family's
     pack plan, with the dense FFN in place of the MoE block. None means the sequential set,
@@ -248,7 +260,21 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     tile (not a multiple of 256) -- refused here rather than failing the whole export, since
     the sequential path serves that size either way."""
     try:
-        return M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        route = M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        if route and paired_prefill(spec):
+            for g in route["layer_types"].values():
+                g["low_kernels"] = {}
+                for step in g["program"] + g["ffn_program"]:
+                    high = step["kernel"]
+                    low = high + "_low"
+                    g["low_kernels"][high] = low
+                    route["contexts"][low] = f"{low}/final.xclbin"
+                    route["kernels"][low] = dict(context=low, insts=f"{low}/insts.bin",
+                                                 build=low, weight_component="bf16_residual")
+                    b = route["builds"][high]
+                    route["builds"][low] = dict(design=b["design"], build_dir=b["build_dir"] + "_low",
+                                                env=dict(b["env"], GQP_WEIGHT_LOW="1", GQP_BREUSE="0"))
+        return route
     except OpRangeError:
         return None
 
@@ -276,6 +302,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
+            **({"post_output": {"dtype": "float32", "offset": L.A_OG,
+                                 "bytes": spec.lin_value_width * 4}} if M.linear_post_fp32(spec) else {}),
             "program": [{"op": "run", "kernel": "lx", "args": args}],
         }
     if spec.has_full:
@@ -309,6 +337,12 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     `has_moe` goes false and nothing asks for the router record."""
     L = layout(spec, max_ctx)
     return {
+        **({"attn_kv_dtype": "bfloat16_pair", "attn_output_dtype": "float32"} if M.paired_attention(spec) else {}),
+        **({"attn_entry_dtype": "float32"} if M.attention_entry_fp32(spec) else {}),
+        **({"linear_entry_dtype": "float32", "linear_conv_dtype": "float32"} if M.linear_fp32(spec) else {}),
+        **({"linear_recurrence": "factored_compensated"} if M.factored_recurrence(spec) else {}),
+        **({"q4_activation_sum": "quantized_fp32"} if M.consistent_q4_sum(spec) else {}),
+        **({"ffn_norm_dtype": "float32"} if ffn_geometry(spec).XM_F32 else {}),
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
         "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,

@@ -1,6 +1,7 @@
 /// \file manifest.cpp
 /// \brief manifest.json parsing and the model check (see manifest.hpp).
 #include "open_qwen36/manifest.hpp"
+#include "open_qwen36/prefill_precision_policy.hpp"
 
 #include <cmath>
 #include <fstream>
@@ -118,6 +119,8 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
 void check_step(const Manifest& m, const Step& s, const std::string& where, const char* what) {
     auto it = m.kernels.find(s.kernel);
     if (it == m.kernels.end()) fail(where, std::string(what) + " names unknown kernel " + s.kernel);
+    if (!it->second.weight_component.empty())
+        fail(where, std::string(what) + ": low-weight kernel cannot be a standalone program step");
     if (s.op == "moeroute2" && it->second.patch != "moeroute2")
         fail(where, std::string(what) + ": moeroute2 on kernel " + s.kernel + ", whose patch is '" +
                         (it->second.patch.empty() ? std::string("none") : it->second.patch) + "'");
@@ -146,8 +149,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
     // a step is split, and an older engine refuses the set by name instead of misreading it.
     // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
-    if (m.version < 1 || m.version > 3)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 3)");
+    // 4 adds paired prefill products; older readers must not silently drop the low halves.
+    if (m.version < 1 || m.version > 4)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 4)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -184,6 +188,21 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.moe.share_down = get<uint64_t>(moe, "share_down", mw);
     if (m.moe.topk > 8 || m.moe.topk == 0) fail(mw, "topk " + std::to_string(m.moe.topk) + " (the router record holds 8)");
     }
+    const std::string kv_dtype = lay.value("attn_kv_dtype", "bfloat16");
+    const std::string og_dtype = lay.value("attn_output_dtype", "bfloat16");
+    const std::string entry_dtype = lay.value("attn_entry_dtype", "bfloat16");
+    if (entry_dtype != "bfloat16" && entry_dtype != "float32")
+        fail(lw, "unsupported attention entry dtype");
+    m.attn_kv_pair = kv_dtype == "bfloat16_pair";
+    if ((kv_dtype != "bfloat16" && !m.attn_kv_pair) ||
+        og_dtype != (m.attn_kv_pair ? "float32" : "bfloat16"))
+        fail(lw, "unsupported attention cache/output dtype combination");
+    const std::string linear_entry = lay.value("linear_entry_dtype", "bfloat16");
+    const std::string linear_conv = lay.value("linear_conv_dtype", "bfloat16");
+    if ((linear_entry != "bfloat16" && linear_entry != "float32") ||
+        (linear_conv != "bfloat16" && linear_conv != "float32"))
+        fail(lw, "unsupported linear entry/history dtype");
+    m.linear_conv_f32 = linear_conv == "float32";
     m.attn.kv_row = m.kv_row;
     m.attn.ptab_row = m.ptab_row;
 
@@ -209,6 +228,10 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
+        d.weight_component = v.value("weight_component", "");
+        if (!d.weight_component.empty() &&
+            (d.weight_component != "bf16_residual" || m.version < 4 || !d.patch.empty()))
+            fail(where, "unsupported kernel weight_component or manifest version: " + k);
         m.kernels[k] = d;
     }
     if (j.contains("rows")) {
@@ -248,6 +271,15 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (t.state_kind == "linear") t.state_bytes = get<uint64_t>(st, "bytes", tw);
         else if (t.state_kind == "kv") t.state_row = get<uint64_t>(st, "row", tw);
         else fail(tw, "unknown state kind " + t.state_kind);
+        if (v.contains("post_output")) {
+            const auto& post = v["post_output"];
+            const auto offset = get<uint64_t>(post, "offset", tw + " post_output");
+            const auto bytes = get<uint64_t>(post, "bytes", tw + " post_output");
+            if (t.state_kind != "linear" || get<std::string>(post, "dtype", tw + " post_output") != "float32" ||
+                offset % 4096 || bytes == 0 || bytes % 4096 ||
+                offset > t.act_bytes || bytes > t.act_bytes - offset)
+                fail(tw, "invalid FP32 post_output region or scratch size");
+        }
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
         // the block prefill route, independent of the sequential `program`
@@ -434,6 +466,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
+                    const std::string conv_dtype = gj.value("conv_dtype", "bfloat16");
+                    if (conv_dtype != (m.linear_conv_f32 ? "float32" : "bfloat16"))
+                        fail(gw, "conv dtype disagrees with the linear state ABI");
+                    g.conv_f32 = m.linear_conv_f32;
+                    if (g.conv_kernel < 2 || g.state_s_off != (g.conv_kernel - 1) * g.qkv_dim * (g.conv_f32 ? 4 : 2) ||
+                        g.s_rows < g.head_dim || g.s_head_bytes != g.s_rows * g.head_dim * 4 ||
+                        t.state_bytes != g.state_s_off + g.value_heads * g.s_head_bytes)
+                        fail(gw, "linear state offsets/size disagree with conv dtype and recurrence geometry");
                     g.out_split = gj.value("out_split", false);
                     // the flag predates per-step `split` and means the same thing for the out step
                     if (g.out_split) g.program.at(1).split = true;
@@ -528,6 +568,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             check_split(g.program, g.weights, "program");
             check_split(g.shared_program, g.shared_weights, "shared");
             check_split(g.ffn_program, g.ffn_weights, "ffn");
+            if (gj.contains("low_kernels")) {
+                g.low_kernels = get<std::map<std::string, std::string>>(gj, "low_kernels", gw);
+                if (g.low_kernels.empty()) fail(gw, "low_kernels must be nonempty when present");
+            }
+            prefill_precision_policy::validate(m, g);
         };
         if (v.contains("gemm_block")) parse_gemm_block(v["gemm_block"], tw + " gemm_block", t.gemm_block);
         // OPEN-PREFILL-MODE: whole routes the engine may load in place of gemm_block
@@ -641,6 +686,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     for (const auto& o : need(need(pack, "lm_head", where), "ops", where + " pack.lm_head")) m.lmhead_ops.push_back(parse_op(o, where + " pack.lm_head"));
     if (m.lmhead_ops.empty()) fail(where, "pack.lm_head has no ops");
     m.hf_config_check = need(j, "hf_config_check", where);
+    if (m.attn_kv_pair) {
+        const size_t kw = get<size_t>(m.hf_config_check, "num_key_value_heads", where) *
+                          get<size_t>(m.hf_config_check, "head_dim", where);
+        if (!kw || m.kv_row != kw * 8) fail(lw, "paired KV row size mismatch");
+        for (const auto& [name, t] : m.layer_types)
+            if (t.state_kind == "kv" && t.state_row != m.kv_row)
+                fail(lw, "paired layer KV row size mismatch");
+    }
     if (j.contains("hf_config_defaults")) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];

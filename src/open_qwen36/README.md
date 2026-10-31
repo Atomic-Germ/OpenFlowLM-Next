@@ -635,3 +635,32 @@ OpenAI-style chat completions:
 The same prompt twice in one server session gives the same answer (state reset
 through the app's checkpoint/restore path). Prompt cache, sampler, chat
 template, tool parsing — all the app's, unchanged.
+
+## Paired prefill runtime (manifest version 4)
+
+The shared Core accepts `gemm_block.low_kernels`, mapping each high GEMM name
+to its `<high>_low` companion. Low descriptors must declare
+`weight_component: "bf16_residual"`, a separate context/stream, and no patch.
+The validated wide dense Qwen3.5 roles require all four projections, FP32
+convolution history, paired KV, and unchanged norm/activation geometry.
+Incompatible or incomplete declarations fail during manifest parsing.
+
+Each projection evaluates `(W_hi X_hi + W_hi X_lo) +
+(W_lo X_hi + W_lo X_lo)` with host-owned intermediate outputs. The shared
+implementation is compiled into both `oflm` and `open_qwen36_cli`. Stage-major
+raw dispatch is disabled for these routes; layer-major and block-major retain
+the validated block-at-a-time arithmetic. Legacy manifests use one dispatch.
+
+This runtime support requires an exported version-4 kernel bundle to activate.
+Rebuilding the executable alone does not upgrade old kernels or manifests.
+The normal qwen35 recipe now exports the five low-weight companions (46 sets)
+for validated dense Q4 H5120/FF17408 models. Use `--model-dir` with the ordinary
+exporter to retain the model's exact vocabulary metadata; weights do not need
+repacking. Export paths remain relative to the bundle.
+
+The shared CLI with this bundle reproduces 44 retained logit files exactly
+across both hybrid schedules, and passes 42 independent CPU logit comparisons
+for a 64-layer, 20-token prompt plus continuation. Integrated all-layer,
+long-prefix and reset checks remain separate gates. The local FP32 DeltaNet
+post-output experiment is also a separate change. See
+[the export/smoke workflow](../../utilities/prefill-production/README.md).

@@ -181,3 +181,63 @@ __attribute__((noinline)) inline void gemv_q4_prep_f32_blocks(const float *__res
     gemv_q4_prep_f32(xf, tab, K);                                                      \
   }
 #define GEMV_Q4_PREP_F32_ENTRY(K) GEMV_Q4_PREP_F32_ENTRY_(K)
+
+// Direct FP32-to-INT16 preparation for dense down projections. Keep the existing
+// 2.25*K table ABI, but quantize the original FP32 input directly to int16;
+// first rounding h to BF16 discards precision before the integer GEMV.
+__attribute__((noinline)) inline void gemv_q4_prep_f32_direct_blocks(
+    const float *__restrict xf, uint8_t *__restrict tab, unsigned K, unsigned b0, unsigned nb) {
+  const unsigned NB = K / 32;
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  // A value just below the next power of two can round to +32768. Clamp that
+  // single endpoint rather than wrapping to -32768.
+  aie::set_saturation(aie::saturation_mode::saturate);
+  int16_t *__restrict xi = (int16_t *)tab;
+  int32_t *__restrict sh = (int32_t *)(tab + 2 * K);
+  bfloat16 *__restrict xsh = (bfloat16 *)(tab + 2 * K + 4 * NB);
+  bfloat16 *__restrict xsl = xsh + NB;
+#pragma clang loop unroll(disable)
+  for (unsigned j = 0; j < nb; ++j) {
+    const unsigned kb = b0 + j;
+    const aie::vector<float, 32> x = aie::load_v<32>(xf + j * 32);
+    const auto bits = aie::bit_and(x.template cast_to<int32_t>(), aie::broadcast<int32_t, 32>(0x7fffffff));
+    const int mx = aie::reduce_max(bits);
+    int s = 141 - (mx >> 23);
+    if (s > 126) s = 126;
+    sh[kb] = s;
+    aie::store_v(xi + kb * 32, aie::to_fixed<int16_t>(x, s));
+#if defined(GEMV_Q4_CONSISTENT_SUM) && GEMV_Q4_CONSISTENT_SUM
+    // Use the same quantized activation in both Q4 affine terms.
+    // Otherwise a constant zero-weight block can produce a nonzero dot product.
+    const auto sx = aie::to_float<float>(aie::load_v<32>(xi + kb * 32), s);
+    aie::accum<accfloat, 16> a16, b16;
+    a16.from_vector(sx.template extract<16>(0));
+    b16.from_vector(sx.template extract<16>(1));
+#else
+    // Sum the original FP32 values, preserving the same reduction tree and
+    // BF16 hi/lo ABI as the BF16 preparation path.
+    aie::accum<accfloat, 16> a16, b16;
+    a16.from_vector(x.template extract<16>(0));
+    b16.from_vector(x.template extract<16>(1));
+#endif
+    const auto v16 = aie::add(a16, b16).template to_vector<float>();
+    aie::accum<accfloat, 8> a8, b8;
+    a8.from_vector(v16.template extract<8>(0));
+    b8.from_vector(v16.template extract<8>(1));
+    aie::vector<float, 16> t = aie::concat(aie::add(a8, b8).template to_vector<float>(),
+                                         aie::zeros<float, 8>());
+#pragma clang loop unroll(full)
+    for (unsigned st = 4; st >= 1; st >>= 1) {
+      aie::accum<accfloat, 16> p, q;
+      p.from_vector(t);
+      q.from_vector(aie::shuffle_down_rotate(t, st));
+      t = aie::add(p, q).template to_vector<float>();
+    }
+    aie::accum<accfloat, 32> bc;
+    bc.from_vector(aie::broadcast<float, 32>(t[0]));
+    const auto hi = bc.template to_vector<bfloat16>();
+    const auto lo = aie::sub(bc, hi).template to_vector<bfloat16>();
+    xsh[kb] = hi[0];
+    xsl[kb] = lo[0];
+  }
+}

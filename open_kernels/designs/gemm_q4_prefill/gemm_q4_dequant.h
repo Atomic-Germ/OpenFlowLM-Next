@@ -345,8 +345,21 @@ __attribute__((noinline)) inline void gqd_fused_ky(const uint8_t *__restrict ban
         so.from_vector(m_o);
         se = aie::mac(se, ne, d_e);
         so = aie::mac(so, no, d_o);
+#if defined(GQD_WEIGHT_LOW)
+        // BF16 residual of the FP32 dequantization, paired with the normal pass.
+        const auto he = se.to_vector<bfloat16>();
+        const auto ho = so.to_vector<bfloat16>();
+        aie::accum<accfloat, 64> he32, ho32, re, ro;
+        he32.from_vector(he);
+        ho32.from_vector(ho);
+        re.from_vector(aie::sub(se.to_vector<float>(), he32.to_vector<float>()));
+        ro.from_vector(aie::sub(so.to_vector<float>(), ho32.to_vector<float>()));
+        const aie::vector<bfloat16, 64> we = re.to_vector<bfloat16>();
+        const aie::vector<bfloat16, 64> wo = ro.to_vector<bfloat16>();
+#else
         const aie::vector<bfloat16, 64> we = se.to_vector<bfloat16>();
         const aie::vector<bfloat16, 64> wo = so.to_vector<bfloat16>();
+#endif
         // [k][row-pair] -> [row-pair][k], then zip the even and odd rows back into
         // natural row order: 8-element groups te0, to0, te1, to1, ... = rows 0, 1, 2, 3, ...
         const aie::vector<bfloat16, 64> te = aie::transpose(we, GQD_S, GQD_S);

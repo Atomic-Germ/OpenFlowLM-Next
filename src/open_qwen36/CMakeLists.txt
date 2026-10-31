@@ -58,6 +58,13 @@ endif()
 add_executable(block_host_test block_host_test.cpp block_host.cpp)
 target_include_directories(block_host_test PRIVATE ${_inc})
 
+# Keep the host's explicit multiply-then-add contract identical to the scalar
+# oracle. GCC otherwise contracts scalar tails differently from AVX2 groups.
+if(NOT MSVC)
+    set_source_files_properties(block_host.cpp block_host_test.cpp
+        PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
+
 # block_host.cpp uses AVX2/FMA intrinsics in both targets. The parent app and
 # Windows build.cmd already enable them; the standalone CMake build must too.
 foreach(t open_qwen36_cli block_host_test)

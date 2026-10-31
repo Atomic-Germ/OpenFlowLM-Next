@@ -332,6 +332,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.ffn_program) wanted[s.kernel] = true;
+        for (const auto& [high, low] : types_[l]->gemm_block.low_kernels) wanted[low] = true;
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted[types_[l]->gemm_block.attn_kernel] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
@@ -370,6 +371,13 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_STAGE_MAJOR")) stage_major_on_ = std::string(env) != "0";
+    for (const auto* type : types_)
+        if (!type->gemm_block.low_kernels.empty()) {
+            // Stage-major submits raw GEMMs and would bypass the four-product sum.
+            stage_major_on_ = false;
+            log("paired prefill projections: block-at-a-time dispatch within each layer");
+            break;
+        }
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
     // Measurement only; off (and free) unless the env names a file.
@@ -459,9 +467,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
-            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)")
-                      : any_dense ? "not in this kernel set (one dxB dispatch a token)"
-                                  : "not in this kernel set (attention on the host)"));
+            (w_->attn_kv_pair ? "not implemented for paired KV (attention on the host)" :
+             any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") :
+             any_dense ? "not in this kernel set (one dxB dispatch a token)" :
+                         "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
         log(std::string("prefill schedule: ") +
             (layer_major_ok() ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
@@ -2208,6 +2217,18 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
 }
 
 const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
+    const auto& lows = types_.at(layer)->gemm_block.low_kernels;
+    const auto low = lows.find(s.kernel);
+    if (low == lows.end()) return gemm_dispatch(s, x, T, K, N, layer);
+    Step residual = s;
+    residual.kernel = low->second;
+    return precision_workspaces_[s.args.at(2)].run(x, T * K, T * N,
+        [&](bool low_weight, const float* input) {
+            return gemm_dispatch(low_weight ? residual : s, input, T, K, N, layer);
+        });
+}
+
+const float* Core::gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
     // A split step's weight is [hi | lo] of a q8 projection's exact q4_1 split (OPEN-PREFILL-BATCH):
     // the dispatch returns 2N rows, and rows N.. are added into rows 0.. below, so every caller
     // sees the projection's [N, T] whether its weight was split or not.
@@ -2536,7 +2557,7 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     timing_.state_ms += ms_since(tt);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
     host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
@@ -3138,12 +3159,12 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
-    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
     double phase[2] = {0, 0};
     host::deltanet_block(g, qkv, z, xn, hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
-                         hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                         hc.dtb.data(), hc.nw.data(), sp,
                          reinterpret_cast<float*>(sp + gb.state_s_off), og, phase);
     timing_.dn_conv_ms += phase[0];
     timing_.dn_rule_ms += phase[1];
@@ -3392,10 +3413,10 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
-    if (attn_block_on_ && gb.attn_block.present()) {
+    if (attn_block_on_ && gb.attn_block.present() && !g.kv_pair) {
         float* Q = BlockScratch::fit(bs_.qrope, T * qw);
         host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), w_->rope_inv_freq.data(),
                              st.map<uint16_t*>(), row / 2, Q);
@@ -3599,7 +3620,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
     host::DeltaGeom g;
     g.T = T; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
-    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     // DeltaNet still goes block by block in order: S and the conv rows chain through it
     gemm_phase(l, gb.program[0], B, T, hid, nch + vw,
                [&](size_t b) -> const float* {
@@ -3622,7 +3643,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
                    auto t0 = std::chrono::steady_clock::now();
                    double phase[2] = {0, 0};
                    host::deltanet_block(g, qkv, z, xn_all + b * T * hid, hc.convw.data(), hc.Wa.data(), hc.Wb.data(),
-                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), sp,
                                         reinterpret_cast<float*>(sp + gb.state_s_off), og_all + b * T * vw, phase);
                    timing_.dn_conv_ms += phase[0];
                    timing_.dn_rule_ms += phase[1];
@@ -3934,8 +3955,10 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
     if (row < 0 || static_cast<size_t>(row) >= cfg_.max_ctx) throw std::runtime_error("open_qwen36: KV row out of range");
     const size_t kv_row = types_[layer]->state_row;
     size_t off = static_cast<size_t>(row) * kv_row + (value ? kv_row / 2 : 0);
-    read_back(state_[layer], kv_row / 2, off);
-    std::memcpy(out, state_[layer].map<uint8_t*>() + off, kv_row / 2);
+    // The public API returns BF16; expose the high plane, not both planes as heads.
+    const size_t bytes = kv_row / (w_->attn_kv_pair ? 4 : 2);
+    read_back(state_[layer], bytes, off);
+    std::memcpy(out, state_[layer].map<uint8_t*>() + off, bytes);
 }
 
 void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {

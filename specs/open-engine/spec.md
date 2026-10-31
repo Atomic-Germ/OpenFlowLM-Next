@@ -4615,6 +4615,124 @@ two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; pos
 a call on two contexts, goes to noise). Detail:
 `.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.
 
+### OPEN-DECODE-COMPARE: complete, pinned decode references
+
+**Applies to:** `open_kernels/model/make_decode.py`, `decode_reference.py`,
+`compare_decode.py`. Tests: `tests/test_compare_decode.py`.
+
+A completed CPU reference writes `decode_reference.json` with manifest-derived
+hidden/logit sizes, layer/token counts, context capacity, spec/build identifiers,
+seed, routing mode and SHA256 hashes of every reference residual/logit file.
+Reference generation invalidates the previous metadata before writing captures;
+only a complete, finite, correctly sized reference publishes new metadata.
+A cfg-only rewrite verifies the existing metadata and hashes without updating
+reference provenance. This record does not hash all model weights or xclbins.
+
+`make_decode.py --kernel-dir DIR` selects an explicit kernel export. Its full
+manifest must match the current recipe/model except for `build_key`; its
+toolchain spec/build identifiers must agree with that manifest, and hashes
+must cover and verify all required binaries. Generated harness paths point
+inside the export (escaping symlinks are refused). References retain the
+selected export's build key, including on cfg-only checks. Source build-key
+drift alone is permitted for compatibility validation, never hidden by
+rewriting either the export or existing reference metadata.
+
+The comparator requires every declared token and layer. `--tokens`, if given,
+must equal the declaration; omitting it checks the complete run. Both device
+and reference captures must have exactly the expected byte count and finite
+FP32 values. Reference hashes must match. Missing metadata fails with a request
+to regenerate the reference; coverage cannot be inferred from surviving files.
+
+Acceptance requires full-logit Pearson correlation > 0.9999 and equal argmax,
+and each residual's `max(abs(actual-reference))/max(abs(reference)) < 0.005`.
+A zero reference residual passes only an exactly zero actual residual. Undefined
+logit correlation fails. Top-5 and residual correlation are diagnostics, not
+additional gates. MoE references that permit device-selected experts are marked
+`device-assisted` and printed as such; this is not independent routing validation.
+
+Optional `--runtime-prefix PREFIX` additionally requires a finite, correctly
+sized CLI `PREFIX_tN.bin` for every declared token N, byte-identical to the
+corresponding harness logits. Even one ULP or a different sign of zero fails.
+Runtime identity does not bypass the CPU-reference gates or imply coverage
+of runtime steps beyond the fixture's declared count. The prefix is resolved
+relative to the working directory (absolute paths are also accepted).
+
+These checks cover captured logits and residuals. State/cache isolation, source
+conversion correctness, serving and full-model hardware acceptance need their
+own evidence; passing this comparator alone does not establish those properties.
+
+The CPU Q4 decoder materializes contiguous chunk-major arrays without changing
+the band-layout mapping or FP32 arithmetic. Scalar decode tests pin exact value
+bits for empty, single/multiple and strided input chunks; the benchmark utility
+also compares real tensors against the retained legacy indexing implementation.
+Reference-preparation speed is separate from NPU inference performance.
+
+### OPEN-QWEN35-CONFIG-NORMALIZE: existing container metadata
+
+`q4nx-build --normalize-config -i DIR` provides an offline path to normalize
+an existing dense Qwen3.5 container's nested config through `inject_oflm_keys`,
+retaining canonical `model_type=qwen3_5`. Before writing it checks header bounds,
+tensor byte ranges/shapes, non-overlap, exact contiguous layer indices and
+input-norm widths. Conflicting nested/top-level values, unsupported model
+families and conversion options are refused. The original config is backed up,
+the replacement is atomic, and model weights are never opened for writing.
+A normalized config is a no-op; an earlier backup is never overwritten.
+Tests: `utilities/q4nx-build/tests/test_normalize_config.py`.
+
+`model/container_vs_hf.py` requires every requested layer in the selected source
+shard. Missing layers and non-finite comparisons fail; finite equal constant or
+scalar tensors can pass. Nonconstant tensors retain correlation > 0.99.
+Tests: `tests/test_container_vs_hf.py`. This source check covers only the selected
+layers and does not replace full-model numerical or hardware acceptance.
+
+
+### OPEN-FFN-PARTIAL-COMPARE: two-piece down projection
+
+For the Qwen3.5 dense recipe with two down pieces, `model/ffn_partials.py`
+checks every requested layer and every declared fixture token. It requires a
+compatible hash-verified export with the fixture's spec/build identities and
+uses that recipe's linear/full-attention act offsets. Captures must have exact
+sizes; all consumed values must be finite. Layer requests cannot be empty,
+duplicated or outside fixture coverage.
+
+Each partial is independently computed in FP64 from the captured `h` and the
+container's decoded down weight. Require normalized maximum error < 0.005 for
+each partial, their sum, and the final residual against captured pre-FFN
+residual plus both reference partials. Normalize by each reference vector's
+own maximum absolute value; a zero reference requires exact zero output.
+Independent partial checks must reject errors that cancel in the sum.
+
+Only one layer's down matrix needs to be resident. JSON results include the
+requested coverage, bound, per-boundary metrics and capture hashes; failures
+return nonzero. This is a conditioned stage comparison, not an independent
+reference for up/gate/norm, attention or recurrent state. Historical captures
+do not establish hardware behavior of a newly built runtime.
+
+The optional `--diagnose-bf16` reports a second comparison from BF16-rounded
+`h`. It is diagnostic only: acceptance and exit status must still depend on
+the original captured FP32 input, even when the rounded-input comparison passes.
+
+
+### OPEN-DENSE-FP32-PREP: dense down activation table
+
+The split dense FFN's FP32 `h` must reach the integer GEMV without an intermediate
+BF16 rounding. `dense_prep_f32` uses `gemv_q4_prep_f32_direct_blocks`: choose a
+power-of-two scale per 32 values from the FP32 maximum exponent, then round
+the original values directly to INT16 (ties to even, endpoint saturation).
+Compute the offset-correction block sum from the original FP32 values and
+store it in the existing BF16 hi/lo representation. Table size remains 2.25*K;
+the two-piece partition, packing, DMA and output layouts do not change.
+
+BF16-input preparation, single-piece dense and non-dense FP32 entries keep
+their existing routes.
+The generator must select the direct entry, so regenerating translation units
+cannot silently restore BF16 rounding. Validate table conversion on hardware
+and replay the failing layer from pinned captured inputs before full-model
+acceptance. Replays carry per-layer state/KV across positions, require exact
+input `h`/pre-FFN residual identity and enforce the original partial gates.
+A layer-at-a-time sweep is conditioned on saved previous-layer outputs; it does
+not replace propagation through the whole corrected model.
+
 ### OPEN-HOST-ATTN-GUARD: the host attention refuses every model it does not compute
 
 **Applies to:** `src/open_qwen36` (`manifest.cpp`, `core.cpp`)
@@ -4697,6 +4815,12 @@ of the request.
   above also asserts.
 - A tape that does not match the geometry it is replayed against, or a k past the tokens the
   block ran, throws rather than replaying part of a block.
+- The tape records the convolution history format. FP32 history is stored and restored
+  without a BF16 conversion; accepting zero tokens restores the block-start history and S.
+  Prefixes shorter than the history window preserve its untouched rows exactly. A format
+  mismatch throws before modifying either state buffer. Reusing a tape for the other format
+  clears the previous history representation. `block_host_test` covers these cases alongside
+  the legacy BF16 rollback and FP32 whole/split-block checks.
 
 **Procedure (manual, the device route -- not yet run):**
 1. B = 1 through the verify route against sequential decode on the same ids: the same token and

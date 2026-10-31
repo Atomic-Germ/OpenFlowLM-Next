@@ -3,9 +3,9 @@ reference for src/open_qwen36/block_host.cpp (OPEN-PREFILL-BATCH).
 
 Same math as replica.py's linear_decode / attn_decode / route, with the
 projections taken as inputs (the engine gets them from the GEMM) and every
-shape a parameter, so the stages run on small random weights. The kernels
-keep the conv state and the KV rows in bf16, so those are rounded here too;
-everything else is fp64.
+shape a parameter, so the stages run on small random weights. Legacy conv
+history and KV rows use BF16; opt-in conv_f32 and kv_pair model FP32 history
+and paired-BF16 cache storage. Other arithmetic is FP64.
 
     python open_kernels/model/replica_block.py --fixture <dir>   # random small case for block_host_test
 """
@@ -42,14 +42,17 @@ def l2n(a, eps=1e-6):
 
 
 def deltanet_block(qkv, z, xn, convw, Wa, Wb, A, dtb, nw, conv_state, S, *, key_heads, value_heads, head_dim,
-                   t_real=None, eps=1e-6):
+                   t_real=None, eps=1e-6, conv_f32=False):
     """T tokens through the linear-attention layer's middle: conv, gated delta rule, gated norm.
     qkv [T, 2*key_w + vw] and z [T, vw] are the fused projection's outputs (pre-activation),
     xn [T, hid] the normed layer input (alpha / beta read it). conv_state [taps-1, nch] and
     S [value_heads, rows, head_dim] are updated in place through the first t_real tokens
-    (rows past head_dim stay zero). Returns og [T, vw] (zero past t_real)."""
+    (rows past head_dim stay zero). conv_f32 preserves FP32 history instead of BF16.
+    Returns og [T, vw] (zero past t_real)."""
     T = qkv.shape[0]
     t_real = T if t_real is None else t_real
+    if not 0 <= t_real <= T or key_heads <= 0 or value_heads % key_heads:
+        raise ValueError("invalid DeltaNet block geometry")
     key_w = key_heads * head_dim
     vw = value_heads * head_dim
     grp = value_heads // key_heads
@@ -57,7 +60,8 @@ def deltanet_block(qkv, z, xn, convw, Wa, Wb, A, dtb, nw, conv_state, S, *, key_
     lanes = Wa.shape[1]
     og = np.zeros((T, vw))
     for t in range(t_real):
-        rows = np.vstack([conv_state, bf16_round(qkv[t])[None, :]])
+        current = qkv[t].astype(np.float32).astype(np.float64) if conv_f32 else bf16_round(qkv[t])
+        rows = np.vstack([conv_state, current[None, :]])
         c = silu((convw * rows).sum(0))
         conv_state[:] = rows[1:]
         q = l2n(c[:key_w].reshape(key_heads, head_dim))
@@ -91,13 +95,17 @@ def rope(t_, p, inv_freq):
     return y
 
 
-def attention_block(q, k, v, gate, qn, kn, inv_freq, kv, pos0, *, nh, kvh, hd, t_real=None, eps=1e-6):
+def attention_block(q, k, v, gate, qn, kn, inv_freq, kv, pos0, *, nh, kvh, hd, t_real=None, eps=1e-6, kv_pair=False):
     """T tokens through the full-attention layer's middle. q / gate [T, nh*hd], k / v [T, kvh*hd]
     are the fused projection's outputs; kv [rows, 2*kvh*hd] the layer's cache rows
     ([K_t | V_t], bf16-valued), rows [0, pos0) valid on entry and [pos0, pos0 + t_real) written.
+    kv_pair uses four BF16-valued planes [K hi, K lo, V hi, V lo].
     Returns og [T, nh*hd], the gated attention output (zero past t_real)."""
     T = q.shape[0]
     t_real = T if t_real is None else t_real
+    if (not 0 <= t_real <= T or kvh <= 0 or nh % kvh or pos0 < 0
+            or kv.shape[0] < pos0 + t_real or kv.shape[1] != (4 if kv_pair else 2) * kvh * hd):
+        raise ValueError("invalid attention block geometry/cache")
     grp = nh // kvh
     og = np.zeros((T, nh * hd))
     for t in range(t_real):
@@ -105,10 +113,20 @@ def attention_block(q, k, v, gate, qn, kn, inv_freq, kv, pos0, *, nh, kvh, hd, t
         qh = rope(rms(q[t].reshape(nh, hd), qn, eps), p, inv_freq)
         kh = rope(rms(k[t].reshape(kvh, hd), kn, eps), p, inv_freq)
         vh = v[t].reshape(kvh, hd)
-        kv[p, :kvh * hd] = bf16_round(kh.reshape(-1))
-        kv[p, kvh * hd:] = bf16_round(vh.reshape(-1))
-        K = kv[:p + 1, :kvh * hd].reshape(p + 1, kvh, hd)
-        V = kv[:p + 1, kvh * hd:].reshape(p + 1, kvh, hd)
+        if kv_pair:
+            w = kvh * hd
+            for offset, source in ((0, kh), (2*w, vh)):
+                value = source.reshape(-1).astype(np.float32).astype(np.float64)
+                hi = bf16_round(value)
+                kv[p, offset:offset+w] = hi
+                kv[p, offset+w:offset+2*w] = bf16_round(value-hi)
+            K = (kv[:p+1, :w] + kv[:p+1, w:2*w]).reshape(p+1, kvh, hd)
+            V = (kv[:p+1, 2*w:3*w] + kv[:p+1, 3*w:]).reshape(p+1, kvh, hd)
+        else:
+            kv[p, :kvh * hd] = bf16_round(kh.reshape(-1))
+            kv[p, kvh * hd:] = bf16_round(vh.reshape(-1))
+            K = kv[:p + 1, :kvh * hd].reshape(p + 1, kvh, hd)
+            V = kv[:p + 1, kvh * hd:].reshape(p + 1, kvh, hd)
         o = np.zeros((nh, hd))
         for h in range(nh):
             s = (K[:, h // grp] @ qh[h]) / np.sqrt(hd)

@@ -27,6 +27,7 @@ MANIFEST_VERSION = 1
 SPLIT_MANIFEST_VERSION = 2
 # 2 plus the bf16_gemm pack op (OPEN-PACK-PLAN), which an engine that reads 2 cannot pack
 GEMM_POOL_MANIFEST_VERSION = 3
+PAIRED_PREFILL_MANIFEST_VERSION = 4
 GEMM_POOL_OPS = ("bf16_gemm",)
 
 
@@ -92,6 +93,8 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["manifest_version"] = SPLIT_MANIFEST_VERSION
     if has_gemm_pool_op(m["layer_types"]):
         m["manifest_version"] = GEMM_POOL_MANIFEST_VERSION
+    if any(g.get("low_kernels") for g in routes(m["layer_types"])):
+        m["manifest_version"] = PAIRED_PREFILL_MANIFEST_VERSION
     return m
 
 

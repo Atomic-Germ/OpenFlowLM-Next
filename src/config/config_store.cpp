@@ -201,13 +201,14 @@ nlohmann::json get_merged_model_entry(const EffectiveConfig& cfg, const std::str
         entry = deep_merge(entry, cfg.user_settings["settings"][type][size]);
     }
 
-    // User-added model (from models.<type>.<size>) — replaces entirely if not in shipped
-    if (entry.is_null() || entry.empty()) {
-        if (cfg.user_settings.contains("models") &&
-            cfg.user_settings["models"].contains(type) &&
-            cfg.user_settings["models"][type].contains(size)) {
-            entry = cfg.user_settings["models"][type][size];
-        }
+    // Match load_effective_config(): a user model is a complete replacement,
+    // including when its tag also exists in the shipped registry. A settings
+    // overlay must not hide a user-only model's metadata either. Explicit
+    // setting keys are resolved separately, ahead of this metadata fallback.
+    if (cfg.user_settings.contains("models") &&
+        cfg.user_settings["models"].contains(type) &&
+        cfg.user_settings["models"][type].contains(size)) {
+        entry = cfg.user_settings["models"][type][size];
     }
 
     return entry;

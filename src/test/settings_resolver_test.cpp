@@ -81,6 +81,31 @@ TEST(per_model_setting_resolved_for_model) {
     ASSERT_EQ(resolved["think"], true); // from shipped registry entry
 }
 
+TEST(user_model_metadata_and_explicit_settings_resolve_together) {
+    auto cfg = make_cfg(nlohmann::json::object(), nlohmann::json::object());
+    cfg.shipped_registry["models"]["qwen3.8"]["27b"] = {
+        {"default_context_length", 32768}, {"details", {{"think", true}}}
+    };
+    auto args = make_args();
+    for (const std::string type : {"qwen3.8", "local"}) {
+        const auto tag = type + ":27b";
+        cfg.user_settings["models"][type]["27b"] = {
+            {"default_context_length", 4096}, {"details", {{"think", false}}}
+        };
+        cfg.user_settings["settings"][type]["27b"] = {{"prefill_mode", "lean"}};
+        auto resolved = oflm::config::resolve_settings(cfg, tag, args);
+        ASSERT_EQ(resolved["ctx_len"], 4096);
+        ASSERT_EQ(resolved["think"], false);
+        ASSERT_EQ(resolved["prefill_mode"], "lean");
+        auto shown = oflm::config::get_setting_value(cfg, tag, "ctx_len", args);
+        ASSERT_TRUE(shown.has_value());
+        ASSERT_EQ(shown->value, "4096");
+        cfg.user_settings["settings"][type]["27b"]["ctx_len"] = 2048;
+        resolved = oflm::config::resolve_settings(cfg, tag, args);
+        ASSERT_EQ(resolved["ctx_len"], 2048);
+    }
+}
+
 TEST(env_var_overrides_user_settings) {
     auto cfg = make_cfg(
         nlohmann::json::object(),

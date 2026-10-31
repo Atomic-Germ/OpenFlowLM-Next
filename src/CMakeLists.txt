@@ -663,7 +663,7 @@ if(NOT OFLM_USE_HRX)
     if(MSVC)
         set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-ffp-contract=off")
     endif()
 endif()
 
@@ -1729,6 +1729,12 @@ set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
 # Not REQUIRED: a build that never runs the target (the Windows release)
 # must still configure on a machine with no python3.
 find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME oflm_model_registry_merge
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/utilities/test-model-registry.py"
+                $<TARGET_FILE:oflm> "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+endif()
 if(NOT Python3_EXECUTABLE)
     set(Python3_EXECUTABLE "python3")
     message(STATUS "No python3 interpreter found: generate-settings will use 'python3' from PATH")

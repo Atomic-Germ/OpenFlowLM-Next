@@ -48,6 +48,7 @@
 #include "open_qwen36/q4nx_file.hpp"
 #include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
+#include "open_qwen36/prefill_precision.hpp"
 
 namespace open_qwen36 {
 
@@ -564,6 +565,8 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// mapping is returned, so a caller that is going to slice the output can transpose
     /// straight into its own arrays. Valid until the next GEMM on the same buffer.
     const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
+    const float* gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
+    std::map<std::string, prefill_precision::Workspace> precision_workspaces_;
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
