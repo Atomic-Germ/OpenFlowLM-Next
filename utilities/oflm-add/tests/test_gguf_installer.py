@@ -1113,3 +1113,57 @@ def test_the_dit_quant_preference_is_quality_first():
     assert oflm_add._pick_dit_gguf(names) == "flux-2-klein-4b-Q8_0.gguf"
     assert oflm_add._pick_dit_gguf(["x-BF16.gguf"]) == "x-BF16.gguf"
     assert oflm_add._pick_dit_gguf(["x-Q4_0.gguf"]) == "x-Q4_0.gguf"
+
+
+# ---- identity from the model, never from its name -------------------------------
+#
+# Three adversarial cases from one afternoon: a fine-tune whose name says nothing
+# (HauhauCS/Qwen3-4B-2507-Instruct-Uncensored-...), a repo with no GGUF at all
+# (Atomic-Germ/GRaPE-1.5-TEST-DONTDL), and the same model's GGUF (mradermacher/GRaPE-1.5-i1-GGUF,
+# arch qwen35, name says 1.5). The rules these pin down:
+
+def test_a_base_models_family_refines_the_architecture_but_never_replaces_a_vl_one():
+    """`details.family` is the ENGINE/adapter, and it is finer than a GGUF's arch.
+
+    Qwen3-4B-Instruct-2507's GGUF says arch `qwen3` while the registry calls it `qwen3-it`
+    -- the base model is the more specific statement, so a fine-tune of it is a qwen3-it.
+    A VL model whose README names a text base keeps `qwen3vl`: `qwen3` is not a refinement
+    of it, and installing a vision model as text would lose the tower.
+    """
+    assert oflm_add.family_precedence(
+        "qwen3", "the GGUF architecture", "qwen3-it", "Qwen3-4B-Instruct-2507-NPU2")[0] == "qwen3-it"
+    assert oflm_add.family_precedence(
+        "qwen3vl", "the GGUF architecture", "qwen3", "Qwen3-4B")[0] == "qwen3vl"
+    assert oflm_add.family_precedence(
+        "qwen3", "the GGUF architecture", "qwen3", "Qwen3-4B")[0] == "qwen3"
+    assert oflm_add.family_precedence(
+        None, "", "llama3", "Llama-3-8B")[0] == "llama3"
+    assert oflm_add.family_precedence(None, "", None, "")[0] is None
+
+
+def test_a_vlms_size_comes_from_its_text_tower():
+    """A VLM nests the decoder under text_config; the top level has no hidden_size."""
+    cfg = {"model_type": "qwen3_5", "torch_dtype": "bfloat16",
+           "text_config": {"hidden_size": 2560, "num_hidden_layers": 32,
+                           "intermediate_size": 9216, "vocab_size": 248320}}
+    assert oflm_add.estimate_size_dict(cfg), "a VLM config must yield a size"
+    assert oflm_add.estimate_size_dict({"model_type": "x"}) is None
+
+
+def test_the_size_marker_falls_back_to_the_set_that_serves_it():
+    """When nothing else in the repo says the size, the geometry that matched does."""
+    assert oflm_add.size_from_set_name("Qwen3.5-4B-NPU2") == "4b"
+    assert oflm_add.size_from_set_name("Gemma3-4B-NPU2") == "4b"
+    assert oflm_add.size_from_set_name("GRaPE-1.5-i1-GGUF") in (None, "")
+
+
+def test_a_tensor_count_that_is_not_a_model_is_not_trusted():
+    """A fixture's 72 "parameters" must not become the tag `0b`; the bytes are the clue."""
+    assert oflm_add.model_size_token(gguf_bytes=2.5e9, quant="Q4_K") == "4.4b"
+    assert oflm_add.model_size_token() is None
+
+
+def test_qwen35_gguf_direct_refuses_rather_than_answering_wrongly():
+    """It installs, loads and emits gibberish -- so it says so instead of pretending."""
+    why = oflm_add.GGUF_DIRECT_UNREADY["qwen3.5"]
+    assert "wrong" in why and "q4nx" in why

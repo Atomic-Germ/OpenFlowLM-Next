@@ -342,6 +342,20 @@ def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
             f"and the shape, and the next release will carry the set.")
 
 
+# Families whose GGUF-direct numerics are not right yet. A model that installs, loads and
+# emits fluent gibberish is worse than one that refuses: every Qwen3.5 GGUF-direct model
+# tested (4B/2B/0.8B, three authors, plus a Qwen3.5 derivative with a joke name) packs
+# and runs and returns nonsense -- the q4_1-vs-f32 twin's numerics, bucket 3 of
+# specs/open-engine/plans/gguf-generalisation.md. The q4nx container of the same model is
+# correct, so that is what the message points at. Remove an entry the moment its numerics
+# pass the CPU reference.
+GGUF_DIRECT_UNREADY = {
+    "qwen3.5": ("the text is wrong: the weights pack and the kernels run, but every "
+                "Qwen3.5 GGUF-direct model tested emits gibberish (the q4_1 / f32 twin's "
+                "numerics). The q4nx container of the same model is correct."),
+}
+
+
 def kernel_set_name(dir_name):
     """The kernel set directory a build for this model is written to.
 
@@ -495,6 +509,7 @@ GGUF_ARCH_FAMILIES = {
     "qwen3next": "qwen3.5",
     "qwen35moe": "qwen3.6-moe",
     "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
+    "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
     "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
 }
 
@@ -1028,6 +1043,29 @@ def family_of_set(system_registry, kdir, name):
     except (OSError, ValueError):
         laid = None
     return (laid or {}).get("family")
+
+
+def family_precedence(content_family, content_where, base_family, base_name):
+    """Which of the two families a model's own content names to use, and where from.
+
+    The content (a GGUF's architecture, or config.json's model_type) says which
+    ARCHITECTURE the file is; the base chain says which MODEL it was built from. The
+    registry's families are finer than either: `qwen3-it` is Qwen3-4B-Instruct-2507 and
+    `qwen3-tk` is its Thinking sibling, while both GGUFs say arch `qwen3` -- so for a
+    finetune the BASE is the better answer, and it is a refinement (same prefix, longer
+    name). A VL model whose README names a text base keeps its VL family, because `qwen3`
+    is not a refinement of `qwen3vl`: the architecture is the more specific statement
+    there.
+    """
+    if content_family and base_family and base_family != content_family:
+        if base_family.lower().startswith(content_family.lower()):
+            return base_family, f"the base model '{base_name}' (a {content_family} variant)"
+        return content_family, content_where
+    if content_family:
+        return content_family, content_where
+    if base_family:
+        return base_family, f"the base model '{base_name}'"
+    return None, ""
 
 
 def family_from_kernels(system_registry, spec, roots, source=None, need_gguf=False):
@@ -2089,22 +2127,124 @@ def estimate_size(config_path):
 
 
 def estimate_size_dict(cfg):
-    """Registry 'size' (bytes) from an already-parsed config.json dict."""
+    """Registry 'size' (bytes) from an already-parsed config.json dict.
+
+    A VLM nests the decoder's geometry under `text_config` (Qwen3.5's published form,
+    and every VLM derivative of it), so the top level alone says nothing -- which is how
+    `Atomic-Germ/GRaPE-1.5-TEST-DONTDL` (a Qwen3.5-4B behind a joke name) ended up with
+    no size at all. Read the text tower when there is one, exactly as the recipes do.
+    """
     if not isinstance(cfg, dict):
         return None
     try:
-        hidden = cfg.get("hidden_size")
-        layers = cfg.get("num_hidden_layers")
+        tc = cfg.get("text_config")
+        c = tc if isinstance(tc, dict) else cfg
+        hidden = c.get("hidden_size")
+        layers = c.get("num_hidden_layers")
         if not hidden or not layers:
             return None
-        intermediate = cfg.get("intermediate_size")
+        intermediate = c.get("intermediate_size")
         per_layer = 12 * hidden * hidden
         if intermediate:
             per_layer += 3 * hidden * intermediate
-        total = per_layer * layers + 2 * hidden * (cfg.get("vocab_size") or hidden)
+        total = per_layer * layers + 2 * hidden * (c.get("vocab_size") or hidden)
         return max(int(round(total / 1e9 * 2) / 2 * 1e9), 1_000_000_000)
     except Exception:
         return None
+
+
+# safetensors dtype -> bytes per parameter. An index's `metadata.total_size` is in
+# BYTES, so the dtype is what turns it into a parameter count.
+DTYPE_BYTES_PER_PARAM = {"float32": 4.0, "float16": 2.0, "bfloat16": 2.0,
+                         "float8_e4m3fn": 1.0, "float8_e5m2": 1.0,
+                         "int8": 1.0, "uint8": 1.0}
+
+# A real model is at least ~100M parameters. Below that the file is a fixture or a
+# truncated header, and its tensor list is a worse clue than its byte size.
+MIN_PLAUSIBLE_PARAMS = 1e8
+
+
+def safetensors_params(cfg, repo, modelscope=False, local_dirs=(), tree=None):
+    """Parameter count from a repo's safetensors index, or None.
+
+    `model.safetensors.index.json` carries the exact byte total of every shard, and the
+    config's dtype says how many bytes a parameter is: that is the real count, not an
+    estimate from the geometry. Only an install-time tag/kernel hint -- the weights are
+    verified by hash.
+    """
+    want = "model.safetensors.index.json"
+    idx = None
+    for d in local_dirs:
+        if d and (Path(d) / want).is_file():
+            try:
+                idx = load_json(Path(d) / want)
+            except Exception:
+                idx = None
+            break
+    if idx is None and repo and (tree is None or want in root_file_names(tree)):
+        try:
+            with tempfile.TemporaryDirectory(prefix="oflm-add-st-") as tmp:
+                got = fetch_from_repo(repo, want, Path(tmp) / want,
+                                      modelscope=modelscope, force=True)
+                if got:
+                    idx = load_json(got)
+        except Exception:
+            idx = None
+    total = ((idx or {}).get("metadata") or {}).get("total_size")
+    dtype = None
+    if isinstance(cfg, dict):
+        tc = cfg.get("text_config")
+        dtype = (cfg.get("torch_dtype")
+                 or (tc.get("torch_dtype") if isinstance(tc, dict) else None)
+                 or cfg.get("dtype"))
+    bpp = DTYPE_BYTES_PER_PARAM.get(str(dtype))
+    if not total or not bpp:
+        return None
+    return total / bpp
+
+
+def size_from_set_name(name):
+    """The size marker of the kernel set that serves a model ('Qwen3.5-4B-NPU2' -> '4b').
+
+    The geometry already matched, so the set's size IS this model's size -- and it is the
+    one signal that needs no extra read at all.
+    """
+    size, _rest = _extract_size(_strip_npu2(name or ""))
+    return size
+
+
+def model_size_token(cfg=None, gguf_source=None, st_params=None, gguf_bytes=None,
+                     quant=None, set_name=None):
+    """The tag's size marker from the model's own NUMBERS, never its name.
+
+    In order of exactness, each skipped when its source is absent:
+      1. a GGUF's tensors -- every parameter is in the header, so this is the count;
+      2. a safetensors index over the dtype's bytes per parameter;
+      3. the config's geometry (a VLM's text tower included);
+      4. the GGUF's byte size over the quant's bytes per parameter -- last because it is
+         the noisy one: a K-quant file mixes formats and an embedded tokenizer is not
+         weights, which is how a 1.5B model got tagged 4.4b;
+      5. the kernel set that serves it -- the geometry matched, so its size is this
+         model's size.
+
+    A count below MIN_PLAUSIBLE_PARAMS is not a model (a fixture, a truncated header),
+    and the next source is used instead: a 72-parameter file must not be tagged "0b".
+    """
+    if gguf_source:
+        n = gguf_params(gguf_source)
+        if n and n >= MIN_PLAUSIBLE_PARAMS:
+            return size_token_from_bytes(n)
+    if st_params and st_params >= MIN_PLAUSIBLE_PARAMS:
+        return size_token_from_bytes(st_params)
+    if cfg:
+        est = estimate_size_dict(cfg)
+        if est:
+            return size_token_from_bytes(est)
+    if gguf_bytes and quant:
+        tok = gguf_size_token(gguf_bytes, quant)
+        if tok:
+            return tok
+    return size_from_set_name(set_name)
 
 
 def size_token_from_bytes(num_bytes):
@@ -2928,13 +3068,13 @@ def read_gguf_inventory(source, limit_mb=32):
         return None
 
 
-def gguf_params_size_token(gguf_source):
-    """A tag size marker from the GGUF's own tensors, or None.
+def gguf_params(gguf_source):
+    """The parameter count from a GGUF's own tensors, or None.
 
-    The last resort for a repo whose slug carries no size marker -- an April-Fool's joke repo,
-    a fine-tune named after its author's cat. Every parameter count is in the header, so the
-    size is derivable from the file, which is what "match by shape" has to mean. Only a
-    tag/kernel-matching hint: the weights are verified by hash, never by this number.
+    Every parameter is in the header, so this is the REAL count, not an estimate from
+    the geometry -- which is what a repo named after its author's cat needs, and what
+    the bytes-over-quant guess only approximates (a K-quant file mixes formats, and an
+    embedded tokenizer is not weights: that guess tagged a 1.5B model 4.4b).
     """
     inv = read_gguf_inventory(gguf_source)
     if not inv:
@@ -2946,7 +3086,13 @@ def gguf_params_size_token(gguf_source):
         for d in dims:
             n *= int(d)
         total += n
-    return size_token_from_bytes(total)
+    return total
+
+
+def gguf_params_size_token(gguf_source):
+    """A tag size marker from the GGUF's own tensors, or None (see gguf_params)."""
+    n = gguf_params(gguf_source)
+    return size_token_from_bytes(n) if n else None
 
 
 def family_from_gguf_arch(gguf_source):
@@ -3607,10 +3753,13 @@ def main():
     # base model), then the content (the GGUF header's architecture, the
     # config's model_type), and last the name.
     content_families = []
-    # The roots the open kernel sets live in: the user's, the system's, and the
-    # tree's own (src/xclbins -- a freshly exported set, which may be newer
-    # than the installed copy).
-    kernel_roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root(), tree_xclbins()]
+    # The roots the open kernel sets live in. The SHIPPED tree first: when several sets
+    # serve one geometry, the one the app ships is the stable answer, and a per-model
+    # sibling set or an install symlink in the user's directory (which sorts earlier by
+    # name, and is often a duplicate) should not be what a text model links to. Then the
+    # user's own (a set they converted), then the tree's src/xclbins (one `oflm add`
+    # just built).
+    kernel_roots = [find_system_xclbin_root(), user_xclbin_dir(args.xclbin_dir), tree_xclbins()]
     spec = None
     geom_dir = None                     # the set whose GEOMETRY this model needs
     geom_set = None                     # ... and its directory name (a label from here on)
@@ -3633,43 +3782,44 @@ def main():
         # decoder, and the M-RoPE lives in config.json), so the kernel family is `qwen2`
         # while the model is `qwen2vl` -- and the adapter that prepares images is picked by
         # the latter. For a text model the two agree, so this only changes VL installs.
+        content_fam, content_where = None, ""
         if gguf_mode and gguf_source is not None:
-            arch_fam = family_from_gguf_arch(gguf_source)
-            if arch_fam:
-                log(f"[INFO] family '{arch_fam}' from the GGUF architecture")
-                content_families.append(arch_fam)
+            content_fam = family_from_gguf_arch(gguf_source)
+            content_where = "the GGUF architecture"
+        if content_fam is None:
+            # No GGUF (or an arch the map does not know): the config's model_type is the
+            # file's own statement about itself, and for a VLM it names the wrapper.
+            content_fam = family_from_config_dict(get_peeked_config())
+            content_where = "config.json model_type"
         geom_dir, geom_set, geom_notes = scan_kernel_sets(
             spec, kernel_roots, source=gguf_source, need_gguf=gguf_mode)
-        if geom_set:
-            fam = family_of_set(system_registry, geom_dir, geom_set)
-            if fam:
-                log(f"[INFO] family '{fam}' from the kernel set '{geom_set}' (the same geometry)")
-                if fam not in content_families:
-                    content_families.append(fam)
+        # The SET names the kernels, never the model. `details.family` is the engine /
+        # adapter that runs a MODEL -- qwen3, qwen3-it, qwen3-tk, qwen3vl are four
+        # different entries for four different Qwen3 4B containers -- while a kernel
+        # set is shared by every model of one geometry. So a text Qwen3-4B fine-tune
+        # matches Qwen3-VL-4B-Instruct-NPU2's kernels and is NOT a qwen3vl; taking the
+        # set's registry family here is what said it was. The family comes from the
+        # model (arch, config, base chain); the set is the LAST resort below, for a
+        # model whose own content names nothing.
         fam, base_name = family_from_base_chain(system_registry, get_base_chain())
-        if fam and fam not in content_families:
-            log(f"[INFO] family '{fam}' from the base model '{base_name}'")
-            content_families.append(fam)
+        chosen, where = family_precedence(content_fam, content_where, fam, base_name)
+        if chosen:
+            content_families.append(chosen)
+            log(f"[INFO] family '{chosen}' from {where}")
     try:
         family = derive_family(system_registry, dir_name, args.family,
                                content_families=content_families)
     except SystemExit:
-        # No name marker, and no official entry can supply the family yet
-        # (that matching happens below). Climb the content instead, cheapest
-        # first: the GGUF header names its architecture; otherwise a
-        # config.json -- the repo's own, else its base-model chain's -- names
-        # its model_type. llama.cpp resolves the same way, from the file, not
-        # the repo slug.
+        # No name marker and no content family: the last thing that knows anything about
+        # this model is the kernel set that serves its geometry -- it was built for SOME
+        # model, and the registry ties that model to a family. The log says so, rather
+        # than presenting the set's model as if the model itself had said it.
         family = None
-        if args.family is None:
-            if gguf_source is not None:
-                family = family_from_gguf_arch(gguf_source)
-                if family:
-                    log(f"[INFO] family '{family}' from the GGUF architecture")
-            if family is None:
-                family = family_from_config_dict(get_peeked_config())
-                if family:
-                    log(f"[INFO] family '{family}' from config.json model_type")
+        if args.family is None and geom_set:
+            family = family_of_set(system_registry, geom_dir, geom_set)
+            if family:
+                log(f"[INFO] family '{family}' from the kernel set '{geom_set}' "
+                    f"(its own model -- this model names no family)")
         if family is None:
             raise
     npue_embed = family in NPU_EMBED_FAMILIES
@@ -3699,41 +3849,26 @@ def main():
         try:
             tag = derive_tag(dir_name, args.tag)
         except SystemExit:
-            # Chaotic slugs carry no size marker: guess from the GGUF's bytes
-            # and quant, else from the peeked config's geometry. Kernel
-            # matching keys off the tag size, so a logged guess beats a
-            # refusal; --tag still overrides.
+            # Chaotic slugs carry no size marker: take it from the model's own numbers
+            # (a GGUF's tensors, a safetensors index, the config's geometry), and only
+            # then from the bytes/quant guess or the set that serves it. Kernel matching
+            # keys off the tag size, so a logged guess beats a refusal; --tag still
+            # overrides.
             if args.tag is not None:
                 raise
-            size_guess = None
-            if gguf_mode:
-                size_guess = gguf_size_token(
-                    gguf_byte_size(repo, modelscope, local_dir, cache,
-                                   gguf_name, tree),
-                    gguf_quant_of(gguf_name))
-            if size_guess is None:
-                size_guess = size_token_from_bytes(
-                    estimate_size_dict(get_peeked_config()))
-            if size_guess is None:
-                # The file itself: the parameter count is in the header, so a repo whose
-                # name says nothing still installs at its real size. The chosen GGUF is not
-                # known yet here (that happens after the tag), so peek ANY .gguf in the
-                # repo -- every quant of one model has the same parameter count.
-                names = ([p.name for p in local_dir.iterdir() if p.suffix == ".gguf"]
-                         if local_dir else
-                         [n for n in root_file_names(tree) if n.endswith(".gguf")])
-                if names:
-                    pick = sorted(names)[0]
-                    if local_dir:
-                        src = str(local_dir / pick)
-                    elif modelscope:
-                        src = f"https://modelscope.ai/models/{repo}/resolve/master/{pick}"
-                    else:
-                        src = f"https://huggingface.co/{repo}/resolve/main/{pick}"
-                    size_guess = gguf_params_size_token(src)
+            _cfg = get_peeked_config()
+            size_guess = model_size_token(
+                cfg=_cfg,
+                gguf_source=(gguf_source if gguf_mode else None),
+                st_params=safetensors_params(_cfg, repo, modelscope,
+                                             (local_dir, cache), tree),
+                gguf_bytes=(gguf_byte_size(repo, modelscope, local_dir, cache,
+                                           gguf_name, tree) if gguf_mode else None),
+                quant=gguf_quant_of(gguf_name) if gguf_mode else None,
+                set_name=geom_set)
             if size_guess is None:
                 raise
-            log(f"[INFO] tag size '{size_guess}' guessed for '{dir_name}'; "
+            log(f"[INFO] tag size '{size_guess}' read from the model for '{dir_name}'; "
                 "pass --tag to override")
             tag = derive_tag(dir_name, None, size_guess)
         bucket, size_token = tag.split(":", 1)
@@ -3767,6 +3902,14 @@ def main():
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
             # open_kernels manifest. Just confirm the family is recognized.
             xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
+        elif family in GGUF_DIRECT_UNREADY and not args.force:
+            # It would install, load and answer -- wrongly. Refuse by name, and say how
+            # to see it anyway (--force), because the numerics work needs to run it.
+            raise SystemExit(
+                f"{repo_arg}: {family} GGUF-direct is not ready -- "
+                f"{GGUF_DIRECT_UNREADY[family]}\n"
+                f"Install the container instead, or pass --force to install it anyway "
+                f"(it will emit wrong text).")
         else:
             if args.open_kernels:
                 kdir = Path(args.open_kernels) if manifest_supports_gguf(

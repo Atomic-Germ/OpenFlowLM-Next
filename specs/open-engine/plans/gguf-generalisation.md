@@ -59,6 +59,32 @@ dict/array literal, which Jinja allows. Gemma 3's translation template ends a 60
 language map with one: the model loaded on the NPU and died in the template parser.
 Patched locally in `src/include/minja/minja.hpp` (both parsers).
 
+**1e. Identity: the family is the model's, the size is the file's.** Two more false
+statements, both from a name doing work a number should do:
+
+* A kernel set names the KERNELS, not the model. `details.family` is the engine/adapter
+  (`qwen3`, `qwen3-it`, `qwen3-tk`, `qwen3vl` are four entries for four Qwen3 4B
+  containers) while one set serves every model of a geometry -- so a text Qwen3-4B
+  fine-tune matching `Qwen3-VL-4B-Instruct-NPU2`'s kernels was logged (and would have
+  been installed) as `qwen3vl`. The set now only supplies a family as the LAST resort,
+  when the model itself names none.
+* The family choice between the arch and the base chain is explicit
+  (`family_precedence`): the base wins when it REFINES the arch (`qwen3` -> `qwen3-it`,
+  which is what an Instruct-2507 fine-tune is), and the arch wins otherwise (`qwen3vl`
+  keeps its VL family against a text base). The log names the source it used.
+* The tag size comes from the model's NUMBERS, in order of exactness: a GGUF's tensors
+  (the real parameter count), a safetensors index over the dtype, the config's geometry
+  (a VLM's `text_config` included -- the top level has no `hidden_size`, which is why
+  `GRaPE-1.5-TEST-DONTDL` had no size at all), the bytes/quant guess, and last the set
+  that serves it. `mradermacher/GRaPE-1.5-i1-GGUF` (arch `qwen35`, name says 1.5) now
+  installs as `qwen3.5`, `4.2b`, on `Qwen3.5-4B-NPU2` -- every fact from the file.
+
+**Bucket 3 is now a refusal, not a silent wrong answer.** That GRaPE install loads and
+answers, and the answer is gibberish -- the same wall as every Qwen3.5 GGUF-direct model.
+`oflm add` refuses `qwen3.5` GGUF-direct by name (`GGUF_DIRECT_UNREADY`), says why, and
+points at the q4nx container; `--force` still installs it for the numerics work.
+
+
 
 ## 2. Two parser gaps  (bucket 4 -- cheap, and both are "read what llama.cpp wrote")
 

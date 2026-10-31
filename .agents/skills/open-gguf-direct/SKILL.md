@@ -30,6 +30,21 @@ description: Direct GGUF loading for the open engines (supersedes q4nx for compa
 >   in `src/include/minja/minja.hpp` (both parsers).
 > * **gemma3-1b is a DESIGN wall, not a catalogue point**: hidden 1152 is not a multiple
 >   of the 256-wide q4 k-tile. `candidates/gemma3-1b.json` is that wall recorded.
+> * **A kernel set names the KERNELS, not the model.** `details.family` is the
+>   engine/adapter (`qwen3`, `qwen3-it`, `qwen3-tk`, `qwen3vl` are four Qwen3 4B
+>   containers), while one set serves every model of a geometry. So a text Qwen3-4B
+>   fine-tune that matches `Qwen3-VL-4B-Instruct-NPU2`'s kernels is NOT a `qwen3vl`; the
+>   set only supplies a family as the last resort. `family_precedence()` picks between the
+>   arch and the base chain: the base wins when it refines the arch (`qwen3` -> `qwen3-it`),
+>   the arch wins otherwise (`qwen3vl` against a text base).
+> * **The tag size comes from the model's numbers**, in order: GGUF tensors (real
+>   parameter count), safetensors index / dtype, the config's geometry (a VLM's
+>   `text_config` included -- the top level has no `hidden_size`), the bytes/quant guess,
+>   then the serving set's name. `mradermacher/GRaPE-1.5-i1-GGUF` (arch qwen35, name says
+>   1.5) installs as `qwen3.5`, `4.2b`, on `Qwen3.5-4B-NPU2` with nothing from the name.
+> * **qwen3.5 GGUF-direct is refused by name** (`GGUF_DIRECT_UNREADY`): it installs,
+>   loads and emits gibberish -- the q4_1/f32 twin's numerics, bucket 3. The q4nx
+>   container is correct; `--force` installs it anyway for the numerics work.
 
 > **Branch scope (2026-10-25):** this document describes the *whole*
 > GGUF-direct feature, which is spread across branches. On **this branch
