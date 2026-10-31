@@ -1112,6 +1112,11 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     install(DIRECTORY "${_oflm_utilities_src}/dit-chain/"
         DESTINATION "${OFLM_SHARE_DESTINATION}/dit-chain"
         PATTERN "__pycache__" EXCLUDE)
+    # One module the converter imports lives beside it rather than in it: the safetensors
+    # range reader (remote tensor headers/bytes without downloading the file). It is ours --
+    # python3-safetensors reads local files and cannot replace it.
+    install(FILES "${_oflm_utilities_src}/hf_safetensors.py"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/dit-chain")
     # The converter is Python and imports the pipeline's own modules -- klein_pipeline,
     # vae_decoder/vae_encoder, and the packers under designs/. Only the .py is needed; the
     # kernels it drives are the xclbins installed above.
@@ -1713,9 +1718,9 @@ set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
 # database exists; on an RPM-only build host it cannot map Fedora sonames and
 # would fail the package, so the explicit list is the fallback there.
 set(CPACK_DEBIAN_PACKAGE_NAME "openflowlm")
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Atomic-Germ <openflowlm@atomic-germ>")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Atomic-Germ <02-germaine-atomic@icloud.com>")
 set(CPACK_DEBIAN_PACKAGE_SECTION "science")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, python3-numpy, python3-ml-dtypes, libxrt-npu2")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, python3-numpy, python3-ml-dtypes, python3-huggingface-hub, python3-safetensors+torch, libxrt-npu2")
 # The diffusion converter (share/oflm/dit-chain) imports numpy and ml_dtypes. Both are in
 # every distro's repo, and nothing here needs a specific version, so they are declared rather
 # than vendored: dnf/apt resolve them.
