@@ -1,0 +1,79 @@
+{
+ "tool": "tail-crossover",
+ "version": 1,
+ "phase": 27,
+ "scope": "Core-level block-vs-sequential cost of a padded 256 dispatch, 8 layers",
+ "provenance": {
+  "driver": "Models/qwen38-27b/prefill-perf/block-v1/build/open_qwen36_cli",
+  "block_route": "--gemm-block",
+  "sequential_route": "no --gemm-block",
+  "why_not_oflm": "oflm has no headless run invocation; the same Core bodies are used",
+  "layers": 8,
+  "max_tokens": 1,
+  "timing": "process wall, single pass per point"
+ },
+ "physical_block": 256,
+ "shipped_crossover": 64,
+ "shipped_crossover_provenance": "engine.cpp:178, inherited from the Qwen3.6-35B MoE",
+ "measured_crossover": 128,
+ "measured_crossover_rule": "smallest n where padded-block wall <= sequential wall, conservative side",
+ "block_cost_flat_ms": [
+  6370,
+  6790
+ ],
+ "rows": [
+  {
+   "n": 1,
+   "seq_ms": 2050,
+   "block_ms": 6530,
+   "ratio": 3.185
+  },
+  {
+   "n": 8,
+   "seq_ms": 2450,
+   "block_ms": 6630,
+   "ratio": 2.706
+  },
+  {
+   "n": 32,
+   "seq_ms": 3710,
+   "block_ms": 6690,
+   "ratio": 1.803
+  },
+  {
+   "n": 64,
+   "seq_ms": 5500,
+   "block_ms": 6510,
+   "ratio": 1.184
+  },
+  {
+   "n": 128,
+   "seq_ms": 8980,
+   "block_ms": 6450,
+   "ratio": 0.718
+  },
+  {
+   "n": 192,
+   "seq_ms": 12400,
+   "block_ms": 6370,
+   "ratio": 0.514
+  },
+  {
+   "n": 255,
+   "seq_ms": 16030,
+   "block_ms": 6790,
+   "ratio": 0.424
+  },
+  {
+   "n": 256,
+   "seq_ms": null,
+   "block_ms": 6470,
+   "ratio": null
+  }
+ ],
+ "notes": [
+  "block cost is flat across active rows: a full-width dispatch whatever t_real is",
+  "n=64 block/seq = 1.18, so the shipped 64 regresses prompts of 64-127 tokens",
+  "n=128 block/seq = 0.72, the first measured point where the block wins"
+ ]
+}
