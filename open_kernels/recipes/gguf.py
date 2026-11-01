@@ -44,7 +44,8 @@ def section(spec, max_ctx: int, programs, twins_built: bool | None = None) -> st
     f32-scale twin built": the twins are no longer what a GGUF runs on, so a model
     that cannot build one (a split FF: Qwen3-14B) still gets a section -- that was the
     bug that made `oflm add` refuse Qwen/Qwen3-14B-GGUF while the set existed. The MoE
-    passes False while GGUF_EXPERT_OPS_READY is off.
+    used to pass False because its expert pack ops did not exist (GGUF_EXPERT_OPS_READY);
+    they do now, so every family with a GGUF spec gets the section.
     """
     if spec.quant != BASE_QUANT or twins_built is False:
         # `twins_built=False` is now an explicit "this family is not GGUF-ready yet"

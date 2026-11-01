@@ -278,9 +278,14 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich, bool pos
     if (name == "model.norm.weight") return "output_norm.weight";
     if (name == "lm_head.weight") return "output.weight";
     std::string n = name;
+    // Both container spellings: the dense families use `model.layers.{l}.`, the MoE
+    // container (utilities/q4nx-build/q4nx/models/qwen35moe.py) uses `model.layer.{l}.`.
+    // They name the same GGUF tensors, so both resolve to `blk.{l}.` -- exactly as the
+    // two token-table spellings above do.
     const std::string layers = "model.layers.";
-    if (n.rfind(layers, 0) == 0) {
-        n = "blk." + n.substr(layers.size());
+    const std::string layer = "model.layer.";
+    if (n.rfind(layers, 0) == 0 || n.rfind(layer, 0) == 0) {
+        n = "blk." + n.substr(n.rfind(layers, 0) == 0 ? layers.size() : layer.size());
         const auto dot = [&](const std::string& from, const std::string& to) {
             const std::string a = "." + from;
             const auto pos = n.find(a);
@@ -317,6 +322,18 @@ std::string GgufFile::gguf_name(const std::string& name, bool sandwich, bool pos
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
         dot("mlp.down_proj", ".ffn_down");
+        // The MoE block (qwen3.6-moe / qwen3.5-moe): the container flattens the routed
+        // experts into one [E*n, k] tensor per projection, the GGUF keeps them 3-D
+        // [k, n, E] under llama.cpp's *_exps names. The shared expert is *_shexp, and
+        // its scalar gate plus the router are f32 vectors/matrices, not chunks.
+        dot("mlp.gate_exps_proj", ".ffn_gate_exps");
+        dot("mlp.up_exps_proj", ".ffn_up_exps");
+        dot("mlp.down_exps_proj", ".ffn_down_exps");
+        dot("mlp.share_gate_exps_proj", ".ffn_gate_shexp");
+        dot("mlp.share_up_exps_proj", ".ffn_up_shexp");
+        dot("mlp.share_down_exps_proj", ".ffn_down_shexp");
+        dot("moe_router", ".ffn_gate_inp");
+        dot("shared_expert_gate", ".ffn_gate_inp_shexp");
     }
     return n;
 }
@@ -681,7 +698,10 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
     const TensorInfo& t = tensor(name);
     const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
     if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
-    const uint64_t nrows = t.dims.size() >= 2 ? t.dims[1] : 1u;  // 1-D tensors are a single row
+    // A row index is a FLAT row of the tensor: for a 2-D [rows, cols] it is dims[1], but a
+    // MoE expert tensor is 3-D ([in, n, experts]) and its rows are n * experts. Counting
+    // only dims[1] refused every expert but the first (the packer reads them by flat row).
+    const uint64_t nrows = cols ? t.nvalues() / cols : 0;
     if (row >= nrows) fail("row " + std::to_string(row) + " past " + name);
     dequant_row(t, row, dim, out);
 }

@@ -99,13 +99,15 @@ def q8_chunk_bytes(quant: str) -> int:
     raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
 
 
-# The MoE family's GGUF-direct twin: the expert weights are 3D tensors
-# ([experts, n, k]), and the pack ops that lay them out (expert_stripes,
-# expert_down) have no GGUF form yet -- a GGUF's expert tensors are
-# quantized, and the packer would have to requantize and re-stripe them.
-# Until those ops exist the family ships no twin: a manifest that advertises
-# the section would send the engine to kernels whose experts it cannot pack.
-GGUF_EXPERT_OPS_READY = False
+# The MoE family's GGUF-direct twin. The expert weights are 3-D tensors
+# ([in, n, experts], llama.cpp's ffn_{up,gate,down}_exps), where a container holds
+# one flattened [E*n, k] tensor per projection. The pack ops therefore have a GGUF
+# source form (`expert_stripes_gguf`, `expert_down_gguf`, pools.cpp) that reads the
+# 3-D raster a row at a time and requantizes to the same q4_1 chunks; the
+# DESTINATION stripe / down layout, and every kernel that reads it, is unchanged.
+# The shared expert is an ordinary projection (std_perm_gguf) and the router needs
+# the transpose the container's conversion bakes in.
+GGUF_EXPERT_OPS_READY = True
 
 
 def pool_quant(spec: ModelSpec) -> str:
@@ -1050,18 +1052,29 @@ def pack_plan(spec: ModelSpec) -> dict:
     L, C = layout(spec), common(spec)
     E, hid, ff = spec.num_experts, spec.hidden, spec.moe_intermediate
     pre = "model.layer.{l}."
+    # A GGUF keeps the routed experts 3-D ([in, n, experts]) instead of flattening them
+    # into one [E*n, k] tensor, so only the SOURCE side of the two expert ops differs;
+    # the destination layout and every kernel that reads it are unchanged. The shared
+    # expert is an ordinary projection and follows the same quant -> op rule as the rest.
+    stripes_op = "expert_stripes_gguf" if spec.reads_gguf else "expert_stripes"
+    down_op = "expert_down_gguf" if spec.reads_gguf else "expert_down"
     experts = [
-        {"op": "expert_stripes", "up": pre + "mlp.up_exps_proj.weight", "gate": pre + "mlp.gate_exps_proj.weight",
+        {"op": stripes_op, "up": pre + "mlp.up_exps_proj.weight", "gate": pre + "mlp.gate_exps_proj.weight",
          "dst": 0, "experts": E, "stripes": C.STRIPES_PER_PROJ, "stripe_bytes": C.STRIPE, "in_dim": hid},
-        {"op": "expert_down", "tensor": pre + "mlp.down_exps_proj.weight", "dst": L.POOL_DOWN, "experts": E,
+        {"op": down_op, "tensor": pre + "mlp.down_exps_proj.weight", "dst": L.POOL_DOWN, "experts": E,
          "expert_bytes": C.UP_BYTES},
-        {"op": "std_perm", "tensor": pre + "mlp.share_up_exps_proj.weight", "dst": L.POOL_SHARE_UP,
-         "nch": q4_chunks(ff, hid), "in_dim": hid},
-        {"op": "std_perm", "tensor": pre + "mlp.share_gate_exps_proj.weight", "dst": L.POOL_SHARE_GATE,
-         "nch": q4_chunks(ff, hid), "in_dim": hid},
-        {"op": "std_perm", "tensor": pre + "mlp.share_down_exps_proj.weight", "dst": L.POOL_SHARE_DOWN,
-         "nch": q4_chunks(hid, ff), "in_dim": ff},
+        proj_op(spec, "shared", pre + "mlp.share_up_exps_proj.weight", L.POOL_SHARE_UP, ff, hid, hid),
+        proj_op(spec, "shared", pre + "mlp.share_gate_exps_proj.weight", L.POOL_SHARE_GATE, ff, hid, hid),
+        proj_op(spec, "shared", pre + "mlp.share_down_exps_proj.weight", L.POOL_SHARE_DOWN, hid, ff, ff),
     ]
+    # The router is [experts, hidden] in a GGUF (llama.cpp's ffn_gate_inp) and
+    # [hidden, experts] in the container (q4nx-build transposes it), so a GGUF source
+    # needs the transpose the container's `put` does not.
+    def router_op(dst: int) -> dict:
+        if spec.reads_gguf:
+            return {"op": "transpose", "tensor": pre + "moe_router.weight", "dst": dst,
+                    "rows": E, "cols": hid, "elem": 2}
+        return {"op": "put", "tensor": pre + "moe_router.weight", "dst": dst, "cap": hid * E * 2}
     plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": pool_chunk(spec), "layer_types": {},
                   "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
                               "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight", "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]},
@@ -1077,10 +1090,20 @@ def pack_plan(spec: ModelSpec) -> dict:
             ],
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.C_LNW, "cap": ELEM},
-                {"op": "put", "tensor": pre + "linear_attn.ssm_alpha_proj.weight", "dst": side + L.SIDE_ALPHA,
-                 "cap": L.SIDE_BETA - L.SIDE_ALPHA},
-                {"op": "put", "tensor": pre + "linear_attn.ssm_beta_proj.weight", "dst": side + L.SIDE_BETA,
-                 "cap": L.SIDE_SMALL - L.SIDE_BETA},
+                # alpha / beta are quantized in a GGUF (llama.cpp quantizes the 2-D
+                # projections), so they are decoded through `transpose` -- which is also
+                # the layout a GGUF needs: [heads, hidden] there, [hidden, heads] in the
+                # container the conversion writes.
+                ({"op": "transpose", "tensor": pre + "linear_attn.ssm_alpha_proj.weight",
+                  "dst": side + L.SIDE_ALPHA, "rows": spec.lin_value_heads, "cols": hid, "elem": 2}
+                 if spec.reads_gguf else
+                 {"op": "put", "tensor": pre + "linear_attn.ssm_alpha_proj.weight", "dst": side + L.SIDE_ALPHA,
+                  "cap": L.SIDE_BETA - L.SIDE_ALPHA}),
+                ({"op": "transpose", "tensor": pre + "linear_attn.ssm_beta_proj.weight",
+                  "dst": side + L.SIDE_BETA, "rows": spec.lin_value_heads, "cols": hid, "elem": 2}
+                 if spec.reads_gguf else
+                 {"op": "put", "tensor": pre + "linear_attn.ssm_beta_proj.weight", "dst": side + L.SIDE_BETA,
+                  "cap": L.SIDE_SMALL - L.SIDE_BETA}),
                 {"op": "put", "tensor": pre + "linear_attn.ssm_a", "dst": side + L.SIDE_SMALL,
                  "cap": spec.lin_value_heads * 4},
                 {"op": "put", "tensor": pre + "linear_attn.ssm_dt.bias", "dst": side + L.SIDE_SMALL + spec.lin_value_heads * 4,
@@ -1089,7 +1112,7 @@ def pack_plan(spec: ModelSpec) -> dict:
                  "taps": spec.conv_kernel, "groups": nch // 1024, "width": 1024},
                 {"op": "put", "tensor": pre + "linear_attn.ssm_norm.weight", "dst": L.C_NW, "cap": spec.lin_value_dim * 2},
                 {"op": "put", "tensor": pre + "post_attention_layernorm.weight", "dst": L.C_POSTLN, "cap": ELEM},
-                {"op": "put", "tensor": pre + "moe_router.weight", "dst": L.C_RW, "cap": hid * E * 2},
+                router_op(L.C_RW),
                 {"op": "put", "tensor": pre + "shared_expert_gate.weight", "dst": L.C_SGW, "cap": ELEM},
                 proj_op(spec, "linear_out", pre + "linear_attn.ssm_out_proj.weight", L.C_WOUT,
                         hid, vw, vw),
@@ -1112,7 +1135,7 @@ def pack_plan(spec: ModelSpec) -> dict:
                 {"op": "put", "tensor": pre + "post_attention_layernorm.weight", "dst": L.CA_POSTLN, "cap": ELEM},
                 {"op": "put", "tensor": pre + "self_attn.q_norm.weight", "dst": L.CA_META, "cap": hd * 2},
                 {"op": "put", "tensor": pre + "self_attn.k_norm.weight", "dst": L.CA_META + hd * 2, "cap": hd * 2},
-                {"op": "put", "tensor": pre + "moe_router.weight", "dst": L.CA_RW, "cap": hid * E * 2},
+                router_op(L.CA_RW),
                 {"op": "put", "tensor": pre + "shared_expert_gate.weight", "dst": L.CA_SGW, "cap": ELEM},
             ],
         }
@@ -1577,8 +1600,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(LIMITS["n_cols"])}}
-    # No f32-scale twins: a GGUF model runs on the q4_1 builds above (recipes/gguf.py).
-    # The GGUF section still waits on the expert pack ops (GGUF_EXPERT_OPS_READY).
+    # No f32-scale twins: a GGUF model runs on the q4_1 builds above, with the
+    # section's GGUF-reading pack ops (recipes/gguf.py section()).
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

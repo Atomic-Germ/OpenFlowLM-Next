@@ -57,6 +57,27 @@ def test_reads_gguf_names_both_gguf_quant_laws():
         assert replace(s, quant=q).reads_gguf is want, q
 
 
+def test_the_moe_gguf_section_packs_three_d_experts():
+    """A GGUF keeps the routed experts 3-D ([in, n, experts]) while a container flattens
+    them into one [E*n, k] tensor per projection. The destination stripes are the same,
+    but the source reader is not -- so the section must name the GGUF forms, and the
+    shared expert (an ordinary projection) and the router (which the container stores
+    already transposed) must follow too. A section naming the container ops fails at
+    load, on hardware, long after `oflm add` said it worked."""
+    m = manifest(_spec("qwen36-35b-a3b"), 4096)
+    g = m["gguf"]
+    for lt in ("linear_attention", "full_attention"):
+        pool = [o["op"] for o in g["layer_types"][lt]["pack"]["pool"]]
+        assert pool[:2] == ["expert_stripes_gguf", "expert_down_gguf"]
+        assert pool[2:5] == ["std_perm_gguf"] * 3
+        assert "transpose" in [o["op"] for o in g["layer_types"][lt]["pack"]["consts"]]
+        # the container plan keeps its own readers
+        base = [o["op"] for o in m["layer_types"][lt]["pack"]["pool"]]
+        assert base[:2] == ["expert_stripes", "expert_down"]
+        assert base[2:5] == ["std_perm"] * 3
+        assert "put" in [o["op"] for o in m["layer_types"][lt]["pack"]["consts"]]
+
+
 QWEN25VL_GGUF = {
     "general.architecture": "qwen2vl",
     "qwen2vl.embedding_length": 2048,
