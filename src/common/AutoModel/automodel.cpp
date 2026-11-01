@@ -44,6 +44,21 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
     if (!use_open) {
+        // A GGUF INSTALL HAS NO CLOSED PATH AT ALL: the closed engine reads a .q4nx container,
+        // and a GGUF model ships model.gguf instead. Falling through to it is not a fallback,
+        // it is a guaranteed failure several layers down ("Failed to open file: ...
+        // model.safetensors" from a family whose loader expects one) -- so say what is
+        // actually wrong, here, once.
+        std::error_code ec;
+        const bool gguf_install =
+            std::filesystem::is_regular_file(std::filesystem::path(this->lm_config->model_path) / "model.gguf", ec) &&
+            !std::filesystem::is_regular_file(std::filesystem::path(this->lm_config->model_path) / "model.q4nx", ec);
+        if (gguf_install)
+            throw std::runtime_error(
+                "this model was installed from a GGUF and no open kernel set serves it (" +
+                this->lm_config->model_name + "); the closed engine reads a .q4nx container, so "
+                "there is nothing for it to load. Reinstall with `oflm add`, or check that the "
+                "kernel set the install linked is present.");
         // Name the engine: a closed-engine crash otherwise reads as an open-kernel bug (#215).
         header_print("OFLM", family_label + " on the closed engine ("
                      + (kernels.empty() ? "no open kernels installed for " + this->lm_config->model_name
