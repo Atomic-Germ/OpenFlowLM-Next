@@ -49,6 +49,11 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_LAYER_MAJOR", "OFLM_OPEN_MOE_BATCH",
     "OFLM_OPEN_MOE_BATCH_LOG", "OFLM_OPEN_MOE_REDISPATCH",
     "OFLM_OPEN_OMP_PASSIVE", "OFLM_OPEN_OMP_THREADS",
+    # Phase 23 attribution only: name projection roles that run an experimental
+    # arithmetic, and which one. Not settings -- they exist so a closed decision can be
+    # re-measured, they default to empty (the frozen `paired` route), and they are read
+    # by the standalone open_qwen36_cli rather than by the shipped oflm CLI.
+    "OFLM_OPEN_PREFILL_ROLES", "OFLM_OPEN_PREFILL_ROLE_MODE",
     "OFLM_OPEN_QUIET", "OFLM_OPEN_READ_FENCE",
     "OFLM_OPEN_ROUTE_SENTINEL", "OFLM_OPEN_SPIN_US",
     "OFLM_OPEN_STAGE_MAJOR", "OFLM_OPEN_STEP_TRACE",
