@@ -195,7 +195,7 @@ Same pass: **derive the packaging list from imports** rather than remembering it
 converter's modules, `open_kernels/*.py`), so "our module isn't installed" stops recurring.
 
 
-## 4b. The MoE twin (Qwen3.6-35B-A3B == Qwen3.5-35B-A3B) -- the next piece
+## 4b. The MoE twin (Qwen3.6-35B-A3B == Qwen3.5-35B-A3B) -- DONE (e6d3d0f)
 
 The geometry is already read (`qwen35moe` has a GGUF builder) and the set exists; what is
 missing is the manifest's `gguf` section, gated off by `GGUF_EXPERT_OPS_READY = False` in
@@ -233,6 +233,17 @@ weights (`OFLM_OPEN_DUMP_POOLS` + the fp64 reference as for qwen35).
 
 **Do not** emit the section before the ops exist. The flag exists because that failure is
 silent-until-load.
+
+**Outcome (2026-10-31).** `GGUF_EXPERT_OPS_READY = True`; the two ops gained GGUF forms
+(`expert_stripes_gguf`, `expert_down_gguf`) over a factored-out per-chunk law
+(`gguf_chunk`, shared with `std_perm_gguf`). A Q4_1 source is used directly; Q8_0/K/IQ4
+requantize. The shared expert, router and alpha/beta got their GGUF forms in the same
+plan. `gguf_pack_test` pins the packed bytes against synthetic 3-D Q4_1 tensors, and
+`test_gguf_section.py` pins the section. `oflm add
+mradermacher/Qwen3.6-35B-A3B-i1-GGUF` installs and packs all 40 layers from the real
+file; the load then stops at the 542 MB lm_head pool (~26 GB of host-only BOs on this
+Krackan box). That is the open engine's per-layer expert-pool memory model, not the
+pack: the closed kernels stream from the container instead of copying 40 x 512 MB.
 
 ## 5. ASR, then embedding  (bucket 5 -- not started)
 

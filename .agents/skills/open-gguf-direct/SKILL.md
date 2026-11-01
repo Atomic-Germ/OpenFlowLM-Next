@@ -1781,12 +1781,53 @@ hash — that is why the export cache keys on content, not on the artifact), so
 "did my change alter the design?" is answered at the recipe/geometry level or by
 re-running the model, never by hashing final.xclbin.
 
+## The MoE twin is DONE: the 35B's experts come from the GGUF's 3-D tensors (2026-10-31)
+
+`GGUF_EXPERT_OPS_READY = True`; `e6d3d0f`. The routed experts are the one place a
+container and a GGUF do not have the same tensor shape: a `.q4nx` flattens them into
+one `[E*n, k]` tensor per projection, llama.cpp keeps them 3-D `[in, n, experts]`
+(`ffn_up_exps` / `ffn_gate_exps` / `ffn_down_exps`). The destination stripe / down
+layout and every kernel are unchanged; only the source side is new:
+
+- `expert_stripes_gguf` / `expert_down_gguf` (pools.cpp) read the 3-D raster a row at
+  a time. `gguf_chunk` is `std_perm_gguf`'s per-chunk law factored out (Q4_0/Q4_1 exact
+  permutation + scale widening; Q8_0/K/IQ4 decode + requant), so an expert's file chunk
+  `(rowblock, ktile)` becomes one q4_1 pool chunk and the existing stripe/down
+  permutation copies it into place.
+- **A Q4_1 source is used DIRECTLY** — no requant. The i1 repos ship the experts at
+  Q4_1; only the non-expert Q6_K tensors (head/embedding) requantize. `gguf_pack_test`
+  compares the packed expert bytes to the source blocks bit-exactly.
+- The shared expert is an ordinary `std_perm_gguf`; the router is `[experts, hidden]`
+  in a GGUF (`ffn_gate_inp`) and needs a `transpose` the container conversion bakes in;
+  `ssm_alpha`/`ssm_beta` are quantized in a GGUF and are decoded through `transpose`
+  too. All in `qwen36moe.pack_plan` under `spec.reads_gguf`.
+- `GgufFile::gguf_name` accepts the MoE container's **singular** `model.layer.{l}.`
+  spelling (dense uses `model.layers.{l}.`) and maps `*_exps`/`*_shexp`/`ffn_gate_inp`.
+- `GgufFile::embed_row` counts **flat** rows (`n * experts`), not `dims[1]` — every
+  expert but the first was refused. `consts_as_bf16` asks a GGUF for its type instead
+  of assuming 2 bytes = bf16 (an f16 router was reinterpreted).
+- `derive_config` (core.cpp) no longer requires the dense `feed_forward_length` for a
+  MoE (`expert_feed_forward_length` is the one it has) and derives the MoE keys and
+  `full_attention_interval` for a config-less GGUF.
+
+**The 35B still does not fit this laptop, and it is not the pack.** `oflm add
+mradermacher/Qwen3.6-35B-A3B-i1-GGUF` installs, links `Qwen3.6-35B-A3B-NPU2`, and the
+load packs **all 40 layers** from the real 21.8 GB file with no pack error. It then
+cannot map the 542 MB lm_head pool at a ~26 GB device offset: the open engine keeps
+one 512 MB expert pool **per layer resident** (40 × 512 MB = 20.5 GB) plus ~120 small
+per-layer BOs, and this Krackan box's host-only BO ceiling is ~26 GB. The closed
+kernels run it because they do not make that copy — they stream from the container.
+Reducing the open footprint means a device-side/pool-lifetime change or an
+active-expert cache, not a pack or quant change.
+
+Pinned by: `gguf_pack_test` (synthetic 3-D Q4_1 up/gate/down, 3-D `embed_row`, f16
+router transpose) and `specs/open-engine/tests/test_gguf_section.py` (the MoE section's
+op names, and the untouched container plan).
+
 ## Still open (Phase-MoE / later)
 
-- qwen36moe recipe f32 twins for the OTHER designs of the family: dx/dx_f32
-  and lm_head law-combos where the family ships them, plus the
-  expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors) and the
-  singular/plural `model.layer(s)` name mismatch.
+- The open MoE's per-layer expert pools do not fit a 35B on a ~26 GB BO ceiling (see
+  above). The pack is correct; the memory model is the remaining work.
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
 - End-to-end `flm serve` with a dense-family GGUF (vocab must match a shipped
   spec exactly; none in the HF cache qualifies today — Peach is llama-arch
