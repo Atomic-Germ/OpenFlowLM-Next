@@ -175,7 +175,27 @@ nlohmann::json derive_config(const GgufFile& g) {
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
     c["num_attention_heads"] = u("attention.head_count");
     c["num_key_value_heads"] = u("attention.head_count_kv");
-    c["intermediate_size"] = u("feed_forward_length");
+    // A dense arch has feed_forward_length; a MoE has expert_feed_forward_length and no
+    // dense FFN at all. Requiring the dense key refused Qwen3.6-35B-A3B at load ("no
+    // metadata key qwen35moe.feed_forward_length") although the install was complete.
+    // The open engine reads the FFN width from the manifest's `moe` block, so this is
+    // informational: fill it from the expert width when that is what the file has.
+    if (g.kv_has(arch + ".feed_forward_length"))
+        c["intermediate_size"] = u("feed_forward_length");
+    else if (g.kv_has(arch + ".expert_feed_forward_length"))
+        c["intermediate_size"] = u("expert_feed_forward_length");
+    // The MoE block's geometry, for a GGUF with no config.json at all (the hub's config
+    // is merged over this and wins where it has the key). `full_attention_interval` is
+    // what check_model derives `layer_types` from when the file has no such list.
+    if (g.kv_has(arch + ".expert_count")) {
+        c["num_experts"] = u("expert_count");
+        c["num_experts_per_tok"] = u("expert_used_count");
+        c["moe_intermediate_size"] = u("expert_feed_forward_length");
+    }
+    if (g.kv_has(arch + ".full_attention_interval"))
+        c["full_attention_interval"] = u("full_attention_interval");
+    if (g.kv_has(arch + ".ssm.time_step_rank"))
+        c["linear_num_value_heads"] = u("ssm.time_step_rank");
     if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
@@ -878,6 +898,12 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         for (const auto& [kn, kd] : w_->kernels)
             if (kd.patch == "attnpos" && kd.rb > 2) kv_slack = std::max<uint64_t>(kv_slack, kd.rb - 2);
         state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
+        // Release the file pages this layer just read. A 35B's expert tensors are ~450 MB a
+        // layer; keeping all 40 layers' pages resident alongside 40 x 512 MB of pool BOs
+        // (which XRT maps locked) is what took a 21.8 GB GGUF over a 46 GB box's memory and
+        // got the loader OOM-killed. Every layer reads a disjoint range, so dropping here
+        // costs nothing -- the pages are never touched again.
+        file_->drop_pages();
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
