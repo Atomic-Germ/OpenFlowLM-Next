@@ -1,86 +1,159 @@
-# Prefill performance characterization (Phase 21)
+# Prefill performance: budget, dispatch table, and what is actually slow
 
-Phase 21 is a **blocking** gate: the production prefill path has to be measured,
-not assumed. This tool measures the *uninstrumented* production route — the
-capture-only CLIs of every earlier phase add readback and are not benchmarks — and
-produces the time-budget attribution Phase 21 asks for.
+Two tools, two different questions.
 
-It does not build kernels, change arithmetic, or relax any numerical gate. It
-runs an existing CLI, parses the stage breakdown the engine already prints, and
-writes a machine-checkable report.
+| tool | question |
+|---|---|
+| `measure.py` | where did the wall time go? (stage budget, median of repeats) |
+| `dispatch.py` | what was the NPU asked to do, and at what efficiency? |
 
-## What is measured
+The second exists because the first one lies by omission. A column reading "host blocked
+on GEMM: 24.5 s" sounds like a synchronization problem. Dividing the FLOPs by it says
+otherwise.
 
-For every prompt length and every schedule, from the CLI's own stderr:
+## Phase 21 result — Qwen3.8-27B, 513 tokens, block route
 
-| Field | Source | Meaning |
-|---|---|---|
-| `resident_s` | `resident after N s` | weight load; once per process, not per request |
-| `prefill_ms` | `prefill N tokens: M ms` | the prefill wall time under test |
-| `preproc_ms` | `prefill N tokens` − Σ stage totals | text prep / embedding / host work outside the per-token loop |
-| `total_ms` | `t_real=...: X ms` | the route's own accounting for the prefill |
-| `part0_ms` | same line | host time blocked on the GEMM dispatches |
-| `part1_ms` | same line | host time in the non-GEMM half (DeltaNet rule, attention, tail) |
-| `route_ms` | same line | MoE routing host stages (0 for these dense qwen35 layers) |
-| `lm_head_ms` | same line | the LM head at the last position |
-| `mid/dn_conv/dn_rule/attn/prenorm/gemm_tile/gemm_tr/tail/shared/state/sync/setup` | second line | the finer host split |
-| `dispatch` per kernel | `NAME calls ms total ...` | per-kernel dispatch time and call count |
+`Models/qwen38-27b/prefill-perf/dispatch-v1/dispatch-513.json`
 
-Two derived numbers matter:
-
-* `attributed_ms = preproc + total` and the **residual** against `prefill_ms`.
-  Phase 21 requires ≥90 % of wall time explained; the residual is what is not.
-* `tok_per_s = N / (prefill_ms/1000)`.
-
-The engine reports *host-blocked* time per stage, so `part0 + part1 + route +
-lm_head` is the accounting identity inside `total_ms`. NPU busy time is not
-directly observable per kernel; `dispatch` sums are the closest available proxy
-and are reported as such, never as "NPU utilization".
-
-## Usage
-
-```bash
-source utilities/env.sh
-export OPENBLAS_NUM_THREADS=1
-
-ironvenv/bin/python utilities/prefill-perf/measure.py run \
-  --cli Models/qwen38-27b/post-prefill-production/plain-v2/build/open_qwen36_cli \
-  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
-  --kernels Models/qwen38-27b/production-v2/kernels-model-ctx2048 \
-  --lengths 1,32,128,256,512,2048 \
-  --schedules sequential,hybrid,block_major \
-  --reps 5 --warmup 1 \
-  --out Models/qwen38-27b/prefill-perf/v1
-ironvenv/bin/python utilities/prefill-perf/measure.py audit \
-  --out Models/qwen38-27b/prefill-perf/v1
+```
+tokens 513   total 103945.5 ms   coverage 89.8% (min 90%) -> NOT COVERED
+  GEMM 74878.6 ms (72.0%)   host 18461.9 ms   unexplained 10605.0 ms
+  dispatch column 74906.9 ms, agrees with the GEMM column
+  per CALL (one 256-token block)      calls  GFLOP/call  TFLOP/s   %peak@16
+  gemm_n14336_k5120             96       37.6    2.0071     12.5%
+  gemm_n16384_k5120            288       42.9    1.9886     12.4%
+  gemm_n34816_k5120            384       91.3    2.1260     13.3%
+  gemm_n5120_k17408            384       45.6    2.1050     13.2%
+  gemm_n5120_k6144             384       16.1    1.7701     11.1%
+  paired `_low` products: 38557.0 of 74878.6 ms (51.5%)
+  prompt throughput: 3 blocks for 513 tokens (1.50x padding),
+                     achieved 1.996 TFLOP/s, useful 0.667 TFLOP/s
 ```
 
-`run` takes the shared resident-validation lock, requires the NPU to be idle, and
-preflights memory, so it never overlaps another NPU job. Prompts are synthetic
-token ids (prefill cost depends on the token *count*, not on which ids), which is
-what makes a 2048-token prompt possible without a real corpus.
+Four findings, in the order they change what to fix:
 
-Warm-up runs are executed and discarded: the first run after the NPU idles is
-slow (cold hardware context, cold page cache, possible power-mode settle), and a
-single run is not a measurement. Each reported row is the **median** of `--reps`
-runs with the full spread retained; conclusions are never drawn from one run.
+1. **The GEMMs sustain ~2.0 TFLOP/s per dispatch, ~12.5 % of a 16-TOPS part.** That is
+   uniform across all five shapes (1.77–2.13), so it is not one bad tiling. It is the
+   arithmetic-to-DMA ratio of the q4_1 route: one 64×64 weight band is dequantised
+   on-core and then used against a 32-wide activation tile, so every weight byte is
+   touched ~1.2 times instead of ~256 times at a prefill-friendly tile.
 
-`audit` re-reads the raw per-run logs, recomputes every statistic from them, and
-refuses a report whose numbers no longer follow from its logs. Exit 0 means the
-measurement is reproducible evidence, **not** that the performance gate passed —
-`model_acceptance` stays false.
+2. **The paired correction is 51.5 % of the GEMM column.** The four-product route buys
+   precision and costs half the GEMM time. This is the plan's first suspect, confirmed
+   by measurement rather than assumed.
 
-## Verdict
+3. **Block padding costs 1.50×.** 513 tokens occupy three 256-wide blocks = 768 slots,
+   so a third of the GEMM work is padding. Useful throughput is 0.667 TFLOP/s, a third
+   of the achieved 1.996.
 
-The report carries `attribution_coverage` per row and an overall
-`budget_complete`. A row whose residual exceeds 10 % of wall time is listed under
-`unattributed`; Phase 21 requires that list to be explained or explicitly
-declared unmeasurable with today's tooling.
+4. **Coverage is 89.8 %, short of the plan's 90 % by 0.2 points.** The gap is
+   `residue` 10576.6 ms: host sub-stages the engine does not clock individually (the
+   named fine stages sum to more than the host column, so they overlap). It is a
+   measurement-completeness gap, not an unexplained performance mystery, and it is
+   reported as NOT COVERED rather than rounded up.
 
-## Scope
+## What that means for Phase 22
 
-This is a performance measurement of an existing binary. It makes no numerical
-claim, promotes no kernel, and does not touch production arithmetic, catalogue
-entries, packing or any installed service. Phase 22 remediation and every
-acceptance threshold are separate, and an exception to the GPU comparison is a
-human decision that this tool records but never takes.
+Ranked by measured size, not by plausibility:
+
+| lever | outcome | evidence |
+|---|---|---|
+| drop the paired `_low` products entirely | −49 % wall, **rejected: 301/513 below the gate** | `phase22-levers-v2.json` |
+| drop only `W_lo X_lo` (`three_term`) | −23 % wall, **1/513 below the gate** | same |
+| layer-major schedule | **no lever** — identical call counts and time | same |
+| wider compiled block | **no lever** — 513 tokens already costs 3 calls | same |
+| larger activation tile per weight band | **blocked** — does not fit L1 | same |
+| dequant / gather | 14.3 % / ~2 %, dequant already 2.8× faster | same |
+
+## Lever 1 measured, and rejected: `--prefill-precision weight_high`
+
+The first lever was implemented as a real setting (`prefill_precision`: `paired` /
+`weight_high` / `single`, default `paired`) and measured on hardware at 513 tokens over
+all 64 layers, one binary, the only difference being the mode:
+
+| | GEMM ms | wall ms | min corr vs reference | failing the 0.9999 gate |
+|---|---|---|---|---|
+| `paired` | 74575.7 | 102721.2 | 0.999911 | **0 / 513** |
+| `weight_high` | 34201.3 | 52134.6 | 0.490848 | **301 / 513** |
+
+The saving is real and is exactly the `_low` share: GEMM −54.1 % against a measured
+`_low` share of 51.5 %, and 1.97× on wall time. **The accuracy cost is not acceptable.**
+`weight_high` is left in the engine as an explicit opt-in (it is the only way to measure
+this, and it is what a future partial-residual scheme can be compared against) but it is
+not a candidate for the default at this prompt length.
+
+**Why the per-projection argument was wrong.** `_low` carries only the BF16 rounding of
+the already-dequantised weight, so against the int4 lattice error of a single projection
+it looks negligible — and that is how it was argued before it was measured. Prefill sums
+64 layers of projections, and the dropped term is a *systematic* rounding whose sign is
+correlated with the weight, so it accumulates coherently instead of averaging out. The
+p50 defect rises from 1.1e-06 to 2.3e-04 — three orders of magnitude — while the
+per-projection estimate said it should not move. A per-operation error budget does not
+compose additively, and this is the measurement that shows it. The paired route's 2×
+GEMM cost is what buys the correlation.
+
+## Lever 2 measured: `--prefill-precision three_term`
+
+`three_term` keeps `W_hi X_hi + W_hi X_lo + W_lo X_hi` and drops only `W_lo X_lo`. With
+both operands split, `|W_lo| ~ 2^-9|W|` and `|X_lo| ~ 2^-9|X|`, so that term is ~2^-18 of
+the projection — 512× smaller than either term `weight_high` gives up.
+
+| | GEMM ms | wall ms | min corr | failing the gate |
+|---|---|---|---|---|
+| `paired` | 74575.7 | 102721.2 | 0.999911 | 0 / 513 |
+| `three_term` | 56470.6 | 78987.6 | 0.999891 | **1 / 513** (P494) |
+| `weight_high` | 34201.3 | 52134.6 | 0.490848 | 301 / 513 |
+
+−23.1 % wall, and the one failure is P494 — the same position that is already the worst
+in `paired` (0.999911, a 1.1e-5 margin). The gate is **not** relaxed to take this: it is
+an explicit opt-in and stays one. Worth knowing: the margin on that position is thinner
+than the term `paired` spends 24 % of its wall time buying.
+
+## Every other lever measured and closed
+
+| lever | result |
+|---|---|
+| layer-major | identical: 96 high + 96 `_low` per shape, 103566.7 ms against 102721.2 |
+| wider block | no gain — 513 tokens already costs 3 calls; the 1.50× is a short-prompt tail, which is what `OFLM_OPEN_GEMM_BLOCK_MIN` exists for |
+| `GQP_TILE_N=64` | refused by the toolchain: `aie.tile op allocated buffers exceeded available memory` |
+| sub-core-tile K slicing | the A refetch cost sums to `NRB × Nslices = N/(64·8)` — unchanged, so it cannot pay |
+| `b_reuse` | the design documents it as failing at 8 columns (`repeat_count` on a shim tile, and the mem-tile BD pool) |
+| submit-ahead | already on (`submit_ahead_ = 1` by default) |
+
+**Why the GEMM cannot go much faster here.** A single-kernel ablation
+(`GQP_NULL_DEQUANT` / `GQP_NULL_GATHER`, 5 runs each, `n14336_k5120_t256`) measures the
+matmul at **85.7 %** of a call: base 16.94 ms, dequant nulled 14.52, gather nulled 16.24.
+A core's operand tile is `m=64, n=32` per k-step — 4096 B of A and 4096 B of B — which is
+`n/m = 1/2` MACs per byte, and the tile **cannot grow**: `tile_n=64` exceeds L1. So the
+arithmetic intensity is fixed by the 64 KB local memory, and 2.0 TFLOP/s (~12.5 % of
+peak) is this design's ceiling rather than a scheduling mistake. Beating it means a
+different datapath (weight-stationary, or int8/fp8 weights), not a tuning pass.
+
+## Reproducing
+
+```bash
+XILINX_XRT=/opt/xilinx/xrt LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+OPENBLAS_NUM_THREADS=1 OFLM_OPEN_DISPATCH_LOG=1 \
+  Models/qwen38-27b/post-prefill-production/plain-v2/build/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-v2/kernels-model \
+  --ids-file <256 ids> --max-ctx 2048 --max-tokens 1 --gemm-block \
+  2> dispatch.log
+
+ironvenv/bin/python utilities/prefill-perf/dispatch.py --log dispatch.log \
+  --out dispatch-513.json
+```
+
+`--gemm-block` is what makes the engine print the dispatch table: it is emitted from
+the block-route branch, and a run without it takes the same path but prints no table.
+That is a property of the CLI's logging, not of the route.
+
+## The bug this tool was written with, and why it is pinned
+
+The first version divided the PROMPT's FLOPs by the sum of every call's time, and
+reported **0.011 TFLOP/s** for a GEMM that sustains **2.0**. A 513-token prompt makes
+three 256-wide calls per GEMM, so the aggregate time is ~3× one call's and the FLOPs
+were for the whole prompt. The correction is per CALL against the compiled block width;
+`test_each_call_carries_one_compiled_block_not_the_whole_prompt` pins it. Had that
+number been believed, it would have argued that the GEMM was hopeless rather than
+tile-bound -- the opposite of the fixable conclusion.

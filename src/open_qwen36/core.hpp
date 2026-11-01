@@ -49,6 +49,7 @@
 #include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 #include "open_qwen36/prefill_precision.hpp"
+#include "open_qwen36/prefill_precision_switch.hpp"
 
 namespace open_qwen36 {
 
@@ -60,6 +61,8 @@ struct CoreConfig {
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
     std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    prefill_precision_switch::Mode prefill_precision =
+        prefill_precision_switch::kDefault;  ///< OPEN-PREFILL-PRECISION: products per projection
     bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 

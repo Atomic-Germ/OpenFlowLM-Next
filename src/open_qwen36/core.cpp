@@ -207,6 +207,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     man_.select_prefill_route(cfg_.prefill_mode == "lean" ? "lean" : "");
     if (has_lean) prefill_route_ = cfg_.prefill_mode;
     else if (cfg_.prefill_mode == "lean") log("this kernel set has one prefill route; lean changes nothing");
+    // Say which arithmetic the block route will run. Two runs of the same prompt that
+    // differ only in this are the A/B this setting exists for; a silent fall back to
+    // `paired` would make both halves identical and read as "no measurable effect".
+    {
+        bool any_low = false;
+        for (const auto& [n, t] : man_.layer_types) any_low = any_low || !t.gemm_block.low_kernels.empty();
+        const auto m = cfg_.prefill_precision;
+        if (!any_low && m != prefill_precision_switch::Mode::paired)
+            log("this kernel set ships no weight-residual product; prefill precision " +
+                prefill_precision_switch::name(m) + " runs the same kernels as paired");
+        else
+            log("prefill precision: " + prefill_precision_switch::name(m) + " (" +
+                std::to_string(prefill_precision_switch::dispatches(m)) + " products per projection)");
+    }
     fs::path md(cfg_.model_dir);
     // ---- the weight file: the shipped container (model.q4nx) or a GGUF
     // (model.gguf, the direct path). When both exist the shipped container
@@ -2217,12 +2231,39 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
 }
 
 const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
+    namespace sw = prefill_precision_switch;
     const auto& lows = types_.at(layer)->gemm_block.low_kernels;
-    const auto low = lows.find(s.kernel);
-    if (low == lows.end()) return gemm_dispatch(s, x, T, K, N, layer);
+    const auto companion = lows.find(s.kernel);
+    // A set that ships no `_low` kernel has one product to run and the mode cannot add one.
+    // This is the pre-existing path for every set that never had a companion: unchanged.
+    if (companion == lows.end() || cfg_.prefill_precision == sw::Mode::single)
+        return gemm_dispatch(s, x, T, K, N, layer);
+    // OPEN-PREFILL-PRECISION: the set ships the weight residual; the run may decline it.
+    // Declining it gives up no accuracy the weights had -- see prefill_precision_switch.hpp:
+    // `_low` carries the bf16 ROUNDING of the dequantised weight, not its int4 quantisation
+    // error. It is what Phase 20 accepted, though, so only an explicit mode drops it.
+    if (!sw::uses_weight_residual(cfg_.prefill_precision))
+        // `Workspace::high`, NOT `Workspace`: the four-product fold would run the high
+        // weight against both input halves AND then repeat it for the low half, issuing
+        // four dispatches where this mode promises two. Measured on hardware: the first
+        // version did exactly that and cost 68576.5 ms where two products cost 36132.9.
+        return precision_workspaces_[s.args.at(2)].high.run(x, T * K, T * N,
+            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); });
     Step residual = s;
-    residual.kernel = low->second;
-    return precision_workspaces_[s.args.at(2)].run(x, T * K, T * N,
+    residual.kernel = companion->second;
+    prefill_precision::Workspace& ws = precision_workspaces_[s.args.at(2)];
+    if (!sw::needs_low_input(cfg_.prefill_precision)) {
+        // W_hi X_hi + W_hi X_lo + W_lo X_hi: the same fold with the input's residual
+        // removed from the W_lo pass only. The order of the first three additions is
+        // unchanged, so the accepted route's sum is a strict superset of this one.
+        const float* h = ws.high.run(x, T * K, T * N,
+            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); });
+        ws.output.assign(h, h + T * N);
+        const float* l = gemm_dispatch(residual, x, T, K, N, layer);
+        for (size_t i = 0; i < T * N; ++i) ws.output[i] += l[i];
+        return ws.output.data();
+    }
+    return ws.run(x, T * K, T * N,
         [&](bool low_weight, const float* input) {
             return gemm_dispatch(low_weight ? residual : s, input, T, K, N, layer);
         });

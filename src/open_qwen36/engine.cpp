@@ -80,6 +80,8 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) cfg_.prefill_mode = pm;   // oflm --prefill-mode
+    if (const char* pp = std::getenv("OFLM_OPEN_PREFILL_PRECISION"))                      // oflm --prefill-precision
+        cfg_.prefill_precision = prefill_precision_switch::parse(pp);
     // "1" is how the variable was always set by hand; "true" is how the
     // settings system delivers a boolean, and "false" is how it delivers the
     // default. Anything else, and the variable being absent, means off.

@@ -170,6 +170,8 @@ Args parse(int argc, char** argv) {
     a.cfg.model_dir = std::getenv("OFLM_MODEL_DIR") ? std::getenv("OFLM_MODEL_DIR") : "";
     a.cfg.kernel_dir = std::getenv("OFLM_OPEN_KERNELS_DIR") ? std::getenv("OFLM_OPEN_KERNELS_DIR") : "";
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) a.cfg.prefill_mode = pm;
+    if (const char* pp = std::getenv("OFLM_OPEN_PREFILL_PRECISION"))
+        a.cfg.prefill_precision = open_qwen36::prefill_precision_switch::parse(pp);
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {
@@ -179,6 +181,7 @@ Args parse(int argc, char** argv) {
         if (k == "--model") a.cfg.model_dir = val();
         else if (k == "--kernels") a.cfg.kernel_dir = val();
         else if (k == "--prefill-mode") a.cfg.prefill_mode = val();
+        else if (k == "--prefill-precision") a.cfg.prefill_precision = open_qwen36::prefill_precision_switch::parse(val());
         else if (k == "--ids") a.ids = parse_ids(val());
         else if (k == "--ids-file") {
             std::ifstream f(val());
