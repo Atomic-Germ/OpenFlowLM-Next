@@ -245,6 +245,24 @@ public:
     /// only: it is how you tell a stage that computes the wrong thing from a stage that
     /// never ran, without inferring either from the logits.
     void read_act(int layer, size_t off, size_t n, uint8_t* dst);
+
+    // ---- Phase 26: the block-vs-sequential oracle's view of the persistent state ----
+    //
+    // Bring-up only, like read_act: nothing on the production path calls these, and the
+    // default route is untouched by their existence. They exist because the oracle has to
+    // compare the state a block produces against the state a token-at-a-time run produces,
+    // and because it has to PROVE production does not write outside its own region rather
+    // than infer it from the numbers.
+    /// The state BO's real size for this layer. A `linear` layer's BO is the manifest's
+    /// `state_bytes`; a `kv` layer's is `(max_ctx + slack) * state_row`, which is why this
+    /// is a call and not a manifest field lookup.
+    size_t state_region_bytes(int layer) const;
+    /// `n` bytes of a layer's state BO at `off`, straight off the device.
+    void read_state(int layer, size_t off, size_t n, uint8_t* dst);
+    /// Fill [off, off+n) of a layer's state BO with `pattern` and push it to the DEVICE
+    /// before the run. A region production must not touch can then be read back and
+    /// required to be unchanged. Destroys whatever was there: bring-up only.
+    void write_state_canary(int layer, size_t off, size_t n, uint8_t pattern);
     /// T = gemm_block_t() tokens through every layer on the block route: the
     /// projections as whole-array GEMM dispatches, the stages between them
     /// per layer-type kind (dense: T single-token attention dispatches and

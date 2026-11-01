@@ -4050,4 +4050,39 @@ void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {
     std::memcpy(dst, act_[layer].map<uint8_t*>() + off, n);
 }
 
+// ---- Phase 26: the oracle's view of the persistent state (bring-up only) ----
+//
+// The BO is sized in load_weights as `state_bytes` for a linear layer and
+// `(max_ctx + kv_slack) * state_row` for a kv layer -- the slack exists because some
+// attnpos kernels read past the real prompt, so the manifest's size is NOT the BO's size
+// for a kv layer. A caller that sized a read from the manifest would silently under-read,
+// which is the reason this is computed from the BO itself.
+size_t Core::state_region_bytes(int layer) const {
+    if (layer < 0 || layer >= nl_)
+        throw std::runtime_error("open_qwen36: state_region_bytes: layer " + std::to_string(layer) + " out of range");
+    return static_cast<size_t>(state_[layer].size());
+}
+
+void Core::read_state(int layer, size_t off, size_t n, uint8_t* dst) {
+    const size_t bytes = state_region_bytes(layer);
+    if (off + n > bytes)
+        throw std::runtime_error("open_qwen36: read_state: [" + std::to_string(off) + ", " + std::to_string(off + n) +
+                                 ") is outside the layer's " + std::to_string(bytes) + "-byte state buffer");
+    read_back(state_[layer], n, off);
+    std::memcpy(dst, state_[layer].map<uint8_t*>() + off, n);
+}
+
+void Core::write_state_canary(int layer, size_t off, size_t n, uint8_t pattern) {
+    const size_t bytes = state_region_bytes(layer);
+    if (off + n > bytes)
+        throw std::runtime_error("open_qwen36: write_state_canary: [" + std::to_string(off) + ", " +
+                                 std::to_string(off + n) + ") is outside the layer's " + std::to_string(bytes) +
+                                 "-byte state buffer");
+    // Write through the map and sync TO_DEVICE. Writing into the map without the sync
+    // leaves the device's copy untouched, and the canary would then "pass" while testing
+    // nothing -- the mirror of the read_back trap the split-sum path documents.
+    std::memcpy(state_[layer].map<uint8_t*>() + off, std::string(n, static_cast<char>(pattern)).data(), n);
+    state_[layer].sync(XCL_BO_SYNC_BO_TO_DEVICE, n, off);
+}
+
 }  // namespace open_qwen36

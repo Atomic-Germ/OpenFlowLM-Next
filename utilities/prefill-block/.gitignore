@@ -1,0 +1,10 @@
+# The raw dumps are gigabytes and fully reproducible from the tool + the committed
+# result.json, so they are not tracked:
+#
+#   runs/<tag>/seq/          logits_*.bin, state_*.bin, out.log, ids.txt
+#   runs/<tag>/block/        the same for the candidate path
+#
+# What IS tracked, per run, is result.json: the fixture, the gate, every metric and every
+# verdict. That is what a reviewer or a test reads; the bytes can always be regenerated.
+runs/*/seq/
+runs/*/block/
