@@ -172,6 +172,11 @@ Args parse(int argc, char** argv) {
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) a.cfg.prefill_mode = pm;
     if (const char* pp = std::getenv("OFLM_OPEN_PREFILL_PRECISION"))
         a.cfg.prefill_precision = open_qwen36::prefill_precision_switch::parse(pp);
+    // PHASE 23 attribution: name the roles that run the experimental arithmetic.
+    if (const char* rp = std::getenv("OFLM_OPEN_PREFILL_ROLES"))
+        a.cfg.prefill_role_precision = open_qwen36::prefill_precision_switch::parse_roles(rp);
+    if (const char* rm = std::getenv("OFLM_OPEN_PREFILL_ROLE_MODE"))
+        a.cfg.prefill_role_mode = open_qwen36::prefill_precision_switch::parse(rm);
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {
@@ -182,6 +187,8 @@ Args parse(int argc, char** argv) {
         else if (k == "--kernels") a.cfg.kernel_dir = val();
         else if (k == "--prefill-mode") a.cfg.prefill_mode = val();
         else if (k == "--prefill-precision") a.cfg.prefill_precision = open_qwen36::prefill_precision_switch::parse(val());
+        else if (k == "--prefill-roles") a.cfg.prefill_role_precision = open_qwen36::prefill_precision_switch::parse_roles(val());
+        else if (k == "--prefill-role-mode") a.cfg.prefill_role_mode = open_qwen36::prefill_precision_switch::parse(val());
         else if (k == "--ids") a.ids = parse_ids(val());
         else if (k == "--ids-file") {
             std::ifstream f(val());

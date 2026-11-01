@@ -63,6 +63,13 @@ struct CoreConfig {
     std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
     prefill_precision_switch::Mode prefill_precision =
         prefill_precision_switch::kDefault;  ///< OPEN-PREFILL-PRECISION: products per projection
+    /// PHASE 23 attribution: when non-empty, ONLY these projection roles run
+    /// `prefill_role_mode`; every other role keeps the accepted `paired` arithmetic.
+    /// Empty (the default) means the global `prefill_precision` applies everywhere,
+    /// so the production path is untouched.
+    std::vector<prefill_precision_switch::Role> prefill_role_precision;
+    prefill_precision_switch::Mode prefill_role_mode =
+        prefill_precision_switch::Mode::three_term;  ///< what the named roles run
     bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 
@@ -568,6 +575,10 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// mapping is returned, so a caller that is going to slice the output can transpose
     /// straight into its own arrays. Valid until the next GEMM on the same buffer.
     const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
+    /// Which separable projection a step is, from its position in the exported program.
+    prefill_precision_switch::Role gemm_role(const Step& s, int layer) const;
+    /// The arithmetic a role runs under the current configuration.
+    prefill_precision_switch::Mode gemm_mode_for(prefill_precision_switch::Role role) const;
     const float* gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
     std::map<std::string, prefill_precision::Workspace> precision_workspaces_;
     /// The tail (final norm, lm_head) for one residual row into logits_host_.

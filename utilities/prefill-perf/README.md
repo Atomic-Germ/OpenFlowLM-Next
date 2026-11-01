@@ -92,7 +92,52 @@ per-projection estimate said it should not move. A per-operation error budget do
 compose additively, and this is the measurement that shows it. The paired route's 2×
 GEMM cost is what buys the correlation.
 
-## Lever 2 measured: `--prefill-precision three_term`
+## Phase 23: the `three_term` failure is role-localised, and STILL rejected
+
+One bounded experiment, as the plan specifies. `three_term` for one projection ROLE at a
+time, `paired` everywhere else, 513 reference positions, no position specialisation.
+Tool: [`three_term_roles.py`](three_term_roles.py); data:
+[`phase23-attribution.json`](phase23-attribution.json).
+
+| variant | stage ms | GEMM ms | min cos | failures | worst | e2e gain |
+|---|---|---|---|---|---|---|
+| control `paired` | 116482.8 | 74711.0 | 0.999911 | 0 | P494 | — |
+| `qkvz` | 111454.9 | 71332.8 | 0.999976 | 0 | P399 | +4.3 % |
+| `attn_in` | 114319.2 | 73563.5 | 0.999951 | 0 | P459 | +1.9 % |
+| `out` | 113303.8 | 72963.9 | 0.999920 | 0 | P494 | +2.7 % |
+| `ffn_up` | 106587.4 | 66535.6 | 0.999915 | 0 | P494 | +8.5 % |
+| **`ffn_down`** | 110865.0 | 70803.1 | 0.999868 | **1** | P399 | +4.8 % |
+| all but `ffn_down` | 98430.0 | 60747.9 | 0.999888 | **1** | P494 | **+15.5 %** |
+
+**The failure is structural, not token-specific.** Four of five roles pass with zero
+failures, and the failure sits only in `ffn_down`. The worst position also moves between
+variants (P399, P459, P494), so nothing here is one unlucky position.
+
+**And it does not compose.** Excluding the guilty role — the cleanest policy the export
+can express — is 15.5 % faster and still fails once. Errors from the four clean roles
+accumulate: `qkvz` alone clears the gate at 0.999976 with 24× the margin, yet together
+they push a different position under it. A per-role budget does not compose any more
+than a per-projection one did, which is the same lesson Phase 22 measured.
+
+**Decision: CLOSE.** The promotion gate needs zero failures AND >= 10 % end-to-end
+gain. The >= 10 % half is reachable (+15.5 %); the zero-failure half is not, in any role
+subset the export allows. `paired` is frozen permanently as the production prefill
+arithmetic, per the plan's own rule for a failed bounded cycle.
+
+**Why the other six rows of the plan's role list are absent.** They are not separable:
+
+| asked for | why untestable |
+|---|---|
+| `qkv` / `z` separately | one fused `n16384_k5120` GEMM |
+| `q` / `k` / `v` / `gate` separately | one fused `n14336_k5120` GEMM |
+| `up` / `gate` separately | one fused `n34816_k5120` GEMM |
+| DeltaNet alpha/beta | runs in the glue kernel, not a projection GEMM |
+| LM head | outside block prefill; tail-only, no paired/three_term variant |
+
+Splitting any of them would mean repacking the model, which is a separate project and
+not what this bounded experiment authorises.
+
+## Lever 2 measured earlier: `--prefill-precision three_term` (whole run)
 
 `three_term` keeps `W_hi X_hi + W_hi X_lo + W_lo X_hi` and drops only `W_lo X_lo`. With
 both operands split, `|W_lo| ~ 2^-9|W|` and `|X_lo| ~ 2^-9|X|`, so that term is ~2^-18 of

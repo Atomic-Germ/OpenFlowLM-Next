@@ -259,6 +259,56 @@ def test_the_setting_is_registered_with_the_exact_default():
     assert setting['scope'] == 'per_model'
 
 
+def test_role_selection_names_only_roles_that_exist(tmp_path):
+    """A typo'd role must stop the run, not silently run `paired` everywhere.
+
+    The whole point of the Phase 23 sweep is that a variant differs from the control
+    in exactly one role. A name that parsed to nothing would produce an identical run
+    labelled as a measurement of that role -- the most misleading possible failure.
+    """
+    r = expect_ok(tmp_path, '''
+        #include "open_qwen36/prefill_precision_switch.hpp"
+        #include <iostream>
+        using namespace open_qwen36::prefill_precision_switch;
+        int main() {
+            auto v = parse_roles("qkvz, ffn_down");
+            if (v.size() != 2) return 1;
+            if (!selects(v, Role::qkvz) || !selects(v, Role::ffn_down)) return 2;
+            if (selects(v, Role::out) || selects(v, Role::ffn_up)) return 3;
+            if (selects(v, Role::none)) return 4;          // "none" is never selectable
+            auto dup = parse_roles("out,out,out");
+            if (dup.size() != 1) return 5;                 // deduplicated
+            try { parse_roles("ffn_down,q_only"); }
+            catch (const std::exception&) { return 0; }    // unknown is an error
+            return 6;
+        }
+    ''')
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_role_list_is_exactly_what_the_export_can_separate(tmp_path):
+    """Five roles, no more: the plan's finer list needs a repack, so it must not appear."""
+    r = expect_ok(tmp_path, '''
+        #include "open_qwen36/prefill_precision_switch.hpp"
+        #include <string>
+        using namespace open_qwen36::prefill_precision_switch;
+        int main() {
+            const auto& v = all_roles();
+            if (v.size() != 5) return 1;
+            std::string s;
+            for (auto r : v) s += role_name(r) + ",";
+            if (s != "qkvz,attn_in,out,ffn_up,ffn_down,") return 2;
+            // The fused/absent ones must not be expressible.
+            const char* bad[] = {"q", "k", "v", "gate", "up", "z", "lm_head", "alpha_beta"};
+            for (const char* b : bad) {
+                try { parse_role(b); return 3; } catch (const std::exception&) {}
+            }
+            return 0;
+        }
+    ''')
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_the_paired_route_is_frozen_as_the_correctness_baseline():
     """The tuning phase is closed against a frozen baseline, and this is the pin.
 

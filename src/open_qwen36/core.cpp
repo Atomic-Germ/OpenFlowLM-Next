@@ -34,6 +34,9 @@
 namespace open_qwen36 {
 
 namespace fs = std::filesystem;
+// PHASE 23: the role/model helpers and the dispatch below all speak of these, so the
+// alias lives at file scope rather than inside one function.
+namespace sw = prefill_precision_switch;
 
 namespace {
 
@@ -220,6 +223,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         else
             log("prefill precision: " + prefill_precision_switch::name(m) + " (" +
                 std::to_string(prefill_precision_switch::dispatches(m)) + " products per projection)");
+        // Say it when only some roles differ, or a role sweep's "control" run would
+        // look identical to a variant that silently did nothing.
+        if (!cfg_.prefill_role_precision.empty()) {
+            std::string names;
+            for (const auto r : cfg_.prefill_role_precision)
+                names += (names.empty() ? "" : ",") + prefill_precision_switch::role_name(r);
+            log("prefill role precision: " + names + " -> " +
+                prefill_precision_switch::name(cfg_.prefill_role_mode) + "; all other roles paired");
+        }
     }
     fs::path md(cfg_.model_dir);
     // ---- the weight file: the shipped container (model.q4nx) or a GGUF
@@ -2230,19 +2242,45 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
     throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
 }
 
+sw::Role Core::gemm_role(const Step& s, int layer) const {
+    // Identity, not a kernel name: the export fuses several logical projections into
+    // one GEMM (qkv+z, q+k+v+gate, up+gate), so a name can belong to a role this
+    // projection is not. Pointer identity into the exported program cannot drift.
+    const auto& gb = types_.at(layer)->gemm_block;
+    if (!gb.program.empty() && &s == &gb.program[0]) {
+        // program[0] is the layer's input projection: fused qkv+z on a DeltaNet
+        // layer, fused q+k+v+gate on a full-attention layer. Kind, not the model
+        // name, decides which -- the same rule the packer used.
+        return gb.kind == "linear" ? sw::Role::qkvz : sw::Role::attn_in;
+    }
+    if (gb.program.size() > 1 && &s == &gb.program[1]) return sw::Role::out;
+    if (!gb.ffn_program.empty() && &s == &gb.ffn_program[0]) return sw::Role::ffn_up;
+    if (gb.ffn_program.size() > 1 && &s == &gb.ffn_program[1]) return sw::Role::ffn_down;
+    return sw::Role::none;
+}
+
+sw::Mode Core::gemm_mode_for(sw::Role role) const {
+    // `prefill_role_precision` names the roles that run `prefill_role_mode`; every
+    // other role stays on the accepted arithmetic. With no roles named this is the
+    // global mode, unchanged.
+    if (cfg_.prefill_role_precision.empty()) return cfg_.prefill_precision;
+    return sw::selects(cfg_.prefill_role_precision, role) ? cfg_.prefill_role_mode
+                                                          : sw::Mode::paired;
+}
+
 const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
-    namespace sw = prefill_precision_switch;
+    const sw::Mode mode = gemm_mode_for(gemm_role(s, layer));
     const auto& lows = types_.at(layer)->gemm_block.low_kernels;
     const auto companion = lows.find(s.kernel);
     // A set that ships no `_low` kernel has one product to run and the mode cannot add one.
     // This is the pre-existing path for every set that never had a companion: unchanged.
-    if (companion == lows.end() || cfg_.prefill_precision == sw::Mode::single)
+    if (companion == lows.end() || mode == sw::Mode::single)
         return gemm_dispatch(s, x, T, K, N, layer);
     // OPEN-PREFILL-PRECISION: the set ships the weight residual; the run may decline it.
     // Declining it gives up no accuracy the weights had -- see prefill_precision_switch.hpp:
     // `_low` carries the bf16 ROUNDING of the dequantised weight, not its int4 quantisation
     // error. It is what Phase 20 accepted, though, so only an explicit mode drops it.
-    if (!sw::uses_weight_residual(cfg_.prefill_precision))
+    if (!sw::uses_weight_residual(mode))
         // `Workspace::high`, NOT `Workspace`: the four-product fold would run the high
         // weight against both input halves AND then repeat it for the low half, issuing
         // four dispatches where this mode promises two. Measured on hardware: the first
@@ -2252,7 +2290,7 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     Step residual = s;
     residual.kernel = companion->second;
     prefill_precision::Workspace& ws = precision_workspaces_[s.args.at(2)];
-    if (!sw::needs_low_input(cfg_.prefill_precision)) {
+    if (!sw::needs_low_input(mode)) {
         // W_hi X_hi + W_hi X_lo + W_lo X_hi: the same fold with the input's residual
         // removed from the W_lo pass only. The order of the first three additions is
         // unchanged, so the accepted route's sum is a strict superset of this one.
