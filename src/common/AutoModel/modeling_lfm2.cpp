@@ -281,15 +281,22 @@ LFM2_5_TK::LFM2_5_TK(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_in
 void LFM2_5_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    // model_type == llama
-    this->lm_engine = std::make_unique<lfm2_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
-
-    //free the q4nx
-    this->q4nx.reset();
+    // The engine: the open kernels when a set is installed for this model, the closed DLL
+    // otherwise -- the same contract LFM2 follows. Without this the Thinking family had no
+    // open path at all, so a GGUF install of it took the closed engine and died on
+    // "Failed to open file: <model>/model.safetensors" (there is no safetensors; the
+    // weights are model.gguf). One implementation, two adapters (AutoModel's docstring).
+    auto open_engine = this->_shared_select_open_engine("OFLM_LFM2_ENGINE", "LFM2");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<lfm2_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
