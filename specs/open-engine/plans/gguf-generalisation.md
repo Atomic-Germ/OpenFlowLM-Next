@@ -195,6 +195,45 @@ Same pass: **derive the packaging list from imports** rather than remembering it
 converter's modules, `open_kernels/*.py`), so "our module isn't installed" stops recurring.
 
 
+## 4b. The MoE twin (Qwen3.6-35B-A3B == Qwen3.5-35B-A3B) -- the next piece
+
+The geometry is already read (`qwen35moe` has a GGUF builder) and the set exists; what is
+missing is the manifest's `gguf` section, gated off by `GGUF_EXPERT_OPS_READY = False` in
+`recipes/qwen36moe.py`. Flipping the flag is the last line of the work, not the first: a
+section that advertises kernels whose experts the packer cannot lay out fails at load.
+
+**What is missing, exactly.** The expert weights are packed by two ops written against a
+`.q4nx` container's chunk raster:
+
+  * `expert_stripes` (up + gate): per expert, per stripe, `ns` chunks from each tensor,
+    copied as interleaved `[up_k | gate_k]` stripes with the chunks transposed
+    (`pool chunk c <- file chunk ncol*(c%4) + c/4`).
+  * `expert_down`: per expert, `nchs` chunks, `rt = 4*(c/8) + c%4`, `cg = (c/4)%2`.
+
+Both read through `q4_source`, which is q4nx-only. A GGUF stores the same weights as 3D
+quantized tensors (`ffn_{up,gate,down}_exps`, dims fastest-first: `[k, n, experts]`), so the
+GGUF form has to dequantize a row, requantize it to the q4_1 pool law, and write it into the
+*same* stripe layout -- the kernels are unchanged.
+
+**The precedent to reuse, in order:**
+  1. `std_perm_gguf`'s row path (pools.cpp): `g.embed_row(name, row, in_dim, rd.data())`
+     decodes one row exactly, then the requant writes q4_1 (f32 or bf16 scales by the pool
+     law). That is the loop the expert ops need, once per expert's row.
+  2. `expert_stripes`/`expert_down` themselves: the *destination* layout is already written
+     and proven against the container -- only the source side changes.
+  3. qwen35's twin (the dense hybrid) for the manifest side: `recipes/gguf.py section()` and
+     `proj_op`'s `qgate` fields show how a family emits a GGUF-reading op without touching
+     its container plan.
+  4. `gguf_pack_test` (src/open_qwen36) is where a new op gets pinned: it builds a synthetic
+     GGUF in memory and compares the packed bytes, which is cheaper than a 20 GB model.
+
+**Verification, in order of cost:** `gguf_pack_test` for the op; the export for the set
+(manifest gains the section); then the model itself, which is the only step that needs the
+weights (`OFLM_OPEN_DUMP_POOLS` + the fp64 reference as for qwen35).
+
+**Do not** emit the section before the ops exist. The flag exists because that failure is
+silent-until-load.
+
 ## 5. ASR, then embedding  (bucket 5 -- not started)
 
 * **Whisper**: the engine exists and runs on xclbins; models are q4nx. The work is the GGUF
