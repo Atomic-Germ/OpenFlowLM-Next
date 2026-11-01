@@ -357,8 +357,12 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
     // hardware
     int restore_idx = -1;
     lfm2_npu *lfm2_engine = dynamic_cast<lfm2_npu*>(this->lm_engine.get());
-
-    if (meta_info.restore_allowed) {
+    // The closed engine keeps its own prefix cache (checkpoint / restore). The OPEN engine
+    // has no such handle -- this cast is null for it -- and _shared_insert drives its cache
+    // itself, so the closed pair is only touched when the closed engine is what is running.
+    // Dereferencing it anyway is what made a GGUF install of this family run its layers and
+    // then never answer: the cast returned null and checkpoint() was called on it.
+    if (lfm2_engine && meta_info.restore_allowed) {
         restore_idx = lfm2_engine->restore();
         this->total_tokens = restore_idx;
         this->token_history = checkpoint_his; // restore the token history to be consistent with the restored KV cache, which is crucial for correct functioning of _shared_insert's prefix-matching logic
@@ -371,7 +375,7 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
     bool success = this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
 
     checkpoint_his = token_history;
-    int checkpoint_idx = lfm2_engine->checkpoint();
+    int checkpoint_idx = lfm2_engine ? lfm2_engine->checkpoint() : -1;
 
     return success;
 }
