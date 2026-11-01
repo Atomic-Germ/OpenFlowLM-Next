@@ -546,7 +546,11 @@ CONFIG_MODEL_FAMILIES = {
     "gemma3": "gemma3",
     "gemma3_text": "gemma3",
     "phi4": "phi4",
-    "phi3": "phi3",
+    # Phi-3 and Phi-4 both publish model_type `phi3`, and the engine family for the set we
+    # ship (Phi4-mini-Instruct-NPU2) is `phi4`. Mapping it to `phi3` matched no official
+    # entry, so an abliterated Phi-4-mini GGUF installed with "No official model matched; no
+    # xclbins link" -- the geometry was right and nothing was linked.
+    "phi3": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
     "hunyuan_v1_dense": "hunyuan",
@@ -1390,7 +1394,7 @@ VISION_TOWERS = {
 }
 
 
-def install_projector(target, repo, modelscope=False, quiet=False, force=False):
+def install_projector(target, repo, modelscope=False, quiet=False, force=False, mmproj_repo=""):
     """Fetch this model's vision projector as `mmproj.gguf`, or return "".
 
     A GGUF model's tower is a SEPARATE file from the language model, and a quant repo
@@ -1403,16 +1407,24 @@ def install_projector(target, repo, modelscope=False, quiet=False, force=False):
     model = Path(target) / "model.gguf"
     if not model.is_file():
         return ""
-    source = repo
-    names = _projectors_in(repo, modelscope)
+    # Which repo carries the tower, in order: the one the user named (`--mmproj`), this
+    # repo, then the non-i1 sibling of an i1 repo (mradermacher's `-i1` quants leave the
+    # projector in the original). `--mmproj` exists because a repo can be structured in a way
+    # none of those covers -- the tower in a third repo the user already knows about -- and
+    # then the model still runs multi-modal instead of installing text-only.
+    source = ""
+    names = []
+    for cand in (mmproj_repo, repo, projector_sibling(repo)):
+        if not cand:
+            continue
+        names = _projectors_in(cand, modelscope)
+        if names:
+            source = cand
+            break
     if not names:
-        sib = projector_sibling(repo)
-        if not sib:
-            return ""
-        names = _projectors_in(sib, modelscope)
-        if not names:
-            return ""
-        source = sib
+        if mmproj_repo:
+            raise SystemExit(f"--mmproj {mmproj_repo}: no *mmproj*.gguf at the repo root")
+        return ""
     names.sort(key=lambda n: (_projector_rank(n), len(n)))
     pick = names[0]
     dest = Path(target) / "mmproj.gguf"
@@ -3640,6 +3652,9 @@ def main():
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
+    ap.add_argument("--mmproj", default="",
+                    help="a repo to take this model's vision projector from, when its own repo "
+                         "and its base's do not carry one (a *mmproj*.gguf at the root is used)")
     ap.add_argument("--text-only", action="store_true",
                     help="GGUF installs only: do NOT fetch the vision projector (mmproj). The model runs "
                          "as a text model; images are refused by the engine, which is the same code path a "
@@ -4164,7 +4179,8 @@ def main():
         # The tower is a second file, and the engine reads it from the model directory.
         # BEFORE the config repair: the repair translates the projector into the
         # vision_config the adapter reads (a GGUF model has no other description of it).
-        projector = install_projector(target, repo, modelscope=modelscope, quiet=args.quiet, force=args.force)
+        projector = install_projector(target, repo, modelscope=modelscope, quiet=args.quiet,
+                                      force=args.force, mmproj_repo=args.mmproj)
         if projector and projector not in files:
             files.append(projector)
     if gguf_mode:
