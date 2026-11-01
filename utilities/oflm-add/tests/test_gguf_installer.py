@@ -609,10 +609,12 @@ def test_gguf_repo_without_kernels_fails_directly_instead_of_q4nx_fallback(tmp_p
         oflm_add.main()
     except SystemExit as e:
         msg = str(e)
-        # The refusal names the real reason: with no kernel sets at all, nothing can
-        # say which geometry this file has (the fixture carries only the arch key).
+        # The refusal names the real reason: the fixture carries only the arch key, so the
+        # geometry cannot be read at all -- and then there is nothing to match OR build, which
+        # is what it says (build-new-spec.py only adds a size to a family that HAS kernels).
         assert "no open kernel set can run this model" in msg
-        assert "build-new-spec.py" in msg
+        assert "nothing to build" in msg
+        assert "build-new-spec.py" not in msg
         assert "model.q4nx" not in msg
     else:
         raise AssertionError("missing GGUF kernels must raise SystemExit directly")

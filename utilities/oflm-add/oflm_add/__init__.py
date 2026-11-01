@@ -350,6 +350,13 @@ def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
     """
     head = f"{model_name}: no open kernel set can run this model (family '{family}')."
     body = "".join(f"\n  {n}" for n in notes)
+    if any("could not be read from its file" in n for n in notes):
+        # No recipe for the architecture: there is nothing to match, nothing to build, and
+        # no amount of retrying a spec will change that. Say so plainly instead of pointing
+        # at build-new-spec.py, which only adds a SIZE to a family that already has kernels.
+        return (f"{head}{body}\n"
+                f"This build has no recipe for that architecture, so its geometry cannot be "
+                f"read from the file. Not supported yet -- nothing to match, nothing to build.")
     if any("no GGUF-direct build" in n for n in notes):
         return (f"{head}{body}\n"
                 f"The kernels are installed; this build of the set predates GGUF-direct.\n"
@@ -4021,8 +4028,15 @@ def main():
         elif official:
             note = f" ({official_note})" if official_note else ""
             log(f"[INFO] xclbins from {src_tag}{note}")
+        elif geom_set:
+            # The GEOMETRY matched an installed set, and that is where the kernels come from
+            # (`xclbin_source` already prefers it). The registry is a suggestion list, not
+            # the boundary of what can run: a fine-tune the list does not name still links
+            # the set its shape needs. Saying "no xclbins link" here was simply false.
+            log(f"[INFO] xclbins from the kernel set that serves this geometry ({geom_set})")
         else:
-            log("[WARN] No official model matched; no xclbins link. Try passing --xclbin-from NAME")
+            log("[WARN] No installed kernel set matches this model's geometry; no xclbins link. "
+                "Pass --xclbin-from NAME to link one explicitly.")
 
     if args.dry_run:
         print(f"repo directory : {dir_name}")
