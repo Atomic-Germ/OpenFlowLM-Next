@@ -76,9 +76,11 @@ def wait_ready(port: int, proc: subprocess.Popen, timeout: float = 900) -> str:
     return f'timed out waiting for /v1/models ({last})'
 
 
-def chat(port: int, text: str, *, max_tokens: int, timeout: float = 1800) -> dict:
+def chat(port: int, text: str, *, max_tokens: int, timeout: float = 1800,
+         messages: list[dict] | None = None) -> dict:
+    """One completion. `messages` overrides `text`, for a request that carries a history."""
     body = json.dumps(dict(model='qwen3.8:27b',
-                           messages=[dict(role='user', content=text)],
+                           messages=messages or [dict(role='user', content=text)],
                            max_tokens=max_tokens, temperature=0, stream=False)).encode()
     req = urllib.request.Request(f'http://127.0.0.1:{port}/v1/chat/completions', data=body,
                                  headers={'Content-Type': 'application/json'}, method='POST')

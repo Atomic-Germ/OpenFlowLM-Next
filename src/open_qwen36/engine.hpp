@@ -103,6 +103,11 @@ private:
     /// write - so an intermittent dispatch failure used to show up as a client
     /// timeout and the one line that would diagnose it was thrown away.
     static void note_failure(const char* what);
+    /// \brief Diagnostic: how many prefill calls this engine has served.
+    /// Only read by the OFLM_OPEN_BLOCK_FAIL_INJECT arm, which needs "the second
+    /// prompt of this session" to reach the snapshot path (position != 0).
+    int prefill_calls_ = 0;
+
     template <class F> auto guarded(F&& f) -> decltype(f()) {
         ensure_alive();
         try {

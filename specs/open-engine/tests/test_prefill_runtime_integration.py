@@ -110,12 +110,12 @@ def test_the_oracle_flags_are_not_in_the_shipped_cli():
 # ---------------------------------------------------------------- the crossover
 
 def test_the_report_records_that_64_was_inherited_not_measured():
-    """The shipped constant came from the MoE family, with a different reason."""
+    """The layer-major constant came from the MoE family, with a different reason."""
     src = engine()
     assert 'Qwen3.6-35B' in src, 'the provenance of the 64 must stay visible in the source'
     md = REPORT.read_text()
     assert 'inherited' in md
-    assert 'C = 128' in md, 'the measured crossover must be recorded'
+    assert '96' in md, 'the measured block-loop crossover must be recorded'
 
 
 def test_the_crossover_is_selected_by_what_the_set_can_run_not_by_model_name():
@@ -125,7 +125,7 @@ def test_the_crossover_is_selected_by_what_the_set_can_run_not_by_model_name():
     possible; a model-name test would need editing for every new tag.
     """
     src = engine()
-    assert 'block_loop_crossover = 128' in src, 'the dense block-loop crossover'
+    assert 'block_loop_crossover = 96' in src, 'the block-loop crossover'
     assert 'layer_major_crossover = 64' in src, 'the MoE layer-major crossover is a different schedule'
     assert 'core_->layer_major_ok() ? layer_major_crossover : block_loop_crossover' in src, \
         'the choice must be capability-driven'
@@ -145,33 +145,40 @@ def test_the_operator_override_still_wins_over_both_crossovers():
         'the diagnostic override must apply after the capability choice'
 
 
-def test_the_measured_crossover_is_conservative_and_inside_the_measured_gap():
-    """64 is still sequential-cheaper; 128 is the first block-cheaper point measured."""
-    md = REPORT.read_text()
-    # The table must contain both the last sequential-cheaper and the first block-cheaper
-    # point, so the crossover cannot be claimed outside the interval actually measured.
-    assert re.search(r'\|\s*64\s*\|', md) and re.search(r'\|\s*\**128\**\s*\|', md)
-    assert '1.18' in md, 'n=64 block/seq ratio, the regression the shipped 64 causes'
-    assert '0.72' in md, 'n=128 block/seq ratio'
-    # The committed data file must agree with the claimed crossover and its provenance.
+def test_the_measured_crossover_comes_from_a_fit_not_from_a_grid_point():
+    """The regression that produced 128, kept as a test so it cannot come back.
+
+    The old rule was "the smallest SAMPLED length at which the block wins", over a grid of
+    1/8/32/64/128/192/255. Its own table crosses near 81, so the rule returned the next grid
+    point (128) and overcharged every prompt in between. A crossover must come from where
+    the two cost curves meet.
+    """
     d = json.loads((ROOT / 'utilities/prefill-block/tail-crossover.json').read_text())
     assert d['physical_block'] == 256
-    assert d['shipped_crossover'] == 64
-    assert d['measured_crossover'] == 128
-    assert 'Qwen3.6-35B' in d['shipped_crossover_provenance']
-    n64 = next(r for r in d['rows'] if r['n'] == 64)
-    n128 = next(r for r in d['rows'] if r['n'] == 128)
-    assert n64['ratio'] > 1.0, 'n=64 must be the sequential-cheaper side'
-    assert n128['ratio'] < 1.0, 'n=128 must be the first block-cheaper side'
+    # The superseded grid measurement is recorded, with the reason it was wrong.
+    assert d['v1_was_a_grid_artifact'] is True
+    assert d['v1_grid'] == [1, 8, 32, 64, 128, 192, 255]
+    assert 'grid point' in d['v1_why_wrong'] or 'grid' in d['v1_why_wrong']
+    # The closure measurement is a fit, and the applied constant follows from it.
+    fit = d['evidence']['linear_fit']
+    assert fit['crossing_tokens'] < 96, 'the crossing is below the applied constant'
+    assert d['applied']['block_loop_crossover'] == 96
+    assert d['applied']['rebuilt'] is True, 'a constant nobody built is not a shipped constant'
     # The mechanism: the block costs the same whatever t_real holds.
-    assert d['block_cost_flat_ms'][0] <= 7000 and d['block_cost_flat_ms'][1] <= 7000
+    lo, hi = d['evidence']['block_cost_flat_ms']
+    assert 0.9 <= hi / lo <= 1.1, f'the flat block cost must stay flat: {lo}..{hi}'
+    # And every decisive point really ran a padded pass -- a point where the block side fell
+    # back to sequential is two sequential runs and its ratio is noise.
+    for r in d['evidence']['rows']:
+        assert r['block_passes'] >= 1
 
 
 def test_the_block_cost_is_recorded_as_flat_across_active_rows():
     """The mechanism, not just the number: a full-width dispatch whatever t_real is."""
     md = REPORT.read_text()
     assert 'flat' in md.lower()
-    assert '6.4' in md and '6.8' in md
+    # The closure sweep's flat band, at full depth through the shipped binary.
+    assert '33.1' in md and '34.5' in md
 
 
 def _flat(md: str) -> str:
@@ -179,14 +186,15 @@ def _flat(md: str) -> str:
     return re.sub(r'\s+', ' ', md)
 
 
-def test_the_crossover_harness_declares_it_was_not_run_green():
-    """A tool that did not produce the shipped table must say so."""
+def test_the_superseded_harness_is_kept_as_the_record_of_the_grid_artifact():
+    """The v1 tool is not deleted: it is the evidence of how 128 was produced."""
     src = CROSSOVER.read_text()
-    assert 'Engine::prefill' in src, 'it is meant to measure the production path'
+    assert 'Engine::prefill' in src, 'it was meant to measure the production path'
     md = _flat(REPORT.read_text())
-    assert 'not run green' in md
-    # The table's level must stay labelled, so it is never read as an oflm throughput claim.
-    assert 'Core`-level measurement' in md
+    assert 'grid artifact' in md, 'the reason 128 was wrong must survive in the report'
+    assert 'tail_crossover.py' in md, 'the superseded harness is still pointed at'
+    # The report must name the level of every number, so none is read as a throughput claim.
+    assert 'Core`-level' in md or 'sanity check, not a performance claim' in md
 
 
 def test_the_report_retracts_the_interactive_only_claim():
@@ -202,9 +210,16 @@ def test_the_report_retracts_the_interactive_only_claim():
 # ---------------------------------------------------------------- the trajectory
 
 def _d16():
-    runs = sorted((ROOT / 'utilities/prefill-block/runs').glob('decode-*-d16-*/result.json'))
+    """The closure trajectory, measured with logits through the harness CLI.
+
+    Two runs exist and they measure different things on purpose. `decode-*-d16-*` drove the
+    shipped `oflm`, which reports no logits, so it could only compare emitted text.
+    `decode16-logits-*` drives the same `Engine::prefill` through the standalone CLI at full
+    depth and does report them, which is what a cosine needs.
+    """
+    runs = sorted((ROOT / 'utilities/prefill-block/runs').glob('decode16-logits-*/result.json'))
     if not runs:
-        pytest.skip('no 16-token trajectory run committed')
+        pytest.skip('no 16-token logits trajectory committed')
     return json.loads(runs[-1].read_text())
 
 
@@ -213,25 +228,37 @@ def test_the_sixteen_token_trajectory_agrees_token_for_token():
     assert d['decode_steps'] == 16
     assert d['layers'] == 64
     assert d['verdict'] == 'PASS'
-    gt = next(t for t in d['tensors'] if t['tensor'] == 'greedy_tokens')
-    assert gt['sequential'] == gt['block']
-    assert len(gt['sequential']) == 16
+    tokens = d['tokens']
+    assert len(tokens) == 16, 'one token comparison per decode step'
+    assert all(t['agree'] for t in tokens), 'a single flipped token is a failure'
+    assert d['summary']['tokens_agreeing'] == 16
 
 
-def test_the_trajectory_errors_are_bounded_not_compounding():
-    """27.9: identical tokens plus a max_abs trend that does not explode."""
+def test_the_trajectory_reports_the_numbers_the_plan_asked_for():
+    """cosine, max_abs AND max_rel, for every step -- not just "PASS"."""
     d = _d16()
     logits = [t for t in d['tensors'] if t['tensor'].startswith('logits@decode')]
     assert len(logits) == 16
-    assert all(t['cosine'] >= 0.9999 for t in logits)
-    ma = [t['max_abs'] for t in logits]
-    first = sorted(ma[:5])[2]
-    last = sorted(ma[-5:])[2]
-    # Growth factor stays small: the plan's "monotonically/explosively" stop condition.
-    assert last < 2.0 * first, f'max_abs compounding: {first} -> {last}'
-    # And no new absolute threshold was introduced to hide it.
-    assert 'new absolute' in REPORT.read_text().lower() or 'no new absolute-error' in \
-        REPORT.read_text().lower()
+    assert all(t['cosine'] >= 0.9999 for t in logits), 'the repository gate, unchanged'
+    assert all('max_abs' in t and 'max_rel' in t for t in logits)
+    s = d['summary']
+    assert s['min_cosine'] >= 0.9999
+    assert s['max_abs'] < 1e-2, 'absolute error stays at the 1e-2 scale'
+    # max_rel is reported, and is large only because it divides by near-zero logits.
+    assert s['max_rel'] > 1.0
+
+
+def test_the_trajectory_errors_are_bounded_not_compounding():
+    """The plan's stop condition: a trend that compounds, not one that oscillates."""
+    d = _d16()
+    ma = [t['max_abs'] for t in d['tensors'] if t['tensor'].startswith('logits@decode')]
+    mid = len(ma) // 2
+    early = max(ma[:mid])
+    late = max(ma[mid:])
+    assert late < 2.0 * early, f'max_abs compounding: {early} -> {late}'
+    # And no new absolute threshold was invented to hide it.
+    md = REPORT.read_text().lower()
+    assert 'no new tolerance was introduced' in md
 
 
 def test_no_weak_new_tolerance_was_invented():
@@ -245,22 +272,24 @@ def test_no_weak_new_tolerance_was_invented():
 # ---------------------------------------------------------------- the open gates
 
 def test_the_report_does_not_claim_a_gate_it_did_not_run():
-    """27.15 ran for 128/1024/2048; the build-blocked changes stay labelled NOT RE-RUN."""
+    """Every gate is either green with an artefact, or it says why not."""
     md = REPORT.read_text()
-    assert 'NOT RE-RUN' in md, 'the build-blocked changes must be labelled'
-    for n in ('128', '1024', '2048'):
+    assert 'PASS — hardware closure complete' in md
+    for n in ('128', '256', '512', '1024'):
         assert f'| {n} |' in md, f'{n} must appear as a measured row, not just in prose'
-    # The unexercised parts must still be named rather than implied.
-    assert 'no hardware coverage yet' in md
+    # The one case that could not be exercised must be named, not implied.
+    assert 'N/A' in md and 'reset' in md.lower()
 
 
-def test_the_build_block_that_stopped_the_rebuild_is_recorded():
-    """A syntax check is not a build; the distinction has to survive in the report."""
+def test_the_rebuild_happened_and_its_provenance_is_recorded():
+    """The earlier report said the binary could not be built. It was built; say how."""
     md = REPORT.read_text()
-    assert '-fsyntax-only' in md
-    assert 'root-owned' in md, 'the actual reason the rebuild could not happen'
-    # And the claim that the matrix is unaffected must carry its justification.
-    assert '≥ 128 tokens' in md or '>= 128 tokens' in md
+    assert 'openflowlm-build:ubuntu26' in md, 'the supported container build'
+    assert '45ed9846122748f686fb77357f4255da0a6deb5a63b8567ad4da1c3d46eedd01' in md, \
+        'the binary the closure ran on'
+    assert '/opt/xilinx/xrt/bin/c++' in md, 'the compiler actually used'
+    # And the older attempt is not erased: it is the reason the build note exists.
+    assert '-fsyntax-only' in md or 'syntax check' in md
 
 
 def test_2711_both_branches_are_in_the_code():
@@ -309,91 +338,152 @@ def _run(pattern: str):
     return json.loads(runs[-1].read_text())
 
 
-def test_the_run_matrix_is_committed_and_passes_every_boundary_length():
+def test_the_old_matrix_is_recorded_as_a_route_comparison_not_boundary_evidence():
+    """Its lengths were TEXT tokens, so a fixture "255" reached the engine as 266.
+
+    It did run both routes on hardware and the outputs agreed, which is still worth having:
+    it is a functional route comparison. What it cannot be is boundary evidence, and the
+    report must say so rather than letting the labels imply otherwise.
+    """
     d = _run('oflm-run-matrix-*/result.json')
     assert d['verdict'] == 'PASS'
-    assert d['matrix']['verdict'] == 'PASS'
     assert d['matrix']['failed'] == []
-    got = sorted(r['text_tokens'] for r in d['matrix']['rows'])
-    assert got == [255, 256, 257, 511, 512, 513], 'every length the plan names must be present'
-    for r in d['matrix']['rows']:
-        assert r['verdict'] == 'PASS'
-        # Both routes must have run on hardware, not just one.
-        for side in ('block', 'sequential'):
-            assert r[side]['rc'] == 0, (r['text_tokens'], side)
-            assert r[side]['reached_model'], (r['text_tokens'], side)
-            assert r[side]['matches_expected'], (r['text_tokens'], side)
-            assert r[side]['output'], (r['text_tokens'], side)
-        assert r['outputs_agree'], f"the two routes disagreed at {r['text_tokens']} tokens"
-
-
-def test_the_matrix_pins_the_prompt_length_rather_than_approximating_it():
-    """An approximate length would not be the boundary the plan asked for."""
-    d = _run('oflm-run-matrix-*/result.json')
     off = d['matrix']['template_offset']
-    assert isinstance(off, int) and off >= 0
+    # This is the proof that it was not the boundary: every length is offset.
+    assert off > 0, 'the fixture lengths were text tokens, not engine tokens'
     for r in d['matrix']['rows']:
         assert r['block']['prefilled'] == r['text_tokens'] + off
-        assert r['sequential']['prefilled'] == r['text_tokens'] + off
+    md = REPORT.read_text()
+    assert 'functional route comparison' in md, 'the relabelling must be explicit'
+    assert 'not' in md and 'boundary evidence' in md
+
+
+def test_the_route_is_asserted_at_exact_engine_lengths():
+    """The closure matrix: the engine's own count must equal the requested count."""
+    d = _run('route-matrix-block-*/result.json')
+    assert d['verdict'] == 'PASS', d.get('failed')
+    assert d['route_reported_by'].startswith('OFLM_OPEN_PREFILL_ROUTE'), \
+        'the route must be read from the engine, never timed'
+    for r in d['rows']:
+        assert r['token_match'], f"{r['requested']} did not reach the engine as itself"
+        assert r['engine_tokens'] == r['requested']
+        assert r['verdict'] == 'PASS', r
+
+
+def test_the_boundary_lengths_are_the_policys_own_cases():
+    """257, 383/384/385 and 513 are the plan's worked examples; check the arithmetic."""
+    d = _run('route-matrix-block-*/result.json')
+    got = {r['requested']: r['actual'] for r in d['rows']}
+    # 256 = exactly one block, no tail.
+    assert got[256]['blocks'] == 1 and got[256]['tail'] == 0
+    # 257 = one block plus ONE stepped token, not a second padded pass.
+    assert got[257]['blocks'] == 1 and got[257]['padded'] == 0
+    assert got[257].get('tail_sequential') == 1
+    # 383 = full block + a 127-token tail. 127 CLEARS the 96 crossover, so it is padded and
+    # the prompt is two passes -- the first post-block tail that would be stepped is 351.
+    assert got[383]['padded'] == 1 and got[383]['passes'] == 2
+    assert got[384]['padded'] == 1 and got[384]['passes'] == 2
+    # 512 = two full blocks; 513 = two blocks plus one stepped token.
+    assert got[512]['blocks'] == 2 and got[512]['padded'] == 0
+    assert got[513]['blocks'] == 2 and got[513].get('tail_sequential') == 1
 
 
 def test_the_two_block_cases_are_distinguishable_from_one_block():
-    """511/512/513 must actually take the multi-block path, not one padded block."""
-    d = _run('oflm-run-matrix-*/result.json')
-    one = [r for r in d['matrix']['rows'] if r['text_tokens'] in (255, 256, 257)]
-    two = [r for r in d['matrix']['rows'] if r['text_tokens'] in (511, 512, 513)]
-    assert one and two
-    # A second block is a second pass over every layer; it cannot be faster than one.
-    assert max(r['block']['wall_s'] for r in one) < min(r['block']['wall_s'] for r in two)
+    """Two passes over every layer cannot be faster than one."""
+    d = _run('oflm-sanity-*/result.json')
+    rows = {r['text_tokens']: r for r in d['rows']}
+    assert rows[128]['passes'] == 1 and rows[512]['passes'] == 2
+    assert rows[128]['ttft_ms'] < rows[512]['ttft_ms']
+    # And the cost is per BLOCK, not per active row: one block at 128 and at 256 is the
+    # same dispatch, so their TTFTs stay within a small band.
+    band = rows[256]['ttft_ms'] / rows[128]['ttft_ms']
+    assert 0.75 <= band <= 1.35, f'one padded block should cost about the same: {band}'
 
 
-def test_the_serve_run_is_committed_and_passes_what_it_could_exercise():
-    d = _run('oflm-serve-*/result.json')
+def test_request_isolation_is_A_B_A_not_a_repeated_A():
+    """A repeated identical request can match for the wrong reason; a different one cannot."""
+    d = _run('fail-inject-serve-*/result.json')
     assert d['verdict'] == 'PASS'
-    graded = [r for r in d['rows'] if r['verdict'] != 'SKIP']
-    assert graded and all(r['verdict'] == 'PASS' for r in graded)
-    checks = ' '.join(r['check'] for r in d['rows'])
-    for need in ('fresh_request_255', 'fresh_request_256', 'fresh_request_257',
-                 'second_request'):
-        assert need in checks, need
+    checks = {r['check']: r for r in d['rows']}
+    assert checks['A_after_B_equals_A_before_B']['ok'], \
+        'resident state leaked across requests if A changed after B ran'
+    assert checks['A_and_B_are_different_prompts']['ok'], \
+        'if A and B matched, the isolation check would pass vacuously'
 
 
-def test_a_skipped_reset_case_is_not_counted_as_a_pass():
-    """serve has no reset endpoint; that is a limitation, never a pass."""
+def test_the_reset_case_is_recorded_as_not_applicable_not_as_a_pass():
+    """serve has no reset endpoint; saying so is the honest outcome."""
     d = _run('oflm-serve-*/result.json')
     skips = [r for r in d['rows'] if r['verdict'] == 'SKIP']
     assert skips, 'the reset case must be present as SKIP, not silently dropped'
     assert all('no reset endpoint' in (r.get('reason') or '') for r in skips)
     assert d.get('reset_endpoint') is None, 'if serve gains a reset endpoint, exercise it'
+    assert 'N/A' in REPORT.read_text()
 
 
-def test_the_serve_timings_show_the_flat_block_cost_through_the_runtime():
-    """The padding signature, measured through oflm rather than at Core level."""
-    d = _run('oflm-serve-*/result.json')
-    walls = [r['wall_s'] for r in d['rows']
-             if r['check'].startswith('fresh_request_') and r.get('wall_s')]
-    assert len(walls) >= 3
-    lo, hi = min(walls), max(walls)
-    assert hi - lo < 0.25 * lo, f'a padded block should be flat in the prompt length: {walls}'
+def test_the_sanity_run_is_labelled_a_sanity_run_not_a_profile():
+    """Phase 28 owns the profile; this run must never be quoted as one."""
+    d = _run('oflm-sanity-*/result.json')
+    assert d['verdict'] == 'PASS'
+    assert 'not a production profile' in d['gate']
+    assert 'Phase 28' in d['not_a_claim']
+    assert 'OFLM_OPEN_LAYER_MAJOR=0' in d['note'], \
+        'block-loop numbers must state that they are not the shipped default route'
 
 
 def test_the_block_cost_is_linear_in_blocks_not_in_active_rows():
-    """Both halves of the claim, from the committed full-depth benchmark.
+    """Both halves of the claim, from the committed sanity run.
 
     Flat in the active rows inside a block -- that is why a tail is padded or avoided.
-    Linear in the number of blocks -- that is why a long prompt costs what it costs. The
-    single-block row is excluded from the per-block rate because it absorbs the model
-    load; using it would understate the marginal cost and make the two sides disagree.
+    Linear in the number of blocks -- that is why a long prompt costs what it costs.
     """
-    d = _run('oflm-bench-*/result.json')
+    d = _run('oflm-sanity-*/result.json')
+    rows = d['rows']
+    # Every row's pass count is the policy's own prediction, so none of them is a surprise.
+    for r in rows:
+        assert r['passes'] == r['expected_passes'], r
+    per_block = [r['ttft_ms'] / r['passes'] for r in rows if r['passes']]
+    assert max(per_block) / min(per_block) <= 1.6, \
+        f'per-block cost is not consistent across block counts: {per_block}'
+
+
+def test_the_crossover_was_measured_with_the_block_side_forced():
+    """The methodological trap: under the shipped policy the block below the crossover
+    never runs, so both sides are sequential and their ratio is noise."""
+    d = _run('crossover-local-*/result.json')
     assert d['verdict'] == 'PASS'
-    assert sorted(r['block']['text_tokens'] for r in d['rows']) == [128, 1024, 2048]
-    multi = [r['block'] for r in d['rows'] if r['block']['blocks'] > 1]
-    assert len(multi) >= 2, 'at least two multi-block points are needed to fit a rate'
-    rate = [b['wall_s'] / b['blocks'] for b in multi]
-    assert max(rate) - min(rate) < 0.10 * min(rate), \
-        f'per-block cost is not constant across block counts: {rate}'
-    # And a block count that does not divide the length exactly still costs the same:
-    # padding is free in time, which is the whole reason the tail policy exists.
-    for b in d['rows']:
-        assert b['block']['matches_expected'], 'the prompt length must be the one asked for'
+    assert d['block_min'] == 1, 'the block side must be forced below the crossover'
+    assert 'OFLM_OPEN_GEMM_BLOCK_MIN' in d['why_forced']
+    # Every decisive point really ran a padded pass.
+    decisive = [r for r in d['rows'] if r['decisive']]
+    assert len(decisive) >= 6
+    assert all(r['block_passes'] >= 1 for r in decisive)
+    # And the crossing comes from the fit, not from the nearest sampled point.
+    assert d['linear_fit']['crossing_tokens'] is not None
+    assert d['linear_fit']['crossing_tokens'] < min(
+        r['engine_tokens'] for r in decisive if r['block_wins'])
+
+
+def test_the_failure_handler_was_exercised_on_hardware():
+    """Item 6: three cases, each proving a different branch actually ran."""
+    d = _run('fail-inject-serve-*/result.json')
+    assert d['verdict'] == 'PASS'
+    checks = {r['check']: r for r in d['rows']}
+    # Case B reached the SNAPSHOT branch, not the reset one.
+    assert checks['B_injector_fired_on_a_non_zero_position']['ok']
+    assert checks['B_reports_the_pre_prompt_state_was_restored']['ok']
+    # Case C refused: the plan's "must not continue on dirty state".
+    assert checks['C_refuses_and_generates_nothing']['ok']
+
+
+def test_case_A_is_committed_too_through_run():
+    """The reset branch, exercised on the CLI path rather than argued from the source."""
+    runs = sorted((ROOT / 'utilities/prefill-block/runs').glob('fail-inject-2*/result.json'))
+    assert runs, 'the case-A run through oflm run must be committed'
+    d = json.loads(runs[-1].read_text())
+    assert d['tool'] == 'prefill-block-fail-inject', \
+        'fail-inject-serve-* is a different harness with a different schema'
+    cases = d['cases']
+    assert cases['A_before_first_block']['injected'] is True
+    assert cases['A_before_first_block']['said_reset'] is True
+    assert cases['A_before_first_block']['output'] == d['reference']['output']

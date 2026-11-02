@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -115,32 +116,114 @@ class Tokenizer:
         return text
 
 
+# The CLI treats "more input is already waiting" as the start of a paste and merges the
+# lines into ONE prompt ([`cli_wide_posix.cpp:307`](../../src/runner/cli_wide_posix.cpp:307)).
+# A plain sleep between writes does not avoid that: the model load takes over a minute, so
+# a clock-paced feeder has buffered the entire script long before the CLI reads its first
+# line, and every later read finds the rest of the script pending. The feed is therefore
+# gated on the CLI ASKING for the next line -- it prints one `>>> ` prompt per read -- so
+# a line is never written while the model is loading or generating.
+_PROMPT = '>>> '
+READY = 'Type /? for help'
+
+
+class _Gate:
+    """Counts the CLI's prompts in the stream it is writing, so feeding can follow it."""
+
+    def __init__(self) -> None:
+        self.prompts = 0
+        self.ready = threading.Event()
+        self.lock = threading.Lock()
+
+    def scan(self, chunk: str) -> None:
+        with self.lock:
+            self.prompts += chunk.count(_PROMPT)
+            if READY in chunk or self.prompts:
+                self.ready.set()
+
+    def wait_prompts(self, want: int, deadline: float, proc) -> bool:
+        while time.monotonic() < deadline and proc.poll() is None:
+            with self.lock:
+                if self.prompts >= want:
+                    return True
+            time.sleep(0.02)
+        return False
+
+
 def run(session: list[str], *, block: bool | None = None, ctx: int = 4096,
         gen_lim: int = 8, timeout: float = 3600, tag: str = '',
         extra: dict | None = None) -> dict:
     """One whole `oflm run` session: the lines go in on stdin, the process exits at EOF."""
-    script = ''
+    lines: list[str] = []
     if gen_lim > 0:
-        script += f'/set gen-lim {gen_lim}\n'
+        lines.append(f'/set gen-lim {gen_lim}')
     # Greedy, so two routes that agree should agree exactly rather than probably.
-    script += '/set temp 0\n/set topk 1\n'
-    for line in session:
-        script += line + '\n'
-    script += '/bye\n'
+    lines += ['/set temp 0', '/set topk 1']
+    lines += session
     cmd = [str(OFLM), 'run', 'qwen3.8:27b', '--ctx-len', str(ctx)]
     t0 = time.monotonic()
+    deadline = t0 + timeout
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with LOCK.open('a') as handle:
         import fcntl
         fcntl.flock(handle, fcntl.LOCK_EX)
-        proc = subprocess.run(cmd, input=script, cwd=str(ROOT), env=env(block=block, extra=extra),
-                              capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env(block=block, extra=extra),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        gate = _Gate()
+        bufs = {'out': [], 'err': []}
+
+        def drain(stream, buf: list, watch: bool) -> None:
+            # RAW reads, not `for line in stream`: the CLI's `>>> ` prompt carries no
+            # newline, so a line-oriented reader blocks on it forever and the gate below
+            # never opens -- which is exactly how the first version of this gated feeder
+            # hung at the first prompt. Read whatever is available and scan that.
+            fd = stream.fileno()
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                text = chunk.decode('utf-8', 'replace')
+                buf.append(text)
+                if watch:
+                    gate.scan(text)
+
+        def feed() -> None:
+            try:
+                for i, line in enumerate(lines):
+                    # Line i is written only once the CLI has printed prompt i: it has
+                    # consumed everything before it, so this is not pending input.
+                    if not gate.wait_prompts(i + 1, deadline, proc):
+                        return
+                    proc.stdin.write(line + '\n')
+                    proc.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                pass
+            finally:
+                try:
+                    proc.stdin.close()   # EOF, which the CLI maps to /bye
+                except (BrokenPipeError, ValueError):
+                    pass
+
+        threads = [threading.Thread(target=feed),
+                   threading.Thread(target=drain, args=(proc.stdout, bufs['out'], True)),
+                   threading.Thread(target=drain, args=(proc.stderr, bufs['err'], False))]
+        for t in threads:
+            t.start()
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rc = proc.wait()
+        for t in threads:
+            t.join(120)
     wall = time.monotonic() - t0
-    text = proc.stdout + '\n' + proc.stderr
-    return dict(tag=tag, block=block, rc=proc.returncode, wall_s=round(wall, 3),
-                stdout=proc.stdout, stderr=proc.stderr, text=text,
-                chunks=parse_chunks(text), output=parse_output(proc.stdout),
-                command=' '.join(cmd))
+    stdout, stderr = ''.join(bufs['out']), ''.join(bufs['err'])
+    text = stdout + '\n' + stderr
+    return dict(tag=tag, block=block, rc=rc, wall_s=round(wall, 3),
+                stdout=stdout, stderr=stderr, text=text,
+                chunks=parse_chunks(text), output=parse_output(stdout),
+                turns=turns(stdout), command=' '.join(cmd))
 
 
 def parse_chunks(text: str) -> list[dict]:
@@ -160,6 +243,17 @@ def prefilled_tokens(rec: dict) -> int:
 _NOISE = re.compile(
     r'^(?:\[OFLM\]|open_qwen36:|>>>|\.\.\.|/set|/bye|Error:|WARNING)'
     r'|^Using custom|^Goodbye!$|^\s*$')
+
+
+def turns(stdout: str) -> list[str]:
+    """The model's text per generated turn.
+
+    `parse_output` concatenates every turn, so on a two-prompt session the first answer is
+    still in the string when the second produced nothing -- which silently turns a refused
+    request into a pass. Each generation is announced by `Model RAW Output:`, so the text
+    is split on that marker and cleaned per segment.
+    """
+    return [parse_output(part) for part in stdout.split('Model RAW Output:')[1:]]
 
 
 def parse_output(stdout: str) -> str:

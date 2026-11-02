@@ -1,103 +1,74 @@
 {
  "tool": "tail-crossover",
- "version": 1,
+ "version": 2,
  "phase": 27,
- "scope": "Core-level block-vs-sequential cost of a padded 256 dispatch, 8 layers",
+ "scope": "Core-level block-vs-sequential cost of a padded 256 dispatch",
  "provenance": {
-  "driver": "Models/qwen38-27b/prefill-perf/block-v1/build/open_qwen36_cli",
-  "block_route": "--gemm-block",
-  "sequential_route": "no --gemm-block",
-  "why_not_oflm": "oflm has no headless run invocation; the same Core bodies are used",
-  "layers": 8,
-  "max_tokens": 1,
-  "timing": "process wall, single pass per point"
+  "superseded_driver": "Models/qwen38-27b/prefill-perf/block-v1/build/open_qwen36_cli",
+  "superseded_note": "v1 used the standalone harness because oflm was believed unscriptable; it is scriptable (stdin EOF is /bye), and the closure sweep therefore runs the shipped binary",
+  "closure_driver": "build/src/oflm, HEAD dcd6e7d1 + the Phase 27 engine.cpp changes",
+  "closure_binary_sha256": "fe308055f5a36cec1c4f776e0cefb84f4e46c660e0ece4e031266dc2b5cd79f8",
+  "timing": "runner PREFILL_TIME, one process per side, /clear between prompts (resets the profilers)"
  },
  "physical_block": 256,
- "shipped_crossover": 64,
- "shipped_crossover_provenance": "engine.cpp:178, inherited from the Qwen3.6-35B MoE",
- "measured_crossover": 128,
- "measured_crossover_rule": "smallest n where padded-block wall <= sequential wall, conservative side",
- "block_cost_flat_ms": [
-  6370,
-  6790
- ],
- "rows": [
-  {
-   "n": 1,
-   "seq_ms": 2050,
-   "block_ms": 6530,
-   "ratio": 3.185
-  },
-  {
-   "n": 8,
-   "seq_ms": 2450,
-   "block_ms": 6630,
-   "ratio": 2.706
-  },
-  {
-   "n": 32,
-   "seq_ms": 3710,
-   "block_ms": 6690,
-   "ratio": 1.803
-  },
-  {
-   "n": 64,
-   "seq_ms": 5500,
-   "block_ms": 6510,
-   "ratio": 1.184
-  },
-  {
-   "n": 128,
-   "seq_ms": 8980,
-   "block_ms": 6450,
-   "ratio": 0.718
-  },
-  {
-   "n": 192,
-   "seq_ms": 12400,
-   "block_ms": 6370,
-   "ratio": 0.514
-  },
-  {
-   "n": 255,
-   "seq_ms": 16030,
-   "block_ms": 6790,
-   "ratio": 0.424
-  },
-  {
-   "n": 256,
-   "seq_ms": null,
-   "block_ms": 6470,
-   "ratio": null
-  }
- ],
- "notes": [
-  "block cost is flat across active rows: a full-width dispatch whatever t_real is",
-  "n=64 block/seq = 1.18, so the shipped 64 regresses prompts of 64-127 tokens",
-  "n=128 block/seq = 0.72, the first measured point where the block wins"
- ],
+ "shipped_crossover_before": 64,
+ "shipped_crossover_before_provenance": "engine.cpp, inherited from the Qwen3.6-35B MoE layer-major case",
+ "v1_measured_crossover": 128,
+ "v1_was_a_grid_artifact": true,
+ "v1_grid": [1, 8, 32, 64, 128, 192, 255],
+ "v1_why_wrong": "v1 reported 'the smallest SAMPLED length at which the padded block is no slower'. Its own table is 64 -> 1.18 and 128 -> 0.72, which crosses near 81; the rule returned the first grid point past the crossing, i.e. 128, not the crossing itself. A constant chosen from a six-point grid overcharges every prompt between the crossing and the next sampled point.",
+ "v2_measured_crossover_engine_tokens": 78,
+ "v2_first_clear_win_engine_tokens": 92,
+ "v2_rule": "linear fit through the sequential side against the median flat block cost; the crossing is where the two cost curves meet, not the nearest sampled point",
  "applied": {
   "engine.cpp": "two constants chosen by capability, not by model name",
-  "block_loop_crossover": 128,
+  "block_loop_crossover": 96,
   "layer_major_crossover": 64,
   "selector": "core_->layer_major_ok()",
   "override": "OFLM_OPEN_GEMM_BLOCK_MIN",
-  "rebuilt": false,
-  "why_not_rebuilt": "both build trees on this host are root-owned from container runs (CMakeCache.txt records /code/build) and a fresh configure cannot fetch its abseil subproject; verified with g++ -fsyntax-only using the exact recorded compile flags instead",
-  "impact_on_the_27_6_matrix": "none: every length in the matrix is >= 128 text tokens, so the 64->128 change cannot alter the route taken"
+  "rebuilt": true,
+  "rebuilt_sha256": "fe308055f5a36cec1c4f776e0cefb84f4e46c660e0ece4e031266dc2b5cd79f8",
+  "why_96_not_78": "the crossing is fitted at 78 and the first clear win at 92 (0.85); 96 keeps a small margin over the single unpinned pass behind each point, and rounds onto the 8-token grid the sweep used",
+  "impact_on_the_27_6_matrix": "none: every length in that matrix is >= 255 engine tokens, far above either constant",
+  "impact": "prompts of 80..127 engine tokens used to take a padded 256-wide block at 33.5 s when stepping them costs 24-55 s; that range now steps, and 96..127 pads"
+ },
+ "evidence": {
+  "artefact": "utilities/prefill-block/runs/crossover-local-20261102-034427/result.json",
+  "verdict": "PASS",
+  "decisive_points": 8,
+  "linear_fit": {
+   "slope_ms_per_token": 425.49,
+   "intercept_ms": 155.6,
+   "block_cost_ms": 33466.6,
+   "crossing_tokens": 78.3,
+   "cross_check": "425.49 ms/token is 2.35 tokens/s, which matches the runner's own 'Average prefill speed: 2.34711 tokens/s' printed by /status -- the two independent instruments agree"
+  },
+  "rows": [
+   {"text": 48, "engine": 56, "sequential_ms": 23968, "block_ms": 34466, "ratio": 1.438, "block_passes": 1},
+   {"text": 60, "engine": 68, "sequential_ms": 29230, "block_ms": 33467, "ratio": 1.145, "block_passes": 1},
+   {"text": 72, "engine": 80, "sequential_ms": 34158, "block_ms": 33444, "ratio": 0.979, "block_passes": 1},
+   {"text": 84, "engine": 92, "sequential_ms": 39153, "block_ms": 33132, "ratio": 0.846, "block_passes": 1},
+   {"text": 96, "engine": 104, "sequential_ms": 44344, "block_ms": 33284, "ratio": 0.751, "block_passes": 1},
+   {"text": 108, "engine": 116, "sequential_ms": 49615, "block_ms": 33482, "ratio": 0.675, "block_passes": 1},
+   {"text": 120, "engine": 128, "sequential_ms": 54642, "block_ms": 33306, "ratio": 0.610, "block_passes": 1},
+   {"text": 128, "engine": 136, "sequential_ms": 58018, "block_ms": 33514, "ratio": 0.578, "block_passes": 1}
+  ],
+  "block_cost_flat_ms": [33132, 33482],
+  "block_cost_flat_note": "33.1-34.5 s across 56..136 engine tokens: the cost is the dispatch width, not the real row count"
+ },
+ "superseded_sweep": {
+  "artefact": "utilities/prefill-block/runs/crossover-local-20261102-031712/result.json",
+  "why_superseded": "the block side ran under the shipped policy, so every length below the crossover fell through to sequential -- two sequential runs per point, whose ratio is noise around 1.0. Counting those non-decisive points produced a spurious 'measured crossover' of 104. The fine sweep forces the block side with OFLM_OPEN_GEMM_BLOCK_MIN=1 so every point really is a padded pass.",
+  "kept_because": "it is the only sweep that measures the SHIPPED policy end to end, and its >= 128 points agree with the fine sweep"
+ },
+ "route_matrix_after_the_change": {
+  "artefact": "utilities/prefill-block/runs/route-matrix-block-20261102-035808/result.json",
+  "note": "that run started BEFORE engine.cpp was changed, so it imported the old 128 into expected() and marked 96, 127 and 383 FAIL although the engine did exactly what 96 requires; the re-run with the constant at 96 is runs/route-matrix-block-<later>"
  },
  "corroboration": {
   "source": "oflm serve, shipped binary, one resident server",
-  "prefilled_tokens": [
-   266,
-   267,
-   268
-  ],
-  "wall_s": [
-   61.45,
-   61.36,
-   61.45
-  ],
+  "prefilled_tokens": [266, 267, 268],
+  "wall_s": [61.45, 61.36, 61.45],
   "note": "flat across the 256 boundary, the padding signature, measured through the runtime"
  }
 }

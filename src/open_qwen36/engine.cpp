@@ -163,6 +163,9 @@ void Engine::ensure_vit() {
 }
 
 buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
+    // Counted before the early return so the diagnostic's "second prompt of the session"
+    // is a property of the request, not of whether it happened to carry tokens.
+    ++prefill_calls_;
     if (ids.empty()) return logits_view();
     if (payload == nullptr) {
         // Decode-as-prefill: exact for this architecture, one step per token, the
@@ -194,18 +197,33 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             //   otherwise         the block loop below, whole 256-wide blocks padded at
             //                     the tail. Its cost is FLAT in the real token count, so
             //                     the crossover is where the *sequential* side catches
-            //                     up. Measured on the dense Qwen3.5 recipe (Phase 27.4):
-            //                     sequential is 1.18x cheaper at 64 tokens and 0.72x at
-            //                     128 -- the crossover is 128, and the 64 inherited from
-            //                     the MoE case was a real regression on 64..127 tokens.
+            //                     up. Phase 27.4 sampled only 1/8/32/64/128/192/255 and
+            //                     reported "the first sampled point where the block wins",
+            //                     which is a grid artifact: its own table crosses near 81.
+            //                     The closure sweep (Phase 27, fine grid, shipped binary,
+            //                     one process per side) measures the flat block at 33.47 s
+            //                     against 425.5 ms/token + 156 ms sequential -- a crossing
+            //                     of ~78 engine tokens, the first clear win at 92 (0.85)
+            //                     and 104 (0.75). 96 keeps a margin over the noise of a
+            //                     single unpinned pass; 128 overcharged 80..127 tokens.
+            //
+            // Both constants count tokens AS Engine::prefill receives them, not text
+            // tokens: the chat template's offset depends on how its boundary merges with
+            // the first text token (8, 10 and 11 have all been observed).
             //
             // Choosing by capability (which schedule the kernel set can run) rather than
             // by model name is what keeps a shape-identical derivative model correct
             // without an update. OFLM_OPEN_GEMM_BLOCK_MIN still overrides both.
-            const size_t block_loop_crossover = 128;
+            const size_t block_loop_crossover = 96;
             const size_t layer_major_crossover = 64;
             size_t min_prompt = core_->layer_major_ok() ? layer_major_crossover : block_loop_crossover;
             if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
+            // Diagnostic: which route this request took, and how the prompt was cut. A
+            // test must not infer this from elapsed time -- a short sequential prompt and
+            // a padded block overlap in wall time, so timing cannot prove which ran. Two
+            // numbers matter and they are different: `n` is the token count this function
+            // received, `blocks` is how many full-width passes it becomes.
+            const bool report_route = std::getenv("OFLM_OPEN_PREFILL_ROUTE") != nullptr;
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
@@ -215,11 +233,63 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                 // pass sees every token that wants an expert instead of one block's worth.
                 // Bit-exact against the block loop below; OFLM_OPEN_LAYER_MAJOR=0 takes it.
                 if (core_->layer_major_ok()) {
+                    if (report_route)
+                        std::fprintf(stderr, "prefill-route layer-major n=%zu blocks=1 tail=0\n",
+                                     ids.size());
                     core_->step_gemm_prompt(ids, true);
                     return logits_view();
                 }
                 const size_t GT = core_->gemm_block_t();
                 if (GT > 0) {
+                    // How the prompt divides, decided before anything runs so the report
+                    // is available even when the route then fails. The tail is padded to a
+                    // block only when it is at least `min_prompt` long; below that it is
+                    // stepped, because a block costs its full width regardless.
+                    const size_t full_blocks = ids.size() / GT;
+                    const size_t tail = ids.size() % GT;
+                    const size_t padded_tail = (tail >= min_prompt) ? 1 : 0;
+                    const size_t passes = full_blocks + padded_tail;
+                    if (report_route)
+                        std::fprintf(stderr,
+                                     "prefill-route block n=%zu blocks=%zu tail=%zu padded=%zu passes=%zu\n",
+                                     ids.size(), full_blocks, tail, padded_tail, passes);
+                    // Diagnostic fault injection, for exercising the 27.11 handler on
+                    // hardware rather than arguing about it from the source. Values:
+                    //   before        fail the FIRST block, before it writes anything
+                    //                 (case A: nothing has moved, so a reset is honest)
+                    //   after         fail the SECOND block, after the first moved state
+                    //                 (case B: the snapshot rewind has to undo block 0)
+                    //   unrecoverable fail the second block AND break the rewind, so the
+                    //                 throw-without-fallback branch is reachable (case C).
+                    //                 It must NOT throw on pass 0: that is case A, where
+                    //                 falling back is legitimate, and a version that threw
+                    //                 there would "pass" case C without ever testing it.
+                    //
+                    // Both `after` and `unrecoverable` need a prompt that really reaches a
+                    // second block, i.e. at least GT + min_prompt tokens -- a 300-token
+                    // prompt is 256 plus a tail the crossover steers away from a block.
+                    //
+                    // `prefill_calls_` selects WHICH prefill of the session is broken, so
+                    // the snapshot branch is reachable at all: a fresh prompt is at position
+                    // 0, where reset() is free and no snapshot is taken, so breaking it can
+                    // only ever exercise the reset branch. The snapshot branch is the one
+                    // that has to undo a block that already ran, and it exists only for a
+                    // prompt that starts at position != 0 -- the second prompt of a session.
+                    const char* inject = std::getenv("OFLM_OPEN_BLOCK_FAIL_INJECT");
+                    const std::string inject_mode = inject ? inject : "";
+                    const char* inject_at = std::getenv("OFLM_OPEN_BLOCK_FAIL_AT");
+                    const int armed_call = inject_at ? std::atoi(inject_at) : 0;
+                    const bool armed = !inject_mode.empty() &&
+                                       (!inject_at || prefill_calls_ >= armed_call);
+                    auto fail_if = [&](size_t pass) {
+                        if (!armed) return;
+                        const bool first = inject_mode == "before";
+                        const bool second = inject_mode == "after" || inject_mode == "unrecoverable";
+                        if (pass == 0 && first)
+                            throw std::runtime_error("injected block failure before the first block");
+                        if (pass == 1 && second)
+                            throw std::runtime_error("injected block failure after one block");
+                    };
                     // 27.11: an UNEXPECTED failure on a route the kernel set advertises must
                     // not be disguised as "this set has no block route". If it happens
                     // before any block has run, nothing has been written to the caches and
@@ -249,6 +319,10 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                     const bool have_snapshot =
                         !recover_by_reset && multi_block && save_pre_prompt_state();
                     auto rewind = [&]() -> bool {
+                        // `unrecoverable` deliberately breaks the recovery too, so the
+                        // throw-without-fallback branch can be seen on hardware instead of
+                        // only read in the source.
+                        if (armed && inject_mode == "unrecoverable") return false;
                         try {
                             if (recover_by_reset) { core_->reset(); return true; }
                             if (have_snapshot) { core_->restore(snapshot_); return true; }
@@ -257,16 +331,34 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                         return false;
                     };
                     size_t i = 0;
+                    size_t pass = 0;
+                    size_t tail_seq = 0;
                     bool ran = false;
                     try {
+                        // The crossover decides the tail as well as the prompt, and it has
+                        // to: a padded block costs its full width whatever it holds, so a
+                        // 1-token tail on a 257-token prompt must NOT buy a second block
+                        // pass. Blocks run only while at least `min_prompt` real tokens
+                        // remain; anything shorter is stepped one at a time, which Phase 26
+                        // proved produces the same state and the same token. Without this a
+                        // 257-token prompt cost two passes instead of one plus one token.
                         while (i < ids.size()) {
-                            const size_t t_real = std::min(GT, ids.size() - i);
+                            const size_t remaining = ids.size() - i;
+                            if (remaining < min_prompt) break;
+                            const size_t t_real = std::min(GT, remaining);
                             std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
                             block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
+                            fail_if(pass);
                             ran = true;
                             core_->step_gemm_block(block, t_real, i + t_real == ids.size());
                             i += t_real;
+                            ++pass;
                         }
+                        for (; i < ids.size(); ++i, ++tail_seq)
+                            core_->step(ids[i], i + 1 == ids.size());
+                        if (report_route && tail_seq)
+                            std::fprintf(stderr, "prefill-route tail-sequential n=%zu tokens=%zu\n",
+                                         ids.size(), tail_seq);
                         return logits_view();
                     } catch (const std::exception& e) {
                         // Only here, in the handler: a message emitted before the try would
@@ -287,6 +379,19 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                 }
                 // no route in this kernel set: fall through to the sequential path below
                 // (this used to return here, leaving the prompt unprocessed -- #109)
+            }
+            // The sequential path reports itself the same way, including the reason the
+            // block route was not taken, so a matrix can assert the policy rather than
+            // infer it: below-crossover is a decision, disabled is a switch, no-program
+            // is a capability, and mrope is a safety rule -- four different facts.
+            if (report_route) {
+                const char* why = !gemm_block_on              ? "disabled"
+                                  : ids.size() < min_prompt  ? "below-crossover"
+                                  : core_->mrope_active()    ? "mrope"
+                                  : core_->gemm_block_t() == 0 ? "no-block-program"
+                                                               : "fallback";
+                std::fprintf(stderr, "prefill-route sequential n=%zu blocks=0 tail=0 why=%s crossover=%zu\n",
+                             ids.size(), why, min_prompt);
             }
             for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
             return logits_view();

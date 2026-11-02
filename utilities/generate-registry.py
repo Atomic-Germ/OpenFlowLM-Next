@@ -42,9 +42,31 @@ NON_SETTING_ENV_VARS = {
     "OFLM_KERNELS_DIR", "OFLM_OPEN_KERNELS_DIR", "OFLM_DIFFUSION_KERNELS_DIR",
     "OFLM_WHISPER_KERNELS_DIR",
     # debug / engineering knobs (not for the settings UI)
+    #
+    # OFLM_OPEN_PREFILL_ROUTE prints which prefill route `Engine::prefill` actually took,
+    # per request: the sequential path, the layer-major prompt path, or the block loop
+    # with its block and tail counts. Phase 27 needed the route *asserted* rather than
+    # inferred from elapsed time -- the block loop and a short sequential prompt overlap
+    # in wall time, so a timing cannot prove which one ran. Default off.
+    #
+    # OFLM_OPEN_BLOCK_FAIL_INJECT makes the block route fail on purpose, so the 27.11
+    # rewind-then-fallback handler can be exercised on hardware instead of being argued
+    # about: "before" fails the first block before it writes anything, "after" fails the
+    # second block after the first has already moved the caches, and "unrecoverable" also
+    # makes the rewind itself fail, to prove the handler throws instead of continuing on
+    # dirty state. It must never become a setting -- it exists to break a request.
+    #
+    # OFLM_OPEN_BLOCK_FAIL_AT=2 arms it for the SECOND prefill of the process. Without it
+    # the injector can only ever reach the reset branch, because a fresh prompt starts at
+    # position 0 and therefore takes no snapshot; the snapshot branch -- the one that has
+    # to undo a block that already ran -- is only reachable from a prompt that starts at
+    # position != 0. Like the injector, it exists to break a request and is never a
+    # setting.
     "OFLM_DECODE_AUTO_THRESHOLD", "OFLM_DET_ROUTE", "OFLM_GRANITE_ENGINE",
-    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
-    "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN",
+    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_BLOCK_FAIL_AT", "OFLM_OPEN_BLOCK_FAIL_INJECT",
+    "OFLM_OPEN_DISPATCH_LOG",
+    "OFLM_OPEN_DXB_LOG",
+    "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN", "OFLM_OPEN_PREFILL_ROUTE",
     "OFLM_OPEN_HOST_ATTN", "OFLM_OPEN_HOST_ATTN_DECODE",
     "OFLM_OPEN_LAYER_MAJOR", "OFLM_OPEN_MOE_BATCH",
     "OFLM_OPEN_MOE_BATCH_LOG", "OFLM_OPEN_MOE_REDISPATCH",
