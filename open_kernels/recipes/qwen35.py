@@ -243,6 +243,24 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+def block_loop_validated(spec: ModelSpec) -> bool:
+    """Whether this exact set's block-loop prefill was measured correct and faster.
+
+    `Core::layer_major_ok()` passes for most dense sets, so the block loop is *available*
+    nearly everywhere; taking it on availability alone would move models nobody ran. This
+    flag is the recipe saying "this geometry was measured" -- Phase 28 did that for
+    Qwen3.8-27B (1.80x at 264 engine tokens, 13/13 boundary cases, 16/16 decode tokens) and
+    for no other Qwen3.5 size, which is why it is keyed on the shape and not the family.
+
+    A new size adopts the block loop by being measured and then added here -- never by
+    inheriting its neighbour's flag.
+    """
+    return (spec.hidden, spec.num_layers, spec.intermediate) == BLOCK_LOOP_VALIDATED_SHAPE
+
+
+BLOCK_LOOP_VALIDATED_SHAPE = (5120, 64, 17408)   # Qwen3.8-27B (hidden, layers, FFN)
+
+
 def paired_prefill(spec: ModelSpec) -> bool:
     """The independently validated dense wide input/weight precision route."""
     return (spec.hidden == 5120 and spec.intermediate == 17408 and
@@ -322,6 +340,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        # Only a set whose block loop was measured declares it; see block_loop_validated().
+        if block_loop_validated(spec):
+            out["block_loop_preferred"] = True
     return out
 
 

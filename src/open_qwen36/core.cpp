@@ -538,7 +538,14 @@ bool Core::layer_major_preferred() const {
         if (!types_[l]->gemm_block.moe_kernel.empty() ||
             !types_[l]->gemm_block.moe_batch.kernels.empty())
             return true;
-    return false;
+    // No routed experts: the block loop is the better schedule, but only take it where that
+    // was actually MEASURED. `layer_major_ok()` is a capability test, and most dense sets
+    // pass it, so preferring the block loop on that alone would move models nobody ran --
+    // the Qwen3.5 0.8B/2B/4B/9B sets are built by the same recipe and there are no weights
+    // for them on this machine to smoke-test. The recipe that validated it (Qwen3.8-27B,
+    // Phase 28) declares `block_loop_preferred` in its manifest; a set that does not
+    // declare it keeps layer-major, which is what it shipped with.
+    return !man_.block_loop_preferred;
 }
 
 Core::~Core() {
@@ -4095,6 +4102,19 @@ void Core::read_state(int layer, size_t off, size_t n, uint8_t* dst) {
                                  ") is outside the layer's " + std::to_string(bytes) + "-byte state buffer");
     read_back(state_[layer], n, off);
     std::memcpy(dst, state_[layer].map<uint8_t*>() + off, n);
+}
+
+void Core::read_global(const std::string& name, size_t off, size_t n, uint8_t* dst) {
+    auto it = globals_.find(name);
+    if (it == globals_.end())
+        throw std::runtime_error("open_qwen36: read_global: this kernel set has no global '" + name + "'");
+    xrt::bo& bo = it->second;
+    if (off + n > bo.size())
+        throw std::runtime_error("open_qwen36: read_global " + name + ": [" + std::to_string(off) +
+                                 ", " + std::to_string(off + n) + ") is outside its " +
+                                 std::to_string(bo.size()) + "-byte buffer");
+    read_back(bo, n, off);
+    std::memcpy(dst, bo.map<uint8_t*>() + off, n);
 }
 
 void Core::write_state_canary(int layer, size_t off, size_t n, uint8_t pattern) {

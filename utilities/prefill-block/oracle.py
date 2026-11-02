@@ -73,7 +73,11 @@ KV_ROW_BYTES = 8192                 # manifest layer_types.full_attention.buffer
 # (`choice(size=n, replace=False)`) gives a different permutation for every n, which breaks
 # that: a 64-token run would not share a single token with the 256-token run it is compared
 # against. 512 covers every fixture here with no repetition of the pool.
-POOL = 512
+# Phase 29 raised this from 512: the long-context ladder needs 4096 engine tokens through
+# the same distinct-id fixture, and a prefix must stay a prefix across every length so a
+# 4K run and a 512-token run share their first 512 rows. Raised deliberately, per the guard
+# below -- the ids are still drawn once, distinct, from a fixed seed.
+POOL = 8192
 
 
 def fixture(n: int, seed: int = 26026) -> list[int]:

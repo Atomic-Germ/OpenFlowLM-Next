@@ -174,6 +174,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     if (m.rope_inv_freq.size() != m.rotary_dim / 2) fail(lw, "rope_inv_freq has " + std::to_string(m.rope_inv_freq.size()) + " values, the rotary dim wants " + std::to_string(m.rotary_dim / 2));
     m.rout_idx_off = lay.value("rout_idx_off", 1024ull);
     m.has_moe = lay.contains("moe");
+    // Declared by a recipe whose block loop has been measured correct on this very set
+    // (Phase 28: the Qwen3.8-27B recipe). Absent is read as "not declared", which keeps
+    // layer-major -- the conservative reading, because layer_major_ok() is a capability
+    // test that most dense sets pass and nobody measured them on the block loop.
+    m.block_loop_preferred = j.value("block_loop_preferred", false);
     if (m.has_moe) {
     const json& moe = lay["moe"];
     const std::string mw = lw + ".moe";

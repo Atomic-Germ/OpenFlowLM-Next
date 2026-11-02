@@ -236,6 +236,16 @@ struct Manifest {
     double rope_theta = 0;
     std::vector<double> rope_inv_freq;       ///< per rotary pair (rotary_dim / 2 values; Llama 3's scaling is in here)
     bool has_moe = false;                    ///< layout.moe present (a family with routed experts)
+    /// The kernel set DECLARES that the block-loop schedule was measured correct on it, so
+    /// it may be preferred over layer-major for a set with no routed experts.
+    ///
+    /// Absent means "not declared", and the conservative reading applies: a set that can run
+    /// layer-major keeps it. That matters because `Core::layer_major_ok()` is a capability
+    /// test -- most dense sets pass it -- so choosing the block loop for them on capability
+    /// alone would move models nobody measured. Phase 28 validated exactly one set (Qwen3.8-27B)
+    /// and its recipe declares this; the other dense sets keep the schedule they shipped with
+    /// until their own run says otherwise.
+    bool block_loop_preferred = false;
     stream_patch::MoeGeometry moe;
     stream_patch::AttnGeometry attn;
     // the model and its programs

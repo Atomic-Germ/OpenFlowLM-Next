@@ -137,13 +137,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--prompt', type=int, default=520,
-                    help='prompt ids; the fixture pool tops out at 512')
+                    help='prompt ids; the fixture pool is O.POOL (8192 since Phase 29)')
     ap.add_argument('--layers', type=int, default=64)
     ap.add_argument('--max-ctx', type=int, default=4096)
     ap.add_argument('--out', type=Path, default=None)
     a = ap.parse_args()
-    if a.prompt > 512:
-        raise SystemExit('the oracle fixture pool is 512 ids; choose --prompt <= 512')
+    if a.prompt > O.POOL:
+        raise SystemExit(f'the oracle fixture pool is {O.POOL} ids; choose --prompt <= {O.POOL}')
 
     ids = O.fixture(a.prompt, seed=26026)
     stamp = time.strftime('%Y%m%d-%H%M%S')

@@ -120,6 +120,10 @@ struct Args {
     // tensor and printed PASS. That is the exact failure mode this phase exists to avoid.
     std::vector<std::string> dump_state;   // "<layer>:<off>:<bytes>:<path>", repeatable
     std::vector<std::string> state_canary; // "<layer>:<off>:<bytes>:<pattern>", repeatable
+    // Bring-up, Phase 29: "<global>:<off>:<bytes>:<path>", repeatable. The position records
+    // are a global (`ptab`), not a layer's state, so --dump-state cannot reach them -- and
+    // proving a high position's RoPE needs the cos/sin the engine actually wrote.
+    std::vector<std::string> dump_global;
     int bench = 0;                  // --bench N[:LAYER]: time the route's dispatches instead of running a prompt
     int bench_layer = 0;            // which layer's route -- the 35B's two types run different GEMM shapes
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
@@ -176,6 +180,23 @@ void dump_act_slice(Core& core, const std::string& spec) {
 /// The same, for a layer's persistent state: the DeltaNet conv history and S, or the KV
 /// rows. Phase 26 compares these between the block and sequential paths, and reads a
 /// canary back through it, so one dump path serves both.
+void dump_global_slice(Core& core, const std::string& spec) {
+    char name[128] = {0};
+    long long off = 0, n = 0;
+    char path[512] = {0};
+    if (std::sscanf(spec.c_str(), "%127[^:]:%lld:%lld:%511s", name, &off, &n, path) != 4 || n <= 0) {
+        std::fprintf(stderr, "--dump-global wants <name>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+        return;
+    }
+    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    core.read_global(name, static_cast<size_t>(off), buf.size(), buf.data());
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
+    std::fwrite(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    std::fprintf(stderr, "wrote %lld B of global %s at %lld -> %s\n", n, name, off, path);
+}
+
 void dump_state_slice(Core& core, const std::string& spec) {
     int layer = 0; long long off = 0, n = 0;
     char path[512] = {0};
@@ -245,6 +266,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--dump-act") a.dump_act = val();            // "<layer>:<off>:<n>:<path>"
         else if (k == "--dump-state") a.dump_state.push_back(val());   // repeatable
         else if (k == "--state-canary") a.state_canary.push_back(val());  // repeatable
+        else if (k == "--dump-global") a.dump_global.push_back(val());  // repeatable (29.4)
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--block-major") a.block_major = true;
@@ -626,6 +648,7 @@ int main(int argc, char** argv) {
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         for (const auto& spec : a.dump_state) dump_state_slice(core, spec);
+        for (const auto& spec : a.dump_global) dump_global_slice(core, spec);
         int reps = a.twice ? 2 : a.repeat;
         for (int r = 1; r < reps; ++r) {
             // The app checkpoints after the prompt and restores before the next

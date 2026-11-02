@@ -259,6 +259,11 @@ public:
     size_t state_region_bytes(int layer) const;
     /// `n` bytes of a layer's state BO at `off`, straight off the device.
     void read_state(int layer, size_t off, size_t n, uint8_t* dst);
+    /// Bring-up: read part of a named GLOBAL buffer (the position records `ptab`, xres, hn).
+    /// The position record lives in a global rather than a layer's state, so read_state
+    /// cannot reach it, and Phase 29's addressing probe needs the cos/sin the engine
+    /// actually wrote at a high position rather than a re-derivation of them.
+    void read_global(const std::string& name, size_t off, size_t n, uint8_t* dst);
     /// Fill [off, off+n) of a layer's state BO with `pattern` and push it to the DEVICE
     /// before the run. A region production must not touch can then be read back and
     /// required to be unchanged. Destroys whatever was there: bring-up only.
