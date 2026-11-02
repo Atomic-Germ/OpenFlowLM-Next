@@ -587,13 +587,33 @@ def test_max_l_is_the_whole_sequence_so_the_prompt_maximum_is_one_less():
     assert 'total_tokens + tokens.size() >= this->MAX_L' in src
     d = _lc()
     c = d['context_contract']
-    # Two paths, two limits, both measured -- and the serve one is the defect.
+    # Two paths, two limits: the CLI steps one row, this family's generation steps a think
+    # preamble of 2 (thinking) or 4 (not) before any budget check.
     assert c['max_prompt_cli'] == 'ctx_len - 1'
-    assert c['max_prompt_serve'].startswith('ctx_len - 3')
-    assert c['measured_cli'] and c['measured_serve']['engine_511']
-    assert 'position 512' in c['measured_serve']['engine_511']
-    assert 'NOT changed' in c['disposition'], \
-        'an unverified accounting change must not be presented as applied'
+    assert c['max_prompt_serve'].startswith('ctx_len - 4')
+    b = c['phase31_boundary_at_ctx512']
+    assert b['503'] == 'generates' and b['504'] == 'generates'
+    assert b['508'].startswith('refused'), 'near the limit it must refuse, not throw'
+
+
+def test_the_think_preamble_is_guarded_before_it_steps():
+    """The row count is derived from the branch, and refused before anything is written.
+
+    This is the Phase 31 fix: `Qwen3_5VL::generate` steps its think preamble (2 rows when
+    thinking, 4 when not) before the loop's budget check can stop it, so a near-limit prompt
+    used to throw `position N reached the context capacity N` and surface as a generic
+    `Internal error`. A constant "spare slots" guess was wrong three times while probing;
+    the guard now derives it from `enable_think` and names the limit in the message.
+    """
+    src = (ROOT / 'src/common/AutoModel/modeling_qwen3_5vl.cpp').read_text()
+    assert 'this->enable_think ? 2 : 4' in src, \
+        'the preamble size must follow the branch, not a guessed constant'
+    assert 'Max length reached: this model needs' in src
+    assert 'largest prompt' in src, 'the refusal must name the usable maximum'
+    # It must sit BEFORE the preamble steps, not after.
+    guard = src.index('Max length reached: this model needs')
+    first_step = src.index('this->lm_engine->forward(think_start_id);')
+    assert guard < first_step, 'the guard must precede the first preamble step'
 
 
 def test_the_capacity_addressing_and_e2e_levels_stay_separate():

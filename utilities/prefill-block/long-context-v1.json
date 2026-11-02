@@ -23,7 +23,16 @@
   "guard": "if (total_tokens + tokens.size() >= MAX_L) refuse -- consistent, not off-by-one",
   "on_refusal": "explicit 'Max length reached, stopping prefilling' and 0 tokens prefilled; never a silent truncation",
   "max_prompt_cli": "ctx_len - 1",
-  "max_prompt_serve": "ctx_len - 3 (MEASURED, tighter than the CLI)",
+  "max_prompt_serve": "ctx_len - 4 when the model does not think, ctx_len - 2 when it does (MEASURED at ctx 512, Phase 31)",
+  "why_serve_is_tighter_now_fixed": "Qwen3_5VL::generate steps a THINK PREAMBLE before any budget check: 2 tokens when enable_think (think_start_id, 198) and 4 when not (think_start_id, 271, think_end_id, 271). The shared _shared_generate path the CLI uses steps none. That is the whole difference, and it is now guarded so the request is REFUSED with the limit named instead of throwing 'position N reached the context capacity N'.",
+  "phase31_boundary_at_ctx512": {
+   "503": "generates",
+   "504": "generates",
+   "508": "refused, explicit 'needs 5 free slots ... largest prompt that can generate is 507'",
+   "509": "refused, explicit",
+   "510": "refused, explicit",
+   "note": "monotone and loud; no position throw remains at any length tested"
+  },
   "why_serve_is_tighter": "`_shared_insert` samples the first token as part of prefill, so `last_token` is the token AT the prompt's last position. `_shared_generate` pushes it to the history and calls forward(last_sampled_token), which consumes a position at or past MAX_L on a prompt that filled the cache. Prefilling succeeded and generation then threw. The prompt was legal by the prefill guard; the refusal happens one stage too late and is not explicit.",
   "measured_serve": {
    "ctx": 512,

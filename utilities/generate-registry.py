@@ -62,6 +62,13 @@ NON_SETTING_ENV_VARS = {
     # to undo a block that already ran -- is only reachable from a prompt that starts at
     # position != 0. Like the injector, it exists to break a request and is never a
     # setting.
+    # OFLM_CTX_TRACE prints, per request, the prompt token count, `total_tokens`, MAX_L and
+    # the engine's own position at the three points where a budget decision is made: after
+    # prefill, before the think preamble, and before the generation loop. It exists because
+    # the CLI and serve disagreed about the largest usable prompt and reading the source was
+    # not enough to say which one was right -- the trace showed Qwen3_5VL::generate stepping
+    # a think preamble the shared path does not. Off unless set; never a setting.
+    "OFLM_CTX_TRACE",
     "OFLM_DECODE_AUTO_THRESHOLD", "OFLM_DET_ROUTE", "OFLM_GRANITE_ENGINE",
     "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_BLOCK_FAIL_AT", "OFLM_OPEN_BLOCK_FAIL_INJECT",
     "OFLM_OPEN_DISPATCH_LOG",

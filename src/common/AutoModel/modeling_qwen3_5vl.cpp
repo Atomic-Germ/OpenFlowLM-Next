@@ -345,6 +345,37 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
     this->profiler_list[TKOEN_DECODE_TIME].reset();
     std::string token_str;
     int sampled_token;
+    // The think preamble below steps tokens before any budget check can stop it, and how
+    // many depends on the branch: TWO when thinking (`think_start_id`, 198) and FOUR when
+    // not (`think_start_id`, 271, `think_end_id`, 271). After the preamble the loop steps
+    // the token it emitted. That is why a single "spare slots" constant kept sliding as the
+    // boundary was probed: at ctx 512 the preamble alone overran a 509-token prompt, and the
+    // throw surfaced as a generic `Internal error` because the budget check came too late.
+    //
+    // So the requirement is derived from the branch rather than assumed, and refused here,
+    // before anything is written, with the limit named. This does not widen the capacity --
+    // it makes the existing one explicit and loud.
+    const int preamble_rows = this->enable_think ? 2 : 4;
+    const int loop_rows = 1;
+    const int need = preamble_rows + loop_rows;
+    if (std::getenv("OFLM_CTX_TRACE"))
+        std::fprintf(stderr, "ctx-trace preamble: total=%zu MAX_L=%zu need=%d "
+                             "engine_pos=%d headroom=%d\n",
+                     this->total_tokens, static_cast<size_t>(this->MAX_L), need,
+                     this->lm_engine->get_current_context_length(),
+                     static_cast<int>(this->MAX_L) - static_cast<int>(this->total_tokens));
+    if (static_cast<int>(this->total_tokens) + need > this->MAX_L) {
+        header_print("WARNING", "Max length reached: this model needs "
+                                << need << " free slots (" << preamble_rows
+                                << " for its think preamble and " << loop_rows
+                                << " for the first emitted token and the loop's step of it), "
+                                << "so the largest prompt "
+                                "that can generate is " << (this->MAX_L - need)
+                                << " tokens (context " << this->MAX_L << "), got "
+                                << this->total_tokens << "; stopping generation...");
+        reason = MAX_LENGTH_REACHED;
+        return result;
+    }
     if(this->enable_think) {
         this->token_history.push_back(think_start_id);
         this->profiler_list[DECODING_TIME].start();
