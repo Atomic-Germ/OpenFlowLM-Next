@@ -187,36 +187,43 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             const bool gemm_block_on = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK") != "0";
             // A block costs its full-width GEMMs however few real tokens it holds, so a
             // short prompt is cheaper one token at a time. The crossover is measured on
-            // hardware, never derived, and there are two of them because there are two
-            // different schedules here -- not two models:
+            // hardware, never derived. Below it, everything is stepped.
             //
-            //   layer_major_ok()  each layer once over the whole prompt (MoE). The
-            //                     prompt is not cut into blocks at all, so what 64 buys
-            //                     is "one layer-major pass beats N step() calls", and that
-            //                     is what Qwen3.6-35B measured.
-            //   otherwise         the block loop below, whole 256-wide blocks padded at
-            //                     the tail. Its cost is FLAT in the real token count, so
-            //                     the crossover is where the *sequential* side catches
-            //                     up. Phase 27.4 sampled only 1/8/32/64/128/192/255 and
-            //                     reported "the first sampled point where the block wins",
-            //                     which is a grid artifact: its own table crosses near 81.
-            //                     The closure sweep (Phase 27, fine grid, shipped binary,
-            //                     one process per side) measures the flat block at 33.47 s
-            //                     against 425.5 ms/token + 156 ms sequential -- a crossing
-            //                     of ~78 engine tokens, the first clear win at 92 (0.85)
-            //                     and 104 (0.75). 96 keeps a margin over the noise of a
-            //                     single unpinned pass; 128 overcharged 80..127 tokens.
+            // Above it there are two schedules and only one of them is the right default:
             //
-            // Both constants count tokens AS Engine::prefill receives them, not text
-            // tokens: the chat template's offset depends on how its boundary merges with
-            // the first text token (8, 10 and 11 have all been observed).
+            //   layer_major_preferred()  each layer once over the whole prompt. What this
+            //                             buys is ONE routed-expert pass a layer, so an
+            //                             expert's weights stream once per layer instead of
+            //                             once per block -- the Qwen3.6-35B measurement.
+            //                             It also pads the prompt to whole blocks
+            //                             (`TOT = B * T`), which costs a full-width
+            //                             dispatch for a short tail.
+            //   the block loop below      whole 256-wide blocks with the tail STEPPED, one
+            //                             pass per block. Phase 28 measured this against
+            //                             layer-major on a dense kernel set (no routed
+            //                             experts, so no expert amortisation to lose):
+            //                             1.80x faster at 264 engine tokens, 1.42x at 520,
+            //                             1.21x at 1032, 1.11x at 2056, never slower --
+            //                             the whole gap is layer-major's padded tail, and
+            //                             it decays as ceil(N/256) over that schedule's
+            //                             pass count as N grows.
             //
-            // Choosing by capability (which schedule the kernel set can run) rather than
-            // by model name is what keeps a shape-identical derivative model correct
-            // without an update. OFLM_OPEN_GEMM_BLOCK_MIN still overrides both.
+            // So the two constants are the same number now, and the reason is not that the
+            // crossover changed: it is that the block loop is the schedule to use for every
+            // kernel set that does not carry routed experts, at every length above the
+            // sequential crossover. `layer_major_preferred()` is what keeps the MoE sets on
+            // the schedule they were measured to want -- capability decides whether a route
+            // can run, preference decides whether it should.
+            //
+            // The value counts tokens AS Engine::prefill receives them, not text tokens:
+            // the chat template's offset depends on how its boundary merges with the first
+            // text token (8, 10 and 11 have all been observed). Phase 27.4 sampled only
+            // 1/8/32/64/128/192/255 and reported "the first sampled point where the block
+            // wins", a grid artifact whose own table crosses near 81; the closure sweep
+            // measured the flat block at 33.47 s against 425.5 ms/token + 156 ms
+            // sequential, a crossing of ~78 with the first clear win at 92 (0.85).
             const size_t block_loop_crossover = 96;
-            const size_t layer_major_crossover = 64;
-            size_t min_prompt = core_->layer_major_ok() ? layer_major_crossover : block_loop_crossover;
+            size_t min_prompt = block_loop_crossover;
             if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
             // Diagnostic: which route this request took, and how the prompt was cut. A
             // test must not infer this from elapsed time -- a short sequential prompt and
@@ -231,8 +238,9 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                 // B(2) of .claude/plans/prefill-parity.md: on a MoE kernel set, run the
                 // whole prompt through each layer before the next, so the layer's expert
                 // pass sees every token that wants an expert instead of one block's worth.
-                // Bit-exact against the block loop below; OFLM_OPEN_LAYER_MAJOR=0 takes it.
-                if (core_->layer_major_ok()) {
+                // Bit-exact against the block loop below; OFLM_OPEN_LAYER_MAJOR=0 takes it,
+                // and so does any kernel set layer_major_preferred() says not to use.
+                if (core_->layer_major_preferred()) {
                     if (report_route)
                         std::fprintf(stderr, "prefill-route layer-major n=%zu blocks=1 tail=0\n",
                                      ids.size());
@@ -385,13 +393,21 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // infer it: below-crossover is a decision, disabled is a switch, no-program
             // is a capability, and mrope is a safety rule -- four different facts.
             if (report_route) {
+                // `not-preferred` is capability without preference: the set CAN run
+                // layer-major but has nothing for it to amortise, so the block loop is the
+                // schedule to use. Reporting it separately from `fallback` matters, because
+                // one is a decision and the other is a failure.
                 const char* why = !gemm_block_on              ? "disabled"
                                   : ids.size() < min_prompt  ? "below-crossover"
                                   : core_->mrope_active()    ? "mrope"
                                   : core_->gemm_block_t() == 0 ? "no-block-program"
+                                  : (core_->layer_major_ok() &&
+                                     !core_->layer_major_preferred()) ? "not-preferred"
                                                                : "fallback";
-                std::fprintf(stderr, "prefill-route sequential n=%zu blocks=0 tail=0 why=%s crossover=%zu\n",
-                             ids.size(), why, min_prompt);
+                std::fprintf(stderr, "prefill-route sequential n=%zu blocks=0 tail=0 why=%s "
+                                     "crossover=%zu layer-major-capable=%d\n",
+                             ids.size(), why, min_prompt,
+                             core_->layer_major_ok() ? 1 : 0);
             }
             for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
             return logits_view();

@@ -109,40 +109,65 @@ def test_the_oracle_flags_are_not_in_the_shipped_cli():
 
 # ---------------------------------------------------------------- the crossover
 
-def test_the_report_records_that_64_was_inherited_not_measured():
-    """The layer-major constant came from the MoE family, with a different reason."""
+def test_the_report_records_the_provenance_of_both_constants():
+    """96 came from a fitted crossing; layer-major's win came from the MoE family."""
     src = engine()
-    assert 'Qwen3.6-35B' in src, 'the provenance of the 64 must stay visible in the source'
+    assert 'Qwen3.6-35B' in src, 'the provenance of the MoE measurement must stay visible'
     md = REPORT.read_text()
     assert 'inherited' in md
-    assert '96' in md, 'the measured block-loop crossover must be recorded'
+    assert '96' in md, 'the measured sequential/block crossover must be recorded'
 
 
-def test_the_crossover_is_selected_by_what_the_set_can_run_not_by_model_name():
-    """27.1: a shape-identical derivative must be correct without an update.
+def test_the_route_is_chosen_by_capability_and_preference_not_by_model_name():
+    """28.1/28.6: a shape-identical derivative must be correct without an update.
 
-    Two schedules, two measured crossovers. Picking by capability is what makes that
-    possible; a model-name test would need editing for every new tag.
+    Two different questions, asked separately:
+      * CAN this set run layer-major   -- `layer_major_ok()`, a manifest fact;
+      * SHOULD it                     -- `layer_major_preferred()`, because layer-major
+                                        amortises routed experts and pads the tail.
+    A model-name test would need editing for every new tag, so neither may use one.
     """
     src = engine()
-    assert 'block_loop_crossover = 96' in src, 'the block-loop crossover'
-    assert 'layer_major_crossover = 64' in src, 'the MoE layer-major crossover is a different schedule'
-    assert 'core_->layer_major_ok() ? layer_major_crossover : block_loop_crossover' in src, \
-        'the choice must be capability-driven'
+    assert 'block_loop_crossover = 96' in src, 'the sequential/block crossover'
+    assert 'core_->layer_major_preferred()' in src, \
+        'preference, not capability, must pick the schedule among the two block routes'
+    assert 'layer_major_ok() ? layer_major_crossover' not in src, \
+        'capability alone must no longer select layer-major'
     # No model-name or family-name test may decide it.
     prefill = src[src.index('buffer<bf16> Engine::prefill'):]
     prefill = prefill[:prefill.index('prefill_images')]
     for fingerprint in ('27b', 'qwen3.8', 'family ==', 'model_name =='):
         assert fingerprint not in prefill, f'{fingerprint} must not steer the route choice'
+    # And the reason lives in the code, not only in a report.
+    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
+    assert 'bool Core::layer_major_preferred() const' in core
+    assert 'moe_kernel.empty()' in core, \
+        'preference must be derived from whether the set carries routed experts'
 
 
-def test_the_operator_override_still_wins_over_both_crossovers():
+def test_the_owner_of_layer_major_still_gets_it():
+    """A set WITH routed experts keeps the schedule layer-major was measured to want."""
+    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
+    body = core[core.index('bool Core::layer_major_preferred() const'):]
+    body = body[:body.index('\n}\n')]
+    assert 'moe_batch.kernels.empty()' in body
+    assert 'return true' in body
+    # Nothing about a specific model, family or tag.
+    for fingerprint in ('27b', 'qwen3.8', 'qwen35', 'family', 'spec_hash'):
+        assert fingerprint not in body, f'{fingerprint} must not appear in the preference rule'
+
+
+def test_the_operator_override_still_wins_over_the_crossover():
     src = engine()
     assert 'OFLM_OPEN_GEMM_BLOCK_MIN' in src
     after = src[src.index('const size_t block_loop_crossover'):]
     after = after[:after.index('mrope_active')]
     assert 'OFLM_OPEN_GEMM_BLOCK_MIN' in after, \
-        'the diagnostic override must apply after the capability choice'
+        'the diagnostic override must apply after the crossover is chosen'
+    # And the other operator switch is still the way to force layer-major back on.
+    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
+    assert 'OFLM_OPEN_LAYER_MAJOR' in core
+    assert 'layer_major_on_ = std::string(env) != "0"' in core
 
 
 def test_the_measured_crossover_comes_from_a_fit_not_from_a_grid_point():

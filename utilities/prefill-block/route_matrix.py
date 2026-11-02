@@ -149,12 +149,15 @@ def main() -> int:
     rows = []
     for n in a.lengths:
         r = one(n, mode=a.mode, gen_lim=a.gen_lim, ctx=a.ctx, offset=offset)
-        # In layer-major mode the whole prompt is one pass and the crossover is 64; the
-        # block-loop policy does not apply, so it is judged on its own rule instead.
         if a.mode == 'block':
             want = expected(n, a.crossover)
         else:
-            want = dict(route='layer-major') if n >= 64 else dict(route='sequential')
+            # What `--mode block` forces, what the shipped default does. Since Phase 28 the
+            # default for a kernel set with no routed experts is the BLOCK loop, not
+            # layer-major: `layer_major_preferred()` is false here, so production takes the
+            # same policy the block mode asserts. This used to expect layer-major, and that
+            # expectation is exactly what the phase changed.
+            want = expected(n, a.crossover)
         got = r['route']
         ok = r['token_match'] and r['rc'] == 0 and all(
             got.get(k) == v for k, v in want.items() if k != 'tail_sequential')

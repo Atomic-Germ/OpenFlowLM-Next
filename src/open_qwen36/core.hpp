@@ -283,9 +283,26 @@ public:
     /// the tail block is padded here with the last id, exactly as the caller did.
     /// Only for the MoE kinds (linear / full) -- layer_major_ok() says so.
     void step_gemm_prompt(const std::vector<int>& ids, bool want_logits);
-    /// Whether step_gemm_prompt() can run this kernel set: a block route whose every
-    /// layer is a MoE kind, and OFLM_OPEN_LAYER_MAJOR not set to 0.
+    /// Whether step_gemm_prompt() can RUN this kernel set: a block route whose every layer
+    /// carries a gemm_block program and OFLM_OPEN_LAYER_MAJOR is not set to 0. This is a
+    /// capability, not a preference -- see layer_major_preferred().
     bool layer_major_ok() const;
+    /// Whether layer-major is also the schedule to USE for this kernel set, which is a
+    /// different question from whether it can run.
+    ///
+    /// `step_gemm_prompt` pads the prompt to whole blocks (`TOT = B * T`) and runs every one
+    /// of them at full width, while the block loop steps a short tail token by token. For a
+    /// kernel set whose layers carry no routed experts, the layer-major body IS the block
+    /// body -- `layer_linear_staged` / `layer_full_staged` call the same kernels with the
+    /// same host stages -- so the only thing layer-major adds is a padded block for the
+    /// tail. Measured on Qwen3.8-27B (Phase 28.2, Phase 28.5's exact-multiple control):
+    /// block-loop is never slower and is 1.8x faster at 264 engine tokens, decaying to
+    /// parity as the tail becomes a negligible fraction of the prompt.
+    ///
+    /// For the MoE kinds the answer stays YES: there `step_gemm_prompt` runs each layer once
+    /// over the whole prompt, so one expert's weights stream once per layer instead of once
+    /// per block, which is the measured win layer-major was built for (Qwen3.6-35B).
+    bool layer_major_preferred() const;
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
     /// sequential path needs. Off by default; costs a tail per token.

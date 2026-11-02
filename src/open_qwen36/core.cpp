@@ -498,13 +498,21 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
              any_dense ? "not in this kernel set (one dxB dispatch a token)" :
                          "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
+        // Three different facts, said separately: whether the set CAN run layer-major, and
+        // -- when it can -- whether that schedule is the one to USE. A set with no routed
+        // experts is capable but not preferred: layer-major would pad the tail into a block
+        // and amortise nothing (Phase 28).
         log(std::string("prefill schedule: ") +
-            (layer_major_ok() ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
-                                                    : "layer-major (the whole prompt through each layer)") +
-                                    (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
-                                                     : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
-                              : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
-                                                            : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
+            (layer_major_preferred()
+                 ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
+                                       : "layer-major (the whole prompt through each layer)") +
+                       (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
+                                        : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
+                 : layer_major_ok()
+                       ? std::string("block-major (layer-major is runnable here but amortises nothing: no "
+                                     "routed experts in this kernel set; OFLM_OPEN_LAYER_MAJOR=1 forces it)")
+                       : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
+                                                     : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
 }
 
 bool Core::layer_major_ok() const {
@@ -514,6 +522,23 @@ bool Core::layer_major_ok() const {
         if (kind != "linear" && kind != "full") return false;
     }
     return nl_ > 0;
+}
+
+bool Core::layer_major_preferred() const {
+    if (!layer_major_ok()) return false;
+    // What made layer-major worth having is ONE expert pass a layer: the whole prompt goes
+    // through the layer before the next one, so a routed expert's ~2 MB streams once per
+    // layer instead of once per 256-token block. A kernel set with no routed experts has no
+    // such win to collect -- `layer_linear_staged` / `layer_full_staged` run the same GEMM
+    // kernels and the same host stages the block loop calls -- and step_gemm_prompt's
+    // TOT = B * T padding then buys a full-width dispatch for a tail the block loop would
+    // have stepped. So the preference is decided by what the schedule exists to amortise,
+    // not by whether it can run.
+    for (int l = 0; l < nl_; ++l)
+        if (!types_[l]->gemm_block.moe_kernel.empty() ||
+            !types_[l]->gemm_block.moe_batch.kernels.empty())
+            return true;
+    return false;
 }
 
 Core::~Core() {
