@@ -122,6 +122,21 @@ production row. An unpaired cache would be 4096 B.
 So the factor of two beyond `2 planes × 1024 × 2 B` is the **hi/lo residual pair** the paired
 attention output needs, not an alignment or a staging duplicate.
 
+**What the allocator really reserves.** The buffer is a **device** BO, not host memory:
+
+```cpp
+state_.push_back(alloc(lt.state_kind == "kv"
+                       ? (cfg_.max_ctx + kv_slack) * lt.state_row   // <-- the row above
+                       : lt.state_bytes));
+```
+
+so `allocated = 8192 × 16 × ctx`. Peak **host** RSS was measured across the ladder and is
+**flat** (1.82 / 2.04 / 1.79 GiB at 4K / 32K / 128K, a slope of a few hundred bytes per token
+and even negative) — the correct outcome, confirming the cache is not host-resident. A host-RSS
+slope is therefore **not** evidence for or against the formula; my first attempt to read one is
+recorded as `INCONCLUSIVE-BY-DESIGN` rather than dressed up as a confirmation. The authoritative
+numbers are the manifest row and the allocation expression.
+
 With 16 full-attention layers:
 
 ```
