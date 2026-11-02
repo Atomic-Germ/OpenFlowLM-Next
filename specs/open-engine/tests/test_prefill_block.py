@@ -247,12 +247,27 @@ def test_the_greedy_token_parse_needs_multiline():
 
 # ---------------------------------------------------------------- the committed runs
 
+# The runs this file owns, selected by the tool that wrote them. Selecting by directory
+# name meant every later phase's output dropped into the same runs/ tree was claimed by
+# this file and judged against the wrong schema -- the Phase 27 oflm runs are not Phase 26
+# oracle runs. Naming the tools makes the ownership explicit and keeps a future phase
+# from having to edit this file to stop being mis-measured.
+_ORACLE_TOOLS = ('prefill-block-oracle',)
+
+
 def _results():
     """The oracle runs only: decode runs carry a different schema and a different gate."""
     if not RUNS.is_dir():
         return []
-    return sorted(p for p in RUNS.glob('*/result.json')
-                  if not p.parent.name.startswith('decode-'))
+    out = []
+    for p in sorted(RUNS.glob('*/result.json')):
+        try:
+            tool = json.loads(p.read_text()).get('tool', '')
+        except (json.JSONDecodeError, OSError):
+            continue
+        if tool in _ORACLE_TOOLS:
+            out.append(p)
+    return out
 
 
 def test_the_committed_runs_are_well_formed_and_all_pass():

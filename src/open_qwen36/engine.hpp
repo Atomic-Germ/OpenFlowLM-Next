@@ -84,6 +84,12 @@ private:
     vision::VitConfig vcfg_;
     std::unique_ptr<vision::VitWeights> vit_;   ///< loaded on the first image (~0.85 GB, ~3 s)
     void ensure_vit();
+    /// 27.11: remember the caches so a block-prefill failure part-way through a prompt
+    /// can be undone before the sequential path runs. Only taken when the prompt does
+    /// not begin at position 0, because that case is recoverable by `reset()` for free.
+    /// Returns false when no snapshot could be taken, which the caller reports rather
+    /// than mistaking for success.
+    bool save_pre_prompt_state();
     template <class Payload> buffer<bf16> prefill_images(std::vector<int>& ids, const Payload& p);
 
     buffer<bf16> logits_view();

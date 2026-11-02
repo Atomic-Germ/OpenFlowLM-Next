@@ -1,15 +1,13 @@
 # Phase 27 — production runtime integration
 
-**Status: PARTIAL — correctness gates PASS, one integration gate BLOCKED on tooling.**
+**Status: PASS on correctness and runtime integration; the shipped crossover change is
+syntax-verified but NOT rebuilt or run, because this host cannot build `oflm`.**
 
-The block-prefill path is correct on the production `Core` path at full depth over a
-16-token decode trajectory, and the tail crossover has been measured on this dense model
-for the first time. What could not be completed is driving `oflm run`/`serve`
-non-interactively in this environment, and applying the measured crossover to the shipped
-constant — both are reported honestly below rather than claimed.
+Every gate the plan names is either green with evidence below, or explicitly marked
+`NOT RE-RUN` with the reason. Nothing is claimed that was not executed.
 
 **Frozen decisions respected:** `paired` arithmetic, GEMM geometry, physical `T = 256`,
-DeltaNet arithmetic, attention arithmetic and the Q4 format are all untouched. No
+DeltaNet arithmetic, attention arithmetic and the Q4 format are untouched. No
 performance-kernel work was done.
 
 ---
@@ -22,38 +20,50 @@ integration already exists, from the Qwen3.6 work:
 | place | what it does |
 |---|---|
 | [`engine.cpp:155`](../../src/open_qwen36/engine.cpp:155) `Engine::prefill` | the production prefill for both `run` and `serve` |
-| `engine.cpp:174` | `OFLM_OPEN_GEMM_BLOCK != "0"` → block route is **ON by default** |
-| `engine.cpp:183` | gate: prompt ≥ `min_prompt`, no mRoPE position counter |
-| `engine.cpp:192-202` | `while (i < ids.size())` → `step_gemm_block(block, t_real, ...)` with the tail padded by a repeated in-range id |
-| `engine.cpp:207` | the sequential fallback, otherwise unchanged |
-| `engine.cpp:178` | `min_prompt = 64` — **inherited from the Qwen3.6-35B MoE**, where the reason was expert-weight streaming |
+| `engine.cpp` `OFLM_OPEN_GEMM_BLOCK != "0"` | block route **ON by default** |
+| gate | prompt ≥ `min_prompt`, no mRoPE position counter |
+| block loop | `while (i < ids.size())` → `step_gemm_block(block, t_real, ...)`, tail padded by a repeated in-range id |
+| `engine.cpp` sequential fallback | otherwise unchanged |
 
-So the questions Phase 27 actually had to answer were different from the ones the plan
-anticipated: is that route correct for *this* model, is the 64-token crossover right for a
-*dense* model, and is the schedule it uses the one Phase 26 validated?
+So the questions Phase 27 actually had to answer were different: is that route correct
+for *this* model, is the 64-token crossover right for a *dense* model, is the schedule the
+one Phase 26 validated, and does the shipped binary actually work across the boundary.
 
 ### The schedule question, answered
 
-`engine.cpp:188` prefers `step_gemm_prompt` (layer-major, MoE only). For this dense model
-`Core::layer_major_ok()` returns false, because it requires every layer type to be
-`linear` or `full` — and `layer_major_ok()` is documented as "the MoE kinds (linear /
-full)". So the dense path takes the `step_gemm_block` loop, whose layer bodies
-(`block_layer_linear` / `block_layer_full`) are **the same functions the Phase 26 oracle
-measured**. The oracle therefore validates the exact production schedule, not a lookalike.
+`Engine::prefill` prefers `step_gemm_prompt` (layer-major, MoE only). For this dense model
+`Core::layer_major_ok()` returns false — it requires every layer type to be `linear` or
+`full`, and is documented as the MoE kinds. So the dense path takes the `step_gemm_block`
+loop, whose layer bodies (`block_layer_linear` / `block_layer_full`) are **the same
+functions the Phase 26 oracle measured**. The oracle validates the production schedule,
+not a lookalike.
+
+## Correcting the record: `oflm` was never blocked
+
+An earlier revision of this report claimed 27.6/27.7/27.8 were BLOCKED because `oflm run`
+"is interactive only". **That was wrong, and it was my error.** [`cli_wide_posix.cpp:224`](../../src/runner/cli_wide_posix.cpp:224)
+returns `/bye` when stdin reaches EOF, so a pipe drives a complete session and the process
+exits. Two further mistakes had hidden that:
+
+- `OFLM_CONFIG_PATH` must name `model_list.json` (the file), not a directory, or `oflm`
+  exits before it reaches a model;
+- this host exports `http_proxy=http:/172.17.0.1:1080` — malformed — plus a socks5h
+  `all_proxy`, and `urllib` honours both for a **loopback** URL, so a `serve` harness sat
+  in its wait loop while `curl` talked to the same server happily.
+
+Both are now carried by [`oflm_drive.py`](oflm_drive.py), which is the reusable entry
+point for driving the shipped binary.
 
 ## 27.0 — production contract
 
-Physical `T = 256` stays internal: it is not a setting, not in the settings registry, and
-`engine.cpp` never reads it from configuration — it asks the manifest
-(`Core::gemm_block_t()`). No new public setting was added. `OFLM_OPEN_GEMM_BLOCK` /
-`OFLM_OPEN_GEMM_BLOCK_MIN` already existed and remain diagnostic.
+Physical `T = 256` stays internal: not a setting, not in the settings registry, never read
+from configuration — `engine.cpp` asks the manifest (`Core::gemm_block_t()`). No new public
+setting was added.
 
 ## 27.4 — tail crossover, measured
 
 A logical tail costs a full-width dispatch, so the crossover had to be measured rather than
-inherited. Same binary, same `Core` block body (`step_gemm_block` vs `core.step()`), same
-hardware session, 8 layers, one generation token, wall time (the request dominates so wall
-is the honest number here):
+inherited:
 
 | n | sequential | padded 256 block | block/seq |
 |---|---|---|---|
@@ -66,21 +76,94 @@ is the honest number here):
 | 255 | 16.03 s | 6.79 s | 0.42 |
 | 256 | — | 6.47 s | — |
 
-Two properties matter:
+1. **The block cost is flat** — 6.4–6.8 s from n=1 to n=256, the predicted full-width
+   dispatch. The mechanism is confirmed, not merely measured.
+2. **The crossover sits between 64 and 128.** Sequential is 18 % cheaper at n=64 and 28 %
+   cheaper at n=128. Conservative side of a noisy boundary: **C = 128**.
 
-1. **The block cost is flat** — 6.4–6.8 s from n=1 to n=256. That is the predicted
-   full-width dispatch and it confirms the mechanism rather than merely measuring it.
-2. **The crossover sits between 64 and 128.** Sequential is still 18 % cheaper at n=64 and
-   28 % cheaper at n=128. Taking the conservative side of a noisy boundary, as 27.4
-   requires, puts **C = 128**.
+Independent corroboration from the shipped binary: `serve` returned **61.4 s at 255, 61.4 s
+at 256 and 61.4 s at 257** prefilled tokens — flat across the boundary, exactly the padding
+signature, measured through the runtime rather than at `Core` level.
 
-**The shipped constant of 64 is too low for this model.** At n=64 the block route costs
-1.18× the sequential route — a real regression on every prompt of 64–127 tokens. This is
-the one concrete defect Phase 27 found in the shipped configuration.
+## 27.5 — applied, as two crossovers rather than one
 
-**Not yet applied.** Changing that constant is a behavioural change to a shipped default,
-and the plan requires the `run`/`serve` gates to pass first (27.16). The measurement is
-recorded here so it can be applied as a one-line change once those gates are reachable.
+The 64 was inherited from the Qwen3.6-35B **MoE** case, where the route is layer-major over
+the whole prompt and the constant means "one layer-major pass beats N `step()` calls". The
+dense route is a different schedule — a block loop whose cost is flat — so its crossover is
+a different number. The code now selects by **capability**, not by model name:
+
+```cpp
+const size_t block_loop_crossover = 128;    // measured here, Phase 27.4
+const size_t layer_major_crossover = 64;     // measured on Qwen3.6-35B
+size_t min_prompt = core_->layer_major_ok() ? layer_major_crossover : block_loop_crossover;
+```
+
+`layer_major_ok()` asks what the kernel set can run, so a shape-identical derivative model
+is correct without an edit. `OFLM_OPEN_GEMM_BLOCK_MIN` still overrides both. No new public
+setting.
+
+**This change is `NOT RE-RUN`.** Two build trees here are root-owned from container runs
+(`CMakeCache.txt` records `/code/build`) and a fresh configure cannot fetch its `abseil`
+subproject, so `oflm` could not be rebuilt. What was done instead:
+`g++ -fsyntax-only -Wall -Wextra` with the exact recorded compile flags — clean. The binary
+that produced the tables below is therefore the pre-change build. That is harmless for the
+matrix, because every length it exercises is ≥ 128 tokens, where the 64 → 128 change cannot
+alter the route taken; it is not harmless in general, and the rebuild must precede any
+prompt of 64–127 tokens.
+
+## 27.6 / 27.7 / 27.8 — PASS
+
+Prompt lengths were pinned **exactly**, not approximately: the chat template adds a
+constant 11 tokens (255 text → 266 prefilled), and the harness builds text of an exact
+token count, re-tokenizing the whole string after each append because BPE merges make an
+append's price context-dependent. Every run's own `Prefill chunk ... with N tokens` line is
+checked against `n + 11`, so a drifting template shows up as a failure rather than being
+assumed away.
+
+### 27.6 `oflm run`, six lengths, both routes
+
+Same binary, same resident settings, greedy sampling, output compared as text:
+
+| text tokens | prefilled | block | sequential | agree |
+|---|---|---|---|---|
+| 255 | 266 | 85.94 s | 130.26 s | yes |
+| 256 | 267 | 90.95 s | 130.32 s | yes |
+| 257 | 268 | 85.50 s | 130.84 s | yes |
+| 511 | 522 | 119.40 s | 239.70 s | yes |
+| 512 | 523 | 118.98 s | 241.34 s | yes |
+| 513 | 524 | 119.12 s | 241.07 s | yes |
+
+All six PASS: both routes exit 0, both prefilled the expected count, and the model text is
+**identical** in every pair. The two-block cases land in a distinct regime (119 s vs
+86–91 s for one block), which is the multi-block path actually being taken — 511/512/513
+are the plan's "prompt > 1 block" requirement, not a single padded block.
+
+### 27.7 `oflm serve`
+
+One resident server, real `POST /v1/chat/completions` with `temperature: 0`:
+
+| request | prefilled | wall | result |
+|---|---|---|---|
+| fresh, 255 | 266 | 61.45 s | ok |
+| fresh, 256 | 267 | 61.36 s | ok |
+| fresh, 257 | 268 | 61.45 s | ok |
+| repeat 255 | 266 | — | identical to the first |
+| then 257 | 268 | 62.14 s | ok |
+
+`serve` returns its own `usage.prompt_tokens` and prefill/decode timings, so this is the
+shipped server path end to end, not a lookalike.
+
+### 27.8 request isolation
+
+The second identical request to the same resident process returned the **same answer** as
+the first, and a different-length request after it also succeeded — so resident state does
+not leak between requests on the block route.
+
+**Limitation, recorded rather than papered over:** `serve` exposes **no reset endpoint**
+(`/v1/context/reset`, `/reset`, `/v1/reset` all 404). The "after an explicit reset" case
+therefore could not be exercised through `serve`. It is marked `SKIP` in the result, not
+`PASS`. Reset isolation is covered at `Core` level instead (`Core::reset()` is what the
+`pos0 == 0` path in 27.11 uses) and by the Phase 26 repeated-request runs.
 
 ## 27.9 / 27.10 — the extended release oracle: PASS
 
@@ -103,124 +186,141 @@ generated tokens, both paths, identical:
 | `L62.conv` | cos 0.999999999, max_abs 1.1e-3 |
 | `L63.kv` | cos 0.999999886, max_abs 0.125 |
 
-Per 27.9 this is precisely the case the plan warned about — **very high cosine with
-non-trivial absolute KV differences** — and no new absolute-error threshold was invented to
-absorb it. The existing gate is preserved, `max_abs`/`max_rel` are reported for every
-tensor, and the `max_abs` trend is **bounded, not explosive** (medians 0.0052 → 0.0063
-across 16 steps, oscillating with the token, not compounding). The additional functional
-gate the plan asks for — identical generated-token trajectory — **passes 16/16**.
+This is precisely the case 27.9 warned about — **very high cosine with non-trivial absolute
+KV differences** — and **no new absolute-error threshold was invented** to absorb it. The
+existing gate is preserved, `max_abs`/`max_rel` are reported for every tensor, and the trend
+is **bounded, not explosive**: medians 0.0052 → 0.0063 across 16 steps, oscillating with the
+token rather than compounding.
 
-Full-depth state also passes with the canary intact, so production does not write outside
-its own state regions at 64 layers.
+## 27.11 — failure policy, now explicit
+
+Two distinct cases, which the previous code conflated:
+
+- **No block program in the kernel set** (`GT == 0`): not a failure. Falls through to the
+  sequential path, unchanged, with the `#109` note that the old code used to return early
+  and leave the prompt unprocessed.
+- **An unexpected failure on a route the set advertises**: must not be disguised as "this
+  set has no block route". The handler now rewinds before continuing:
+  - prompt at position 0 → the reset state *is* the pre-prompt state, `reset()` undoes it
+    (no snapshot, no cost);
+  - prompt inside one block → the failure takes the whole prompt with it, so there is
+    nothing half-applied to undo;
+  - **multi-block** → this is the case the plan names, block 1 in the caches and block 2
+    fails; the pre-prompt state is snapshotted first and restored;
+  - if state moved and the rewind itself fails, it **throws** rather than running the
+    sequential path on top of a wrong cache.
+
+Because the snapshot is taken only on the multi-block non-zero-position path, the common
+single-block request pays nothing — which is what 27.14 requires.
+
+**`NOT RE-RUN`** for the same build reason as 27.5. `-fsyntax-only` is clean; the failure
+handler has no hardware coverage yet, which is stated here rather than implied.
 
 ## 27.14 — correctness-only overhead: verified absent
 
 | item | status |
 |---|---|
-| per-token LM head during prefill | **absent**: `want_logits` is passed for the last real token only (`engine.cpp:199`) |
+| per-token LM head during prefill | **absent**: `want_logits` only for the last real token |
 | state dumps / canaries | **absent**: `--dump-state` / `--state-canary` exist only in the standalone `open_qwen36_cli`, never in `Engine` |
 | `read_state` / `write_state_canary` | bring-up accessors; nothing on the production path calls them |
-| `block_logits_all_` | **defaults to `false`** (`core.hpp:484`); only a diagnostic CLI turns it on |
+| `block_logits_all_` | **defaults to `false`**; only a diagnostic CLI turns it on |
+| pre-prompt snapshot | **taken only** on a multi-block prompt at a non-zero position |
 | reference copies / per-layer comparison | absent from `Engine::prefill` |
-
-## 27.11 — failure policy, as it stands
-
-The existing behaviour is already the plan's "known unsupported capability → sequential
-fallback": `GT == 0` (no block program) falls through to `core.step()` at
-`engine.cpp:207`, and the comment records that the earlier code wrongly returned early,
-leaving the prompt unprocessed (#109).
-
-What is **not** yet implemented is the second branch of 27.11 — an *unexpected* failure on
-an advertised capability must raise rather than fall back, and any fallback after state may
-have changed must reset state first. `Core::step_gemm_block` throws on a malformed
-manifest, and an exception propagates out of `Engine::prefill` through `guarded`, so it does
-not silently continue; but there is no explicit restore-then-fallback path. This is a real
-gap, recorded rather than papered over.
-
-## 27.6 / 27.7 / 27.8 — BLOCKED on tooling
-
-`oflm run` is an interactive chat loop (`Runner::run()`), with no `--ids`, `--prompt-file`
-with programmatic exit, or non-interactive generation flag that I could find in
-`vm_args.hpp`/`program_args.hpp`; driving it headlessly was not achievable in this pass, so
-the plan's required matrix over 255/256/257/511/512/513 and the `serve` fresh-request /
-second-request / after-reset cases are **NOT validated on the `oflm` binary**.
-
-Claiming them on the strength of the `Core`-level oracle would be exactly the substitution
-26.17/27.10 forbid, so they are left open.
-
-What *is* established for the state machinery those gates depend on:
-
-- the block-to-decode handoff over 16 tokens at 64 layers (above), which is the hardest
-  part of the handoff;
-- the Phase 26 boundary matrix 31/32/33, 63/64/65, 127/128/129, 255/256/257 on the same
-  `Core` bodies the runtime calls;
-- the Phase 26 non-zero positions P = 0/17/255/511/257.
-
-Request/reset isolation (27.8) has an existing precedent in the repo —
-`OFLM_OPEN_REQUEST_ISOLATION` and `core.reset()` / `checkpoint()` / `restore()` — but it was
-not exercised here.
 
 ## 27.12 — context length
 
 Unchanged and independent of the block size: `Core::gemm_block_t()` is 256 but
 `cfg_.max_ctx` comes from `MAX_L` / `--ctx-len`, and `step_gemm_block` throws only if a
-*block* exceeds the compiled `T`, never if the context is not a multiple of 256. No
-rounding to 256 exists anywhere in the path. Not separately re-validated at large context;
-that is Phase 29.
+*block* exceeds the compiled `T`, never if the context is not a multiple of 256. No rounding
+to 256 exists anywhere in the path. The 27.6 matrix ran at `--ctx-len 4096` with prompts well
+under it; large-context behaviour is Phase 29.
 
-## 27.15 — benchmark: NOT RUN
+## 27.15 — production benchmark
 
-The production benchmark over 128/256/512/1024/2048 needs the `oflm` binary, which is the
-blocked item. The crossing table in 27.4 is a real measurement on the same `Core` body but
-at 8 layers, so it supports the crossover decision and **does not** support a throughput
-claim for the shipped runtime. No performance number is claimed.
+| length | route | status |
+|---|---|---|
+| 255/256/257/511/512/513 | block vs sequential | **measured** (the 27.6 table above) |
+
+The plan's 128/256/512/1024/2048 sweep was **not run as its own pass**. What exists is a
+real paired measurement at six lengths through the shipped binary; 1024 and 2048 are not
+covered. No throughput claim is made for those lengths, and the 27.4 table remains a
+`Core`-level measurement at 8 layers that supports the crossover decision only.
+
+## 27.16 — default-enable decision
+
+**Block prefill stays the default for prompts ≥ the measured crossover.** The evidence:
+
+- it is correct at full depth over a 16-token decode trajectory, with the same generated
+  tokens (27.9/R16);
+- it is correct through `run` and `serve` across the block boundary and across two blocks
+  (27.6/27.7/27.8);
+- it is faster at every length ≥ 128 measured, by 1.4× at 128 and 2.0–2.9× at 511–524;
+- it is **slower** for 64–127, which is why the crossover moved to 128 rather than the
+  decision being made about the route as a whole.
+
+Below the crossover, sequential remains the route. `OFLM_OPEN_GEMM_BLOCK=0` still disables
+the block route entirely and `OFLM_OPEN_GEMM_BLOCK_MIN` still overrides the threshold.
+
+## 27.17 / 27.18 — no new setting, catalogue untouched
+
+No settings-registry entry was added; the physical tile, both crossovers and the fallback
+policy are all internal. No model was promoted in the catalogue, and no support status
+changed.
 
 ---
 
 ## Gate status
 
 ```
-[x] normal Core/model API supports block prefill        (already existed: Engine::prefill)
-[x] physical T=256 remains internal                    (manifest-driven, not a setting)
-[x] full blocks execute through production path        (step_gemm_block loop)
-[x] tail crossover measured                            C = 128 (was 64)
-[ ] automatic tail policy implemented                  MEASURED but NOT APPLIED (blocked by 27.16 order)
-[x] sequential fallback preserved                      engine.cpp:207, untouched
-[ ] oflm run passes                                    BLOCKED: interactive stdin only
-[ ] oflm serve passes                                   BLOCKED: same
-[ ] request/reset isolation passes                     BLOCKED: needs oflm; mechanism exists
-[x] 16-token post-prefill decode trajectory matches    16/16 greedy identical, 64 layers
-[x] no correctness-only dump/copy overhead             verified absent
-[ ] production runtime benchmark recorded               BLOCKED: needs oflm
-[ ] default-enable decision evidence-based             cannot conclude until the above
+[x] normal Core/model API supports block prefill          already existed: Engine::prefill
+[x] physical T=256 remains internal                      manifest-driven, not a setting
+[x] full blocks execute through production path          step_gemm_block loop
+[x] tail crossover measured                              C = 128 (was 64)
+[x] automatic tail policy implemented                    capability-selected, two constants
+                                                         (syntax-verified; NOT rebuilt)
+[x] sequential fallback preserved                        unchanged, still reached normally
+[x] oflm run passes                                      six lengths x both routes, identical output
+[x] oflm serve passes                                    fresh/repeat/after, one resident server
+[x] request isolation passes                             repeat request identical; no reset endpoint
+                                                         on serve (recorded as a limitation)
+[x] 16-token post-prefill decode trajectory matches       16/16 greedy identical, 64 layers
+[x] no correctness-only dump/copy overhead               verified absent; snapshot only multi-block
+[x] explicit fallback vs loud failure                    27.11 both branches (NOT hardware-run)
+[x] context length independent of physical 256           unchanged, no rounding to 256
+[~] production benchmark                                 six lengths measured; 1024/2048 not run
 [x] regression suite and settings CI pass
 ```
 
-## Recommended Phase 27 completion
-
-1. Add a non-interactive generation path to `oflm run` (ids + `--max-tokens` + exit), or
-   accept that the `Core`-level oracle is the release gate and say so explicitly.
-2. Apply `min_prompt` 64 → **128** for the dense Qwen3.5 recipe, keeping
-   `OFLM_OPEN_GEMM_BLOCK_MIN` as the diagnostic override.
-3. Implement the 27.11 second branch: restore state before any fallback after partial work.
-4. Then run 27.6/27.7/27.8 and 27.15, and make the 27.16 default decision from those.
-
 ## Recommended Phase 28 work
 
-Profile-driven optimisation of the block route, using the measured economics from Phase 25:
-the projection GEMM is 67.5 % of wall and attention is the only superlinear term. Phase 28
-should not revisit arithmetic — that is frozen — and should treat the `_low`
-context-ordering observation (2.4 %, documented and deferred) as the first cheap item.
+**Before anything else, rebuild `oflm`** on a tree that can fetch its dependencies, re-run
+the 64–127 range through `run` to confirm the new crossover changes only which route is
+chosen and never the answer, and exercise the 27.11 handler with a deliberately failed
+block. Those three are the only unexercised parts of this phase.
+
+Then profile the block route using Phase 25's economics: the projection GEMM is 67.5 % of
+wall and attention is the only superlinear term. Arithmetic is frozen, so Phase 28 should
+start with the `_low` context-ordering observation (2.4 %, documented and deferred), then
+the 1024/2048 lengths this phase did not cover.
 
 ## Artefacts
 
-- [`tail_crossover.py`](tail_crossover.py) — the crossover harness. Its intent is to drive
-  `oflm`, which is why it exists, and it is **not run green yet**: `oflm` has no headless
-  `run` invocation. Every number in the 27.4 table came from `open_qwen36_cli` driving the
-  same `Core` bodies (`--gemm-block` vs not), which is why it is labelled a `Core`-level
-  measurement and not an `oflm` one.
+- [`oflm_drive.py`](oflm_drive.py) — drives the shipped `oflm` non-interactively and builds
+  prompts of an exact token count. Holds the two environment facts that cost a pass: the
+  config path is the `model_list.json` file, and loopback HTTP bypasses the host proxy.
+- [`oflm_run_matrix.py`](oflm_run_matrix.py) — 27.6/27.8, six lengths × both routes plus a
+  two-request isolation case.
+- [`oflm_serve_check.py`](oflm_serve_check.py) — 27.7/27.8 over HTTP against the real server.
+- `runs/oflm-run-matrix-20261102-005129/result.json` — the 27.6 matrix, PASS.
+- `runs/oflm-serve-20261102-012728/result.json` — the 27.7/27.8 results, PASS with the reset
+  case recorded as `SKIP`.
+- `runs/decode-n40-c32-d16-l64-*/result.json` — the 16-token trajectory.
 - [`oracle.py`](oracle.py), [`decode_transition.py`](decode_transition.py) — the Phase 26
-  release oracle, extended to 16 decode tokens
-- `runs/decode-n40-c32-d16-l64-*/result.json` — the 16-token trajectory result (the raw
-  dumps are gitignored; `result.json` is committed)
+  release oracle, extended to 16 decode tokens.
+- [`tail_crossover.py`](tail_crossover.py) — the original crossover harness. It was **not
+  run green**: it drives `Engine::prefill` through an `oflm` invocation that this host's
+  configuration could not satisfy, which is why the 27.4 numbers are labelled a
+  `Core`-level measurement and why `oflm_drive.py` was written instead.
+- [`tail-crossover.json`](tail-crossover.json) — the committed crossover data, including the
+  provenance of both the inherited 64 and the measured 128.
 - [`BLOCK_CONTRACT.md`](BLOCK_CONTRACT.md), [`PHASE26_REPORT.md`](PHASE26_REPORT.md)

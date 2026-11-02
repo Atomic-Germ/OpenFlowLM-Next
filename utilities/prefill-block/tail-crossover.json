@@ -75,5 +75,29 @@
   "block cost is flat across active rows: a full-width dispatch whatever t_real is",
   "n=64 block/seq = 1.18, so the shipped 64 regresses prompts of 64-127 tokens",
   "n=128 block/seq = 0.72, the first measured point where the block wins"
- ]
+ ],
+ "applied": {
+  "engine.cpp": "two constants chosen by capability, not by model name",
+  "block_loop_crossover": 128,
+  "layer_major_crossover": 64,
+  "selector": "core_->layer_major_ok()",
+  "override": "OFLM_OPEN_GEMM_BLOCK_MIN",
+  "rebuilt": false,
+  "why_not_rebuilt": "both build trees on this host are root-owned from container runs (CMakeCache.txt records /code/build) and a fresh configure cannot fetch its abseil subproject; verified with g++ -fsyntax-only using the exact recorded compile flags instead",
+  "impact_on_the_27_6_matrix": "none: every length in the matrix is >= 128 text tokens, so the 64->128 change cannot alter the route taken"
+ },
+ "corroboration": {
+  "source": "oflm serve, shipped binary, one resident server",
+  "prefilled_tokens": [
+   266,
+   267,
+   268
+  ],
+  "wall_s": [
+   61.45,
+   61.36,
+   61.45
+  ],
+  "note": "flat across the 256 boundary, the padding signature, measured through the runtime"
+ }
 }

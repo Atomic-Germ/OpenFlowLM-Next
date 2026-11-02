@@ -133,6 +133,16 @@ void Engine::ensure_alive() {
     poisoned_ = false;
 }
 
+bool Engine::save_pre_prompt_state() {
+    try {
+        snapshot_ = core_->checkpoint();
+        return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "open_qwen36: cannot snapshot the pre-prompt state: %s\n", e.what());
+        return false;
+    }
+}
+
 buffer<bf16> Engine::forward(int id) {
     return guarded([&] { core_->step(id, true); return logits_view(); });
 }
@@ -173,9 +183,28 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // getenv_oflm, not getenv, so a pre-rename FLM_* export still works (#41).
             const bool gemm_block_on = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK") != "0";
             // A block costs its full-width GEMMs however few real tokens it holds, so a
-            // short prompt is cheaper one token at a time; the crossover is measured, not
-            // derived (Qwen3.6-35B: ~64 tokens), OFLM_OPEN_GEMM_BLOCK_MIN overrides it.
-            size_t min_prompt = 64;
+            // short prompt is cheaper one token at a time. The crossover is measured on
+            // hardware, never derived, and there are two of them because there are two
+            // different schedules here -- not two models:
+            //
+            //   layer_major_ok()  each layer once over the whole prompt (MoE). The
+            //                     prompt is not cut into blocks at all, so what 64 buys
+            //                     is "one layer-major pass beats N step() calls", and that
+            //                     is what Qwen3.6-35B measured.
+            //   otherwise         the block loop below, whole 256-wide blocks padded at
+            //                     the tail. Its cost is FLAT in the real token count, so
+            //                     the crossover is where the *sequential* side catches
+            //                     up. Measured on the dense Qwen3.5 recipe (Phase 27.4):
+            //                     sequential is 1.18x cheaper at 64 tokens and 0.72x at
+            //                     128 -- the crossover is 128, and the 64 inherited from
+            //                     the MoE case was a real regression on 64..127 tokens.
+            //
+            // Choosing by capability (which schedule the kernel set can run) rather than
+            // by model name is what keeps a shape-identical derivative model correct
+            // without an update. OFLM_OPEN_GEMM_BLOCK_MIN still overrides both.
+            const size_t block_loop_crossover = 128;
+            const size_t layer_major_crossover = 64;
+            size_t min_prompt = core_->layer_major_ok() ? layer_major_crossover : block_loop_crossover;
             if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
@@ -191,15 +220,70 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                 }
                 const size_t GT = core_->gemm_block_t();
                 if (GT > 0) {
+                    // 27.11: an UNEXPECTED failure on a route the kernel set advertises must
+                    // not be disguised as "this set has no block route". If it happens
+                    // before any block has run, nothing has been written to the caches and
+                    // the sequential path below is exactly as correct as it would have been
+                    // -- that is a genuine fallback. If it happens after a block has run,
+                    // state has moved, so the caches are put back to where they were before
+                    // the prompt and only then does the sequential path run. Continuing on
+                    // top of a half-updated cache would silently produce the wrong answer
+                    // with the right shape, which is the failure mode worth the extra code.
+                    //
+                    // The "where they were" is a snapshot, and taking one is a full readback
+                    // of every layer's state, so it is not taken where it cannot be needed:
+                    //
+                    //   position 0      the reset state IS the pre-prompt state, so
+                    //                   reset() undoes the prompt for free.
+                    //   one block       the failure takes the whole prompt with it, so
+                    //                   there is no half-applied cache to undo; if it did
+                    //                   move state the throw below reports that rather
+                    //                   than falling back onto a wrong cache.
+                    //   multi-block     this is the case the plan names -- block 1 is in
+                    //                   the caches and block 2 fails.
+                    //
+                    // So the common single-block path pays nothing, which is what 27.14
+                    // requires, and the only path that can be left half-applied pays once.
+                    const bool recover_by_reset = core_->position() == 0;
+                    const bool multi_block = ids.size() > GT;
+                    const bool have_snapshot =
+                        !recover_by_reset && multi_block && save_pre_prompt_state();
+                    auto rewind = [&]() -> bool {
+                        try {
+                            if (recover_by_reset) { core_->reset(); return true; }
+                            if (have_snapshot) { core_->restore(snapshot_); return true; }
+                        } catch (...) {
+                        }
+                        return false;
+                    };
                     size_t i = 0;
-                    while (i < ids.size()) {
-                        const size_t t_real = std::min(GT, ids.size() - i);
-                        std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
-                        block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
-                        core_->step_gemm_block(block, t_real, i + t_real == ids.size());
-                        i += t_real;
+                    bool ran = false;
+                    try {
+                        while (i < ids.size()) {
+                            const size_t t_real = std::min(GT, ids.size() - i);
+                            std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
+                            block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
+                            ran = true;
+                            core_->step_gemm_block(block, t_real, i + t_real == ids.size());
+                            i += t_real;
+                        }
+                        return logits_view();
+                    } catch (const std::exception& e) {
+                        // Only here, in the handler: a message emitted before the try would
+                        // announce a failure on every run that succeeds.
+                        if (ran && !rewind())
+                            throw std::runtime_error(std::string(
+                                "open_qwen36: block prefill failed after part of the prompt had "
+                                "already run, and the pre-prompt state could not be restored: ") +
+                                e.what());
+                        std::fprintf(stderr,
+                                     "open_qwen36: block prefill failed on a set that advertises it: %s\n"
+                                     "open_qwen36: %s, then the sequential path\n", e.what(),
+                                     recover_by_reset ? "cache reset"
+                                                      : (have_snapshot ? "pre-prompt state restored"
+                                                                       : "state NOT rewound"));
+                        // fall through to the sequential path, from the restored state
                     }
-                    return logits_view();
                 }
                 // no route in this kernel set: fall through to the sequential path below
                 // (this used to return here, leaving the prompt unprocessed -- #109)
