@@ -1,7 +1,23 @@
 # Phase 29 — How far does this runtime scale, and what stops it?
 
-**Status: PASS. Outcome B — attention becomes the dominant long-context cost, so the
-full-context escalation stopped at 4K and attention is the selected next target.**
+**Status: PASS — Outcome B.** Attention becomes the dominant long-context cost, so the
+full-context escalation stopped at 4K and attention is the selected next target.
+
+## Final classification
+
+```
+largest capacity validated:     262144   (256K: buffers, indices, context object)
+largest addressing validated:   262144   (positions up to and including 262143)
+largest end-to-end validated:     4095   Engine-visible tokens (the 4K ladder rung)
+largest server request validated: 4093   Engine-visible tokens, then a short request in the
+                                         same process, then the long one again identical
+long-context performance blocker: attention
+KV at 256K:                 34359738368 B = 32.00 GiB  (8192 B row x 16 layers x 262144)
+```
+
+End-to-end is a **4095-token** result, not a 4096 one, and not an 8K or 16K one: 8K and 16K are
+**capacity and addressing validated, end-to-end NOT validated**. The three levels are never
+merged in this report.
 
 Three different claims, kept apart throughout:
 
@@ -85,8 +101,28 @@ The eight questions:
 
 ## 29.2 — The memory model, from the manifest
 
-`layout.kv_row` is **8192 bytes**, which is exactly `4 kv heads × 256 head dim × 2 bytes ×
-(K + V)`. With 16 full-attention layers:
+`layout.kv_row` is **8192 bytes**, and the arithmetic behind it is **not** `(K + V)`. This
+model's attention takes the **paired** cache (`recipes/qwen36moe.py`:
+`(8 if paired else 4) * kvw`, and `paired_attention()` is true for qwen35 at hidden 5120 with
+24/4/256/64), so a row is **four bf16 planes**:
+
+```
+element          bfloat16, 2 B
+kv_heads × hd    4 × 256 = 1024 elements
+K planes         [K hi | K lo]  2 × 1024 × 2 B = 4096 B
+V planes         [V hi | V lo]  2 × 1024 × 2 B = 4096 B
+row                                           = 8192 B
+```
+
+`block_host.hpp:93` says exactly this — `kv_pair` is "cache planes [K hi, K lo, V hi, V lo]" —
+and `Core::kv_row()` uses `off = row*kv_row + (value ? kv_row/2 : 0)`, i.e. K in the first
+4 KB and V in the second. There is **no padding and no second copy**: 8192 B is the single
+production row. An unpaired cache would be 4096 B.
+
+So the factor of two beyond `2 planes × 1024 × 2 B` is the **hi/lo residual pair** the paired
+attention output needs, not an alignment or a staging duplicate.
+
+With 16 full-attention layers:
 
 ```
 KV = 8192 × 16 × ctx = 131072 bytes/token
@@ -155,20 +191,81 @@ ids so the second token legitimately wrote the row I wanted to be zero.
 
 ## 29.5 / 29.14 — The context boundary
 
+`MAX_L` is the **total stored sequence**, not the prompt: the generate loop is
+`while (total_tokens < MAX_L)`, so prompt and generated tokens draw on one budget. That makes
+the prefill guard
+
+```cpp
+if (this->total_tokens + tokens.size() >= this->MAX_L) refuse
+```
+
+**consistent, not off-by-one**: a prompt of exactly `MAX_L` would leave no slot for the first
+generated token. The invariant is
+
+```
+prompt_tokens + generated_tokens <= MAX_L
+```
+
+and the largest prompt that can generate at least one token is **`MAX_L − 1`**.
+
+Verified exhaustively at a 512 context, where a boundary case costs seconds
+(`runs/ctx-boundary-512-20261102-185906/`, 6/6 PASS):
+
+| prompt | generate | engine tokens | prefilled | warns | verdict |
+|---|---|---|---|---|---|
+| 510 | 1 | 510 | yes | – | prefills and generates |
+| **511 = MAX_L−1** | 1 | **511** | yes | – | **the last usable slot** |
+| 511 = MAX_L−1 | 2 | 511 | yes | – | generation stops at `MAX_L` |
+| **512 = MAX_L** | 1 | **0** | **no** | `Max length reached, stopping prefilling` | **explicit refusal** |
+
 | case | observed |
 |---|---|
 | engine 4095 at a 4096 capacity | **runs** — 15 full blocks + a padded 255 tail, 16 passes |
-| engine 4096 at a 4096 capacity | **refused**: `[WARNING] Max length reached, stopping prefilling...`, **0 tokens prefilled** |
+| engine 4096 at a 4096 capacity | **refused**: `Max length reached, stopping prefilling`, **0 tokens prefilled** |
 | silent truncation | **none** — nothing is prefilled and the request does not proceed |
 | position wrap | **none** — addressing proves it at 262 143 |
 | KV overwrite | none observed; `step_gemm_block` refuses `pos + T > max_ctx` |
 
-The exact-capacity refusal is a **one-token off-by-one in `_shared_insert`**:
-`if (total_tokens + tokens.size() >= MAX_L)` refuses a prompt that would exactly fill the
-context, so the usable maximum is `MAX_L − 1`. It fails loudly and safely, which is the
-behaviour the plan requires, but it is a real (and reportable) defect in limit accounting.
-It was **not** changed in this phase: 29.15 forbids changing limits during the measurement
-pass.
+This is **the contract, not a defect**, and the earlier revision of this report called it a
+defect because it had not checked what `MAX_L` meant. The guard is left as it is, and the
+operational consequence is stated plainly for the CLI: **the maximum prompt for a request that
+generates at least one token is `ctx_len − 1`.**
+
+### The server is one stage tighter, and that IS a real inconsistency
+
+The first serve smoke at that same limit failed, and the log names it:
+
+```
+[OFLM]  Prefill chunk 1/1 with 511 tokens
+[OFLM]  Start generating...
+open_qwen36: request failed: open_qwen36: position 512 reached the context capacity 512
+```
+
+`_shared_insert` samples the first token as part of prefill, so `last_token` is already the
+token AT the prompt's last position. `_shared_generate` then pushes it onto the history and
+calls `forward(last_sampled_token)`, which consumes a position at or past `MAX_L` on a prompt
+that filled the cache. Prefill succeeded; generation threw; the API returned
+`Internal error`.
+
+Measured on a 512 context, four points:
+
+| engine tokens | CLI | serve |
+|---|---|---|
+| 509 | ok | **PASS** (fresh, repeat-identical, and a following request) |
+| 510 | ok | **PASS** |
+| 511 = `MAX_L−1` | **prefills and generates** | **prefill ok, then throw** |
+| 512 = `MAX_L` | refused, 0 prefilled | refused |
+
+So the guard is right for the CLI and **one stage too late for serve**: a prompt the prefill
+path accepts cannot generate, and the refusal comes as a generic `Internal error` rather than
+the explicit length message. The practical rule until it is fixed: **a serve request must keep
+two slots of headroom — `prompt ≤ ctx_len − 2`.**
+
+The accounting fix lives in `_shared_insert` / `_shared_generate`, which every family shares.
+I drafted it, then **reverted it rather than ship it unverified**: the `+1` that makes the
+guard correct for serve also changes the CLI path that the boundary test already proved
+works, and neither variant has been re-measured. It is recorded as a Phase 30/31 candidate,
+not a Phase 29 change.
 
 ## 29.6 — End-to-end: 4096
 
@@ -246,13 +343,23 @@ The gap this leaves: no sequential-vs-block logits comparison at 4K. A sequentia
 is 16× the block route's dispatch count at one token per step — hours — which 29.7 explicitly
 authorises skipping when it "would consume excessive hardware time".
 
-## 29.13 — Server
+## 29.13 — Server: one long request, one short, PASS
 
-Not run at 4K, and recorded as such: the server path shares `Engine::prefill` with the CLI,
-and 29.13 asks for a representative case "unless it exposes a discrepancy". The 4K CLI run
-reached the same code (block route, 16 passes, logits, decode), so the remaining risk was the
-request-level plumbing, which Phase 27's A→B→A isolation already covered at 400 tokens. A 4K
-serve request would be ~11 minutes per request for no new information.
+`runs/oflm-serve-20261102-192100/`, ctx 4096, ONE representative long case:
+
+| request | tokens | wall | result |
+|---|---|---|---|
+| long | 4085 text → **4093 engine** | **516.42 s** | accepted, prefilled, generated, output produced, no DMA / allocation / context error |
+| short, same process | 40 | 21.87 s | ok |
+| long again, same process | 4093 | – | **identical to the first** |
+| short again, same process | 40 | 21.89 s | ok, matches the first short |
+
+The short request before and after the long one returned the same answer in the same ~21.9 s,
+so the long prompt leaked **no** KV, DeltaNet, conv or position state into the next request.
+`serve` has no reset endpoint; recorded `N/A`, not counted as a pass.
+
+It also **exposed a discrepancy**, which is why the 9 minutes were worth spending: the serve
+and CLI limits differ by a slot (29.5 above).
 
 ## 29.11 / 29.12 — The two length settings
 
@@ -268,6 +375,16 @@ measurement. The only runtime change in this phase is the Phase 29.0 *preference
 moves **no** pre-existing model and was made before the measurements.
 
 ---
+
+## Phase 30 disposition: DEFERRED
+
+The plan's Phase 30 (optional new arithmetic / datapath research) is marked **DEFERRED**:
+
+> New arithmetic/datapath optimization is intentionally postponed until the Qwen3.8-27B
+> production-support plan is formally closed.
+
+Nothing from it was implemented, and nothing will be as part of this closure: no attention
+redesign, no INT8/INT4, no FP8, no KV quantization, no new GEMM, no new tile geometry.
 
 ## Phase 29 decision tree: Outcome B
 

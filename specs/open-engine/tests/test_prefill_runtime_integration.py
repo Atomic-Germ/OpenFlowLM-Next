@@ -527,3 +527,94 @@ def test_case_A_is_committed_too_through_run():
     assert cases['A_before_first_block']['injected'] is True
     assert cases['A_before_first_block']['said_reset'] is True
     assert cases['A_before_first_block']['output'] == d['reference']['output']
+
+
+# ---------------------------------------------------------------- long context (Phase 29)
+
+def _lc():
+    path = ROOT / 'utilities/prefill-block/long-context-v1.json'
+    if not path.is_file():
+        pytest.skip('no long-context artefact committed')
+    return json.loads(path.read_text())
+
+
+def test_the_kv_row_is_the_paired_layout_not_a_hand_estimate():
+    """A row is FOUR bf16 planes -- [K hi, K lo, V hi, V lo] -- not two.
+
+    The first version of this report wrote `4 x 256 x 2 x (K+V)`, which is 4096, and called
+    it 8192. The number was right and the reason was wrong: the paired attention route stores
+    each K and V twice, so `row = (8 if paired else 4) * kvw`. The test derives the row from
+    the recipe and the host struct rather than asserting the constant.
+    """
+    d = _lc()
+    kv = d['kv_model']
+    kvw = 4 * 256                       # kv heads x head dim for this geometry
+    unpaired = 4 * kvw                 # [K | V] bf16
+    paired = 8 * kvw                   # [K hi | K lo | V hi | V lo] bf16
+    assert kv['bytes_per_token_per_full_layer'] == paired == 8192
+    assert kv['bytes_per_token_per_full_layer'] != unpaired, \
+        'this model is paired; the unpaired row would be 4096'
+    assert kv['k_physical_stride_bytes'] + kv['v_physical_stride_bytes'] == paired
+    assert kv['bytes_per_token_all_16_layers'] == paired * 16 == 131072
+    # The runtime says the same thing in its own words.
+    host = (ROOT / 'src/open_qwen36/block_host.hpp').read_text()
+    assert '[K hi, K lo, V hi, V lo]' in host
+    recipe = (ROOT / 'open_kernels/recipes/qwen36moe.py').read_text()
+    assert '(8 if paired else 4) * kvw' in recipe
+    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
+    assert 'kv_row / (w_->attn_kv_pair ? 4 : 2)' in core, \
+        'the readout divides a row into four planes when paired'
+
+
+def test_the_allocated_kv_matches_the_formula_at_every_measured_length():
+    kv = _lc()['kv_model']
+    row = kv['bytes_per_token_per_full_layer']
+    layers = 16
+    for ctx, allocated in kv['allocated_kv'].items():
+        assert allocated == row * layers * int(ctx), ctx
+    assert kv['allocated_kv']['262144'] == 34359738368, '32 GiB at 256K'
+
+
+def test_max_l_is_the_whole_sequence_so_the_prompt_maximum_is_one_less():
+    """`MAX_L` is prompt + generated; a prompt of exactly MAX_L has no room to generate.
+
+    That makes the `>=` guard consistent rather than off-by-one, and the earlier report's
+    "defect" label wrong. The boundary was then verified at a 512 context.
+    """
+    src = (ROOT / 'src/common/AutoModel/automodel.cpp').read_text()
+    assert 'while (this->total_tokens < this->MAX_L)' in src, \
+        'generation draws on the same budget as the prompt'
+    assert 'total_tokens + tokens.size() >= this->MAX_L' in src
+    d = _lc()
+    c = d['context_contract']
+    # Two paths, two limits, both measured -- and the serve one is the defect.
+    assert c['max_prompt_cli'] == 'ctx_len - 1'
+    assert c['max_prompt_serve'].startswith('ctx_len - 3')
+    assert c['measured_cli'] and c['measured_serve']['engine_511']
+    assert 'position 512' in c['measured_serve']['engine_511']
+    assert 'NOT changed' in c['disposition'], \
+        'an unverified accounting change must not be presented as applied'
+
+
+def test_the_capacity_addressing_and_e2e_levels_stay_separate():
+    d = _lc()
+    for key in ('capacity_validated', 'addressing_validated_positions',
+                'end_to_end_validated'):
+        assert key in d, key
+    assert max(d['capacity_validated']) == 262144
+    assert max(d['addressing_validated_positions']) == 262143
+    # End-to-end must never be claimed above what actually ran.
+    assert max(d['end_to_end_validated']) < 8192
+    for row in d['rows']:
+        if row['context_length'] >= 8192:
+            assert row['e2e_pass'] is False, \
+                'a length above 4K must not be recorded as end-to-end validated'
+
+
+def test_the_attention_gate_is_a_measured_fit_not_a_theory():
+    g = _lc()['attention_gate']
+    assert g['fires'] is True
+    assert 0.99 <= g['model_r2'] if 'model_r2' in g else True
+    assert 1.0 < g['ms_per_position'] < 2.5
+    assert g['gate_threshold'] == 0.20
+    assert 4096 < g['gate_crossing_context'] < 16384

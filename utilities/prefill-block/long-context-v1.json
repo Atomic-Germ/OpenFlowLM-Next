@@ -17,15 +17,51 @@
   "note": "the three are never collapsed; a capacity PASS is not an end-to-end claim"
  },
 
+ "context_contract": {
+  "max_l_semantics": "MAX_L is the TOTAL stored sequence (prompt + generated): the generate loop is `while (total_tokens < MAX_L)`",
+  "invariant": "prompt_tokens + generated_tokens <= MAX_L",
+  "guard": "if (total_tokens + tokens.size() >= MAX_L) refuse -- consistent, not off-by-one",
+  "on_refusal": "explicit 'Max length reached, stopping prefilling' and 0 tokens prefilled; never a silent truncation",
+  "max_prompt_cli": "ctx_len - 1",
+  "max_prompt_serve": "ctx_len - 3 (MEASURED, tighter than the CLI)",
+  "why_serve_is_tighter": "`_shared_insert` samples the first token as part of prefill, so `last_token` is the token AT the prompt's last position. `_shared_generate` pushes it to the history and calls forward(last_sampled_token), which consumes a position at or past MAX_L on a prompt that filled the cache. Prefilling succeeded and generation then threw. The prompt was legal by the prefill guard; the refusal happens one stage too late and is not explicit.",
+  "measured_serve": {
+   "ctx": 512,
+   "engine_509": "PASS (fresh, repeat-identical, and a following request)",
+   "engine_510": "PASS",
+   "engine_511": "prefill ok, then 'position 512 reached the context capacity 512' -> HTTP 'Internal error'",
+   "artefacts": ["runs/ctx-boundary-512-20261102-185906",
+                 "runs/oflm-serve-20261102-191643",
+                 "runs/oflm-serve-20261102-190706"]
+  },
+  "measured_cli": "engine 511 prefills and generates at ctx 512 (runs/ctx-boundary-512-20261102-185906)",
+  "disposition": "NOT changed in Phase 29: the accounting fix touches the shared insert/generate state and was reverted rather than shipped unverified. Recorded as a Phase 30/31 candidate. Until then, a serve request must keep 2 slots of headroom: prompt <= ctx_len - 2 for any generation."
+ },
+
  "kv_model": {
   "kv_row_bytes": 8192,
-  "derivation": "4 kv heads x 256 head dim x 2 bytes x (K + V) = 8192, matching layout.kv_row",
-  "full_attention_layers": 16,
-  "bytes_per_token_all_layers": 131072,
+  "derivation": "PAIRED cache: 4 planes of bf16 at kv_heads*head_dim = 4*256 = 1024 elements each. [K hi, K lo, V hi, V lo] per block_host.hpp:93, so 4 planes x 1024 elems x 2 B = 8192 B. An UNPAIRED cache would be 2 planes x 1024 x 2 = 4096 B (recipes/qwen36moe.py: (8 if paired else 4) * kvw).",
+  "element_storage": "bfloat16, 2 bytes per element",
+  "k_physical_stride_bytes": 4096,
+  "v_physical_stride_bytes": 4096,
+  "k_planes": "hi + lo, 2048 B each",
+  "v_planes": "hi + lo, 2048 B each",
+  "pairing_reason": "the paired route stores each K and V value twice (hi/lo residual pair) so the attention output is computed in FP32 from the pair; this is the validated wide dense Qwen attention geometry (recipes/qwen36moe.py paired_attention: qwen35, hidden 5120, 24/4/256/64)",
+  "row_layout": "off = row*kv_row + (value ? kv_row/2 : 0) -- K in the first 4096 B, V in the second (core.cpp kv_row())",
+  "padding_alignment_bytes_per_row": 0,
+  "staging_duplicate": "none: 8192 is the single production row; there is no second copy",
+  "bytes_per_token_per_full_layer": 8192,
+  "bytes_per_token_all_16_layers": 131072,
   "linear_state_bytes_fixed": 3317760,
   "ptab_row_bytes": 2048,
   "container_gib": 18.48,
-  "formula": "container + kv_row*16*ctx + ptab_row*ctx + globals + linear_state + per-layer buffers"
+  "formula": "container + 8192*16*ctx + 2048*ctx + globals + linear_state + per-layer buffers",
+  "allocated_kv": {
+   "4096": 536870912,
+   "32768": 4294967296,
+   "131072": 17179869184,
+   "262144": 34359738368
+  }
  },
 
  "host": {
@@ -70,6 +106,19 @@
    "notes": "addressing probed at 262143; capacity accepted the full length with no silent reduction"}
  ],
 
+ "server_smoke": {
+  "artefact": "runs/oflm-serve-20261102-192100",
+  "verdict": "PASS",
+  "ctx": 4096,
+  "long_request": {"text_tokens": 4085, "engine_tokens": 4093, "wall_s": 516.42,
+                   "result": "accepted, prefilled, generated, output produced, no DMA/allocation/context error"},
+  "short_request_same_process": {"text_tokens": 40, "wall_s": 21.87, "result": "ok"},
+  "repeat_long_same_process": {"matches_first": true},
+  "short_after_long": {"wall_s": 21.89, "result": "ok", "matches_the_first_short": true},
+  "isolation": "the long request leaked no KV / DeltaNet / conv / position state into the next request: the short request before and after the long one returned the same answer and the same ~21.9 s",
+  "reset_endpoint": "N/A -- serve exposes none (recorded, not counted as a pass)"
+ },
+
  "capacity_validated": [4096, 8192, 16384, 32768, 65536, 131072, 262144],
  "addressing_validated_positions": [4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384, 16385,
                                     32767, 32768, 32769, 65535, 65536, 65537, 131071, 131072,
@@ -92,7 +141,9 @@
   "attention_ms": 51000,
   "attention_share": 0.086,
   "attention_share_excl_tail": 0.123,
+  "ms_per_position": 1.628,
   "model": "attention per block = 1.628 ms/position x position + 187 ms   (R^2 = 0.99768, 15 full blocks)",
+  "model_r2": 0.99768,
   "why_it_matters": "attention is linear in position while GEMM is linear in BLOCKS, so attention's share grows quadratically in context length: 12.3% at 4K, 21.5% at 8K, 35.1% at 16K",
   "gate_threshold": 0.20,
   "gate_crossing_context": 7600,
