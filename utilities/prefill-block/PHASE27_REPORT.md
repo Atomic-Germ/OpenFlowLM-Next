@@ -237,14 +237,34 @@ under it; large-context behaviour is Phase 29.
 
 ## 27.15 — production benchmark
 
-| length | route | status |
-|---|---|---|
-| 255/256/257/511/512/513 | block vs sequential | **measured** (the 27.6 table above) |
+Two measurements, both through the shipped `oflm` at full 64-layer depth:
 
-The plan's 128/256/512/1024/2048 sweep was **not run as its own pass**. What exists is a
-real paired measurement at six lengths through the shipped binary; 1024 and 2048 are not
-covered. No throughput claim is made for those lengths, and the 27.4 table remains a
-`Core`-level measurement at 8 layers that supports the crossover decision only.
+**Paired A/B**, block vs sequential, same binary and settings (the 27.6 table): the block
+route is 1.5× faster at 266 tokens, 2.0× at 522 and 2.0× at 524 in the two-block regime.
+
+**Block route alone**, by prompt length — `gen-lim 8`, so 52 tokens of generation are
+included in every wall time:
+
+| text tokens | prefilled | blocks | wall | wall / block |
+|---|---|---|---|---|
+| 128 | 139 | 1 | 51.96 s | 51.96 s |
+| 1024 | 1035 | 5 | 191.14 s | 38.23 s |
+| 2048 | 2059 | 9 | 335.30 s | 37.26 s |
+
+The 5- and 9-block rows agree on **~37–38 s per block**, which is the honest marginal cost.
+The single-block row is higher because one request also absorbs the model load, so 52 s is
+not the block's cost — at 266 tokens the same route takes 86 s, i.e. about 38 s per block
+plus a constant. That is why the 27.4 table, measured at 8 layers, is quoted for the
+*crossover decision* only: its absolute times are not full-depth times.
+
+**Precision on 27.4's "flat":** the block cost is flat in the number of **active rows inside
+a block** — n=1 and n=256 take the same full-width dispatch — but it is **linear in the
+number of blocks**. 5 blocks ≈ 5×38 s regardless of how the 1024 tokens divide up. Both
+statements are needed: the first is why a tail must be padded or avoided, the second is why
+long prompts cost what they cost.
+
+`serve` corroborates the flat-in-active-rows half from the other side: 61.4 s at 255, 256
+and 257 prefilled tokens, three requests, one resident server.
 
 ## 27.16 — default-enable decision
 
@@ -287,7 +307,7 @@ changed.
 [x] no correctness-only dump/copy overhead               verified absent; snapshot only multi-block
 [x] explicit fallback vs loud failure                    27.11 both branches (NOT hardware-run)
 [x] context length independent of physical 256           unchanged, no rounding to 256
-[~] production benchmark                                 six lengths measured; 1024/2048 not run
+[x] production benchmark                                 128/1024/2048 + paired A/B at the boundary
 [x] regression suite and settings CI pass
 ```
 

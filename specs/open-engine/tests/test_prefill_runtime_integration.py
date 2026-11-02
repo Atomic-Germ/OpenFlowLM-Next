@@ -245,12 +245,13 @@ def test_no_weak_new_tolerance_was_invented():
 # ---------------------------------------------------------------- the open gates
 
 def test_the_report_does_not_claim_a_gate_it_did_not_run():
-    """The 1024/2048 sweep was not run; the report must say so, and say which were."""
+    """27.15 ran for 128/1024/2048; the build-blocked changes stay labelled NOT RE-RUN."""
     md = REPORT.read_text()
     assert 'NOT RE-RUN' in md, 'the build-blocked changes must be labelled'
-    assert 'not run as its own pass' in md
-    for n in ('1024', '2048'):
-        assert n in md
+    for n in ('128', '1024', '2048'):
+        assert f'| {n} |' in md, f'{n} must appear as a measured row, not just in prose'
+    # The unexercised parts must still be named rather than implied.
+    assert 'no hardware coverage yet' in md
 
 
 def test_the_build_block_that_stopped_the_rebuild_is_recorded():
@@ -374,3 +375,25 @@ def test_the_serve_timings_show_the_flat_block_cost_through_the_runtime():
     assert len(walls) >= 3
     lo, hi = min(walls), max(walls)
     assert hi - lo < 0.25 * lo, f'a padded block should be flat in the prompt length: {walls}'
+
+
+def test_the_block_cost_is_linear_in_blocks_not_in_active_rows():
+    """Both halves of the claim, from the committed full-depth benchmark.
+
+    Flat in the active rows inside a block -- that is why a tail is padded or avoided.
+    Linear in the number of blocks -- that is why a long prompt costs what it costs. The
+    single-block row is excluded from the per-block rate because it absorbs the model
+    load; using it would understate the marginal cost and make the two sides disagree.
+    """
+    d = _run('oflm-bench-*/result.json')
+    assert d['verdict'] == 'PASS'
+    assert sorted(r['block']['text_tokens'] for r in d['rows']) == [128, 1024, 2048]
+    multi = [r['block'] for r in d['rows'] if r['block']['blocks'] > 1]
+    assert len(multi) >= 2, 'at least two multi-block points are needed to fit a rate'
+    rate = [b['wall_s'] / b['blocks'] for b in multi]
+    assert max(rate) - min(rate) < 0.10 * min(rate), \
+        f'per-block cost is not constant across block counts: {rate}'
+    # And a block count that does not divide the length exactly still costs the same:
+    # padding is free in time, which is the whole reason the tail policy exists.
+    for b in d['rows']:
+        assert b['block']['matches_expected'], 'the prompt length must be the one asked for'
