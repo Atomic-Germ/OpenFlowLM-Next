@@ -46,7 +46,15 @@ K = int(os.environ.get("AG_K", 256))
 N = int(os.environ.get("AG_N", 2048))
 if M % (M_TILE * 4) or K % K_TILE or N % (N_TILE * N_COLS):
     sys.exit(f"attn_gemm: M={M} K={K} N={N} must tile by ({M_TILE * 4}, {K_TILE}, {N_TILE * N_COLS})")
+# [16/10/2026] AG_TB : tb_max_n_rows (task/0152 T61-2). The C tiler needs
+# M % (M_TILE * 4 * tb_n_rows) == 0 with tb_n_rows = min(tb_max//2, row blocks)
+# so the default tb_max=4 (tb_n_rows=2 -> M multiple of 512) REFUSES M=1280 --
+# Granite 4.2's ag_m = heads_per_kv(40/8=5) * 256 = 1280, only divisible at
+# tb_n_rows=1 (256). AG_TB=2 -> tb_n_rows=1 builds every Granite tier; the
+# default stays 4 for the validated Qwen points (M=2048 works at tb_n_rows=2).
+TB_MAX = int(os.environ.get("AG_TB", "4"))
 
 DESIGN = pretiled_array
 SPECIALIZE = dict(M=M, K=K, N=N, m=M_TILE, k=K_TILE, n=N_TILE, n_aie_cols=N_COLS,
-                  dtype_in_str="bf16", dtype_out_str="f32", rtp=True)
+                  dtype_in_str="bf16", dtype_out_str="f32", rtp=True,
+                  tb_max_n_rows=TB_MAX)
