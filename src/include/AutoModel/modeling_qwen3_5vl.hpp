@@ -28,6 +28,18 @@ private:
     int think_start_id = 248068;
     int think_end_id = 248069;
     void setup_tokenizer(std::string model_path);
+
+    /// How many cache rows `generate()` steps as a think preamble before the generation
+    /// loop's own budget guard can run: 2 when thinking (`think_start_id`, 198) and 4 when
+    /// not (`think_start_id`, 271, `think_end_id`, 271).
+    ///
+    /// This lives beside the branches it counts so the capacity guard and the preamble
+    /// cannot drift apart: `generate` refuses a prompt that leaves less than
+    /// `generation_preamble_rows() + 1` free, then advances `total_tokens` by exactly this
+    /// many once the preamble has run. Measured at ctx 512 -- prompt 507 generates and
+    /// finishes at exactly MAX_L, prompt 508 is refused. Not a setting, and it says nothing
+    /// about any model: it is this generation shape's own semantics.
+    int generation_preamble_rows() const { return this->enable_think ? 2 : 4; }
     
     // Image processing functionality
     ImageReader image_reader_;

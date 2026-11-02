@@ -23,7 +23,20 @@
   "guard": "if (total_tokens + tokens.size() >= MAX_L) refuse -- consistent, not off-by-one",
   "on_refusal": "explicit 'Max length reached, stopping prefilling' and 0 tokens prefilled; never a silent truncation",
   "max_prompt_cli": "ctx_len - 1",
-  "max_prompt_serve": "ctx_len - 4 when the model does not think, ctx_len - 2 when it does (MEASURED at ctx 512, Phase 31)",
+  "max_prompt_serve": "ctx_len - 5 when the model does not think, ctx_len - 3 when it does (OBSERVED at ctx 512, Phase 31)",
+  "generation_headroom": {
+   "rule": "prompt + generation_preamble_rows() + 1 <= ctx_len",
+   "thinking_branch": {"preamble_rows": 2, "need": 3,
+                        "observed_508": "generates, ends engine_pos=510 total=511",
+                        "observed_509": "generates, ends engine_pos=511 total=512 (last legal prompt)",
+                        "observed_510": "REFUSED, headroom=2"},
+   "normal_branch": {"preamble_rows": 4, "need": 5,
+                     "observed_506": "generates, ends engine_pos=510 total=511",
+                     "observed_507": "generates, ends engine_pos=511 total=512 (last legal prompt)",
+                     "observed_508": "REFUSED, headroom=4"},
+   "trace": "OFLM_CTX_TRACE prints the engine position before the preamble, after every preamble step, and after the first emitted token",
+   "helper": "Qwen3_5VL::generation_preamble_rows() -- guard, counter advance and the template trim all call it"
+  },
   "why_serve_is_tighter_now_fixed": "Qwen3_5VL::generate steps a THINK PREAMBLE before any budget check: 2 tokens when enable_think (think_start_id, 198) and 4 when not (think_start_id, 271, think_end_id, 271). The shared _shared_generate path the CLI uses steps none. That is the whole difference, and it is now guarded so the request is REFUSED with the limit named instead of throwing 'position N reached the context capacity N'.",
   "phase31_boundary_at_ctx512": {
    "503": "generates",

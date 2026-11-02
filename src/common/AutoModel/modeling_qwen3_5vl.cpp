@@ -317,7 +317,9 @@ bool Qwen3_5VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
     }
 
     size_t n = tokens.size();
-    tokens.resize(n - (this->enable_think ? 2 : 4));
+    // The template already ends with the preamble's tokens; trim exactly as many as
+    // `generate` will step, from the same helper, so the two cannot disagree.
+    tokens.resize(n - static_cast<size_t>(this->generation_preamble_rows()));
 
     bool success = has_images
         ? this->_shared_insert(meta_info, tokens, is_cancelled, &image_payload, last_image_token_index)
@@ -347,17 +349,19 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
     int sampled_token;
     // The think preamble below steps tokens before any budget check can stop it, and how
     // many depends on the branch: TWO when thinking (`think_start_id`, 198) and FOUR when
-    // not (`think_start_id`, 271, `think_end_id`, 271). After the preamble the loop steps
-    // the token it emitted. That is why a single "spare slots" constant kept sliding as the
-    // boundary was probed: at ctx 512 the preamble alone overran a 509-token prompt, and the
-    // throw surfaced as a generic `Internal error` because the budget check came too late.
+    // not (`think_start_id`, 271, `think_end_id`, 271). The engine's position advances by
+    // that many while `total_tokens` does not, which is the accounting bug: the loop's own
+    // `while (total_tokens < MAX_L)` guard then measures a position it has already passed,
+    // and the overflow surfaces as `position 512 reached the context capacity 512` -- a
+    // generic `Internal error` in serve. Measured with OFLM_CTX_TRACE at ctx 512:
     //
-    // So the requirement is derived from the branch rather than assumed, and refused here,
-    // before anything is written, with the limit named. This does not widen the capacity --
-    // it makes the existing one explicit and loud.
-    const int preamble_rows = this->enable_think ? 2 : 4;
-    const int loop_rows = 1;
-    const int need = preamble_rows + loop_rows;
+    //   prompt=506  before 506 -> 507 -> 508 -> 509 -> 510 (preamble), total still 506
+    //
+    // So `total_tokens` is advanced by the preamble after it runs, which makes the counter
+    // and the engine position agree and the loop guard true again. The up-front refusal
+    // then only has to guarantee the preamble itself fits plus one row to emit.
+    const int preamble_rows = this->generation_preamble_rows();
+    const int need = preamble_rows + 1;
     if (std::getenv("OFLM_CTX_TRACE"))
         std::fprintf(stderr, "ctx-trace preamble: total=%zu MAX_L=%zu need=%d "
                              "engine_pos=%d headroom=%d\n",
@@ -367,8 +371,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
     if (static_cast<int>(this->total_tokens) + need > this->MAX_L) {
         header_print("WARNING", "Max length reached: this model needs "
                                 << need << " free slots (" << preamble_rows
-                                << " for its think preamble and " << loop_rows
-                                << " for the first emitted token and the loop's step of it), "
+                                << " for its think preamble and 1 to emit the first token), "
                                 << "so the largest prompt "
                                 "that can generate is " << (this->MAX_L - need)
                                 << " tokens (context " << this->MAX_L << "), got "
@@ -376,11 +379,19 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         reason = MAX_LENGTH_REACHED;
         return result;
     }
+    const bool ctx_trace = std::getenv("OFLM_CTX_TRACE") != nullptr;
+    auto trace_pos = [&](const char* step) {
+        if (ctx_trace)
+            std::fprintf(stderr, "ctx-trace step %-14s engine_pos=%d total=%zu\n", step,
+                         this->lm_engine->get_current_context_length(), this->total_tokens);
+    };
+    trace_pos("before-preamble");
     if(this->enable_think) {
         this->token_history.push_back(think_start_id);
         this->profiler_list[DECODING_TIME].start();
         this->lm_engine->forward(think_start_id);
         this->profiler_list[DECODING_TIME].stop(1);
+        trace_pos("after-think-start");
         token_str = this->tokenizer->run_time_decoder(think_start_id);
         result += token_str;
         os << token_str << std::flush;
@@ -390,14 +401,19 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         this->profiler_list[DECODING_TIME].start();
         buffer<bf16> y = this->lm_engine->forward(198);
         this->profiler_list[DECODING_TIME].stop(1);
+        trace_pos("after-198");
         token_str = this->tokenizer->run_time_decoder(198);
         result += token_str;
         sampled_token = this->sampler->sample(y);
         os << token_str << std::flush;
+        // The two preamble rows are in the cache now; the counter must say so, or the loop
+        // guard below measures a position the engine has already passed.
+        this->total_tokens += static_cast<size_t>(preamble_rows);
     }
     else{
         this->token_history.push_back(think_start_id);
         this->lm_engine->forward(think_start_id);
+        trace_pos("after-think-start");
         token_str = this->tokenizer->run_time_decoder(think_start_id);
 
         // \n\n
@@ -405,23 +421,28 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         this->profiler_list[DECODING_TIME].start();
         this->lm_engine->forward(271);
         this->profiler_list[DECODING_TIME].stop(1);
+        trace_pos("after-271a");
         token_str = this->tokenizer->run_time_decoder(271);
         
         this->token_history.push_back(think_end_id);
         this->profiler_list[DECODING_TIME].start();
         this->lm_engine->forward(think_end_id);
         this->profiler_list[DECODING_TIME].stop(1);
+        trace_pos("after-think-end");
         token_str = this->tokenizer->run_time_decoder(think_end_id);
 
         this->token_history.push_back(271);
         this->profiler_list[DECODING_TIME].start();
         buffer<bf16> y = this->lm_engine->forward(271);
         this->profiler_list[DECODING_TIME].stop(1);
+        trace_pos("after-271b");
         token_str = this->tokenizer->run_time_decoder(271);
         sampled_token = this->sampler->sample(y);
+        this->total_tokens += static_cast<size_t>(preamble_rows);
     }
     this->total_tokens++;
     meta_info.generated_tokens++;
+    trace_pos("after-first-token");
     int last_sampled_token = sampled_token;
     token_str = this->tokenizer->run_time_decoder(last_sampled_token);
     result += token_str;

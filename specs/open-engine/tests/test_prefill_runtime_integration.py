@@ -606,8 +606,9 @@ def test_the_think_preamble_is_guarded_before_it_steps():
     the guard now derives it from `enable_think` and names the limit in the message.
     """
     src = (ROOT / 'src/common/AutoModel/modeling_qwen3_5vl.cpp').read_text()
-    assert 'this->enable_think ? 2 : 4' in src, \
-        'the preamble size must follow the branch, not a guessed constant'
+    # The branch constant lives in the helper (see the 31.C test); the call site asks it.
+    assert 'this->generation_preamble_rows()' in src, \
+        'the preamble size must come from the helper, not a guessed constant'
     assert 'Max length reached: this model needs' in src
     assert 'largest prompt' in src, 'the refusal must name the usable maximum'
     # It must sit BEFORE the preamble steps, not after.
@@ -638,3 +639,28 @@ def test_the_attention_gate_is_a_measured_fit_not_a_theory():
     assert 1.0 < g['ms_per_position'] < 2.5
     assert g['gate_threshold'] == 0.20
     assert 4096 < g['gate_crossing_context'] < 16384
+
+
+def test_the_generation_preamble_is_declared_once_and_used_by_both_sides():
+    """31.C: the capacity guard and the preamble implementation cannot drift apart.
+
+    `generation_preamble_rows()` is the single source: the guard in front of the preamble
+    uses it, and the counter is advanced by it after the preamble runs, so `total_tokens`
+    and the engine position move together. Measured at ctx 512: prompt 507 generates and
+    ends at total == MAX_L; prompt 508 is refused before anything is written.
+    """
+    hdr = (ROOT / 'src/include/AutoModel/modeling_qwen3_5vl.hpp').read_text()
+    assert 'int generation_preamble_rows() const' in hdr
+    assert 'this->enable_think ? 2 : 4' in hdr, 'two rows thinking, four not'
+    src = (ROOT / 'src/common/AutoModel/modeling_qwen3_5vl.cpp').read_text()
+    # Exactly one local declaration of the branch constant: it comes from the helper.
+    assert src.count('const int preamble_rows = this->generation_preamble_rows();') == 1
+    assert 'this->enable_think ? 2 : 4' not in src, \
+        'the branch constant must live in the helper, not be repeated at a call site'
+    # The counter moves by the preamble, or the loop guard measures a stale position.
+    assert src.count('this->total_tokens += static_cast<size_t>(preamble_rows);') == 2, \
+        'both branches must account for their preamble rows'
+    # A model name must not appear in the rule.
+    for name in ('qwen3.8', '27b', 'qwen35'):
+        assert name not in hdr[hdr.index('generation_preamble_rows()') - 900:
+                              hdr.index('generation_preamble_rows()')], name
