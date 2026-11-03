@@ -317,8 +317,19 @@ def test_the_canary_appears_in_the_committed_runs():
     assert checked > 0, 'the canary check never ran in any committed run'
 
 
+_ORACLE_TOOLS_DECODE = ('prefill-block-decode-transition',)
+
+
 def test_the_decode_transition_is_recorded_as_the_hard_gate():
-    rs = sorted(RUNS.glob('decode-*/result.json')) if RUNS.is_dir() else []
+    """Selected by the tool that wrote it: the directory prefix also matches later
+    `decode-rate-*` / `decode16-logits-*` runs, which are a different gate entirely."""
+    rs = []
+    for p in sorted(RUNS.glob('decode-*/result.json')) if RUNS.is_dir() else []:
+        try:
+            if json.loads(p.read_text()).get('tool') in _ORACLE_TOOLS_DECODE:
+                rs.append(p)
+        except (json.JSONDecodeError, OSError):
+            continue
     if not rs:
         pytest.skip('no committed decode-transition runs')
     for p in rs:
