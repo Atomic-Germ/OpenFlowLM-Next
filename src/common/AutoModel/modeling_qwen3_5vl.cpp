@@ -345,6 +345,10 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
 
     this->profiler_list[DECODING_TIME].reset();
     this->profiler_list[TKOEN_DECODE_TIME].reset();
+    const auto finalize_metadata = [&]() {
+        meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
+        meta_info.stop_reason = reason;
+    };
     std::string token_str;
     int sampled_token;
     // The think preamble below steps tokens before any budget check can stop it, and how
@@ -377,6 +381,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
                                 << " tokens (context " << this->MAX_L << "), got "
                                 << this->total_tokens << "; stopping generation...");
         reason = MAX_LENGTH_REACHED;
+        finalize_metadata();
         return result;
     }
     const bool ctx_trace = std::getenv("OFLM_CTX_TRACE") != nullptr;
@@ -451,6 +456,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
     if (this->total_tokens >= this->MAX_L){
         header_print("WARNING", "Max length reached, stopping generation...");
         reason = MAX_LENGTH_REACHED;
+        finalize_metadata();
         return result;
     }
     while (this->total_tokens < this->MAX_L){
@@ -492,8 +498,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
             break;
         }
     }
-    meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
-    meta_info.stop_reason = reason;
+    finalize_metadata();
     if (this->total_tokens >= this->MAX_L){
         header_print("WARNING", "Max length reached, stopping generation...");
     }

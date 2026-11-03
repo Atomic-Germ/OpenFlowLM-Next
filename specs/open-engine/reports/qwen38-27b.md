@@ -73,6 +73,21 @@ Measured at a 512 context, both branches, both sides of the boundary
 The refused rows carry **no `ctx-trace step` line at all**, so no position was written. Over
 HTTP the refusal is `400 {"message":"Max length reached!","type":"model_error"}`.
 
+### Review follow-up: generation metadata
+
+Both context-limit early returns now share the normal metadata finalizer. A
+headroom refusal reports `MAX_LENGTH_REACHED`, zero generated tokens and zero
+decoding duration without forwarding or advancing context. The largest accepted
+prompt still emits one token and reports its decoding duration and length stop.
+Prompt, load and prefill metadata remain unchanged; token counters are updated
+only where tokens are emitted, and no profiler is active at these early returns.
+
+The executable [host regression](../tests/test_qwen35_generation_metadata.py)
+compiles the production method with engine/tokenizer/sampler/profiler doubles.
+It covers both preambles at boundaries derived from `generation_preamble_rows()`,
+stale metadata, ordinary token limits, EOS and cancellation. These checks concern
+control flow and response metadata; the NPU measurements above are unchanged.
+
 ## 4. A correction to Phase 29's explanation
 
 Phase 29 blamed the serve gap on `_shared_insert` sampling the first token as part of prefill.

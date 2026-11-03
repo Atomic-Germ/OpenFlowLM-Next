@@ -126,3 +126,21 @@ accuracy, serving or throughput. Host regression tests live in
 `specs/open-engine/tests/test_prefill_decode_checks.py`; their subprocess double
 is explicitly software-only evidence. Current suite: 2351 passed, 60 skipped;
 native CTest: 22 passed, 2 skipped. No new XCLBIN/library or production change.
+
+
+## Generation headroom metadata regression
+
+After changing `Qwen3_5VL::generate`, run the executable host checks:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -m pytest -q \
+  specs/open-engine/tests/test_qwen35_generation_metadata.py
+```
+
+The test compiles the production method and preamble-row helper with host doubles;
+no weights or NPU are needed. Both thinking branches must reject the first prompt
+above `MAX_L - generation_preamble_rows() - 1` before any forward call, with
+`MAX_LENGTH_REACHED`, zero generated tokens and zero decoding duration. The last
+accepted prompt emits one token and finalizes its length-stop metadata. Stale
+metadata, EOS, cancellation and ordinary token limits are covered separately.
+Keep this control-flow evidence separate from the numerical NPU gates above.
