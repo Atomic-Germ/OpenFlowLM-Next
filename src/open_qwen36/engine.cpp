@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "open_qwen36/prefill_route_reason.hpp"
+#include "open_qwen36/prefill_thresholds.hpp"
 #include "utils/utils.hpp"
 
 namespace open_qwen36 {
@@ -209,12 +210,14 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             //                             it decays as ceil(N/256) over that schedule's
             //                             pass count as N grows.
             //
-            // So the two constants are the same number now, and the reason is not that the
-            // crossover changed: it is that the block loop is the schedule to use for every
-            // kernel set that does not carry routed experts, at every length above the
-            // sequential crossover. `layer_major_preferred()` is what keeps the MoE sets on
-            // the schedule they were measured to want -- capability decides whether a route
-            // can run, preference decides whether it should.
+            // The two crossover constants are NOT the same number and are not meant to be:
+            // this one is `prefill::kDenseBlockLoop` (96) and applies to the block loop on a
+            // dense set; `prefill::kLayerMajor` (64) belongs to the layer-major schedule and
+            // the MoE families that measured it. What is true is that the block loop is the
+            // schedule to use for every kernel set that does not carry routed experts, at
+            // every length above THIS crossover. `layer_major_preferred()` is what keeps the
+            // MoE sets on the schedule they were measured to want -- capability decides
+            // whether a route can run, preference decides whether it should.
             //
             // The value counts tokens AS Engine::prefill receives them, not text tokens:
             // the chat template's offset depends on how its boundary merges with the first
@@ -223,7 +226,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // wins", a grid artifact whose own table crosses near 81; the closure sweep
             // measured the flat block at 33.47 s against 425.5 ms/token + 156 ms
             // sequential, a crossing of ~78 with the first clear win at 92 (0.85).
-            const size_t block_loop_crossover = 96;
+            const size_t block_loop_crossover = prefill::kDenseBlockLoop;
             size_t min_prompt = block_loop_crossover;
             if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
             // Diagnostic: which route this request took, and how the prompt was cut. A

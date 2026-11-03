@@ -144,7 +144,11 @@ def test_the_route_is_chosen_by_capability_and_preference_not_by_model_name():
     A model-name test would need editing for every new tag, so neither may use one.
     """
     src = engine()
-    assert 'block_loop_crossover = 96' in src, 'the sequential/block crossover'
+    # The crossover now comes from `prefill::kDenseBlockLoop`; that it equals 96, and that
+    # the baseline agrees, is asserted by the threshold test above rather than by a literal
+    # here, so a shared constant is possible at all.
+    assert 'block_loop_crossover = prefill::kDenseBlockLoop' in src, \
+        'the sequential/block crossover must come from the shared constant'
     assert 'core_->layer_major_preferred()' in src, \
         'preference, not capability, must pick the schedule among the two block routes'
     assert 'layer_major_ok() ? layer_major_crossover' not in src, \
@@ -173,6 +177,31 @@ def test_the_operator_override_still_wins_over_the_crossover():
     # override from one the preference silently vetoes (it did exactly that). Its behaviour
     # is pinned by test_the_operator_override_decides_the_route_not_just_the_log_line() and
     # by src/test/layer_major_policy_test.cpp at the unit level.
+
+
+def test_the_documented_crossover_matches_the_baseline_and_the_header():
+    """One number, three places: the C++ constant, the baseline, and the public header.
+
+    The header said 64 for years while the code used 96. Both numbers exist -- 64 is the
+    layer-major crossover the MoE families measured, 96 is the dense block-loop one -- but
+    presenting 64 as the dense default made a 64-95 token prompt look block-eligible.
+    """
+    hdr = (ROOT / 'src/open_qwen36/prefill_thresholds.hpp').read_text()
+    assert 'inline constexpr size_t kDenseBlockLoop = 96;' in hdr
+    assert 'inline constexpr size_t kLayerMajor = 64;' in hdr
+    # The baseline records the production dense value, and it must be the same number.
+    b = baseline()
+    assert b['routes']['sequential_block_crossover'] == 96
+    assert b['routes']['layer_major_crossover'] == 64
+    # The implementation takes the boundary from the constant rather than repeating it.
+    eng = (ROOT / 'src/open_qwen36/engine.cpp').read_text()
+    assert 'const size_t block_loop_crossover = prefill::kDenseBlockLoop;' in eng, \
+        'the crossover must come from the shared constant, not a second literal 96'
+    # And the public header must not still claim the MoE number for the dense route.
+    public = (ROOT / 'src/open_qwen36/engine.hpp').read_text()
+    assert 'kDenseBlockLoop` (96)' in public
+    assert 'GEMM_BLOCK_MIN (64)' not in public, \
+        'the header described 64 as the dense default; that is the bug this pins'
 
 
 def test_the_measured_crossover_comes_from_a_fit_not_from_a_grid_point():

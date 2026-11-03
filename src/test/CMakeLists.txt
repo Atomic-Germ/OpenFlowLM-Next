@@ -14,6 +14,12 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# OPEN-PREFILL-BATCH thresholds: the dense block-loop crossover is 96 and layer-major's 64
+# is a different schedule's number. Header-only, so the 95/96 boundary is tested here.
+add_executable(prefill_thresholds_test prefill_thresholds_test.cpp)
+target_include_directories(prefill_thresholds_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME prefill_thresholds COMMAND prefill_thresholds_test)
+
 # OPEN-PREFILL-BATCH telemetry: `why=` must distinguish a policy choice from a recovered
 # block failure. Header-only, so the six-by-two matrix is tested without a device.
 add_executable(prefill_route_reason_test prefill_route_reason_test.cpp)
