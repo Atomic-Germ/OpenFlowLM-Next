@@ -14,6 +14,17 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# Bring-up diagnostics: an offset/length pair must not wrap into a valid range, at the signed
+# CLI boundary or at the size_t Core accessors. Header-only, so these link nothing -- a test
+# of the contract that needed a device could not run in CI.
+add_executable(buffer_range_test buffer_range_test.cpp)
+target_include_directories(buffer_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME buffer_range COMMAND buffer_range_test)
+
+add_executable(diagnostic_range_test diagnostic_range_test.cpp)
+target_include_directories(diagnostic_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME diagnostic_range COMMAND diagnostic_range_test)
+
 # OPEN-PREFILL-BATCH route policy: which prefill schedule is used, and whether an operator's
 # OFLM_OPEN_LAYER_MAJOR is honoured. Header-only, so this links nothing -- the decision is a
 # pure function and testing it needs no XRT, no weights and no device.

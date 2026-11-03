@@ -1,6 +1,7 @@
 /// \file core.cpp
 /// \brief The resident open-kernel decode engine: a manifest interpreter (see core.hpp).
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/buffer_range.hpp"
 
 #include <algorithm>
 #include <array>
@@ -4088,9 +4089,9 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
 void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {
     if (layer < 0 || layer >= nl_) throw std::runtime_error("open_qwen36: read_act: layer " + std::to_string(layer) + " out of range");
     const size_t bytes = types_[layer]->act_bytes;
-    if (off + n > bytes)
-        throw std::runtime_error("open_qwen36: read_act: [" + std::to_string(off) + ", " + std::to_string(off + n) +
-                                 ") is outside the layer's " + std::to_string(bytes) + "-byte act buffer");
+    // overflow-safe: `off + n > bytes` wraps (SIZE_MAX + 2 == 1) and a negative offset that
+    // reached here as size_t is exactly SIZE_MAX. require_range subtracts instead.
+    require_range(off, n, bytes, "read_act", "layer's act");
     read_back(act_[layer], n, off);
     std::memcpy(dst, act_[layer].map<uint8_t*>() + off, n);
 }
@@ -4110,9 +4111,7 @@ size_t Core::state_region_bytes(int layer) const {
 
 void Core::read_state(int layer, size_t off, size_t n, uint8_t* dst) {
     const size_t bytes = state_region_bytes(layer);
-    if (off + n > bytes)
-        throw std::runtime_error("open_qwen36: read_state: [" + std::to_string(off) + ", " + std::to_string(off + n) +
-                                 ") is outside the layer's " + std::to_string(bytes) + "-byte state buffer");
+    require_range(off, n, bytes, "read_state", "layer's state");
     read_back(state_[layer], n, off);
     std::memcpy(dst, state_[layer].map<uint8_t*>() + off, n);
 }
@@ -4122,20 +4121,14 @@ void Core::read_global(const std::string& name, size_t off, size_t n, uint8_t* d
     if (it == globals_.end())
         throw std::runtime_error("open_qwen36: read_global: this kernel set has no global '" + name + "'");
     xrt::bo& bo = it->second;
-    if (off + n > bo.size())
-        throw std::runtime_error("open_qwen36: read_global " + name + ": [" + std::to_string(off) +
-                                 ", " + std::to_string(off + n) + ") is outside its " +
-                                 std::to_string(bo.size()) + "-byte buffer");
+    require_range(off, n, static_cast<size_t>(bo.size()), "read_global " + name, "global");
     read_back(bo, n, off);
     std::memcpy(dst, bo.map<uint8_t*>() + off, n);
 }
 
 void Core::write_state_canary(int layer, size_t off, size_t n, uint8_t pattern) {
     const size_t bytes = state_region_bytes(layer);
-    if (off + n > bytes)
-        throw std::runtime_error("open_qwen36: write_state_canary: [" + std::to_string(off) + ", " +
-                                 std::to_string(off + n) + ") is outside the layer's " + std::to_string(bytes) +
-                                 "-byte state buffer");
+    require_range(off, n, bytes, "write_state_canary", "layer's state");
     // Write through the map and sync TO_DEVICE. Writing into the map without the sync
     // leaves the device's copy untouched, and the canary would then "pass" while testing
     // nothing -- the mirror of the read_back trap the split-sum path documents.

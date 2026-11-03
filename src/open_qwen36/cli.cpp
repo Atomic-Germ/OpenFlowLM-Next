@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/diagnostic_range.hpp"
 
 using open_qwen36::Core;
 using open_qwen36::CoreConfig;
@@ -159,16 +160,26 @@ void set_power_mode(const std::string& mode) {
     std::fprintf(stderr, "NPU power mode: %s%s\n", mode.c_str(), rc == 0 ? "" : " (xrt-smi failed; mode is whatever it was)");
 }
 
+using open_qwen36::diagnostic::range_ok;
+using open_qwen36::diagnostic::to_size;
+
+/// The CLI's rule, one place: a negative offset or a non-positive length is not a range.
+///
+/// `to_size` is only ever reached past this, so `static_cast<size_t>(-1)` cannot happen.
+bool diagnostic_range_ok(long long off, long long n) { return range_ok(off, n) && n != 0; }
+
 /// Write a slice of a layer's act scratch to a file, so a bring-up run can compare one
 /// stage's output against the reference instead of inferring it from the logits.
 void dump_act_slice(Core& core, const std::string& spec) {
     int layer = 0; long long off = 0, n = 0;
     char path[512] = {0};
-    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 || n <= 0) {
-        std::fprintf(stderr, "--dump-act wants <layer>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0) {
+        std::fprintf(stderr, "--dump-act wants <layer>:<offset>=0>:<bytes, >0>:<path>, got %s\n",
+                     spec.c_str());
         return;
     }
-    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    std::vector<uint8_t> buf(to_size(n));
     core.read_act(layer, static_cast<size_t>(off), buf.size(), buf.data());
     std::FILE* f = std::fopen(path, "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
@@ -184,11 +195,13 @@ void dump_global_slice(Core& core, const std::string& spec) {
     char name[128] = {0};
     long long off = 0, n = 0;
     char path[512] = {0};
-    if (std::sscanf(spec.c_str(), "%127[^:]:%lld:%lld:%511s", name, &off, &n, path) != 4 || n <= 0) {
-        std::fprintf(stderr, "--dump-global wants <name>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+    if (std::sscanf(spec.c_str(), "%127[^:]:%lld:%lld:%511s", name, &off, &n, path) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0) {
+        std::fprintf(stderr, "--dump-global wants <name>:<offset>=0>:<bytes, >0>:<path>, got %s\n",
+                     spec.c_str());
         return;
     }
-    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    std::vector<uint8_t> buf(to_size(n));
     core.read_global(name, static_cast<size_t>(off), buf.size(), buf.data());
     std::FILE* f = std::fopen(path, "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
@@ -200,11 +213,13 @@ void dump_global_slice(Core& core, const std::string& spec) {
 void dump_state_slice(Core& core, const std::string& spec) {
     int layer = 0; long long off = 0, n = 0;
     char path[512] = {0};
-    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 || n <= 0) {
-        std::fprintf(stderr, "--dump-state wants <layer>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0) {
+        std::fprintf(stderr, "--dump-state wants <layer>:<offset>=0>:<bytes, >0>:<path>, got %s\n",
+                     spec.c_str());
         return;
     }
-    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    std::vector<uint8_t> buf(to_size(n));
     core.read_state(layer, static_cast<size_t>(off), buf.size(), buf.data());
     std::FILE* f = std::fopen(path, "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
@@ -217,12 +232,14 @@ void dump_state_slice(Core& core, const std::string& spec) {
 /// production never wrote there. Applied after load, before the request runs.
 void set_state_canary(Core& core, const std::string& spec) {
     int layer = 0, pattern = -1; long long off = 0, n = 0;
-    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%d", &layer, &off, &n, &pattern) != 4 || n <= 0 ||
-        pattern < 0 || pattern > 255) {
-        std::fprintf(stderr, "--state-canary wants <layer>:<off>:<bytes>:<0-255>, got %s\n", spec.c_str());
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%d", &layer, &off, &n, &pattern) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0 || pattern < 0 || pattern > 255) {
+        std::fprintf(stderr,
+                     "--state-canary wants <layer>:<offset>=0>:<bytes, >0>:<0-255>, got %s\n",
+                     spec.c_str());
         return;
     }
-    core.write_state_canary(layer, static_cast<size_t>(off), static_cast<size_t>(n),
+    core.write_state_canary(layer, static_cast<size_t>(off), to_size(n),
                             static_cast<uint8_t>(pattern));
     std::fprintf(stderr, "canary %d over layer %d state [%lld, %lld)\n", pattern, layer, off, off + n);
 }
@@ -299,7 +316,7 @@ Args parse(int argc, char** argv) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] [--dump-state L:off:n:path] [--state-canary L:off:n:pat]\n");
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] [--dump-state L:off>=0:n>0:path] [--state-canary L:off>=0:n>0:pat]\n");
         std::exit(2);
     }
     return a;
