@@ -87,11 +87,17 @@ when no output-token limit is configured. Explicit EOS takes precedence even on
 the last available slot and retains `EOT_DETECTED`; cancellation retains
 `CANCEL_DETECTED`. A last-slot EOS does not log a context-limit stop.
 
+The positive output-token cap is checked before each further sampling iteration,
+so `length_limit=1` stops after the first token without another forward or sample.
+Zero and negative limits remain unlimited by output count. An initial EOS takes
+precedence over both limits and is committed to the cache without a second sample,
+matching EOS handling in the regular loop.
+
 The executable [host regression](../tests/test_qwen35_generation_metadata.py)
 compiles the production method with engine/tokenizer/sampler/profiler doubles.
 It covers both preambles at boundaries derived from `generation_preamble_rows()`,
-stale metadata, ordinary token limits, loop exhaustion, last-slot EOS and
-cancellation. These checks concern
+stale metadata, output limits 1/2/0/-1 with exact forward/sample/output counts,
+initial EOS, loop exhaustion, last-slot EOS and cancellation. These checks concern
 control flow and response metadata; the NPU measurements above are unchanged.
 
 ### Review follow-up: normalization kernel compilation

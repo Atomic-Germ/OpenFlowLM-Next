@@ -459,6 +459,13 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
     result += token_str;
     os << token_str << std::flush;
 
+    if (this->is_eos(last_sampled_token)) {
+        // Commit EOS to the cache as in the loop, without sampling another token.
+        this->token_history.push_back(last_sampled_token);
+        this->lm_engine->forward(last_sampled_token);
+        finalize_metadata();
+        return result;
+    }
     if (this->total_tokens >= this->MAX_L){
         header_print("WARNING", "Max length reached, stopping generation...");
         reason = MAX_LENGTH_REACHED;
@@ -468,7 +475,8 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
     // Exhausting the loop's context budget is a length stop. Explicit EOS or
     // cancellation below takes precedence, including EOS on the final slot.
     reason = MAX_LENGTH_REACHED;
-    while (this->total_tokens < this->MAX_L){
+    while (this->total_tokens < this->MAX_L &&
+           (length_limit <= 0 || meta_info.generated_tokens < length_limit)) {
         if (is_cancelled()) {
             reason = CANCEL_DETECTED;
             // reset stream content 
@@ -503,10 +511,6 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
             break;
         }
         meta_info.generated_tokens++;
-        if ((length_limit > 0) && (meta_info.generated_tokens >= length_limit)){
-            reason = MAX_LENGTH_REACHED;
-            break;
-        }
     }
     finalize_metadata();
     if (reason == MAX_LENGTH_REACHED && this->total_tokens >= this->MAX_L){

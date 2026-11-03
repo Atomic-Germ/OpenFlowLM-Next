@@ -66,7 +66,10 @@ struct Engine {
 };
 struct Tokenizer {
     int calls = 0;
-    std::string run_time_decoder(int) { ++calls; return "token"; }
+    std::string run_time_decoder(int token) {
+        ++calls;
+        return token == 42 ? "[ordinary]" : token == 99 ? "[eos]" : "[preamble]";
+    }
 };
 struct Sampler {
     int calls = 0;
@@ -96,20 +99,22 @@ struct Qwen3_5VL {
 };
 METHOD
 int main(int argc, char** argv) {
-    assert(argc == 3);
+    assert(argc == 3 || argc == 4);
     Qwen3_5VL model;
     model.enable_think = std::string(argv[1]) == "think";
     const std::string scenario = argv[2];
     const int preamble = model.generation_preamble_rows();
     const int largest = model.MAX_L - preamble - 1;
     const bool refused = scenario == "refuse" || scenario == "refuse-stale";
-    model.total_tokens = refused ? largest + 1 : scenario == "boundary" ? largest : 1;
+    const bool first_eos = scenario == "eos-first" || scenario == "eos-first-boundary";
+    const bool boundary = scenario == "boundary" || scenario == "eos-first-boundary";
+    model.total_tokens = refused ? largest + 1 : boundary ? largest : 1;
     model.engine.pos = static_cast<int>(model.total_tokens);
     const auto position = model.engine.pos;
     model.token_history = {123};
     const int available = model.MAX_L - position - preamble;
     const bool exhaust_context = scenario == "context" || scenario == "eos-at-context";
-    model.sampling.eos_at = scenario == "eos" ? 2 : scenario == "eos-at-context" ? available : 0;
+    model.sampling.eos_at = first_eos ? 1 : scenario == "eos" ? 2 : scenario == "eos-at-context" ? available : 0;
     chat_meta_info_t meta;
     meta.prompt_tokens = position;
     meta.total_duration = 123; meta.load_duration = 456; meta.prefill_duration = 789;
@@ -118,7 +123,8 @@ int main(int argc, char** argv) {
         meta.decoding_duration = 99999;
     }
     std::ostringstream output;
-    auto result = model.generate(meta, exhaust_context ? 0 : 2, output,
+    const int limit = argc == 4 ? std::stoi(argv[3]) : exhaust_context ? 0 : 2;
+    auto result = model.generate(meta, limit, output,
                                  [&] { return scenario == "cancel"; });
     assert(meta.prompt_tokens == position);
     assert(meta.total_duration == 123 && meta.load_duration == 456 && meta.prefill_duration == 789);
@@ -140,7 +146,23 @@ int main(int argc, char** argv) {
         assert(model.engine.calls.size() >= static_cast<size_t>(preamble));
         assert(std::vector<int>(model.engine.calls.begin(),model.engine.calls.begin()+preamble) == expected);
         assert(meta.decoding_duration > 0);
-        if (scenario == "boundary") {
+        if (scenario == "output-cap" || first_eos) {
+            const int count = first_eos ? 1 : limit > 0 && limit < available ? limit : available;
+            assert(meta.generated_tokens == count);
+            assert(meta.stop_reason == (first_eos ? EOT_DETECTED : MAX_LENGTH_REACHED));
+            assert(model.sampling.calls == count);
+            const int forwards = preamble + count - 1 + (first_eos ? 1 : 0);
+            assert(model.engine.calls.size() == static_cast<size_t>(forwards));
+            assert(model.engine.pos == position + forwards);
+            assert(model.total_tokens == static_cast<size_t>(position + preamble + count));
+            std::string expected_output = model.enable_think ? "[preamble][preamble]" : "";
+            for (int i = 0; i < count; ++i) expected_output += first_eos ? "[eos]" : "[ordinary]";
+            assert(output.str() == expected_output);
+            if (first_eos) {
+                assert(model.engine.calls.back() == 99);
+                assert(model.token_history.back() == 99);
+            }
+        } else if (scenario == "boundary") {
             assert(meta.stop_reason == MAX_LENGTH_REACHED && meta.generated_tokens == 1);
             assert(model.total_tokens == static_cast<size_t>(model.MAX_L));
             assert(model.engine.calls.size() == static_cast<size_t>(preamble));
@@ -181,4 +203,13 @@ int main(int argc, char** argv) {
 ])
 def test_generation_finalizes_metadata_without_unwanted_forward_steps(generation_binary, branch, scenario):
     result = subprocess.run([str(generation_binary), branch, scenario], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('branch', ['think', 'no-think'])
+@pytest.mark.parametrize('limit', [1, 2, 0, -1])
+@pytest.mark.parametrize('scenario', ['output-cap', 'eos-first', 'eos-first-boundary'])
+def test_generation_output_limit_and_first_eos(generation_binary, branch, limit, scenario):
+    result = subprocess.run([str(generation_binary), branch, scenario, str(limit)],
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

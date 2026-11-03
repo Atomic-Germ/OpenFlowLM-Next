@@ -145,4 +145,8 @@ accepted prompt emits one token and finalizes its length-stop metadata. Stale
 metadata, EOS, cancellation and ordinary token limits are covered separately.
 With `length_limit = 0`, regular-loop context exhaustion must report
 `MAX_LENGTH_REACHED`; explicit EOS on the last slot must retain `EOT_DETECTED`.
+The output-limit matrix covers 1, 2, 0 and -1 in both branches, checking exact
+forward, sample and emitted-token counts. A one-token cap allows only the preamble
+forwards and one sample. Initial EOS retains EOT precedence, including at the
+context boundary; its one cache-commit forward does not sample another token.
 Keep this control-flow evidence separate from the numerical NPU gates above.
