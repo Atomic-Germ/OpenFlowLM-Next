@@ -14,6 +14,12 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# Think-preamble headroom: MAX_L - (preamble + 1), not MAX_L - 1. Header-only, so the exact
+# refusal boundary is tested here instead of only on the NPU at context 512.
+add_executable(generation_headroom_test generation_headroom_test.cpp)
+target_include_directories(generation_headroom_test PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
+add_test(NAME generation_headroom COMMAND generation_headroom_test)
+
 # OPEN-PREFILL-BATCH provenance: the machine-readable baseline must record the SAME
 # layer-major direction the C++ decision implements. This parses the JSON and compares it
 # against `preferred()` rather than checking that a field exists.

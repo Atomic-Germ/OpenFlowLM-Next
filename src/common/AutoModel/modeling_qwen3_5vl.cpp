@@ -7,6 +7,7 @@
 
 
 #include "AutoModel/modeling_qwen3_5vl.hpp"
+#include "AutoModel/generation_headroom.hpp"
 #include "config/settings_resolver.hpp"
 #include "metrices.hpp"
 #include "config/settings_resolver.hpp"
@@ -372,7 +373,12 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
                      this->total_tokens, static_cast<size_t>(this->MAX_L), need,
                      this->lm_engine->get_current_context_length(),
                      static_cast<int>(this->MAX_L) - static_cast<int>(this->total_tokens));
-    if (static_cast<int>(this->total_tokens) + need > this->MAX_L) {
+    // The predicate is a pure function (`oflm::generation::may_generate`) rather than an
+    // inline sum, so the exact boundary is tested exhaustively on any machine instead of
+    // only on the NPU at context 512.
+    if (!oflm::generation::may_generate(this->total_tokens,
+                                       static_cast<std::size_t>(this->MAX_L),
+                                       this->enable_think)) {
         header_print("WARNING", "Max length reached: this model needs "
                                 << need << " free slots (" << preamble_rows
                                 << " for its think preamble and 1 to emit the first token), "

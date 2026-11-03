@@ -372,50 +372,31 @@ def test_the_cli_prompt_is_its_own_line_not_an_argument_to_clear():
         assert "'/clear ' + text" not in src, f'{name} would generate nothing'
 
 
-def test_the_think_preamble_is_guarded_before_it_steps():
-    """The row count is derived from the branch, and refused before anything is written.
+def test_the_generation_headroom_rule_is_the_shared_pure_helper():
+    """The arithmetic is pinned by a ctest, so here only the WIRING is asserted.
 
-    This is the Phase 31 fix: `Qwen3_5VL::generate` steps its think preamble (2 rows when
-    thinking, 4 when not) before the loop's budget check can stop it, so a near-limit prompt
-    used to throw `position N reached the context capacity N` and surface as a generic
-    `Internal error`. A constant "spare slots" guess was wrong three times while probing;
-    the guard now derives it from `enable_think` and names the limit in the message.
+    The rule itself -- MAX_L - (preamble + 1), refusal at exactly that boundary, both
+    branches -- is `oflm::generation::may_generate()`, tested exhaustively by
+    `src/test/generation_headroom_test.cpp` on any machine. A source-string test can only
+    show that a symbol exists, which stayed true through the very bug that made a
+    near-limit prompt throw instead of refusing.
     """
-    src = (ROOT / 'src/common/AutoModel/modeling_qwen3_5vl.cpp').read_text()
-    # The branch constant lives in the helper (see the 31.C test); the call site asks it.
-    assert 'this->generation_preamble_rows()' in src, \
-        'the preamble size must come from the helper, not a guessed constant'
-    assert 'Max length reached: this model needs' in src
-    assert 'largest prompt' in src, 'the refusal must name the usable maximum'
-    # It must sit BEFORE the preamble steps, not after.
-    guard = src.index('Max length reached: this model needs')
-    first_step = src.index('this->lm_engine->forward(think_start_id);')
-    assert guard < first_step, 'the guard must precede the first preamble step'
-
-
-def test_the_generation_preamble_is_declared_once_and_used_by_both_sides():
-    """31.C: the capacity guard and the preamble implementation cannot drift apart.
-
-    `generation_preamble_rows()` is the single source: the guard in front of the preamble
-    uses it, and the counter is advanced by it after the preamble runs, so `total_tokens`
-    and the engine position move together. Measured at ctx 512: prompt 507 generates and
-    ends at total == MAX_L; prompt 508 is refused before anything is written.
-    """
-    hdr = (ROOT / 'src/include/AutoModel/modeling_qwen3_5vl.hpp').read_text()
-    assert 'int generation_preamble_rows() const' in hdr
-    assert 'this->enable_think ? 2 : 4' in hdr, 'two rows thinking, four not'
-    src = (ROOT / 'src/common/AutoModel/modeling_qwen3_5vl.cpp').read_text()
-    # Exactly one local declaration of the branch constant: it comes from the helper.
-    assert src.count('const int preamble_rows = this->generation_preamble_rows();') == 1
-    assert 'this->enable_think ? 2 : 4' not in src, \
-        'the branch constant must live in the helper, not be repeated at a call site'
-    # The counter moves by the preamble, or the loop guard measures a stale position.
-    assert src.count('this->total_tokens += static_cast<size_t>(preamble_rows);') == 2, \
-        'both branches must account for their preamble rows'
-    # A model name must not appear in the rule.
+    hdr = (ROOT / 'src/include/AutoModel/generation_headroom.hpp').read_text()
+    assert 'inline constexpr bool may_generate(' in hdr
+    assert 'inline constexpr int preamble_rows(bool thinking)' in hdr
+    # The model asks the helper rather than carrying the branch constant itself.
+    model_hdr = (ROOT / 'src/include/AutoModel/modeling_qwen3_5vl.hpp').read_text()
+    assert 'oflm::generation::preamble_rows(this->enable_think)' in model_hdr, \
+        'the row count must come from the shared rule'
+    model_src = (ROOT / 'src/common/AutoModel/modeling_qwen3_5vl.cpp').read_text()
+    assert 'oflm::generation::may_generate(' in model_src, \
+        'the guard must call the tested predicate, not repeat the sum'
+    # The counter still moves by the preamble after it runs, or the loop guard measures a
+    # stale position -- that is a wiring property, not a policy one.
+    assert model_src.count('this->total_tokens += static_cast<size_t>(preamble_rows);') == 2
+    # The rule is not allowed to know any model.
     for name in ('qwen3.8', '27b', 'qwen35'):
-        assert name not in hdr[hdr.index('generation_preamble_rows()') - 900:
-                              hdr.index('generation_preamble_rows()')], name
+        assert name not in hdr, name
 
 
 def test_the_production_baseline_is_internally_consistent():

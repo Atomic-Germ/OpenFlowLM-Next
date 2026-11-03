@@ -7,6 +7,7 @@
 
 #pragma once
 #include "AutoModel/automodel.hpp"
+#include "AutoModel/generation_headroom.hpp"
 #include "metrices.hpp"
 
 
@@ -39,7 +40,11 @@ private:
     /// many once the preamble has run. Measured at ctx 512 -- prompt 507 generates and
     /// finishes at exactly MAX_L, prompt 508 is refused. Not a setting, and it says nothing
     /// about any model: it is this generation shape's own semantics.
-    int generation_preamble_rows() const { return this->enable_think ? 2 : 4; }
+    /// The rule itself is `oflm::generation::preamble_rows()` -- a pure function tested
+    /// exhaustively by src/test/generation_headroom_test.cpp on any machine. This accessor
+    /// only supplies the branch. Kept on ONE line: the generation-metadata regression test
+    /// extracts this declaration by taking the rest of the line.
+    int generation_preamble_rows() const { return oflm::generation::preamble_rows(this->enable_think); }
     
     // Image processing functionality
     ImageReader image_reader_;

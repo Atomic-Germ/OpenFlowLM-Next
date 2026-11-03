@@ -37,6 +37,9 @@ def generation_binary(tmp_path_factory):
 #include <utility>
 #include <vector>
 #include "AutoModel/stop_reason.hpp"
+// The guard inside `generate()` now calls the shared headroom rule, so the extracted method
+// needs its declaration to compile on its own.
+#include "AutoModel/generation_headroom.hpp"
 #define header_print(tag, text) do { std::ostringstream log; log << text; } while (false)
 using bf16 = uint16_t;
 template<class T> using buffer = std::vector<T>;
