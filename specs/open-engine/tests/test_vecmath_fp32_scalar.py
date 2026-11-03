@@ -15,10 +15,37 @@ that changed nothing.
 """
 import importlib.util
 from pathlib import Path
+import subprocess
 import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize('source,width,groups', [
+    ('ln.cc', 2048, 1),
+    ('ln_xn.cc', 4096, 1),
+    ('ln_xn.cc', 2560, 2),
+    ('ln_xn.cc', 2560, 4),
+])
+def test_bf16_output_norm_compiles_with_peano(tmp_path, source, width, groups):
+    """Compile real kernels: numerical Python checks cannot catch AIE API misuse."""
+    config = pytest.importorskip('aie.utils.config')
+    compiler = Path(config.peano_install_dir()) / 'bin/clang++'
+    headers = Path(config.cxx_header_path())
+    if not compiler.is_file():
+        pytest.skip('Peano compiler is not installed')
+    command = [str(compiler), '--target=aie2p-none-unknown-elf', '-std=c++20', '-O2',
+               '-D__AIE_API_AIE_ADF_HPP__', '-Wno-deprecated-declarations',
+               f'-DLN_N={width}', f'-DLN_GROUPS={groups}', '-DLN_EPS=1e-6f']
+    for include in (headers, headers / 'aie_kernels', headers / 'aie_kernels/aie2p',
+                    ROOT / 'open_kernels/include'):
+        command += ['-I', str(include)]
+    command += ['-c', str(ROOT / 'open_kernels/designs/ln' / source),
+                '-o', str(tmp_path / 'norm.o')]
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / 'norm.o').stat().st_size > 0
 
 
 def bf16(v):

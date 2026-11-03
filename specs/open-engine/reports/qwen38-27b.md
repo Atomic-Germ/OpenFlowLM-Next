@@ -94,6 +94,22 @@ stale metadata, ordinary token limits, loop exhaustion, last-slot EOS and
 cancellation. These checks concern
 control flow and response metadata; the NPU measurements above are unchanged.
 
+### Review follow-up: normalization kernel compilation
+
+The shared fused and streamed BF16-output RMSNorm kernels now convert their
+FP32 vector through an accumulator before rounding to BF16. The grouped path
+also broadcasts the current group's inverse RMS (`inv[g]`). Three-term FP32
+multiplication and rounding mode are preserved.
+
+Peano regression tests compile all four affected configurations. Standalone
+NPU checks pass for widths 2048 and 4096, width 2560 with two and four groups,
+and the unchanged 5120 split route, against the existing FP64 fixture bounds.
+The full Docker build also passes the export of 19 model specs plus BERT sets.
+Reproduction steps and results are in
+[the normalization validation skill](../../../.agents/skills/open-norm-bf16-validation/SKILL.md).
+These checks do not replace full-model validation or update the performance
+measurements above.
+
 ## 4. A correction to Phase 29's explanation
 
 Phase 29 blamed the serve gap on `_shared_insert` sampling the first token as part of prefill.

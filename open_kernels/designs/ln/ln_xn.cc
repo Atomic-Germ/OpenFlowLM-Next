@@ -19,8 +19,8 @@ void ln_xn(const float *__restrict x0, const float *__restrict x1, const float *
       // reaches ~16 mantissa bits, a relative 2e-5 on a 5120-wide row applied to EVERY
       // element the layer goes on to use. `mul3_32` is exact to fp32 here.
       const v32f t = mul3bv_32(y, aie::load_v<kV>(w + j));
-      const v32f o = mul3_32(t, aie::broadcast<float, kV>(inv));
-      aie::store_v(xn + j, o.template to_vector<bfloat16>());
+      const v32f o = mul3_32(t, aie::broadcast<float, kV>(inv[g]));
+      aie::store_v(xn + j, accf32(o).to_vector<bfloat16>());
     }
   }
 #else
@@ -33,7 +33,7 @@ void ln_xn(const float *__restrict x0, const float *__restrict x1, const float *
     // full-precision (y * w) * inv: the two-term split is ~2e-5 relative, see mul3_32
     const v32f t = mul3bv_32(y, aie::load_v<kV>(w + j));
     const v32f o = mul3_32(t, aie::broadcast<float, kV>(inv));
-    aie::store_v(xn + j, o.template to_vector<bfloat16>());
+    aie::store_v(xn + j, accf32(o).to_vector<bfloat16>());
   }
 #endif
 }

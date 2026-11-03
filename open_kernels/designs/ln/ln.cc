@@ -28,7 +28,7 @@ void ln_fn(const float *__restrict x0, const float *__restrict x1, const float *
     // a relative 2e-5 that this path applies to every element of the layer.
     const v32f t = mul3bv_32(aie::load_v<kV>(yp), aie::load_v<kV>(w + j));
     const v32f o = mul3_32(t, aie::broadcast<float, kV>(inv));
-    aie::store_v(xn + j, o.template to_vector<bfloat16>());
+    aie::store_v(xn + j, accf32(o).to_vector<bfloat16>());
   }
 }
 }
