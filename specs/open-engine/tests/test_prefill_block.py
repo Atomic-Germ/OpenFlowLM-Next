@@ -27,7 +27,6 @@ ROOT = Path(__file__).resolve().parents[3]
 HERE = ROOT / 'utilities/prefill-block'
 ORACLE = HERE / 'oracle.py'
 DECODE = HERE / 'decode_transition.py'
-DOC = HERE / 'BLOCK_CONTRACT.md'
 RUNS = HERE / 'runs'
 
 
@@ -41,19 +40,24 @@ def load(name, path):
 # ---------------------------------------------------------------- the contract (26.0)
 
 def test_the_contract_is_derived_from_the_manifest_not_asserted():
-    md = DOC.read_text()
-    # The binding constraint must be stated with its arithmetic, because it is the reason
-    # T=32 was NOT adopted as a physical geometry.
-    assert 'M = (nh/kvh) · T = 6 · T' in md
-    assert 'ab.m = 1536' in md or '1536' in md
-    assert 'T = 256 exactly' in md
-    # The plan's escape clause, and the explicit refusal to add a geometry.
-    assert 'active_t = 32, physical_t = 256' in md
-    assert 'No new GEMM geometry is authorised' in md
-    # The three masking mechanisms, named.
-    for mech in ('softmax_chunk', 'R = g.t_real', 'tile_rows_as_b'):
-        assert mech in md, mech
-    assert 'padding cannot reach' in md.lower() or 'Padding cannot reach' in md
+    """The binding constraint, recomputed from the manifest.
+
+    This used to grep the prose of `BLOCK_CONTRACT.md`. That pinned the wording of a
+    document instead of the geometry, and the geometry is already checked against the
+    artefact by the test below -- so the arithmetic is done here, from the manifest, and
+    the prose is free to be rewritten.
+    """
+    m = json.loads((ROOT / 'Models/qwen38-27b/production-v2/kernels-model/manifest.json').read_text())
+    gb = m['layer_types']['full_attention']['gemm_block']
+    nh, kvh = 24, 4                    # Qwen3.8-27B
+    # attention_npu needs M == ab.m, and M = (nh/kvh) * T, so T is NOT free.
+    assert gb['attn_block']['m'] == (nh // kvh) * gb['t']
+    assert gb['t'] == 256, 'the only T that satisfies M = ab.m = 1536'
+    # The three masking mechanisms must exist in the production block step, since they are
+    # what make an active_t below the physical 256 safe.
+    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
+    for mech in ('softmax_chunk', 't_real'):
+        assert mech in core, mech
 
 
 def test_the_manifest_really_forces_256_for_a_full_layer():

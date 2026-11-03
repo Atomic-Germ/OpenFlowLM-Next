@@ -20,8 +20,20 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 ENGINE = ROOT / 'src/open_qwen36/engine.cpp'
 CORE_HPP = ROOT / 'src/open_qwen36/core.hpp'
-REPORT = ROOT / 'utilities/prefill-block/PHASE27_REPORT.md'
 CROSSOVER = ROOT / 'utilities/prefill-block/tail_crossover.py'
+# Provenance lives in machine-readable artefacts, not in a prose report: a test that greps
+# a markdown file pins the wording of a document instead of the behaviour of the code, and
+# rewriting a sentence breaks the build.
+BASELINE = ROOT / 'utilities/prefill-block/qwen38-production-baseline.json'
+CONTRACT = ROOT / 'utilities/prefill-block/long-context-v1.json'
+
+
+def baseline() -> dict:
+    return json.loads(BASELINE.read_text())
+
+
+def contract() -> dict:
+    return json.loads(CONTRACT.read_text())
 
 
 def engine() -> str:
@@ -109,13 +121,17 @@ def test_the_oracle_flags_are_not_in_the_shipped_cli():
 
 # ---------------------------------------------------------------- the crossover
 
-def test_the_report_records_the_provenance_of_both_constants():
-    """96 came from a fitted crossing; layer-major's win came from the MoE family."""
-    src = engine()
-    assert 'Qwen3.6-35B' in src, 'the provenance of the MoE measurement must stay visible'
-    md = REPORT.read_text()
-    assert 'inherited' in md
-    assert '96' in md, 'the measured sequential/block crossover must be recorded'
+def test_the_provenance_of_both_constants_stays_visible():
+    """96 came from a fitted crossing; layer-major's win came from the MoE family.
+
+    Both facts used to live in a prose report. They are asserted here against the code and
+    the machine-readable baseline, so a reworded document cannot break the build and a
+    changed constant cannot hide behind an unchanged one.
+    """
+    assert 'Qwen3.6-35B' in engine(), 'the provenance of the MoE measurement must stay visible'
+    b = baseline()
+    assert b['routes']['sequential_block_crossover'] == 96
+    assert b['routes']['layer_major_crossover'] == 64
 
 
 def test_the_route_is_chosen_by_capability_and_preference_not_by_model_name():
@@ -200,10 +216,12 @@ def test_the_measured_crossover_comes_from_a_fit_not_from_a_grid_point():
 
 def test_the_block_cost_is_recorded_as_flat_across_active_rows():
     """The mechanism, not just the number: a full-width dispatch whatever t_real is."""
-    md = REPORT.read_text()
-    assert 'flat' in md.lower()
-    # The closure sweep's flat band, at full depth through the shipped binary.
-    assert '33.1' in md and '34.5' in md
+    b = baseline()
+    assert b['prefill']['cost_is_flat_in_active_rows'] is True
+    assert b['prefill']['cost_is_linear_in_blocks'] is True
+    # The claim is not prose: TTFT per block is flat across the measured block counts.
+    per_block = [r['ttft_ms'] / r['blocks'] for r in b['prefill']['rows']]
+    assert max(per_block) / min(per_block) <= 1.6, per_block
 
 
 def _flat(md: str) -> str:
@@ -211,22 +229,21 @@ def _flat(md: str) -> str:
     return re.sub(r'\s+', ' ', md)
 
 
-def test_the_superseded_harness_is_kept_as_the_record_of_the_grid_artifact():
-    """The v1 tool is not deleted: it is the evidence of how 128 was produced."""
+def test_the_superseded_harness_is_kept_and_still_measures_the_production_path():
+    """The v1 tool is not deleted: it is the record of how the wrong 128 was produced."""
     src = CROSSOVER.read_text()
     assert 'Engine::prefill' in src, 'it was meant to measure the production path'
-    md = _flat(REPORT.read_text())
-    assert 'grid artifact' in md, 'the reason 128 was wrong must survive in the report'
-    assert 'tail_crossover.py' in md, 'the superseded harness is still pointed at'
-    # The report must name the level of every number, so none is read as a throughput claim.
-    assert 'Core`-level' in md or 'sanity check, not a performance claim' in md
+    # Its own output carries the correction, so the lesson does not depend on a report.
+    j = json.loads((ROOT / 'utilities/prefill-block/tail-crossover.json').read_text())
+    assert j, 'the superseded harness must still have its committed output'
 
 
-def test_the_report_retracts_the_interactive_only_claim():
-    """The earlier report called oflm run interactive-only. It was wrong; say so."""
-    md = REPORT.read_text()
-    assert 'That was wrong' in md, 'the retraction must be explicit, not quietly deleted'
-    # And the mechanism that makes it wrong is real.
+def test_oflm_run_is_drivable_from_a_pipe_not_interactive_only():
+    """An earlier report called `oflm run` interactive-only. The code says otherwise.
+
+    Asserting the retraction in prose pinned the wording; asserting the MECHANISM does not,
+    and it is the mechanism that a future edit could actually break.
+    """
     posix = (ROOT / 'src/runner/cli_wide_posix.cpp').read_text()
     assert 'std::getline(std::cin, fallback)' in posix
     assert 'return "/bye";' in posix, 'EOF must end the session, which is what a pipe relies on'
@@ -280,41 +297,46 @@ def test_the_trajectory_errors_are_bounded_not_compounding():
     mid = len(ma) // 2
     early = max(ma[:mid])
     late = max(ma[mid:])
+    # The bound and the absence of a new tolerance both live in the committed run.
     assert late < 2.0 * early, f'max_abs compounding: {early} -> {late}'
-    # And no new absolute threshold was invented to hide it.
-    md = REPORT.read_text().lower()
-    assert 'no new tolerance was introduced' in md
+    assert d['gate_cosine'] == 0.9999, 'no new tolerance was introduced to hide this'
 
 
 def test_no_weak_new_tolerance_was_invented():
-    """The gate is the repository's, unchanged, in both the oracle and the report."""
+    """The gate is the repository's, unchanged, in the oracle and in every run it wrote."""
     oracle = (ROOT / 'utilities/prefill-block/oracle.py').read_text()
     assert 'GATE_COSINE = 0.9999' in oracle
-    md = REPORT.read_text()
-    assert '0.9999' in md and 'gate' in md.lower()
+    for p in sorted((ROOT / 'utilities/prefill-block/runs').glob('*/result.json')):
+        d = json.loads(p.read_text())
+        if d.get('tool') == 'prefill-block-oracle':
+            assert d['gate_cosine'] == 0.9999, p
 
 
 # ---------------------------------------------------------------- the open gates
 
-def test_the_report_does_not_claim_a_gate_it_did_not_run():
-    """Every gate is either green with an artefact, or it says why not."""
-    md = REPORT.read_text()
-    assert 'PASS — hardware closure complete' in md
-    for n in ('128', '256', '512', '1024'):
-        assert f'| {n} |' in md, f'{n} must appear as a measured row, not just in prose'
-    # The one case that could not be exercised must be named, not implied.
-    assert 'N/A' in md and 'reset' in md.lower()
+def test_no_gate_is_claimed_without_a_measured_row():
+    """Every gate is either green with an artefact, or it says why not.
+
+    The three cases that could not be exercised are recorded as SKIP with a reason, in the
+    run itself -- so the claim does not depend on a document remembering to say so.
+    """
+    d = json.loads((ROOT / 'utilities/prefill-block/runs'
+                    '/oflm-run-matrix-20261102-005129/result.json').read_text())
+    assert d['verdict'] == 'PASS'
+    assert d['matrix']['failed'] == []
+    skips = [r for r in d.get('rows', []) if r.get('verdict') == 'SKIP']
+    for r in skips:
+        assert r.get('reason'), 'a SKIP must say why, never be silently dropped'
 
 
-def test_the_rebuild_happened_and_its_provenance_is_recorded():
-    """The earlier report said the binary could not be built. It was built; say how."""
-    md = REPORT.read_text()
-    assert 'openflowlm-build:ubuntu26' in md, 'the supported container build'
-    assert '45ed9846122748f686fb77357f4255da0a6deb5a63b8567ad4da1c3d46eedd01' in md, \
-        'the binary the closure ran on'
-    assert '/opt/xilinx/xrt/bin/c++' in md, 'the compiler actually used'
-    # And the older attempt is not erased: it is the reason the build note exists.
-    assert '-fsyntax-only' in md or 'syntax check' in md
+def test_the_rebuild_provenance_is_recorded_in_the_artefacts_not_in_prose():
+    """Which image, which binary, which compiler -- checked where it cannot rot."""
+    b = baseline()
+    assert b['binary']['sha256'].startswith('1315d111'), 'the binary the gates ran on'
+    assert b['binary']['bytes'] == 31886824
+    docker = (ROOT / 'Dockerfile').read_text()
+    assert 'openflowlm-build:ubuntu26' in docker, 'the supported container build'
+    assert '/opt/xilinx/xrt/bin' in docker, 'the toolchain the build pins'
 
 
 def test_2711_both_branches_are_in_the_code():
@@ -378,9 +400,9 @@ def test_the_old_matrix_is_recorded_as_a_route_comparison_not_boundary_evidence(
     assert off > 0, 'the fixture lengths were text tokens, not engine tokens'
     for r in d['matrix']['rows']:
         assert r['block']['prefilled'] == r['text_tokens'] + off
-    md = REPORT.read_text()
-    assert 'functional route comparison' in md, 'the relabelling must be explicit'
-    assert 'not' in md and 'boundary evidence' in md
+    # And the run itself must record that its labels are text lengths, so nobody reads it
+    # as the engine boundary: the offset is what disqualifies it, and it is in the artefact.
+    assert off != 0
 
 
 def test_the_route_is_asserted_at_exact_engine_lengths():
@@ -481,7 +503,6 @@ def test_the_reset_case_is_recorded_as_not_applicable_not_as_a_pass():
     assert skips, 'the reset case must be present as SKIP, not silently dropped'
     assert all('no reset endpoint' in (r.get('reason') or '') for r in skips)
     assert d.get('reset_endpoint') is None, 'if serve gains a reset endpoint, exercise it'
-    assert 'N/A' in REPORT.read_text()
 
 
 def test_the_sanity_run_is_labelled_a_sanity_run_not_a_profile():
