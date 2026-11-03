@@ -143,4 +143,6 @@ above `MAX_L - generation_preamble_rows() - 1` before any forward call, with
 `MAX_LENGTH_REACHED`, zero generated tokens and zero decoding duration. The last
 accepted prompt emits one token and finalizes its length-stop metadata. Stale
 metadata, EOS, cancellation and ordinary token limits are covered separately.
+With `length_limit = 0`, regular-loop context exhaustion must report
+`MAX_LENGTH_REACHED`; explicit EOS on the last slot must retain `EOT_DETECTED`.
 Keep this control-flow evidence separate from the numerical NPU gates above.

@@ -82,10 +82,16 @@ prompt still emits one token and reports its decoding duration and length stop.
 Prompt, load and prefill metadata remain unchanged; token counters are updated
 only where tokens are emitted, and no profiler is active at these early returns.
 
+Regular-loop context exhaustion also reports `MAX_LENGTH_REACHED`, including
+when no output-token limit is configured. Explicit EOS takes precedence even on
+the last available slot and retains `EOT_DETECTED`; cancellation retains
+`CANCEL_DETECTED`. A last-slot EOS does not log a context-limit stop.
+
 The executable [host regression](../tests/test_qwen35_generation_metadata.py)
 compiles the production method with engine/tokenizer/sampler/profiler doubles.
 It covers both preambles at boundaries derived from `generation_preamble_rows()`,
-stale metadata, ordinary token limits, EOS and cancellation. These checks concern
+stale metadata, ordinary token limits, loop exhaustion, last-slot EOS and
+cancellation. These checks concern
 control flow and response metadata; the NPU measurements above are unchanged.
 
 ## 4. A correction to Phase 29's explanation

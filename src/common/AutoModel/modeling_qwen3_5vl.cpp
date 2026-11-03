@@ -465,6 +465,9 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         finalize_metadata();
         return result;
     }
+    // Exhausting the loop's context budget is a length stop. Explicit EOS or
+    // cancellation below takes precedence, including EOS on the final slot.
+    reason = MAX_LENGTH_REACHED;
     while (this->total_tokens < this->MAX_L){
         if (is_cancelled()) {
             reason = CANCEL_DETECTED;
@@ -494,6 +497,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         this->profiler_list[TKOEN_DECODE_TIME].stop(1);
         this->token_history.push_back(sampled_token);
         if (this->is_eos(sampled_token)){
+            reason = EOT_DETECTED;
             meta_info.generated_tokens++;
             this->lm_engine->forward(last_sampled_token);
             break;
@@ -505,7 +509,7 @@ std::string Qwen3_5VL::generate(chat_meta_info_t& meta_info, int length_limit, s
         }
     }
     finalize_metadata();
-    if (this->total_tokens >= this->MAX_L){
+    if (reason == MAX_LENGTH_REACHED && this->total_tokens >= this->MAX_L){
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     

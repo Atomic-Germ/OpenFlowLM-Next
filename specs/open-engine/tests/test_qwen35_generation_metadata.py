@@ -70,8 +70,8 @@ struct Tokenizer {
 };
 struct Sampler {
     int calls = 0;
-    bool eos = false;
-    int sample(const buffer<bf16>&) { return (++calls > 1 && eos) ? 99 : 42; }
+    int eos_at = 0;
+    int sample(const buffer<bf16>&) { return ++calls == eos_at ? 99 : 42; }
 };
 METADATA
 struct Qwen3_5VL {
@@ -107,7 +107,9 @@ int main(int argc, char** argv) {
     model.engine.pos = static_cast<int>(model.total_tokens);
     const auto position = model.engine.pos;
     model.token_history = {123};
-    model.sampling.eos = scenario == "eos";
+    const int available = model.MAX_L - position - preamble;
+    const bool exhaust_context = scenario == "context" || scenario == "eos-at-context";
+    model.sampling.eos_at = scenario == "eos" ? 2 : scenario == "eos-at-context" ? available : 0;
     chat_meta_info_t meta;
     meta.prompt_tokens = position;
     meta.total_duration = 123; meta.load_duration = 456; meta.prefill_duration = 789;
@@ -116,7 +118,8 @@ int main(int argc, char** argv) {
         meta.decoding_duration = 99999;
     }
     std::ostringstream output;
-    auto result = model.generate(meta, 2, output, [&] { return scenario == "cancel"; });
+    auto result = model.generate(meta, exhaust_context ? 0 : 2, output,
+                                 [&] { return scenario == "cancel"; });
     assert(meta.prompt_tokens == position);
     assert(meta.total_duration == 123 && meta.load_duration == 456 && meta.prefill_duration == 789);
     assert(meta.decoding_duration == model.profiler_list[DECODING_TIME].elapsed * 1000);
@@ -142,6 +145,15 @@ int main(int argc, char** argv) {
             assert(model.total_tokens == static_cast<size_t>(model.MAX_L));
             assert(model.engine.calls.size() == static_cast<size_t>(preamble));
             assert(model.engine.pos == position+preamble);
+        } else if (exhaust_context) {
+            const bool eos = scenario == "eos-at-context";
+            assert(meta.stop_reason == (eos ? EOT_DETECTED : MAX_LENGTH_REACHED));
+            assert(available > 1 && meta.generated_tokens == available);
+            assert(model.sampling.calls == available);
+            assert(model.total_tokens == static_cast<size_t>(model.MAX_L));
+            assert(model.engine.pos == model.MAX_L - (eos ? 0 : 1));
+            assert(model.engine.calls.size() == static_cast<size_t>(preamble + available - (eos ? 0 : 1)));
+            assert(model.token_history.back() == (eos ? 99 : 42));
         } else if (scenario == "cancel") {
             assert(meta.stop_reason == CANCEL_DETECTED && meta.generated_tokens == 1);
             assert(model.engine.calls.size() == static_cast<size_t>(preamble));
@@ -164,7 +176,9 @@ int main(int argc, char** argv) {
 
 
 @pytest.mark.parametrize('branch', ['think', 'no-think'])
-@pytest.mark.parametrize('scenario', ['refuse', 'refuse-stale', 'boundary', 'limit', 'eos', 'cancel'])
+@pytest.mark.parametrize('scenario', [
+    'refuse', 'refuse-stale', 'boundary', 'limit', 'eos', 'cancel', 'context', 'eos-at-context',
+])
 def test_generation_finalizes_metadata_without_unwanted_forward_steps(generation_binary, branch, scenario):
     result = subprocess.run([str(generation_binary), branch, scenario], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
