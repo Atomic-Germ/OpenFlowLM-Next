@@ -179,6 +179,34 @@ def test_the_operator_override_still_wins_over_the_crossover():
     # by src/test/layer_major_policy_test.cpp at the unit level.
 
 
+def test_the_baseline_states_the_layer_major_direction_the_code_implements():
+    """Machine-readable provenance must not invert `block_loop_preferred`.
+
+    The runtime rule for a dense set is `return !block_loop_preferred` -- the flag REJECTS
+    layer-major because the block loop was measured better. A baseline sentence that reads
+    as "dense sets keep layer-major when the flag is set" states the opposite, and this JSON
+    is what tooling treats as authoritative.
+    """
+    p = baseline()['routes']['layer_major_policy']
+    # The validated dense configuration prefers the block loop, so layer-major is off.
+    assert p['qwen38_27b']['block_loop_preferred'] is True
+    assert p['qwen38_27b']['prefers_layer_major'] is False
+    # The flag's meaning, stated the right way round.
+    assert 'block loop was MEASURED' in p['meaning_of_block_loop_preferred']
+    assert 'not a request to use layer-major' in p['meaning_of_block_loop_preferred']
+    # A dense set WITHOUT it keeps what it shipped with.
+    assert 'block_loop_preferred is false' in p['dense']['prefers_layer_major_when']
+    # Routed experts stay distinct: they prefer layer-major for a different reason.
+    assert p['routed_experts']['prefers_layer_major'] is True
+    # Capability is recorded as a separate question from preference.
+    assert 'layer_major_ok()' in p['capability_is_separate']
+    # And the C++ decision agrees -- the same assertion the ctest makes, kept here too so a
+    # Python-only check catches it as well.
+    src = (ROOT / 'src/open_qwen36/layer_major_policy.hpp').read_text()
+    assert 'return !f.block_loop_preferred;' in src, \
+        'a dense set prefers layer-major only when the flag is ABSENT'
+
+
 def test_the_documented_crossover_matches_the_baseline_and_the_header():
     """One number, three places: the C++ constant, the baseline, and the public header.
 

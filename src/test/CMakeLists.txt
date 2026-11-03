@@ -14,6 +14,20 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# OPEN-PREFILL-BATCH provenance: the machine-readable baseline must record the SAME
+# layer-major direction the C++ decision implements. This parses the JSON and compares it
+# against `preferred()` rather than checking that a field exists.
+add_executable(layer_major_policy_consistency_test layer_major_policy_consistency_test.cpp)
+# `nlohmann/json.hpp` is vendored under src/include, which is why this needs that path and
+# not just src/: the header-only JSON reader is part of the tree, not a package.
+target_include_directories(layer_major_policy_consistency_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(layer_major_policy_consistency_test PRIVATE
+    BASELINE_JSON="${CMAKE_SOURCE_DIR}/utilities/prefill-block/qwen38-production-baseline.json")
+add_test(NAME layer_major_policy_consistency COMMAND layer_major_policy_consistency_test)
+
 # OPEN-PREFILL-BATCH thresholds: the dense block-loop crossover is 96 and layer-major's 64
 # is a different schedule's number. Header-only, so the 95/96 boundary is tested here.
 add_executable(prefill_thresholds_test prefill_thresholds_test.cpp)

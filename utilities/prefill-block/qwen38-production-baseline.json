@@ -40,8 +40,32 @@
   "sequential_block_crossover": 96,
   "layer_major_crossover": 64,
   "dense_qwen38_default": "block-loop",
-  "layer_major": "automatic: routed-expert sets keep it, dense sets take the block loop only when the manifest declares block_loop_preferred; OFLM_OPEN_LAYER_MAJOR overrides either way (1 forces it where capable, 0 forces it off, unset leaves this rule)",
-  "why": "layer-major pads a tail to TOT = B*T whole blocks while the block loop steps it; that padding is the entire measured difference (1.80x at 264 engine tokens, parity at an exact multiple)"
+  "layer_major": "automatic: routed-expert sets keep it; dense sets keep their prior layer-major behaviour UNLESS the manifest marks the block loop as preferred; OFLM_OPEN_LAYER_MAJOR overrides either way (1 forces it where capable, 0 forces it off, unset leaves this rule)",
+  "why": "layer-major pads a tail to TOT = B*T whole blocks while the block loop steps it; that padding is the entire measured difference (1.80x at 264 engine tokens, parity at an exact multiple)",
+  "layer_major_policy": {
+   "source": "open_qwen36::layer_major::preferred() -- src/open_qwen36/layer_major_policy.hpp",
+   "meaning_of_block_loop_preferred": "the manifest asserts that the block loop was MEASURED to be the better dense schedule for this exact geometry; it is not a request to use layer-major",
+   "routed_experts": {
+    "prefers_layer_major": true,
+    "why": "one expert pass a layer instead of one per 256-token block"
+   },
+   "dense": {
+    "prefers_layer_major_when": "block_loop_preferred is false or absent",
+    "prefers_block_loop_when": "block_loop_preferred is true",
+    "why": "layer-major pads the tail to whole blocks and amortises nothing without routed experts"
+   },
+   "capability_is_separate": "layer_major_ok() decides whether the schedule can RUN; it ignores OFLM_OPEN_LAYER_MAJOR, so a force cannot claim a route the set has no kernels for",
+   "operator_override": {
+    "unset": "the rule above",
+    "zero": "layer-major off everywhere",
+    "nonzero": "layer-major on wherever layer_major_ok() is true"
+   },
+   "qwen38_27b": {
+    "block_loop_preferred": true,
+    "prefers_layer_major": false,
+    "note": "the manifest of this kernel set declares it, which is why the dense default here is the block loop"
+   }
+  }
  },
  "prefill": {
   "gate": "31.F cheap baseline; TTFT excludes nothing, it is the whole time to first token",
