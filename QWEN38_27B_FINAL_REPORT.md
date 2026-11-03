@@ -3,10 +3,10 @@
 **Verdict: PASS.** Text-only Qwen3.8-27B runs on the open XDNA2 kernel set, on the shipped
 `oflm` binary, with block prefill as the production route.
 
-Machine-readable companion: [`utilities/prefill-block/qwen38-production-baseline.json`](utilities/prefill-block/qwen38-production-baseline.json).
-Phase 29's long-context evidence: [`utilities/prefill-block/LONG_CONTEXT.md`](utilities/prefill-block/LONG_CONTEXT.md).
-Earlier phases: [`PHASE26`](utilities/prefill-block/PHASE26_REPORT.md),
-[`PHASE27`](utilities/prefill-block/PHASE27_REPORT.md), [`PHASE28`](utilities/prefill-block/PHASE28_REPORT.md).
+Machine-readable companion: [`qwen38-production-baseline.json`](utilities/prefill-block/qwen38-production-baseline.json).
+Long-context contract: [`long-context-v1.json`](utilities/prefill-block/long-context-v1.json).
+Block contract and the Phase 27 closure record: [`BLOCK_CONTRACT.md`](utilities/prefill-block/BLOCK_CONTRACT.md),
+[`PHASE27_REPORT.md`](utilities/prefill-block/PHASE27_REPORT.md).
 
 ---
 
