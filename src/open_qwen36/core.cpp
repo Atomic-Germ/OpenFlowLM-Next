@@ -395,7 +395,9 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
-    if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
+    // Three states, not a boolean: unset is the automatic policy, and only an explicit
+    // request may override it. layer_major_preferred() is where the request is honoured.
+    layer_major_force_ = layer_major::from_environment();
     if (const char* env = std::getenv("OFLM_OPEN_STAGE_MAJOR")) stage_major_on_ = std::string(env) != "0";
     for (const auto* type : types_)
         if (!type->gemm_block.low_kernels.empty()) {
@@ -498,25 +500,40 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
              any_dense ? "not in this kernel set (one dxB dispatch a token)" :
                          "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
-        // Three different facts, said separately: whether the set CAN run layer-major, and
-        // -- when it can -- whether that schedule is the one to USE. A set with no routed
-        // experts is capable but not preferred: layer-major would pad the tail into a block
-        // and amortise nothing (Phase 28).
+        // Three different facts, said separately: whether the set CAN run layer-major, what
+        // the operator asked for, and -- absent a request -- what the automatic rule says.
+        // The first branch below is the one this wording exists for: if it says "layer-major
+        // (forced)" then Engine::prefill() takes the layer-major branch, because both read
+        // the same pure decision.
         log(std::string("prefill schedule: ") +
             (layer_major_preferred()
                  ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
                                        : "layer-major (the whole prompt through each layer)") +
+                       (layer_major_force_ == layer_major::Force::On
+                            ? ", forced by OFLM_OPEN_LAYER_MAJOR=1"
+                            : "") +
                        (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
                                         : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
-                 : layer_major_ok()
-                       ? std::string("block-major (layer-major is runnable here but amortises nothing: no "
+                 : !layer_major_ok()
+                       ? std::string("block-major (this kernel set has no layer-major route: every layer "
+                                     "needs a linear/full gemm_block program"
+                                     // say why the force could not be honoured, rather than silently
+                                     // ignoring it
+                                     ) +
+                             (layer_major_force_ == layer_major::Force::On
+                                  ? "; OFLM_OPEN_LAYER_MAJOR=1 cannot be honoured here"
+                                  : "") + ")"
+                       : std::string("block-major (layer-major is runnable here but amortises nothing: no "
                                      "routed experts in this kernel set; OFLM_OPEN_LAYER_MAJOR=1 forces it)")
-                       : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
-                                                     : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
+                             + (layer_major_force_ == layer_major::Force::Off
+                                    ? ", disabled by OFLM_OPEN_LAYER_MAJOR=0"
+                                    : "")));
 }
 
 bool Core::layer_major_ok() const {
-    if (!layer_major_on_ || !gemm_block_t_) return false;
+    // Capability only: can this set RUN layer-major at all? An explicit force-off is an
+    // operator decision, not a capability, so it is applied in layer_major_preferred().
+    if (!gemm_block_t_) return false;
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
         if (kind != "linear" && kind != "full") return false;
@@ -525,27 +542,23 @@ bool Core::layer_major_ok() const {
 }
 
 bool Core::layer_major_preferred() const {
-    if (!layer_major_ok()) return false;
+    layer_major::Facts f;
+    f.capable = layer_major_ok();
     // What made layer-major worth having is ONE expert pass a layer: the whole prompt goes
     // through the layer before the next one, so a routed expert's ~2 MB streams once per
-    // layer instead of once per 256-token block. A kernel set with no routed experts has no
-    // such win to collect -- `layer_linear_staged` / `layer_full_staged` run the same GEMM
-    // kernels and the same host stages the block loop calls -- and step_gemm_prompt's
-    // TOT = B * T padding then buys a full-width dispatch for a tail the block loop would
-    // have stepped. So the preference is decided by what the schedule exists to amortise,
-    // not by whether it can run.
+    // layer instead of once per 256-token block.
     for (int l = 0; l < nl_; ++l)
         if (!types_[l]->gemm_block.moe_kernel.empty() ||
-            !types_[l]->gemm_block.moe_batch.kernels.empty())
-            return true;
+            !types_[l]->gemm_block.moe_batch.kernels.empty()) {
+            f.has_routed_experts = true;
+            break;
+        }
     // No routed experts: the block loop is the better schedule, but only take it where that
-    // was actually MEASURED. `layer_major_ok()` is a capability test, and most dense sets
-    // pass it, so preferring the block loop on that alone would move models nobody ran --
-    // the Qwen3.5 0.8B/2B/4B/9B sets are built by the same recipe and there are no weights
-    // for them on this machine to smoke-test. The recipe that validated it (Qwen3.8-27B,
-    // Phase 28) declares `block_loop_preferred` in its manifest; a set that does not
-    // declare it keeps layer-major, which is what it shipped with.
-    return !man_.block_loop_preferred;
+    // was actually MEASURED -- the Qwen3.8-27B recipe declares `block_loop_preferred`, and a
+    // set that does not declare it keeps the layer-major it shipped with.
+    f.block_loop_preferred = man_.block_loop_preferred;
+    // The decision itself is a pure function, so it can be tested without a device.
+    return layer_major::preferred(layer_major_force_, f);
 }
 
 Core::~Core() {

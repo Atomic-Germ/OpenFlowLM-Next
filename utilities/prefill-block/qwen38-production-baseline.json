@@ -40,7 +40,7 @@
   "sequential_block_crossover": 96,
   "layer_major_crossover": 64,
   "dense_qwen38_default": "block-loop",
-  "layer_major": "kept for routed-expert sets, and for dense sets only when the manifest declares block_loop_preferred",
+  "layer_major": "automatic: routed-expert sets keep it, dense sets take the block loop only when the manifest declares block_loop_preferred; OFLM_OPEN_LAYER_MAJOR overrides either way (1 forces it where capable, 0 forces it off, unset leaves this rule)",
   "why": "layer-major pads a tail to TOT = B*T whole blocks while the block loop steps it; that padding is the entire measured difference (1.80x at 264 engine tokens, parity at an exact multiple)"
  },
  "prefill": {

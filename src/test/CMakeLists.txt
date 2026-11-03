@@ -14,6 +14,13 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# OPEN-PREFILL-BATCH route policy: which prefill schedule is used, and whether an operator's
+# OFLM_OPEN_LAYER_MAJOR is honoured. Header-only, so this links nothing -- the decision is a
+# pure function and testing it needs no XRT, no weights and no device.
+add_executable(layer_major_policy_test layer_major_policy_test.cpp)
+target_include_directories(layer_major_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME layer_major_policy COMMAND layer_major_policy_test)
+
 # Settings registry tests (host-only, no NPU needed)
 add_executable(settings_registry_test settings_registry_test.cpp
     ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)

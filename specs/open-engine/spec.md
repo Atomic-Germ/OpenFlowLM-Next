@@ -3527,9 +3527,22 @@ share an expert's dispatch, since `OPEN-MOE-BATCH` is not invariant to that
 (see its own result). The schedule also lets a layer read its DeltaNet state
 off the device once per prompt instead of once per block, and stops the
 full-attention layers pulling the whole KV window back for every block.
-`OFLM_OPEN_LAYER_MAJOR=0` (or `--block-major` on the CLI) takes the
-block-at-a-time loop; a `dense` layer type has no layer-major form and stays
-block-major.
+`OFLM_OPEN_LAYER_MAJOR` is an operator override with three states, not a boolean:
+unset takes the automatic policy, `0` (or `--block-major` on the CLI) forces the
+block-at-a-time loop, and any other value forces layer-major wherever the kernel
+set can actually run it. A `dense` layer type has no layer-major form and stays
+block-major whatever the override says.
+
+Which of the two block routes a set takes, absent an override, is a separate
+question from which it can run. On a kernel set with routed experts layer-major
+is preferred, because that is what the schedule amortises. On a set with none it
+pads the prompt to whole blocks and amortises nothing, so the block loop is
+preferred -- but only where that was measured: a manifest declares
+`block_loop_preferred` when its recipe validated the block loop against
+layer-major, and a set that does not declare it keeps layer-major. The override
+wins over that preference in both directions; it cannot create capability, so a
+force-on onto a set with no block route logs that it cannot be honoured and runs
+the block loop.
 
 Inside a layer-major layer the steps run **stage-major**: each GEMM step goes over
 every block of the prompt before the next step starts, and the next block's
@@ -3559,9 +3572,20 @@ layer-major order. `OFLM_OPEN_STAGE_MAJOR=0` keeps that order, for the A/B.
 - Qwen3.5's emission (`tests/test_qwen35.py`): at the 9B, `linear` runs `gemm_n12288_k4096` (qkv|z, pool ops 3-4) then `gemm_n4096_k4096` (out), `full` runs `gemm_n10240_k4096` (q, k, v, gate: pool ops 3-6) then `gemm_n4096_k4096` (o, op 7), and both carry `ffn_program` = `gemm_n24576_k4096` (up|gate, pool ops 0-1, contiguous, up first) then `gemm_n4096_k12288` (down, op 2) with `ff` 12288 and none of the MoE tail's keys; one `gemm` context, no `mx` / `mb` kernels or globals, and the attention products built at `AG_M` 1024 in their own directories. All four published sizes emit a route; `attn`, `linear` or (with every role at q8) `ffn` at q8 splits exactly those roles' steps, and a width the GEMM cannot tile emits no route and leaves the sequential manifest; `linear_out` at q8 emits `gout_w` as `from: "pack"` -- two `std_perm` ops of `ssm_out_proj`, 2048 chunks each at in_dim 4096, `split` hi at dst 0 and lo right after -- with `out_split` and the out step on `gemm_n8192_k4096`, while the sequential consts keep their `q8_perm`. The split reads back every q8 value exactly (the re-quantisation of the same chunks does not), and NumPy (`pack.split_q8_q4_1`) and C++ (`pools::split_q4_1_chunks`) produce the same bytes (`tests/test_qwen35.py`, `pools_test.cpp`). The 35B's manifest is byte-identical to its emission before the dense tail existed, apart from the build key. The parser takes the qwen35 fixture's route and a split out projection, and refuses both tails, neither tail, a third FFN step, an FFN step naming an undefined buffer, an FFN weight past the plan, a packed weight that is not `std_perm`, and a split that is not hi / lo (`manifest_test.cpp`). `split` parses per step and `out_split` marks the out step split; a split step whose weight is not a mirrored hi / lo pack, whose ops do not lie end to end from dst 0 (so the lo halves start exactly where the hi halves end), on a `dense` route (whose GEMM dispatch adds no halves), or in a manifest_version 1 manifest, and a split weight read by a step without `split`, are refused (`manifest_test.cpp`). The recipe writes manifest_version 2 when a step is split and 1 otherwise, out_split included (`test_prefill_batch.py`, `tests/test_qwen35.py`).
 - The dense kind's recipe (`dense.py gemm_route`) emits one `gemm_block` per layer type present, sharing the five-step program, weight map and widths (`layout`/`geometry` don't vary by layer type) but each naming its own `attn_kernel` / `attn_args`: a family with one layer type gets the schema's defaults (`dxB` / `...,"ptab"`); Gemma 3's two get `dxB` / `ptab` for `dense` and a second kernel entry `dxB_local` / `ptab_local` -- the SAME `dx_attn/insts.bin` stream, patched with the family's sliding window -- for `dense_local`, plus `sandwich: true` and `act: "gelu_tanh"` on both (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`). A family combining sandwich norms with a non-gelu-tanh activation, or the reverse, gets no route (`tests/test_gemma3.py`) -- the host chain only implements the two pairings above. Nor does a family whose q/k/v carry a bias or whose position record is wider than one attention element (Qwen2, both): `dx_attn` has neither stream and refuses to build, so the manifest stays the sequential one (`tests/test_qwen2.py`). The parser refuses a dense route whose `attn_kernel` runs the same instruction stream as any sequential `program` step (`dx`, `dx_local`) -- `attnpos` alone does not make a kernel the attention-only dispatch, and the sequential stream would run the whole layer per token (`manifest_test.cpp`).
 - Layer-major is refused where it has no meaning: `layer_major_ok()` is false without a block
-  route, with `OFLM_OPEN_LAYER_MAJOR=0`, and for any layer type whose kind is not `linear` or
-  `full`; `step_gemm_prompt()` throws rather than silently running the wrong schedule, and
-  throws for a prompt that would run past the context capacity.
+  route and for any layer type whose kind is not `linear` or `full`, and
+  `layer_major_preferred()` is false when `OFLM_OPEN_LAYER_MAJOR=0`; `step_gemm_prompt()` throws
+  rather than silently running the wrong schedule, and throws for a prompt that would run past
+  the context capacity. The capability test deliberately ignores the operator variable, so that
+  an explicit force cannot make a set claim a schedule it has no kernels for; the override is
+  applied in the preference. Both are `open_qwen36::layer_major` -- a pure function, pinned
+  behaviourally by `src/test/layer_major_policy_test.cpp` over the force / routed-experts /
+  `block_loop_preferred` / capability matrix, without a device.
+- The override decides the route, not only the log line: with the shipped Qwen3.8-27B set,
+  `OFLM_OPEN_LAYER_MAJOR=1` runs `prefill-route layer-major` while unset and `=0` run
+  `prefill-route block`, and the printed `prefill schedule:` line matches the route taken in
+  all three states (`utilities/prefill-block/layer_major_override.py`, artefact
+  `runs/layer-major-override-*/result.json`). This is asserted because the two once disagreed:
+  `=1` set the boolean, the log said "forced", and the block loop ran.
 - The engine says out loud when the OpenMP wait policy could not be applied. vcomp reads
   `OMP_WAIT_POLICY` when it loads, so the static initialiser that sets it only works if vcomp
   is delay-loaded (`/DELAYLOAD:VCOMP140.DLL`); a build without that runs the host workers

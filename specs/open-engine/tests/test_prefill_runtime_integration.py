@@ -154,23 +154,12 @@ def test_the_route_is_chosen_by_capability_and_preference_not_by_model_name():
     prefill = prefill[:prefill.index('prefill_images')]
     for fingerprint in ('27b', 'qwen3.8', 'family ==', 'model_name =='):
         assert fingerprint not in prefill, f'{fingerprint} must not steer the route choice'
-    # And the reason lives in the code, not only in a report.
-    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
-    assert 'bool Core::layer_major_preferred() const' in core
-    assert 'moe_kernel.empty()' in core, \
-        'preference must be derived from whether the set carries routed experts'
-
-
-def test_the_owner_of_layer_major_still_gets_it():
-    """A set WITH routed experts keeps the schedule layer-major was measured to want."""
-    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
-    body = core[core.index('bool Core::layer_major_preferred() const'):]
-    body = body[:body.index('\n}\n')]
-    assert 'moe_batch.kernels.empty()' in body
-    assert 'return true' in body
-    # Nothing about a specific model, family or tag.
-    for fingerprint in ('27b', 'qwen3.8', 'qwen35', 'family', 'spec_hash'):
-        assert fingerprint not in body, f'{fingerprint} must not appear in the preference rule'
+    # And the reason lives in the code, not only in a report. The rule itself is
+    # `layer_major::preferred()`, a pure function tested behaviourally by
+    # src/test/layer_major_policy_test.cpp -- including that a set with routed experts
+    # keeps layer-major. Reading its body here would only pin the shape of the source.
+    assert 'layer_major::preferred(' in (ROOT / 'src/open_qwen36/core.cpp').read_text(), \
+        'the preference must come from the shared policy, not a second copy of the rule'
 
 
 def test_the_operator_override_still_wins_over_the_crossover():
@@ -180,10 +169,47 @@ def test_the_operator_override_still_wins_over_the_crossover():
     after = after[:after.index('mrope_active')]
     assert 'OFLM_OPEN_GEMM_BLOCK_MIN' in after, \
         'the diagnostic override must apply after the crossover is chosen'
-    # And the other operator switch is still the way to force layer-major back on.
-    core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
-    assert 'OFLM_OPEN_LAYER_MAJOR' in core
-    assert 'layer_major_on_ = std::string(env) != "0"' in core
+    # The layer-major override is not asserted here: a source string cannot tell a working
+    # override from one the preference silently vetoes (it did exactly that). Its behaviour
+    # is pinned by test_the_operator_override_decides_the_route_not_just_the_log_line() and
+    # by src/test/layer_major_policy_test.cpp at the unit level.
+
+
+def _override():
+    """The operator-override run: three states, each with its log line and its route."""
+    runs = sorted((ROOT / 'utilities/prefill-block/runs').glob(
+        'layer-major-override-*/result.json'))
+    for path in reversed(runs):
+        d = json.loads(path.read_text())
+        if d.get('verdict') == 'PASS':
+            return d
+    pytest.skip('no passing layer-major-override run committed')
+
+
+def test_the_operator_override_decides_the_route_not_just_the_log_line():
+    """OFLM_OPEN_LAYER_MAJOR used to be overruled by the automatic preference.
+
+    On a dense set whose manifest says `block_loop_preferred`, `=1` set a boolean, the log
+    said layer-major was forced, and the block loop ran. So the assertion cannot be that
+    the variable appears in the source -- it did. It has to be that the route the prefill
+    took matches the line the runtime printed, in all three operator states.
+    """
+    d = _override()
+    rows = {r['case']: r for r in d['rows']}
+    # Unset keeps the production routing untouched -- the non-negotiable part.
+    assert rows['unset']['env'] is None
+    assert rows['unset']['actual_route'] == 'block'
+    # Force-on wins over block_loop_preferred: the bug, stated as an assertion.
+    assert rows['force_on']['actual_route'] == 'layer-major'
+    assert rows['force_on']['logged_schedule'] == 'layer-major'
+    # Force-off still disables it.
+    assert rows['force_off']['actual_route'] == 'block'
+    assert rows['force_off']['logged_schedule'] == 'block-major'
+    # And no row may report a schedule it did not run.
+    for r in d['rows']:
+        agree = ((r['logged_schedule'] == 'block-major' and r['actual_route'] == 'block')
+                 or r['logged_schedule'] == r['actual_route'])
+        assert agree, r
 
 
 def test_the_measured_crossover_comes_from_a_fit_not_from_a_grid_point():

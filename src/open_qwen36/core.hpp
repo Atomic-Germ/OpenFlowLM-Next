@@ -43,6 +43,7 @@
 
 #include "open_qwen36/block_host.hpp"
 #include "open_qwen36/gguf_file.hpp"
+#include "open_qwen36/layer_major_policy.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -289,8 +290,9 @@ public:
     /// Only for the MoE kinds (linear / full) -- layer_major_ok() says so.
     void step_gemm_prompt(const std::vector<int>& ids, bool want_logits);
     /// Whether step_gemm_prompt() can RUN this kernel set: a block route whose every layer
-    /// carries a gemm_block program and OFLM_OPEN_LAYER_MAJOR is not set to 0. This is a
-    /// capability, not a preference -- see layer_major_preferred().
+    /// carries a gemm_block program. This is a capability, not a preference, and it ignores
+    /// OFLM_OPEN_LAYER_MAJOR on purpose -- an operator cannot force a schedule onto a set
+    /// with no kernels for it. The force is applied in layer_major_preferred().
     bool layer_major_ok() const;
     /// Whether layer-major is also the schedule to USE for this kernel set, which is a
     /// different question from whether it can run.
@@ -307,6 +309,11 @@ public:
     /// For the MoE kinds the answer stays YES: there `step_gemm_prompt` runs each layer once
     /// over the whole prompt, so one expert's weights stream once per layer instead of once
     /// per block, which is the measured win layer-major was built for (Qwen3.6-35B).
+    ///
+    /// OFLM_OPEN_LAYER_MAJOR overrides this: `1` (or any nonzero value) selects layer-major
+    /// wherever the set is capable, and `0` disables it. Unset leaves the rule above in
+    /// force. The decision itself is `open_qwen36::layer_major::preferred()`, a pure
+    /// function, so the operator contract is tested without a device.
     bool layer_major_preferred() const;
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
@@ -426,7 +433,7 @@ private:
     std::string prefill_route_;  ///< "fast" | "lean" on a set that carries both, "" on a set with one route
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
-    bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
+    layer_major::Force layer_major_force_ = layer_major::Force::Auto; ///< OFLM_OPEN_LAYER_MAJOR, as the operator set it
     bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count

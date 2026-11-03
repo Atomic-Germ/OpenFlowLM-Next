@@ -453,7 +453,12 @@ std::vector<int> request(Core& core, const Args& a) {
     // B(2): the whole prompt through each layer before the next, so a layer's MoE streams
     // each expert once for every token of the prompt that wants it instead of once per
     // block. Bit-exact against the block-at-a-time loop below, which --block-major forces.
-    if (a.gemm_block && core.layer_major_ok() && !a.block_major) {
+    //
+    // The schedule is the Core's decision, not this flag's: --gemm-block asks for the block
+    // route, --block-major names the loop inside it, and OFLM_OPEN_LAYER_MAJOR still gets the
+    // last word. Asking layer_major_ok() here would ignore an explicit =0, because that is a
+    // capability test by design -- the override lives in layer_major_preferred().
+    if (a.gemm_block && core.layer_major_preferred() && !a.block_major) {
         core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty());
         core.step_gemm_prompt(a.ids, true);
         stages("gemm-prompt", 0, a.ids.size(), a.ids.size());
