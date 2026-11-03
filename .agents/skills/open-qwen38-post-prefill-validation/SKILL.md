@@ -5,6 +5,9 @@ description: Validate the standard FP32 DeltaNet post-output export over full-de
 
 # Short prefill after FP32 post-output promotion
 
+The [final model report](../../../specs/open-engine/reports/qwen38-27b.md)
+summarizes production validation, measured performance and context limits.
+
 Use the existing standard 46-set export from open-qwen38-post-output-integration.
 No kernel rebuild or model repacking is needed. Historical BF16 output hashes
 are not the expected results for this arithmetic. Do not rewrite old evidence.

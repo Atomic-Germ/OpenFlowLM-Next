@@ -1,5 +1,9 @@
 # Qwen3.8-27B validation report
 
+For the production validation summary, measured performance and context limits,
+see the [final report](../reports/qwen38-27b.md). The entries below retain the
+investigation history.
+
 ## Refined candidate upstream drift scan — 2026-10-31
 
 Traced the refined candidate and control across **all 64 layers** at P125/P205/

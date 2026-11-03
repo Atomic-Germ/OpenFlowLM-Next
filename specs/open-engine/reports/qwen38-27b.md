@@ -3,9 +3,9 @@
 **Verdict: PASS.** Text-only Qwen3.8-27B runs on the open XDNA2 kernel set, on the shipped
 `oflm` binary, with block prefill as the production route.
 
-Machine-readable companion: [`qwen38-production-baseline.json`](utilities/prefill-block/qwen38-production-baseline.json).
-Long-context contract: [`long-context-v1.json`](utilities/prefill-block/long-context-v1.json).
-Crossover record: [`tail-crossover.json`](utilities/prefill-block/tail-crossover.json).
+Machine-readable companion: [`qwen38-production-baseline.json`](../../../utilities/prefill-block/qwen38-production-baseline.json).
+Long-context contract: [`long-context-v1.json`](../../../utilities/prefill-block/long-context-v1.json).
+Crossover record: [`tail-crossover.json`](../../../utilities/prefill-block/tail-crossover.json).
 
 ---
 
@@ -135,6 +135,8 @@ would allocate 32 GiB of KV for every request.
 | 31.J | full regression | PASS 2350 / 172 / 0, settings CI OK |
 
 ## 8. Reproducing
+
+Run these commands from the repository root.
 
 ```bash
 source utilities/env.sh                       # XRT, MLIR-AIE + Peano, the tree's paths
