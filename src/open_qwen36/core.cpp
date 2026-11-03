@@ -823,8 +823,15 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
             globals_[name] = alloc(bytes);
         }
     }
-    // a "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU uses the other
-    if (stage_major_on_ && layer_major_ok())
+    // A "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU
+    // uses the other. Only the layer-major body reads them (`layer_linear_staged` /
+    // `layer_full_staged`, reached from `step_gemm_prompt`), so the test is whether that
+    // schedule will RUN -- `layer_major_preferred()` -- and not merely whether the set could
+    // support it. Gating on `layer_major_ok()` used to work by accident, because that
+    // function also consulted OFLM_OPEN_LAYER_MAJOR; now that capability and the operator's
+    // choice are separate, asking capability alone would allocate these for every set that
+    // will never enter the schedule, including an explicit OFLM_OPEN_LAYER_MAJOR=0.
+    if (stage_major_on_ && layer_major_preferred())
         for (int l = 0; l < nl_; ++l) {
             const GemmBlockProgram& gb = types_[l]->gemm_block;
             for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
