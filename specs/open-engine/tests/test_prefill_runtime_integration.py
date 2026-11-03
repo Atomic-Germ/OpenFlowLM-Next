@@ -13,6 +13,7 @@ Hardware numbers are asserted for shape and provenance only -- no NPU result is 
 """
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -177,6 +178,26 @@ def test_the_operator_override_still_wins_over_the_crossover():
     # override from one the preference silently vetoes (it did exactly that). Its behaviour
     # is pinned by test_the_operator_override_decides_the_route_not_just_the_log_line() and
     # by src/test/layer_major_policy_test.cpp at the unit level.
+
+
+def test_no_committed_artefact_names_a_path_under_the_scratch_dir():
+    """`runs/` is scratch and gitignored, so a path into it is a dangling reference.
+
+    The provenance documents record measured NUMBERS, each with the tool and command that
+    produce it. An `artefact` field naming a `runs/...` file makes the document look
+    self-referential and points at something no reader can open.
+    """
+    import subprocess
+    r = subprocess.run([sys.executable,
+                        str(ROOT / 'utilities/prefill-block/fix_artefact_refs.py'), '--check'],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, \
+        f'a provenance document still points under runs/:\n{r.stderr}'
+    # And the replacement is a reproduction instruction, not an empty string.
+    d = json.loads((ROOT / 'utilities/prefill-block/'
+                    'qwen38-production-baseline.json').read_text())
+    for block in ('prefill', 'decode', 'generation_headroom'):
+        assert 'Reproduce with:' in d[block]['artefact'], block
 
 
 def test_the_baseline_states_the_layer_major_direction_the_code_implements():
