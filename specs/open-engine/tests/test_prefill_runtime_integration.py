@@ -212,6 +212,46 @@ def test_the_operator_override_decides_the_route_not_just_the_log_line():
         assert agree, r
 
 
+def _fallback():
+    """The three-case run: no injection, a recovered failure, an unrecoverable one."""
+    runs = sorted((ROOT / 'utilities/prefill-block/runs').glob(
+        'prefill-fallback-*/result.json'))
+    for path in reversed(runs):
+        d = json.loads(path.read_text())
+        if d.get('verdict') == 'PASS':
+            return d
+    pytest.skip('no passing prefill-fallback run committed')
+
+
+def test_a_recovered_block_failure_is_reported_as_fallback_not_as_policy():
+    """A crash that was recovered must not read as a decision.
+
+    `why=` used to be recomputed from static state with `fallback` as the final `else`. A
+    block route that threw, was rewound and was then stepped leaves the same switch,
+    crossover and capability behind it as one the policy never chose -- so a recovered
+    failure could be printed as `not-preferred`. The dynamic fact is now carried explicitly
+    and outranks every policy reason.
+    """
+    d = _fallback()
+    rows = {r['inject']: r for r in d['rows']}
+    # No injection: the block route succeeded, so there is no sequential line at all.
+    clean = rows[None]
+    assert clean['block_route_ran'] is True
+    assert clean['why'] != 'fallback', 'nothing failed, so nothing may say fallback'
+    # The case this exists for.
+    recovered = rows['before']
+    assert recovered['block_failed'] is True
+    assert recovered['why'] == 'fallback'
+    # And it really did step the prompt afterwards, from the restored state.
+    assert recovered['sequential_after'] is True
+    assert recovered['engine_tokens'] == d['text_tokens'] + 8
+    # An unrecoverable failure is a hard failure, not a successful fallback.
+    fatal = rows['unrecoverable']
+    assert fatal['hard_failure'] is True
+    assert fatal['why'] is None, 'a thrown request never reaches the route report'
+    assert fatal['sequential_after'] is False
+
+
 def test_the_measured_crossover_comes_from_a_fit_not_from_a_grid_point():
     """The regression that produced 128, kept as a test so it cannot come back.
 

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "open_qwen36/prefill_route_reason.hpp"
 #include "utils/utils.hpp"
 
 namespace open_qwen36 {
@@ -234,6 +235,11 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
+            // The dynamic half of the route diagnostic. It is deliberately per-request state
+            // and not recomputed at the end: a block route that threw and was rewound leaves
+            // the same switch, crossover and capability behind it as one that never ran, so
+            // the static state cannot tell a recovered failure from a policy choice.
+            prefill_route::Attempt attempt = prefill_route::Attempt::NotAttempted;
             if (gemm_block_on && ids.size() >= min_prompt && !core_->mrope_active()) {
                 // B(2) of .claude/plans/prefill-parity.md: on a MoE kernel set, run the
                 // whole prompt through each layer before the next, so the layer's expert
@@ -382,6 +388,12 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                                      recover_by_reset ? "cache reset"
                                                       : (have_snapshot ? "pre-prompt state restored"
                                                                        : "state NOT rewound"));
+                        // Reaching here means the prompt WILL be stepped below from a state
+                        // that was put back: the one case the telemetry calls `fallback`. The
+                        // unrecoverable branch above throws instead of falling through, so a
+                        // hard failure never reaches this assignment and is never reported as
+                        // a successful fallback.
+                        attempt = prefill_route::Attempt::FailedRecovered;
                         // fall through to the sequential path, from the restored state
                     }
                 }
@@ -397,13 +409,21 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                 // layer-major but has nothing for it to amortise, so the block loop is the
                 // schedule to use. Reporting it separately from `fallback` matters, because
                 // one is a decision and the other is a failure.
-                const char* why = !gemm_block_on              ? "disabled"
-                                  : ids.size() < min_prompt  ? "below-crossover"
-                                  : core_->mrope_active()    ? "mrope"
-                                  : core_->gemm_block_t() == 0 ? "no-block-program"
-                                  : (core_->layer_major_ok() &&
-                                     !core_->layer_major_preferred()) ? "not-preferred"
-                                                               : "fallback";
+                //
+                // `attempt` is the part that cannot be read off the static state: a block
+                // route that threw and was rewound leaves the same switch, crossover and
+                // capability behind it as one that never ran. `prefill_route::reason()`
+                // gives the failure priority so a recovered crash is never reported as a
+                // policy choice.
+                const prefill_route::Policy policy =
+                    !gemm_block_on                 ? prefill_route::Policy::Disabled
+                    : ids.size() < min_prompt     ? prefill_route::Policy::BelowCrossover
+                    : core_->mrope_active()       ? prefill_route::Policy::Mrope
+                    : core_->gemm_block_t() == 0  ? prefill_route::Policy::NoBlockProgram
+                    : (core_->layer_major_ok() && !core_->layer_major_preferred())
+                          ? prefill_route::Policy::NotPreferred
+                          : prefill_route::Policy::Enabled;
+                const char* why = prefill_route::reason(attempt, policy);
                 std::fprintf(stderr, "prefill-route sequential n=%zu blocks=0 tail=0 why=%s "
                                      "crossover=%zu layer-major-capable=%d\n",
                              ids.size(), why, min_prompt,

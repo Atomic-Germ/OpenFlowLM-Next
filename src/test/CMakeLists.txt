@@ -14,6 +14,12 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# OPEN-PREFILL-BATCH telemetry: `why=` must distinguish a policy choice from a recovered
+# block failure. Header-only, so the six-by-two matrix is tested without a device.
+add_executable(prefill_route_reason_test prefill_route_reason_test.cpp)
+target_include_directories(prefill_route_reason_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME prefill_route_reason COMMAND prefill_route_reason_test)
+
 # Bring-up diagnostics: an offset/length pair must not wrap into a valid range, at the signed
 # CLI boundary or at the size_t Core accessors. Header-only, so these link nothing -- a test
 # of the contract that needed a device could not run in CI.
