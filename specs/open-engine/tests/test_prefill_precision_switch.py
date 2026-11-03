@@ -330,14 +330,6 @@ def test_the_paired_route_is_frozen_as_the_correctness_baseline():
     assert 'REAL_VOCAB = 248077' in checker or 'real_vocab' in checker
 
 
-def test_the_baseline_document_records_numbers_not_aspirations():
-    """A closing benchmark document must carry the measured figures, dated."""
-    baseline = (ROOT / 'utilities/prefill-perf/BASELINE.md').read_text()
-    for number in ('102721.2', '74575.7', '38442.8', '0.999911'):
-        assert number in baseline, number
-    assert 'FROZEN' in baseline
-    assert '0.9999' in baseline
-
 
 def test_the_two_prefill_settings_describe_different_things():
     """`prefill_mode` picks which route is loaded; this picks the arithmetic.

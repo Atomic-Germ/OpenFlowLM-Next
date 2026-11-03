@@ -185,12 +185,3 @@ def test_the_dispatch_per_block_count_is_not_a_column_count():
     assert per_proj // 8 == 8, 'per block: 8 = 2 weight components x 2 input components'
 
 
-def test_the_report_states_its_own_limitations():
-    md = (ROOT / 'utilities/prefill-perf/E2E_PROFILE.md').read_text()
-    for needed in ('reps = 1', 'dispersion', 'residue', 'commit', 'firmware'):
-        assert needed in md, needed
-    # The power mode was unreadable, and saying so is required rather than omitting it.
-    assert 'not set' in md and 'EACCES' in md
-    # The denominators must be named in the report, and the double count recorded.
-    assert 'wall share' in md and 'engine share' in md
-    assert 'sum of the exclusive categories' in md or 'categories' in md

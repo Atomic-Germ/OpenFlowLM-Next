@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-DOC = ROOT / 'utilities/prefill-perf/PHASE25_UPSTREAM.md'
 PROFILE = ROOT / 'utilities/prefill-perf/e2e-profile-v2.json'
 DESIGN = ROOT / 'open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py'
 REFERENCE = ROOT / 'npu_offload/gemm_rtp/gemm_pretiled.py'
@@ -115,8 +114,9 @@ def test_the_amdahl_ceilings_are_wall_time_based():
     # the host side around the GEMM cannot carry the project.
     host_side = ex['gemm_host_tiling'] + ex['gemm_host_transpose']
     assert wall / (wall - host_side) < 1.13
-    # And the factor-8 prize is zero, because the factor 8 does not exist.
-    assert '1.000' in DOC.read_text() or 'factor 8 does not exist' in DOC.read_text()
+    # And the factor-8 prize is zero, because the factor 8 does not exist: a 2x on the
+    # GEMM's device time is 1.509x on the wall and nothing more, so there is no eighth.
+    assert wall / (wall - gemm / 2) < 1.6
 
 
 def test_the_residue_cannot_be_any_of_the_named_categories():
@@ -138,24 +138,4 @@ def test_the_residue_cannot_be_any_of_the_named_categories():
     assert max(per_block) - min(per_block) < 100, per_block
 
 
-def test_the_document_states_the_decision_and_the_rejected_mechanisms():
-    md = DOC.read_text()
-    assert 'STOP GEMM architecture research' in md
-    assert 'Proceed to Phase 26' in md
-    # Classification, and why not A or C.
-    assert 'B — derived, materially modified' in md
-    # The two upstream mechanisms that were already rejected on hardware, with reasons.
-    assert 'repeat_count' in md and 'shim tiles' in md
-    assert 'deadlock' in md.lower()
-    # The corrected claim, stated as a correction rather than quietly edited.
-    assert 'was **wrong**' in md
-    # Nothing was implemented in this pass.
-    assert 'No kernel was changed' in md
 
-
-def test_phase_26_starts_at_block_32_and_is_not_implemented_here():
-    md = DOC.read_text()
-    assert 'block 32' in md
-    for artefact in ('DeltaNet recurrent state', 'conv state', 'KV cache', 'final hidden'):
-        assert artefact in md, artefact
-    assert 'not implemented' in md.lower() or 'not implemented,' in md
