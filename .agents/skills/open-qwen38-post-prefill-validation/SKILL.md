@@ -77,3 +77,49 @@ These six resident runs are single requests in separate processes. Do not claim
 repeated-request/reset acceptance from them. Next validate separate captures
 of repeated short requests against short-v1, then block boundaries and the
 long prefix. Preserve the old BF16 reset evidence as historical data only.
+
+
+## Shared block decode checker
+
+The numerical block/decode checks now share
+[decode_transition.py](../../../utilities/prefill-block/decode_transition.py).
+Select `--check state` for exact greedy-token equality plus final conv/recurrent/KV
+state and logits, or `--check logits` for the cosine-gated trajectory with argmax
+agreement reported separately. The standalone 16-token logits script was removed;
+use the latter mode instead. The shipped `oflm` text check remains separate.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/decode_transition.py \
+  --check state --prompt 257 --decode 2 --layers 4 --out Models/qwen38-27b/decode-check-state
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/decode_transition.py \
+  --check logits --prompt 257 --decode 16 --layers 4 --out Models/qwen38-27b/decode-check-logits
+```
+
+Use fresh output directories and the shared NPU lock. The checker uses the CLI,
+model and kernel paths declared in `utilities/prefill-block/oracle.py`; inspect
+these before running. Rebuild the standalone CLI if its native sources changed.
+XRT device access may require execution outside the sandbox: a sandbox-only
+`0 devices found` result does not prove that the host lacks an NPU.
+
+Only physical `--chunk 256` is accepted. Old arbitrary chunk values changed
+metadata without configuring the CLI schedule. The block side now explicitly
+sets `OFLM_OPEN_LAYER_MAJOR=0`; inspect `out_block.log` for `gemm-block` rather
+than `gemm-prompt`. Prompt dump indices remain relative even with `--position`.
+Missing/empty/malformed logits, incomplete token coverage in state mode and
+wrong-sized state dumps fail. Neither mode overwrites an existing run directory.
+
+Default prompt/decode/layers are 40/2/8 (state) and 700/16/64 (logits). Keep the
+original oracle cosine bound 0.9999. State and logits retain distinct tool IDs
+and acceptance rules; do not turn an argmax mismatch into a logits-only failure
+or interpret near-zero-reference max-relative error as a new acceptance bound.
+
+Validated 2026-11-03 on four layers, prompt 257: state PASS with two generated
+tokens; logits PASS with 16/16 agreeing tokens and minimum cosine 0.999999993.
+The log records physical blocks of 256 and 1 tokens. Existing source/binary
+identities, raw outputs and both reports are retained under
+`Models/qwen38-27b/prefill-block-consolidation-20261103/validation.json`.
+This validates the checker and its route on a layer slice, not full-depth model
+accuracy, serving or throughput. Host regression tests live in
+`specs/open-engine/tests/test_prefill_decode_checks.py`; their subprocess double
+is explicitly software-only evidence. Current suite: 2351 passed, 60 skipped;
+native CTest: 22 passed, 2 skipped. No new XCLBIN/library or production change.

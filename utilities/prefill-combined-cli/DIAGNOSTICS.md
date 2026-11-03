@@ -296,3 +296,33 @@ signed attribution invariants. Neither isolated acceptance nor this CPU result
 establishes full-model acceptance.
 
 Evidence: `Models/qwen38-27b/prefill-combined-attribution/v1/`.
+
+
+## Block decode checks
+
+Use one numerical checker for both post-prefill decode gates:
+
+```sh
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/decode_transition.py \
+  --check state --prompt 257 --decode 2 --layers 8
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/decode_transition.py \
+  --check logits --prompt 700 --decode 16 --layers 64
+```
+
+`state` (the default) requires exact greedy-token agreement and compares final
+conv/recurrent/KV state as well as all logits. `logits` uses the same unchanged
+oracle cosine bound but reports argmax disagreement separately. It replaces
+the separate 16-token logits entry point. Defaults remain 40/2/8 for
+prompt/decode/layers in state mode and 700/16/64 in logits mode. The shipped
+`oflm` text-output check remains separate because it cannot expose these tensors.
+
+The checker forces block-major execution on the block side. Only `--chunk 256`
+is supported: earlier arbitrary chunk values changed report metadata without
+changing the native CLI's physical schedule. `--position` shifts the absolute
+state position; prompt dump indices remain relative. Missing, empty, malformed
+or incomplete dumps fail, and an existing output directory is never reused.
+
+Result tool IDs and the separate state/logits acceptance rules remain compatible
+with retained evidence. Historical JSON is not rewritten. Host tests exercise
+both commands through a subprocess CLI double and real binary dump readers;
+these tests are software checks, not NPU accuracy evidence.
