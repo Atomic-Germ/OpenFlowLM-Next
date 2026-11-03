@@ -3,17 +3,23 @@
 **Status: PASS — Outcome B.** Attention becomes the dominant long-context cost, so the
 full-context escalation stopped at 4K and attention is the selected next target.
 
-## Final classification
+## Final classification (Phase 31 keeps all four levels apart)
 
 ```
 largest capacity validated:     262144   (256K: buffers, indices, context object)
 largest addressing validated:   262144   (positions up to and including 262143)
-largest end-to-end validated:     4095   Engine-visible tokens (the 4K ladder rung)
+largest end-to-end validated:     4095   Engine-visible tokens (the 4K ladder rung), CLI
 largest server request validated: 4093   Engine-visible tokens, then a short request in the
                                          same process, then the long one again identical
 long-context performance blocker: attention
 KV at 256K:                 34359738368 B = 32.00 GiB  (8192 B row x 16 layers x 262144)
 ```
+
+**What this support is, stated without overreach.** Qwen3.8-27B on open XDNA2 is
+**text-only**, its context is **validated to 4095 engine tokens end to end** (4093 through the
+server), and its long-context attention is **not optimized**. The 256K figure is a *capacity
+and addressing* result — the buffers allocate and the position arithmetic is correct out to
+position 262143 — not a claim that a 256K prompt was run through the model.
 
 End-to-end is a **4095-token** result, not a 4096 one, and not an 8K or 16K one: 8K and 16K are
 **capacity and addressing validated, end-to-end NOT validated**. The three levels are never
@@ -242,13 +248,11 @@ Verified exhaustively at a 512 context, where a boundary case costs seconds
 | KV overwrite | none observed; `step_gemm_block` refuses `pos + T > max_ctx` |
 
 This is **the contract, not a defect**, and the earlier revision of this report called it a
-defect because it had not checked what `MAX_L` meant. The guard is left as it is, and the
-operational consequence is stated plainly for the CLI: **the maximum prompt for a request that
-generates at least one token is `ctx_len − 1`.**
+defect because it had not checked what `MAX_L` meant. The guard is left as it is.
 
-### The server is one stage tighter, and that IS a real inconsistency
+### The server was one stage tighter — and the real cause was a think preamble
 
-The first serve smoke at that same limit failed, and the log names it:
+The first serve smoke at that same limit failed, and the log named it:
 
 ```
 [OFLM]  Prefill chunk 1/1 with 511 tokens
@@ -256,31 +260,43 @@ The first serve smoke at that same limit failed, and the log names it:
 open_qwen36: request failed: open_qwen36: position 512 reached the context capacity 512
 ```
 
-`_shared_insert` samples the first token as part of prefill, so `last_token` is already the
-token AT the prompt's last position. `_shared_generate` then pushes it onto the history and
-calls `forward(last_sampled_token)`, which consumes a position at or past `MAX_L` on a prompt
-that filled the cache. Prefill succeeded; generation threw; the API returned
-`Internal error`.
+This report originally attributed it to `_shared_insert` sampling the first token as part of
+prefill. That was **partly right and did not explain the size of the gap**: correcting it
+moved the boundary by one slot, while the observed serve limit was several slots below the
+CLI's. The actual cause, found in Phase 31, is that `Qwen3_5VL::generate` has **its own loop**
+and steps a THINK PREAMBLE before any budget check runs:
 
-Measured on a 512 context, four points:
-
-| engine tokens | CLI | serve |
+| branch | rows stepped | ids |
 |---|---|---|
-| 509 | ok | **PASS** (fresh, repeat-identical, and a following request) |
-| 510 | ok | **PASS** |
-| 511 = `MAX_L−1` | **prefills and generates** | **prefill ok, then throw** |
-| 512 = `MAX_L` | refused, 0 prefilled | refused |
+| thinking (`enable_think`) | **2** | `think_start_id`, `198` |
+| not thinking | **4** | `think_start_id`, `271`, `think_end_id`, `271` |
 
-So the guard is right for the CLI and **one stage too late for serve**: a prompt the prefill
-path accepts cannot generate, and the refusal comes as a generic `Internal error` rather than
-the explicit length message. The practical rule until it is fixed: **a serve request must keep
-two slots of headroom — `prompt ≤ ctx_len − 2`.**
+Those rows consume context positions, so the largest prompt that can still emit a token is
 
-The accounting fix lives in `_shared_insert` / `_shared_generate`, which every family shares.
-I drafted it, then **reverted it rather than ship it unverified**: the `+1` that makes the
-guard correct for serve also changes the CLI path that the boundary test already proved
-works, and neither variant has been re-measured. It is recorded as a Phase 30/31 candidate,
-not a Phase 29 change.
+```
+MAX_L − (preamble_rows + 1)     507 at ctx 512, not thinking; 509, thinking
+```
+
+and not `MAX_L − 1`. Worse, `total_tokens` was not advanced by the preamble, so the counter
+and the engine position diverged and the loop guard measured a stale position — which is why
+a constant "leave N slots" guess was wrong at N = 2, 3, 4 **and** 5.
+
+Phase 31 fixes it structurally: `Qwen3_5VL::generation_preamble_rows()` is the single source
+for the guard, the counter advance **and** the template trim, and the guard sits *before* the
+first preamble step. Measured at a 512 context, both branches, both sides
+(`runs/think-boundary-512-20261103-015405/`, 8/8 PASS):
+
+| branch | prompt | need | observed |
+|---|---|---|---|
+| not thinking | **507** | 5 | **generates**, one token, ends at `total == MAX_L` |
+| not thinking | **508** | 5 | **REFUSED before stepping** — `needs 5 free slots … largest prompt that can generate is 507` |
+| thinking | **509** | 3 | **generates**, one token, ends at `total == MAX_L` |
+| thinking | **510** | 3 | **REFUSED before stepping** — `needs 3 free slots … largest prompt that can generate is 509` |
+
+The refused rows carry **no `ctx-trace step` line at all**, so nothing was written to the
+cache: the refusal is a refusal, not a partial prefill. And over the API it is now a
+deliberate `HTTP 400 {"message":"Max length reached!","type":"model_error"}`, not
+`Internal error`. The CLI's own chat turn steps no preamble, so its limit stays `ctx_len − 1`.
 
 ## 29.6 — End-to-end: 4096
 

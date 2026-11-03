@@ -48,6 +48,9 @@ OFFSET = 8
 def one(text_tokens: int, gen: int, *, ctx: int, timeout: float) -> dict:
     tok = D.Tokenizer()
     text = tok.exact_text(text_tokens)
+    # `/clear` ignores its arguments ([`runner.cpp:465`](../../src/runner/runner.cpp:465)),
+    # so the text must be its own line: `/clear <text>` would only clear and generate
+    # nothing, and every row here would be a vacuous pass.
     rec = D.run(['/clear', text], block=True, gen_lim=gen, ctx=ctx, timeout=timeout,
                 extra={'OFLM_OPEN_PREFILL_ROUTE': '1'})
     text_all = rec['stdout'] + '\n' + rec['stderr']

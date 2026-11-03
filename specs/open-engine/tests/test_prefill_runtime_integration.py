@@ -633,10 +633,72 @@ def test_max_l_is_the_whole_sequence_so_the_prompt_maximum_is_one_less():
     assert head['normal_branch']['preamble_rows'] == 4
     assert head['thinking_branch']['preamble_rows'] == 2
     assert head['normal_branch']['need'] == 5 and head['thinking_branch']['need'] == 3
+    # Both branches name the SAME last legal prompt the hardware observed.
+    assert head['normal_branch']['last_legal_prompt_at_ctx512'] == 507
+    assert head['thinking_branch']['last_legal_prompt_at_ctx512'] == 509
     b = c['phase31_boundary_at_ctx512']
     # Non-thinking: 507 ends at total == MAX_L == 512, so 506 and 507 both generate.
-    assert b['503'] == 'generates' and b['504'] == 'generates'
-    assert b['508'].startswith('refused'), 'near the limit it must refuse, not throw'
+    assert b['non_thinking']['507'] == 'generates (last legal)'
+    assert b['non_thinking']['508'].startswith('refused'), 'must refuse, not throw'
+    # Thinking: two preamble rows, so 509 is the last legal prompt and 510 refuses.
+    assert b['thinking']['509'] == 'generates (last legal)'
+    assert b['thinking']['510'].startswith('refused')
+
+
+def _think_boundary():
+    """The Phase 31 headroom run: both branches, both sides of the boundary."""
+    runs = sorted((ROOT / 'utilities/prefill-block/runs').glob(
+        'think-boundary-*/result.json'))
+    for path in reversed(runs):
+        d = json.loads(path.read_text())
+        if d.get('verdict') == 'PASS':
+            return d
+    pytest.skip('no passing think-boundary run committed')
+
+
+def test_the_headroom_boundary_was_measured_on_both_sides_of_both_branches():
+    """31.A/31.B: the boundary is observed, not derived, and the branch is measured.
+
+    The branch is read from the `ctx-trace` step names rather than inferred from what was
+    requested, so a flipped default cannot quietly pass as the other branch. The refused
+    row must show NO `step` line at all: if it stepped a preamble, the guard is after the
+    write it is supposed to prevent.
+    """
+    d = _think_boundary()
+    assert d['ctx'] == 512
+    by = {(r['branch'], r['engine_want']): r for r in d['rows']}
+    for branch, want_branch, preamble in (('normal_branch', 'not-thinking', 4),
+                                          ('thinking_branch', 'thinking', 2)):
+        need = preamble + 1
+        ok = by[(branch, d['ctx'] - need)]
+        bad = by[(branch, d['ctx'] - need + 1)]
+        assert ok['branch_observed'] == want_branch, (branch, ok['branch_observed'])
+        assert ok['engine_tokens'] == ok['engine_want'], 'the prompt reached the engine as itself'
+        assert ok['output_len'] > 0 and not ok['refused']
+        # The refusal happens after prefill and before the first preamble step.
+        assert bad['refused'] is True
+        assert bad['branch_observed'] is None, 'the guard must precede the preamble'
+        assert bad['position_error'] is False, 'no position throw may remain'
+        assert bad['internal_error'] is False
+        assert not any('step ' in t for t in bad['trace'])
+
+
+def test_the_cli_prompt_is_its_own_line_not_an_argument_to_clear():
+    """`/clear` ignores its arguments, so `/clear <text>` generates nothing.
+
+    That mistake produced a vacuous "PASS" in the first version of the headroom harness:
+    0 tokens prefilled and no request made. It is asserted here because it is invisible in
+    the result -- the run looks like a clean over-limit refusal.
+    """
+    runner = (ROOT / 'src/runner/runner.cpp').read_text()
+    body = runner[runner.index('void Runner::cmd_clear'):]
+    body = body[:body.index('}')]
+    assert 'input_list' not in body.replace('std::vector<std::string>& input_list', ''), \
+        'if cmd_clear starts using its arguments, this test and the harnesses can be simplified'
+    for name in ('think_boundary.py', 'ctx_boundary.py'):
+        src = (ROOT / 'utilities/prefill-block' / name).read_text()
+        assert "'/clear', text" in src or "'/clear'," in src, name
+        assert "'/clear ' + text" not in src, f'{name} would generate nothing'
 
 
 def test_the_think_preamble_is_guarded_before_it_steps():
@@ -707,3 +769,47 @@ def test_the_generation_preamble_is_declared_once_and_used_by_both_sides():
     for name in ('qwen3.8', '27b', 'qwen35'):
         assert name not in hdr[hdr.index('generation_preamble_rows()') - 900:
                               hdr.index('generation_preamble_rows()')], name
+
+
+def test_the_production_baseline_is_internally_consistent():
+    """The quotable numbers, checked against each other rather than trusted.
+
+    A baseline nobody can recompute is a claim, not a measurement: every derived field is
+    recomputed here from the primitive ones, so a transcription slip fails the build.
+    """
+    b = json.loads((ROOT / 'utilities/prefill-block/'
+                    'qwen38-production-baseline.json').read_text())
+    assert b['status'] == 'PASS'
+    for key in ('commit', 'binary', 'model_artifact', 'prefill', 'decode', 'context',
+                'generation_headroom', 'routes', 'gates'):
+        assert key in b, key
+    assert b['binary']['bytes'] == 31886824
+    assert b['binary']['sha256'].startswith('1315d111')
+    assert b['model_artifact']['tensors'] == 947
+    assert b['model_artifact']['bytes'] == 19844633616
+    assert round(b['model_artifact']['gib'], 3) == 19.845
+    # Prefill: engine count, block count and rate must agree with each other.
+    physical = b['geometry']['physical_block_t']
+    for r in b['prefill']['rows']:
+        assert r['blocks'] == r['engine_tokens'] // physical, r
+        rate = r['engine_tokens'] / (r['ttft_ms'] / 1000.0)
+        assert abs(rate - r['prompt_tok_s']) < 0.02, (r, rate)
+    # Cost is linear in BLOCKS, not in rows: TTFT per block stays in a narrow band.
+    per_block = [r['ttft_ms'] / r['blocks'] for r in b['prefill']['rows']]
+    assert max(per_block) / min(per_block) <= 1.6, per_block
+    # KV: row x full layers = per token, and 256K follows with no fudge factor.
+    c = b['context']
+    assert c['kv_bytes_per_token'] == (c['kv_bytes_per_token_per_full_layer']
+                                       * c['kv_full_attention_layers'])
+    assert c['kv_bytes_per_token_per_full_layer'] == 8192
+    assert c['kv_256k_bytes'] == c['kv_bytes_per_token'] * 262144
+    assert c['kv_256k_gib'] == 32.0
+    # The levels stay ordered and separate.
+    assert c['capacity_validated'] == c['addressing_validated'] == 262144
+    assert c['addressing_last_position'] == 262143
+    assert c['serve_end_to_end_validated'] < c['cli_end_to_end_validated'] < 8192
+    assert b['routes']['sequential_block_crossover'] == 96
+    assert b['routes']['dense_qwen38_default'] == 'block-loop'
+    # And the claim list is short and specific, not "everything works".
+    assert any('vision' in x for x in b['not_claimed'])
+    assert any('256K' in x for x in b['not_claimed'])

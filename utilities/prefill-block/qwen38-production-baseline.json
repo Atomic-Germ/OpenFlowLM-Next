@@ -1,0 +1,122 @@
+{
+ "tool": "qwen38-production-baseline",
+ "version": 1,
+ "phase": 31,
+ "status": "PASS",
+ "model": "Qwen3.8-27B",
+ "scope": "text-only, open XDNA2 (aie2p) kernels",
+ "commit": "7bb6c8aa",
+ "commit_note": "HEAD at which the gates below ran; f966f976 only changes test artefact selection",
+ "binary": {
+  "path": "build/src/oflm",
+  "sha256": "1315d11128d72302bcd845c499980f9e25a757a47c3869d68a5a10fc72a2f090",
+  "bytes": 31886824,
+  "provenance": "the shipped binary built by the repository's own Docker path, not a harness-only CLI"
+ },
+ "model_artifact": {
+  "name": "Qwen3.8-27B-NPU2",
+  "file": "model.q4nx",
+  "tensors": 947,
+  "bytes": 19844633616,
+  "gib": 19.845,
+  "embedded_metadata": false,
+  "note": "measured from the artifact itself; the earlier 851 tensors / 19.15 GB figure is superseded by this count"
+ },
+ "geometry": {
+  "hidden": 5120,
+  "ffn": 17408,
+  "layers": 64,
+  "deltanet_layers": 48,
+  "full_attention_layers": 16,
+  "heads": 24,
+  "kv_heads": 4,
+  "head_dim": 256,
+  "vocab_real": 248077,
+  "physical_block_t": 256,
+  "conv_kernel": 4,
+  "rotary_dim": 64
+ },
+ "routes": {
+  "sequential_block_crossover": 96,
+  "layer_major_crossover": 64,
+  "dense_qwen38_default": "block-loop",
+  "layer_major": "kept for routed-expert sets, and for dense sets only when the manifest declares block_loop_preferred",
+  "why": "layer-major pads a tail to TOT = B*T whole blocks while the block loop steps it; that padding is the entire measured difference (1.80x at 264 engine tokens, parity at an exact multiple)"
+ },
+ "prefill": {
+  "gate": "31.F cheap baseline; TTFT excludes nothing, it is the whole time to first token",
+  "rows": [
+   {"prompt_tokens": 256, "engine_tokens": 264, "blocks": 1, "passes": 1, "ttft_ms": 39491.9, "prompt_tok_s": 6.68},
+   {"prompt_tokens": 512, "engine_tokens": 520, "blocks": 2, "passes": 2, "ttft_ms": 73212.3, "prompt_tok_s": 7.10},
+   {"prompt_tokens": 1024, "engine_tokens": 1032, "blocks": 4, "passes": 4, "ttft_ms": 143022.0, "prompt_tok_s": 7.22}
+  ],
+  "artefact": "utilities/prefill-block/runs/oflm-sanity-20261103-012348/result.json",
+  "cost_is_linear_in_blocks": true,
+  "cost_is_flat_in_active_rows": true
+ },
+ "decode": {
+  "gate": "31.E; load and prefill are outside the interval",
+  "tokens": 32,
+  "ctx": 4096,
+  "decode_tok_s_median": 2.087,
+  "decode_tok_s_range": [2.05, 2.09],
+  "runner_reported_range": [2.18, 2.22],
+  "flat_across_prompt_length": true,
+  "artefact": "utilities/prefill-block/runs/decode-rate-20261103-011637/result.json",
+  "note": "decode_tok_s is the loop rate; the runner's own end-to-end rate is a different denominator and the two are never interchanged"
+ },
+ "context": {
+  "capacity_validated": 262144,
+  "addressing_validated": 262144,
+  "addressing_last_position": 262143,
+  "cli_end_to_end_validated": 4095,
+  "serve_end_to_end_validated": 4093,
+  "kv_bytes_per_token_per_full_layer": 8192,
+  "kv_full_attention_layers": 16,
+  "kv_bytes_per_token": 131072,
+  "kv_256k_bytes": 34359738368,
+  "kv_256k_gib": 32.0,
+  "kv_layout": "4 bf16 planes per full layer: [K hi, K lo, V hi, V lo]; kv_row = 8192",
+  "kv_is_device_buffer": true,
+  "max_prefill_len": 4096,
+  "default_context_length": 32768,
+  "levels_never_collapsed": "a capacity PASS is not an end-to-end claim"
+ },
+ "generation_headroom": {
+  "rule": "prompt + generation_preamble_rows() + 1 <= ctx_len",
+  "normal": {"preamble_rows": 4, "need": 5, "last_legal_at_ctx512": 507},
+  "thinking": {"preamble_rows": 2, "need": 3, "last_legal_at_ctx512": 509},
+  "cli_chat_turn": "steps no preamble, so its limit is ctx_len - 1",
+  "refusal": "explicit, before the first preamble step; HTTP 400 'Max length reached!' over the API",
+  "artefact": "utilities/prefill-block/runs/think-boundary-512-20261103-015405/result.json"
+ },
+ "gates": {
+  "1_binary_provenance": "PASS",
+  "2_route_matrix": "PASS 9/9 at 95/96/97, 255/256/257, 511/512/513",
+  "3_prefill_to_decode_oracle": "PASS 16/16, min cosine 0.999999812, max_abs 6.914e-03, no new tolerance",
+  "4_normal_run": "PASS, short sequential and multi-block",
+  "5_normal_serve": "PASS, and the over-limit request is HTTP 400 model_error, not Internal error",
+  "6_request_isolation": "PASS A -> B -> A",
+  "31A_non_thinking_boundary": "PASS 507 generates, 508 refused",
+  "31B_thinking_boundary": "PASS 509 generates, 510 refused",
+  "31E_decode": "PASS 2.087 tok/s median",
+  "31F_prefill": "PASS 256/512/1024 as predicted",
+  "31G_artifact": "PASS 947 tensors, 19844633616 B, no embedded metadata",
+  "31J_full_regression": "PASS 2350 passed, 172 skipped, 0 failed; settings CI OK"
+ },
+ "not_claimed": [
+  "vision support",
+  "256K end-to-end validation",
+  "optimized long-context attention",
+  "INT8 / INT4 / FP8 arithmetic",
+  "any GEMM or attention speedup"
+ ],
+ "environment": {
+  "host": "Ryzen AI 9 365 / Radeon 880M",
+  "npu": "Strix aie2p 6x8",
+  "firmware": "amdxdna 2.26.0",
+  "xrt": "2.25.00",
+  "host_cpus": 20,
+  "host_ram_gib": 91
+ }
+}
