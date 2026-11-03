@@ -3544,6 +3544,18 @@ wins over that preference in both directions; it cannot create capability, so a
 force-on onto a set with no block route logs that it cannot be honoured and runs
 the block loop.
 
+"Validated" is keyed on the **complete** `ModelSpec`, not on a shape subset:
+`qwen35.block_loop_validated()` asks whether `spec.spec_hash()` is in
+`BLOCK_LOOP_VALIDATED`, which holds exactly one entry, Qwen3.8-27B. `spec_hash()`
+serialises every field except `extra` (name and provenance), so heads, kv heads,
+`head_dim`, `rotary_dim`, the linear-attention key/value geometry, `conv_kernel`,
+the layer-type layout and the quant roles are all inside the key -- each of them
+moves the generated route and the cost the measurement justified. A near-match
+that keeps `(hidden, num_layers, intermediate)` and changes anything else is a
+different hash and does not inherit the flag; it keeps the block route as an
+available schedule, it just does not claim it was measured better. Adopting a new
+geometry means measuring it and adding its hash with its evidence.
+
 Inside a layer-major layer the steps run **stage-major**: each GEMM step goes over
 every block of the prompt before the next step starts, and the next block's
 dispatch overlaps the host's work on this one (`gemm_phase`). The host stages

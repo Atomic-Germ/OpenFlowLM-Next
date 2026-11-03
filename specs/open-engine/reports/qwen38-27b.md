@@ -111,6 +111,13 @@ thing: **layer-major pads a tail to `TOT = B*T` whole blocks; the block loop ste
 
 So the dense default is the **block loop at 96**, dense sets only take layer-major when the
 manifest declares `block_loop_preferred`, and routed-expert sets keep it as their owner.
+`OFLM_OPEN_LAYER_MAJOR` overrides that choice in either direction (`1` forces layer-major
+where the set can run it, `0` forces it off, unset leaves the rule).
+
+`block_loop_preferred` is keyed on the **complete** `ModelSpec` (`spec_hash()`), so it names
+this geometry and no other: a near-match that differs in kv heads, `rotary_dim`,
+`conv_kernel`, the linear-attention geometry or a quant role is a different key and keeps the
+block route without claiming it was measured. Only Qwen3.8-27B carries the flag.
 
 ## 6. Context: four numbers, never interchanged
 

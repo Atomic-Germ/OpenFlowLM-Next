@@ -243,22 +243,41 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+# The one configuration whose block-loop *preference* was measured. Anything else on this
+# family may still RUN the block loop -- that is a capability -- but this flag is a claim
+# that someone ran it, and only these geometries earned it.
+#
+# Keyed on the complete spec hash, not on a hand-picked tuple: `ModelSpec.spec_hash()`
+# serialises every field except `extra` (name and provenance), and `from_dict` refuses an
+# unknown field, so a field added to the dataclass is in this key by construction. That is
+# the property a three-field tuple did not have: heads, kv heads, head_dim, rotary_dim, the
+# linear-attention key/value geometry, conv_kernel, the layer-type layout and the quant
+# roles all change the generated route and the measured cost, and none of them moved the
+# old key.
+#
+# A new geometry is adopted by being MEASURED and then added here with its hash and the
+# evidence that earned it -- never by matching a neighbour on three numbers.
+BLOCK_LOOP_VALIDATED = {
+    # Qwen3.8-27B: 1.80x at 264 engine tokens, 13/13 boundary cases, 16/16 decode tokens
+    # (Phase 28.2/28.5). `Atomic-Germ/Qwen3.8-27B-NPU2`'s own config.json derives this.
+    "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458": "Qwen3.8-27B",
+}
+
+
 def block_loop_validated(spec: ModelSpec) -> bool:
-    """Whether this exact set's block-loop prefill was measured correct and faster.
+    """Whether THIS exact configuration's block-loop prefill was measured correct and faster.
 
     `Core::layer_major_ok()` passes for most dense sets, so the block loop is *available*
     nearly everywhere; taking it on availability alone would move models nobody ran. This
-    flag is the recipe saying "this geometry was measured" -- Phase 28 did that for
-    Qwen3.8-27B (1.80x at 264 engine tokens, 13/13 boundary cases, 16/16 decode tokens) and
-    for no other Qwen3.5 size, which is why it is keyed on the shape and not the family.
+    is the recipe saying "this geometry was measured", and the key is the whole spec rather
+    than a subset of it: a near-match that differs only in, say, `num_kv_heads` produces a
+    different route and a different cost, and must not inherit the flag.
 
-    A new size adopts the block loop by being measured and then added here -- never by
-    inheriting its neighbour's flag.
+    Dense sizes other than 27B keep the block loop as an available route; they just do not
+    claim it was measured better. `paired_prefill()` below still covers the wide dense
+    geometry for the precision route, which is a separate claim.
     """
-    return (spec.hidden, spec.num_layers, spec.intermediate) == BLOCK_LOOP_VALIDATED_SHAPE
-
-
-BLOCK_LOOP_VALIDATED_SHAPE = (5120, 64, 17408)   # Qwen3.8-27B (hidden, layers, FFN)
+    return spec.spec_hash() in BLOCK_LOOP_VALIDATED
 
 
 def paired_prefill(spec: ModelSpec) -> bool:

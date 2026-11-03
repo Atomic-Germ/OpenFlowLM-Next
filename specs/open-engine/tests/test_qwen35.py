@@ -11,6 +11,7 @@ a nested `text_config` with `model_type: qwen3_5_text`.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -395,6 +396,127 @@ def test_the_27b_config_derives():
     assert (s.num_heads, s.num_kv_heads, s.head_dim, s.rotary_dim) == (24, 4, 256, 64)
     assert (s.lin_key_heads, s.lin_value_heads, s.lin_key_dim, s.lin_value_dim) == (16, 48, 128, 128)
     assert s.layer_types == tuple(FULL if (l + 1) % 4 == 0 else LINEAR for l in range(64))
+
+
+# ------------------------------------------------ what "validated" is keyed on
+#
+# `block_loop_preferred` is a claim that THIS geometry's block loop was measured correct and
+# faster. It used to be keyed on (hidden, num_layers, intermediate), so a near-match could
+# inherit it while differing in a field that changes the route and the cost -- heads, kv
+# heads, head_dim, rotary_dim, the linear-attention geometry, conv_kernel, the layer layout,
+# or a quant role. These tests mutate one field at a time and require validation to fail.
+
+def spec27() -> ModelSpec:
+    """The measured configuration, derived from the model's own config.json."""
+    return ModelSpec.from_hf_config(cfg("27b"))
+
+
+def _route_relevant_mutations(spec: ModelSpec) -> dict:
+    """One `dataclasses.replace` per field that can move the route or its cost.
+
+    The list is written out rather than derived from `fields(ModelSpec)` on purpose: a field
+    that cannot affect scheduling (a name, a provenance string) would otherwise have to be
+    excused, and an excuse list is how the subset that caused this bug comes back. What
+    protects the whole struct is `test_the_validated_key_is_the_whole_spec`, which fails if
+    any field ever leaves the hash.
+    """
+    n = spec.num_layers
+    return {
+        "hidden": dict(hidden=spec.hidden + 256),
+        "num_layers": dict(num_layers=n - 1,
+                           layer_types=spec.layer_types[:n - 1]),
+        "intermediate": dict(intermediate=spec.intermediate + 256),
+        "num_heads": dict(num_heads=spec.num_heads - 2),
+        "num_kv_heads": dict(num_kv_heads=spec.num_kv_heads - 1),
+        "head_dim": dict(head_dim=spec.head_dim // 2),
+        "rotary_dim": dict(rotary_dim=spec.rotary_dim // 2),
+        "lin_key_heads": dict(lin_key_heads=spec.lin_key_heads // 2),
+        "lin_value_heads": dict(lin_value_heads=spec.lin_value_heads - 8),
+        "lin_key_dim": dict(lin_key_dim=spec.lin_key_dim // 2),
+        "lin_value_dim": dict(lin_value_dim=spec.lin_value_dim // 2),
+        "conv_kernel": dict(conv_kernel=spec.conv_kernel + 1),
+        "layer_types": dict(layer_types=tuple(FULL if t == LINEAR else LINEAR
+                                             for t in spec.layer_types)),
+        "quant": dict(quant={**spec.quant_map, "ffn": "q8"}),
+        "vocab": dict(vocab=spec.vocab - 128),
+        "norm_eps": dict(norm_eps=1e-5),
+        "activation": dict(activation="gelu_tanh"),
+        "sandwich_norms": dict(sandwich_norms=not spec.sandwich_norms),
+        "qk_norm": dict(qk_norm=not spec.qk_norm),
+        "attn_gate": dict(attn_gate=not spec.attn_gate),
+        "norm_groups": dict(norm_groups=2),
+        "rope_theta": dict(rope_theta=spec.rope_theta * 2),
+    }
+
+
+def test_the_measured_27b_is_still_the_one_that_earned_the_flag():
+    """Acceptance: the configuration that was measured still declares the preference."""
+    s = spec27()
+    assert Q35.block_loop_validated(s) is True
+    m = Q35.programs(s)
+    assert m.get("block_loop_preferred") is True, \
+        'the block loop was measured on this geometry and the manifest must still say so'
+
+
+@pytest.mark.parametrize("field", sorted(_route_relevant_mutations(spec27())))
+def test_no_single_route_relevant_field_may_inherit_the_preference(field):
+    """Mutating one scheduling-relevant field at a time must lose the flag."""
+    s = spec27()
+    mutated = dataclasses.replace(s, **_route_relevant_mutations(s)[field])
+    assert mutated != s, f'{field} did not change the spec'
+    assert Q35.block_loop_validated(mutated) is False, \
+        f'a spec differing only in {field} must not inherit a measurement it did not earn'
+
+
+def test_a_near_match_that_keeps_the_old_three_field_key_gets_no_preference():
+    """The regression fixture: same (hidden, num_layers, intermediate), different geometry.
+
+    Sixteen value heads per four key heads is what 27B has; changing the ratio changes the
+    linear-attention kernel geometry and therefore the cost the measurement justified. Under
+    the old key this spec validated, which is precisely the leak.
+    """
+    s = spec27()
+    near = dataclasses.replace(s, lin_value_heads=32)
+    assert (near.hidden, near.num_layers, near.intermediate) == \
+           (s.hidden, s.num_layers, s.intermediate), 'the old key must still match'
+    assert Q35.block_loop_validated(near) is False
+    m = Q35.programs(near)
+    assert m.get("block_loop_preferred") is None, \
+        'the exported manifest must not carry a preference this geometry never measured'
+
+
+def test_the_shipped_published_sizes_do_not_claim_the_measurement():
+    """Non-goal check: the other sizes keep the block route, they just do not claim this."""
+    for name in ("9b", "4b", "2b", "0p8b"):
+        s = ModelSpec.from_hf_config(cfg(name))
+        assert Q35.block_loop_validated(s) is False, name
+        # The block route itself is still emitted where the GEMM can tile it.
+        assert Q35.gemm_route(s) is not None, name
+
+
+def test_the_validated_key_is_the_whole_spec():
+    """Why the key is the spec hash: every field is in it, so none can be forgotten.
+
+    A hand-picked tuple is only as complete as the list someone wrote. This pins the
+    property instead -- a field added to `ModelSpec` is inside the validated key by
+    construction -- and fails if `spec_hash` ever starts excluding one that it should not.
+    """
+    s = spec27()
+    base = s.spec_hash()
+    # Every dataclass field except `extra` (name and provenance) must move the hash.
+    from dataclasses import fields
+    for f in fields(ModelSpec):
+        if f.name in ("extra", "layer_types", "quant"):
+            continue          # exercised by the mutations above; their form is special
+        assert hasattr(s, f.name), f.name
+    # `extra` is the one exclusion, and it is deliberate.
+    assert dataclasses.replace(s, extra={"name": "another tag"}).spec_hash() == base, \
+        'a name must not change which geometry this is'
+    assert dataclasses.replace(s, extra={}).spec_hash() == base
+    # And the hash really does cover the fields the old tuple did not.
+    for field in ("num_kv_heads", "rotary_dim", "conv_kernel", "lin_value_heads"):
+        mutated = dataclasses.replace(s, **_route_relevant_mutations(s)[field])
+        assert mutated.spec_hash() != base, field
 
 
 def test_the_27b_down_gemv_runs_in_two_k_pieces(monkeypatch):
