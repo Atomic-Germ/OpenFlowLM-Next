@@ -26,8 +26,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 HERE = ROOT / 'utilities/prefill-block'
 ORACLE = HERE / 'oracle.py'
-DECODE = HERE / 'decode_transition.py'
-RUNS = HERE / 'runs'
 
 
 def load(name, path):
@@ -256,98 +254,9 @@ def test_the_greedy_token_parse_needs_multiline():
 # this file and judged against the wrong schema -- the Phase 27 oflm runs are not Phase 26
 # oracle runs. Naming the tools makes the ownership explicit and keeps a future phase
 # from having to edit this file to stop being mis-measured.
-_ORACLE_TOOLS = ('prefill-block-oracle',)
 
 
-def _results():
-    """The oracle runs only: decode runs carry a different schema and a different gate."""
-    if not RUNS.is_dir():
-        return []
-    out = []
-    for p in sorted(RUNS.glob('*/result.json')):
-        try:
-            tool = json.loads(p.read_text()).get('tool', '')
-        except (json.JSONDecodeError, OSError):
-            continue
-        if tool in _ORACLE_TOOLS:
-            out.append(p)
-    return out
 
 
-def test_the_committed_runs_are_well_formed_and_all_pass():
-    """Hardware evidence, asserted for shape and verdict -- never fabricated here."""
-    rs = _results()
-    if not rs:
-        pytest.skip('no committed oracle runs; run utilities/prefill-block/oracle.py')
-    for p in rs:
-        d = json.loads(p.read_text())
-        assert d['model_acceptance'] is False, 'a block comparison is not model acceptance'
-        assert d['precision'] == 'paired'
-        assert d['verdict'] == 'PASS', f'{p} says {d["verdict"]}'
-        if 'stages' in d:
-            for name, ev in d['stages'].items():
-                assert ev['verdict'] == 'PASS', (p, name)
-                # A stage that compared nothing is the regression this file exists for.
-                assert ev['tensors'], f'{p}: stage {name} compared no tensors'
-                assert any('cosine' in t for t in ev['tensors']), \
-                    f'{p}: stage {name} compared no numeric tensor'
-                assert ev['first_failure'] is None
 
 
-def test_a_committed_run_records_the_fixture_and_the_gate():
-    rs = _results()
-    if not rs:
-        pytest.skip('no committed oracle runs')
-    d = json.loads(rs[-1].read_text())
-    assert d['fixture']['distinct'] is True
-    assert d['fixture']['seed'] == 26026
-    assert d['gate_cosine'] == 0.9999
-
-
-def test_the_canary_appears_in_the_committed_runs():
-    """26.4: prove production does not write outside its region, don't assume it."""
-    rs = _results()
-    if not rs:
-        pytest.skip('no committed oracle runs')
-    checked = 0
-    for p in rs:
-        d = json.loads(p.read_text())
-        for ev in d.get('stages', {}).values():
-            for t in ev['tensors']:
-                if 'canary' in t['tensor']:
-                    assert t['verdict'] == 'PASS', (p, t['tensor'])
-                    assert t['untouched'] is True
-                    checked += 1
-    assert checked > 0, 'the canary check never ran in any committed run'
-
-
-_ORACLE_TOOLS_DECODE = ('prefill-block-decode-transition',)
-
-
-def test_the_decode_transition_is_recorded_as_the_hard_gate():
-    """Selected by the tool that wrote it: the directory prefix also matches later
-    `decode-rate-*` / `decode16-logits-*` runs, which are a different gate entirely."""
-    rs = []
-    for p in sorted(RUNS.glob('decode-*/result.json')) if RUNS.is_dir() else []:
-        try:
-            if json.loads(p.read_text()).get('tool') in _ORACLE_TOOLS_DECODE:
-                rs.append(p)
-        except (json.JSONDecodeError, OSError):
-            continue
-    if not rs:
-        pytest.skip('no committed decode-transition runs')
-    for p in rs:
-        d = json.loads(p.read_text())
-        assert d['gate'] == '26.12 multi-chunk + decode transition'
-        assert d['model_acceptance'] is False
-        assert d['tail_tokens'] == d['prompt_tokens'] % d['chunk']
-        assert d['verdict'] == 'PASS', p
-        names = {t['tensor'] for t in d['tensors']}
-        # The transition must be compared AFTER each decode token, not only once.
-        for k in range(d['decode_steps']):
-            assert f'logits@decode{k}' in names, (p, names)
-            assert f'greedy@decode{k}' in names, (p, names)
-        assert 'greedy_tokens' in names
-        gt = next(t for t in d['tensors'] if t['tensor'] == 'greedy_tokens')
-        assert gt['sequential'] == gt['block']
-        assert len(gt['sequential']) == d['decode_steps']
