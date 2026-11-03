@@ -1,5 +1,8 @@
 # Private combined prefill CLI
 
+See [retained diagnostics](DIAGNOSTICS.md) for shared replay dependencies,
+CPU attribution commands and historical findings.
+
 Build three fresh native executables from the current source:
 
 - `paired`: paired-BF16 inputs and residual tracing, the original control.

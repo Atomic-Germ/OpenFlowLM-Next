@@ -1,5 +1,8 @@
 r"""ws_poc: weight-stationary proof of concept for the q4_1 prefill GEMM.
 
+STOPPED experiment: see utilities/prefill-perf/BASELINE.md for the measured
+incomplete-output failure and L1 limit. Retained only for reproducibility.
+
 NOT part of the model runtime. A standalone experiment that answers one question with
 hardware numbers: does reusing one dequantized weight tile across R activation
 microtiles beat the frozen paired baseline (utilities/prefill-perf/BASELINE.md) by
@@ -48,12 +51,14 @@ R is an independent variable, so it must be reachable: R <= T_TILES = T/(32*8) =
 At T=256 that is R=1, i.e. no experiment, which is why the POC is driven at T >= 512 and
 R={2,4} at T=512, R={2,4,8} at T=2048.
 
-Build (needs the full toolchain, i.e. inside the build container):
+Build from the repository root (needs the full toolchain):
     GQP_N=14336 GQP_K=5120 GQP_T=2048 GQP_R=4 \
-      python ../../build_design.py ws_poc.py build_ws_t2048_r4
+      python open_kernels/build_design.py utilities/prefill-perf/ws_poc.py \
+        Models/qwen38-27b/prefill-perf/ws-t2048-r4
 
 Drive it with the baseline's own vectors (make_test.py --shape n14336_k5120 --tokens T)
-and score both with compare.py, so the two designs are measured identically.
+and score separate per-variant dumps with utilities/prefill-perf/ws_measure.py.
+Do not use compare.py for multiple variants: it reads one shared output dump.
 """
 
 from __future__ import annotations
@@ -70,7 +75,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern
 
-HERE = Path(__file__).parent
+KERNEL_SOURCES = Path(__file__).resolve().parents[2] / "open_kernels/designs/gemm_q4_prefill"
 
 N_AIE_ROWS = 4
 N_AIE_COLS = 8
@@ -117,7 +122,7 @@ def ensure_dequant_entries() -> list[Path]:
     """The per-ky entries gemm_q4_prefill.py generates; this design reuses them."""
     out = []
     for ky in range(4):
-        p = HERE / f"gemm_q4_dequant_entry_k{ky}.cc"
+        p = KERNEL_SOURCES / f"gemm_q4_dequant_entry_k{ky}.cc"
         if not p.is_file():
             raise RuntimeError(f"missing {p}; build gemm_q4_prefill.py once so the entries exist")
         out.append(p)

@@ -52,7 +52,7 @@ Read weights per layer; no resident model needed for that CPU attribution.
 
 ## CPU rounding attribution follow-up (2026-10-23)
 
-Use [the attribution runbook](../../../utilities/prefill-combined-attribution/README.md).
+Use [the attribution runbook](../../../utilities/prefill-combined-cli/DIAGNOSTICS.md#combined-rounding).
 No resident/NPU execution. Verify prior audited captures, references and builds;
 read weights per layer. Check manifest/source identity including chunk0 Q/gate
 slices. Keep paired-input error separate from weight rounding, preserve per-head

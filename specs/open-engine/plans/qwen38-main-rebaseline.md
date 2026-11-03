@@ -1818,7 +1818,7 @@ remains a follow-up target. Existing full residual accuracy is still
 
 **11 new RED-to-GREEN tests; 1592 passed, 47 skipped** overall. No native build
 or NPU execution. Reproduction, signed-vector interpretation and scope are in
-the [projection attribution runbook](../../../utilities/prefill-projection-attribution/README.md).
+the [projection attribution runbook](../../../utilities/prefill-combined-cli/DIAGNOSTICS.md#projection-rounding).
 Production and candidate arithmetic remain unchanged.
 
 ## Early causal sublayer boundaries — 2026-10-21
@@ -1892,7 +1892,7 @@ before implementation. No native build or NPU run was needed. Production and
 candidate arithmetic remain unchanged; full retained residual acceptance is
 still **3974/4032, FAIL**. This selected-prefix diagnostic does not establish
 long-prefix or model acceptance. Reproduction and scope are in the
-[CPU scan runbook](../../../utilities/prefill-prefix-scan/README.md).
+[CPU scan runbook](../../../utilities/prefill-combined-cli/DIAGNOSTICS.md#causal-prefix-scan).
 
 ## Weighted-candidate sublayer diagnosis — 2026-10-21
 

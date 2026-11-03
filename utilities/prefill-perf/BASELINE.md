@@ -95,7 +95,7 @@ with its own gate, not as a tuning pass inside the runtime.
 
 ## Weight-stationary POC: measured, and STOPPED
 
-[`ws_poc.py`](../../open_kernels/designs/gemm_q4_prefill/ws_poc.py) reorders the same kernel
+[`ws_poc.py`](ws_poc.py) reorders the same kernel
 (no tile change, `tile_n` stays 32) so one dequantized weight tile feeds R activation
 microtiles, R = `T / (tile_n * n_aie_cols)`. Measured with
 [`ws_measure.py`](ws_measure.py), which gives each variant its own dump file — `compare.py`

@@ -75,7 +75,7 @@ def design_traffic(n_weight: int, k: int, t: int, tile_n: int, r_tiles: int) -> 
 
 def importlib_ws():
     import importlib.util
-    p = DESIGN / 'ws_poc.py'
+    p = HERE / 'ws_poc.py'
     if not p.is_file():
         return None
     spec = importlib.util.spec_from_file_location('_ws_poc', p)

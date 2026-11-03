@@ -48,7 +48,7 @@ rounding hypothesis against actual captures before selecting a new NPU replay.
 No resident run is required for that attribution step.
 
 CPU attribution follow-up (2026-10-21): use
-[the rounding runbook](../../../utilities/prefill-projection-attribution/README.md).
+[the rounding runbook](../../../utilities/prefill-combined-cli/DIAGNOSTICS.md#projection-rounding).
 No build/NPU execution. Nine manifest-packed/source weight identities pass;
 7683 conditioned projection comparisons preserve individual Q/K/V/Z head scales.
 Two failures emerge: Q L34/P6/H13 0.0050724904 and V L37/P0/H46 0.0071224278.

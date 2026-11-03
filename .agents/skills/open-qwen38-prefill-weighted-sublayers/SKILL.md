@@ -49,7 +49,7 @@ without a new resident NPU run. Keep ideal-history diagnostics explicitly
 separate from primary acceptance and actual native state.
 
 CPU-only prefix follow-up (2026-10-21): use
-[the prefix scanner](../../../utilities/prefill-prefix-scan/README.md) on the
+[the prefix scanner](../../../utilities/prefill-combined-cli/DIAGNOSTICS.md#causal-prefix-scan) on the
 same retained data. No native rebuild/NPU run. Layers 0–55, P7/P17: 112/112
 independent outputs reconstruct bytewise; 224 cases and signed-vector closure
 validate. Sequential passes 112/112, hybrid 101/112; first hybrid failures
