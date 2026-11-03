@@ -18,7 +18,7 @@
   "file": "model.q4nx",
   "tensors": 947,
   "bytes": 19844633616,
-  "gib": 19.845,
+  "gib": 18.482,
   "embedded_metadata": false,
   "note": "measured from the artifact itself; the earlier 851 tensors / 19.15 GB figure is superseded by this count"
  },

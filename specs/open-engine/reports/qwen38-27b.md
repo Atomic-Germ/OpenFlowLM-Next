@@ -14,7 +14,7 @@ Crossover record: [`tail-crossover.json`](../../../utilities/prefill-block/tail-
 | area | result |
 |---|---|
 | binary | shipped `oflm`, `7bb6c8aa`, sha256 `1315d111…f090`, 31 886 824 B, built by the repo's own Docker path |
-| weights | `model.q4nx`, **947 tensors**, **19 844 633 616 B = 19.845 GB**, no embedded metadata |
+| weights | `model.q4nx`, **947 tensors**, **19 844 633 616 B ≈ 19.845 GB ≈ 18.482 GiB**, no embedded metadata |
 | prefill route | block loop by default at 96; layer-major only for routed-expert sets or a manifest that declares `block_loop_preferred` |
 | prefill correctness | 64-layer prefill → 16-token decode oracle, **16/16**, min cosine **0.999999812**, max_abs **6.914e-03**, **no new tolerance** |
 | decode | **2.087 tok/s** median (range 2.05–2.09), flat in prompt length, load and prefill excluded |

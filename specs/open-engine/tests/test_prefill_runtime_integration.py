@@ -436,7 +436,9 @@ def test_the_production_baseline_is_internally_consistent():
     assert b['binary']['sha256'].startswith('1315d111')
     assert b['model_artifact']['tensors'] == 947
     assert b['model_artifact']['bytes'] == 19844633616
-    assert round(b['model_artifact']['gib'], 3) == 19.845
+    # GiB is binary; the stored value is rounded to the nearest 0.001 GiB.
+    artifact = b['model_artifact']
+    assert abs(artifact['gib'] - artifact['bytes'] / (2 ** 30)) <= 0.0005
     # Prefill: engine count, block count and rate must agree with each other.
     physical = b['geometry']['physical_block_t']
     for r in b['prefill']['rows']:
