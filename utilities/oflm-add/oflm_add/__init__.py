@@ -84,6 +84,15 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # and Q8_0 requantize to something very close to a clean q4_1; IQ4 is the worst of both).
 # Size is the trade: Q8_0 is twice the download of Q4_1 for no gain over it.
 GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q6_K", "Q8_0", "Q5_K", "Q4_K", "IQ4"]
+# The SAME choice for an NpuEmbeddings GGUF (bert / nomic-bert). Those packers
+# dequantize every tensor to F32 and pack the checkpoint, so there is no q4_1
+# pool to preserve and the source's precision is all that matters. Measured
+# against the author's safetensors (cosine of the embeddings, 8 texts):
+# Q8_0 0.9996, Q4_0 0.966 (MiniLM) / 0.91 (nomic, which is far more sensitive).
+# So Q8_0 first -- half the bytes of F16 for the same result -- then the exact
+# floats for a repo that ships no quant, then the coarser quants.
+NPUE_GGUF_PREFERENCE = ["Q8_0", "F16", "BF16", "F32",
+                        "Q6_K", "Q5_K", "Q4_K", "Q4_1", "Q4_0", "IQ4"]
 # Whether a GGUF can be used is NOT a property of the family NAME: it is a
 # property of the kernel set the install links. The recipe emits the manifest's
 # f32-scale twin ("gguf" section) and the export builds its kernel set; the
@@ -120,15 +129,19 @@ def gguf_quant_suffix(name):
     m = GGUF_QUANT_RE.search(name)
     return m.group(1) if m else None
 
-def gguf_quant_family(suffix):
+def gguf_quant_family(suffix, preference=None):
     """A raw suffix folded to its tensor family, or None when unknown.
     K-subtype letters stay with their family ('Q4_K_M' -> 'Q4_K': the tensors
     inside are plain Q4_K), but anything with a digit run past the family
-    ('Q4_0_4_4', 'Q4_K_L2'?) is a different layout, not a variant."""
+    ('Q4_0_4_4', 'Q4_K_L2'?) is a different layout, not a variant.
+
+    `preference` is the accepted family list: the chat kernels' q4_1-pool law
+    by default, or NPUE_GGUF_PREFERENCE for an NpuEmbeddings GGUF (which also
+    accepts the plain F16/F32/BF16 files those repos ship)."""
     if not suffix:
         return None
     q = suffix.upper()
-    for fam in GGUF_QUANT_PREFERENCE:
+    for fam in (preference or GGUF_QUANT_PREFERENCE):
         if q == fam:
             return fam
         if q.startswith(fam + "_") and re.fullmatch(r"[A-Z]+", q[len(fam) + 1:]):
@@ -157,15 +170,17 @@ def split_quant_request(repo_arg: str):
     return head, tail.upper()
 
 
-def choose_gguf_file(names, want=None):
+def choose_gguf_file(names, want=None, preference=None):
     """Pick the best compatible *.gguf from a repo's root file names.
     Returns (chosen, refused) -- refused maps every other gguf to why.
 
     `want` names the quant the user asked for ("IQ4_NL"): the files whose quant
     SUFFIX matches it exactly win, and the ones whose FAMILY matches are the
     fallback. Without it the preference order decides (Q4_1 first -- it is the
-    one the pool takes byte-exactly).
+    one the pool takes byte-exactly). `preference` replaces that order for an
+    NpuEmbeddings GGUF, whose packer dequantizes everything (NPUE_GGUF_PREFERENCE).
     """
+    pref = preference or GGUF_QUANT_PREFERENCE
     refused = {}
     cands = []
     for n in names:
@@ -175,11 +190,11 @@ def choose_gguf_file(names, want=None):
             refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
             continue
         suffix = gguf_quant_suffix(n)
-        q = gguf_quant_family(suffix)
-        if q not in GGUF_QUANT_PREFERENCE:
-            refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
+        q = gguf_quant_family(suffix, pref)
+        if q not in pref:
+            refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(pref)}); convert with q4nx-build"
             continue
-        cands.append((GGUF_QUANT_PREFERENCE.index(q), q, suffix, n))
+        cands.append((pref.index(q), q, suffix, n))
     cands.sort()
     if not cands:
         return None, refused
@@ -187,7 +202,7 @@ def choose_gguf_file(names, want=None):
         exact = [c for c in cands if c[2].upper() == want]
         if exact:
             return exact[0][3], refused
-        fam = gguf_quant_family(want)
+        fam = gguf_quant_family(want, pref)
         same = [c for c in cands if c[1] == fam]
         if not same:
             have = ", ".join(sorted({c[2] for c in cands})) or "none"
@@ -2088,7 +2103,9 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
     if gguf_name:
-        want_list = GGUF_FILES + GGUF_OPTIONAL
+        # `want` adds files a GGUF repo needs beyond the chat set -- the
+        # NPU-embedding checkpoint's vocab.txt and 1_Pooling/config.json.
+        want_list = list(dict.fromkeys(GGUF_FILES + GGUF_OPTIONAL + (want or [])))
     else:
         want_list = want if want is not None else ALL_FILES
     if modelscope:
@@ -2156,7 +2173,8 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
 
 def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
     obtained = []
-    want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else (want if want is not None else ALL_FILES)
+    want_list = (list(dict.fromkeys(GGUF_FILES + GGUF_OPTIONAL + (want or [])))
+                 if gguf_name else (want if want is not None else ALL_FILES))
     for fname in want_list:
         src = src_dir / (gguf_name if fname == "model.gguf" else fname)
         if src.is_file():
@@ -3744,7 +3762,31 @@ def main():
         if _inv and is_diffusion_dit(*_inv):
             return install_diffusion_gguf(args, repo, dit_name, local_dir, dir_name)
 
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want)
+    # An NpuEmbeddings GGUF (bert / nomic-bert) is packed from dequantized F32
+    # tensors, not streamed as q4_1 pools, so PRECISION -- not the q4_1-pool law
+    # -- is what picks the file (see NPUE_GGUF_PREFERENCE). Every candidate's
+    # header names its architecture, so one small range read decides, and the
+    # file itself stays the authority, exactly as it is for the family below.
+    npue_gguf = False
+    if gguf_names:
+        probe = gguf_names[0]
+        if local_dir:
+            probe_src = str(local_dir / probe)
+        elif cache and (cache / probe).is_file():
+            probe_src = str(cache / probe)
+        else:
+            probe_src = (f"https://www.modelscope.ai/models/{repo}/resolve/master/{probe}"
+                         if modelscope
+                         else f"https://huggingface.co/{repo}/resolve/main/{probe}")
+        try:
+            _inv = read_gguf_inventory(probe_src, limit_mb=2)
+            _arch = str((_inv[0] if _inv else {}).get("general.architecture") or "")
+            npue_gguf = _arch in ("bert", "nomic-bert")
+        except Exception:
+            npue_gguf = False
+    gguf_pref = NPUE_GGUF_PREFERENCE if npue_gguf else GGUF_QUANT_PREFERENCE
+    gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want,
+                                               preference=gguf_pref)
     if gguf_name is None and local_dir and "model.gguf" in gguf_names and not gguf_want:
         gguf_name = "model.gguf"
         gguf_refused.pop("model.gguf", None)
@@ -3754,13 +3796,14 @@ def main():
             raise SystemExit(
                 f"{repo_arg}: ':QUANT' is for GGUF repositories, and this repository has no .gguf files "
                 f"(files present: {', '.join(all_files) or 'none'})")
-        compat = sorted({gguf_quant_suffix(n).upper() for n in gguf_names
-                         if gguf_quant_of(n) in GGUF_QUANT_PREFERENCE and not re.search(r"-\d+-of-\d+\.gguf$", n)})
+        compat = sorted({(gguf_quant_suffix(n) or "").upper() for n in gguf_names
+                         if gguf_quant_family(gguf_quant_suffix(n), gguf_pref) in gguf_pref
+                         and not re.search(r"-\d+-of-\d+\.gguf$", n)})
         files = ", ".join(sorted(gguf_names))
         raise SystemExit(
             f"{repo_arg}: no compatible '{gguf_want}' GGUF in that repository.\n"
             f"  supported quants present : {', '.join(compat) or 'none'} "
-            f"(open kernels accept {'/'.join(GGUF_QUANT_PREFERENCE)})\n"
+            f"(open kernels accept {'/'.join(gguf_pref)})\n"
             f"  .gguf files in repo      : {files}")
     cache = None
     if local_dir:
@@ -3773,7 +3816,7 @@ def main():
         files = ", ".join(sorted(gguf_names))
         raise SystemExit(
             f"{repo_arg}: repository carries only .gguf files, and none uses a quant supported "
-            f"by the open kernels (accept {'/'.join(GGUF_QUANT_PREFERENCE)}).\n"
+            f"by the open kernels (accept {'/'.join(gguf_pref)}).\n"
             f"  .gguf files in repo: {files}")
     gguf_mode = gguf_name is not None and not have_q4nx
     if gguf_mode:
@@ -3921,8 +3964,26 @@ def main():
         tag = f"{official[1]}:{official[2]}" if not args.tag else args.tag
         bucket, size_token = tag.split(":", 1)
         size_value = base_entry.get("size") or size_from_tag(tag)
-        gguf_mode = False
-        gguf_name = None
+        if gguf_mode:
+            # The official entry's `size` is its safetensors checkpoint (438 MB
+            # for bge-base); the install is one GGUF (118 MB). Report the file
+            # that is actually on disk.
+            size_value = (gguf_byte_size(None if local_dir else repo, modelscope,
+                                         local_dir, cache, gguf_name, tree)
+                          or size_value)
+        # An NpuEmbeddings model may arrive as a GGUF (llama.cpp's `bert` /
+        # `nomic-bert` arch) instead of the safetensors checkpoint its packers
+        # read. The GGUF path above has already chosen and verified the file;
+        # keep it, and the engine stages a checkpoint from it on first load.
+        # A repo that ships BOTH keeps the safetensors: that is the packers'
+        # native input, and the GGUF is a lossy re-encoding of it.
+        if local_dir is not None:
+            have_st = (local_dir / "model.safetensors").is_file()
+        else:
+            have_st = "model.safetensors" in root_file_names(tree)
+        if have_st:
+            gguf_mode = False
+            gguf_name = None
     else:
         official = match_official_entry(system_registry, dir_name)
         base_entry = official[3] if official else None
@@ -3976,7 +4037,9 @@ def main():
     # because the registry named a set that is not on disk.
     gguf_kernel_dir = None
     built_set = None                   # the set this install built for a new size
-    if gguf_mode:
+    if gguf_mode and not npue_embed:
+        # (An NpuEmbeddings model skips this gate: its kernels are the
+        # npue_design_family design set, not a chat open-kernels manifest.)
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
@@ -4050,28 +4113,43 @@ def main():
         print(f"details.family : {family}")
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
-        if gguf_mode:
+        if gguf_mode and not npue_embed:
             print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
-            if family not in EMBEDDING_FAMILIES:
-                # The geometry decision, in the dry run: which set serves this file,
-                # or why none does. This is what makes `oflm add --dry-run <repo>` the
-                # scripted answer to "will this install?".
-                if gguf_kernel_dir:
-                    print(f"gguf kernels   : {gguf_kernel_dir}")
-                elif spec is not None and open_kernels_checkout() is not None:
-                    print(f"gguf kernels   : (would build {family}-{size_token}: "
-                          f"{'; '.join(geom_notes)})")
-                else:
-                    print(f"gguf kernels   : (none: {'; '.join(geom_notes)})")
+            # The geometry decision, in the dry run: which set serves this file,
+            # or why none does. This is what makes `oflm add --dry-run <repo>` the
+            # scripted answer to "will this install?".
+            if gguf_kernel_dir:
+                print(f"gguf kernels   : {gguf_kernel_dir}")
+            elif spec is not None and open_kernels_checkout() is not None:
+                print(f"gguf kernels   : (would build {family}-{size_token}: "
+                      f"{'; '.join(geom_notes)})")
+            else:
+                print(f"gguf kernels   : (none: {'; '.join(geom_notes)})")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
             bases = get_base_chain()
             print(f"base model(s)  : {', '.join(bases) or '(none in README)'}")
             print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
         elif npue_embed:
-            print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
-        if args.open_kernels:
+            # An NpuEmbeddings model: the checkpoint is packed into a `.npue`
+            # container on first load and the engine routes by the exact tag.
+            # No chat xclbin linking and no quant family -- the packers read
+            # the checkpoint (or the checkpoint the adapter stages from the
+            # GGUF), so the `gguf kernels` question does not apply.
+            if gguf_mode:
+                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct; "
+                      f"staged as an F32 checkpoint on first load)")
+                print(f"design set     : {base_entry.get('npue_design_family')}")
+                print("tokenizer      : container vocab.txt (base repo's, else "
+                      "rebuilt from the GGUF's WordPiece tokens)")
+            else:
+                print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
+        if npue_embed:
+            # No chat-model open-kernel link: the design set printed above is
+            # the whole kernel story for an NpuEmbeddings model.
+            pass
+        elif args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
             sh, note = model_spec_hash(local_dir)
@@ -4124,9 +4202,18 @@ def main():
                                  want=NPU_EMBED_FILES if npue_embed else None)
 
     if npue_embed:
-        # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are absent
-        # for some families (e.g. gte has no vocab.txt) and are tolerated.
-        required = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"]
+        if gguf_mode:
+            # The engine stages a HuggingFace checkpoint from model.gguf on
+            # first load, including config.json / vocab.txt / 1_Pooling when
+            # the base repo cannot be reached -- so the GGUF is the only file
+            # this install cannot do without.
+            required = ["model.gguf"]
+        else:
+            # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are
+            # absent for some families (e.g. gte has no vocab.txt) and are
+            # tolerated.
+            required = ["config.json", "model.safetensors", "tokenizer.json",
+                        "tokenizer_config.json"]
     else:
         required = ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode else REQUIRED_FILES
     missing = [f for f in required if not (target / f).is_file()]
@@ -4138,10 +4225,16 @@ def main():
         # the quant repo: a quant of a finetune of a base tries each level in
         # order until every file resolves.
         aux_missing = [f for f in missing if f != "model.gguf"]
-        if not (target / "config.json").is_file():
-            aux_missing.append("config.json")
-        if not (target / "chat_template.jinja").is_file():
-            aux_missing.append("chat_template.jinja")
+        if npue_embed:
+            # The NpuEmbeddings packer reads vocab.txt and 1_Pooling beside
+            # config.json; the base repo has the author's own copies. Missing
+            # ones are rebuilt from the GGUF by the engine, so this is an
+            # improvement, not a requirement.
+            aux_want = ["config.json", "tokenizer.json", "tokenizer_config.json",
+                        "vocab.txt", "1_Pooling/config.json"]
+        else:
+            aux_want = ["config.json", "chat_template.jinja"]
+        aux_missing = [f for f in aux_want if not (target / f).is_file()]
         if aux_missing:
             bases = get_base_chain()
             gated_warned = set()
@@ -4168,12 +4261,21 @@ def main():
                             log(f"[INFO]   {f} <- {b}")
                             break
             else:
-                log("[WARN] no base_model in the GGUF repo README; tokenizer/config must "
-                    "come from the GGUF itself")
+                if npue_embed:
+                    log("[INFO] no base_model in the GGUF repo README; the adapter derives "
+                        "config.json, vocab.txt and 1_Pooling/config.json from the GGUF")
+                else:
+                    log("[WARN] no base_model in the GGUF repo README; tokenizer/config must "
+                        "come from the GGUF itself")
             # Last resort: the GGUF embeds its own tokenizer (vocab, merges,
             # specials, chat template). Curated base-repo files win when they
             # exist; this covers gated or vanished bases with zero auth.
-            if gguf_mode and (target / "tokenizer.json").is_file():
+            if npue_embed:
+                # The NpuEmbeddings engine tokenizes from the container's own
+                # vocab.txt; a BPE tokenizer.json rebuilt from a WordPiece GGUF
+                # would be a different tokenizer than the one packed.
+                pass
+            elif gguf_mode and (target / "tokenizer.json").is_file():
                 # tokenizer.json already exists (from base repo); skip GGUF extraction
                 log("[INFO] tokenizer.json already present from base repo; skipping GGUF extraction")
             elif (target / "model.gguf").is_file():
@@ -4195,7 +4297,7 @@ def main():
         _chain.append(_off_repo)
     fill_chat_template(target, repo, _chain, modelscope)
     projector = ""
-    if gguf_mode and not args.text_only:
+    if gguf_mode and not args.text_only and not npue_embed:
         # The tower is a second file, and the engine reads it from the model directory.
         # BEFORE the config repair: the repair translates the projector into the
         # vision_config the adapter reads (a GGUF model has no other description of it).
@@ -4215,9 +4317,12 @@ def main():
             present = sorted(e.name for e in target.iterdir() if e.is_file())
             raise SystemExit(
                 f"Model is missing required files: {missing} (files present: {', '.join(present) or 'none'})")
-    if gguf_mode and not (target / "config.json").is_file():
+    if gguf_mode and not npue_embed and not (target / "config.json").is_file():
         log("[WARN] No config.json in the repo; the engine will derive the config from the GGUF "
             "metadata (llama-family shapes only -- Granite etc. need a config.json).")
+    elif gguf_mode and npue_embed and not (target / "config.json").is_file():
+        log("[INFO] No config.json in the repo; the NpuEmbeddings adapter derives one from the "
+            "GGUF's metadata when it stages the checkpoint.")
 
     if not size_value:
         size_value = estimate_size(target / "config.json")
@@ -4229,6 +4334,21 @@ def main():
     if gguf_mode:
         entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (q4_1 pool law)
         entry.setdefault("flm_min_version", "0.9.45")
+    if npue_embed and args.force:
+        # A .npue is packed from the checkpoint beside it and named after the
+        # model directory, so replacing the weights without dropping the
+        # container would leave the OLD weights packed under the new name --
+        # correctly sized and silently wrong. --force is the flag that rewrites
+        # the weights, so it is the flag that invalidates the pack.
+        stale = sorted(target.glob("*.npue"))
+        for p in stale:
+            try:
+                p.unlink()
+            except OSError as ex:
+                log(f"[WARN] could not remove stale container {p}: {ex}")
+        if stale:
+            log(f"[INFO] removed {len(stale)} stale .npue container(s); "
+                "the model repacks on first load")
     if npue_embed:
         # build_entry copies npue_design_family / details / label from the official
         # entry, but blanks `url`; restore it so the .npue packer attributes the

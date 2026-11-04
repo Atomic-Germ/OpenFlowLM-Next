@@ -89,6 +89,10 @@ public:
     std::string kv_str(const std::string& key) const;
     uint64_t kv_u64(const std::string& key) const;
     double kv_f64(const std::string& key) const;
+    /// A metadata STRING array in file order. `meta_` keeps only small arrays,
+    /// so a big one (the tokenizer's vocab) is re-read from the mapping here.
+    /// Empty when the key is absent; throws when it is not a string array.
+    std::vector<std::string> kv_str_array(const std::string& key) const;
 
     static const char* type_name(Type t);
 

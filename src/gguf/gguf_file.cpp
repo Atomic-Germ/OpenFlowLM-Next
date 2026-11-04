@@ -508,6 +508,36 @@ double GgufFile::kv_f64(const std::string& key) const {
     }
 }
 
+std::vector<std::string> GgufFile::kv_str_array(const std::string& key) const {
+    // `meta_` deliberately drops big arrays (the tokenizer's vocab is megabytes of
+    // text nothing else reads), so walk the header again to the key. Called once
+    // per GGUF->checkpoint conversion, never on a hot path.
+    const uint8_t* end = map_ + map_size_;
+    if (map_size_ < 24) return {};
+    const uint8_t* q = map_ + 4;
+    (void)rd_u32(q);                 // version
+    (void)rd_u64(q);                 // tensor count
+    const uint64_t nkv = rd_u64(q);
+    for (uint64_t i = 0; i < nkv; ++i) {
+        const std::string k = rd_str(q, end);
+        const uint32_t t = rd_u32(q);
+        if (k != key) {
+            std::string v;
+            rd_value(t, q, end, v);
+            continue;
+        }
+        if (t != 9) fail("metadata " + key + " is not an array");
+        const uint32_t et = rd_u32(q);
+        const uint64_t n = rd_u64(q);
+        if (et != 8) fail("metadata " + key + " is not a string array");
+        std::vector<std::string> out;
+        out.reserve(static_cast<size_t>(n));
+        for (uint64_t j = 0; j < n; ++j) out.push_back(rd_str(q, end));
+        return out;
+    }
+    return {};
+}
+
 /// One row of a tensor, `dim` values wide, from a tensor whose fastest dim is `dim`.
 /// The caller has already checked that the row exists: embed_row for the model's
 /// [rows, cols] tensors, f32_all for any rank (the vision projector's patch embed is
