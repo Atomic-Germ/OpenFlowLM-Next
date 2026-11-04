@@ -229,6 +229,9 @@ public:
     /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
     /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
+    /// Whether a block writes KV rows for its padding too (the dxB dispatches, the host
+    /// attention, the MoE kinds) rather than only for its real tokens (the attention products).
+    bool gemm_block_pads_cache() const;
 
     /// `n` bytes of a layer's `act` scratch at `off`, straight off the device. Bring-up
     /// only: it is how you tell a stage that computes the wrong thing from a stage that

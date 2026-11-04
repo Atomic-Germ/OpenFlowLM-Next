@@ -205,6 +205,17 @@ int main(int argc, char** argv) {
     const size_t T = S.at("T"), t_real = S.at("t_real"), hid = S.at("hid");
     const double tol = 1e-4;
 
+    // ---- which prompt tokens run as blocks near the context capacity (OPEN-PREFILL-BATCH)
+    {
+        // padding caches rows: max_ctx 4096, pos 512, 3584 tokens -> the 512-token tail would pad past 4096
+        check(host::block_prefill_tokens(512, 3584, 1024, 4096, true) == 3072, "block_prefill_tokens: a padded tail past max_ctx steps");
+        check(host::block_prefill_tokens(512, 3584, 256, 4096, true) == 3584, "block_prefill_tokens: an aligned prompt runs whole");
+        check(host::block_prefill_tokens(0, 1100, 1024, 2048, true) == 1100, "block_prefill_tokens: a padded tail inside max_ctx runs");
+        check(host::block_prefill_tokens(3900, 100, 1024, 4096, true) == 0, "block_prefill_tokens: no whole block fits");
+        // only real rows cached: the same prompt runs whole
+        check(host::block_prefill_tokens(512, 3584, 1024, 4096, false) == 3584, "block_prefill_tokens: real rows only, all blocks");
+    }
+
     // ---- rmsnorm: a row of ones with a unit weight is 1 / sqrt(1 + eps)
     {
         std::vector<float> x(2 * hid, 1.f), w(hid, 2.f), out(2 * hid);

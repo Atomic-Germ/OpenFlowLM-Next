@@ -3498,7 +3498,11 @@ set carries it and the prompt has at least the crossover length (64 tokens;
 `OFLM_OPEN_GEMM_BLOCK=0` (read through `getenv_oflm`, so the pre-rename `FLM_`
 export still works) turns it off; any other value leaves it on. A set without
 the route, or a prompt the route does not take, prefills one token at a time --
-with the route on, never skipped. Only the real tokens of a padded block touch the
+with the route on, never skipped. Near the context capacity, a block whose padding writes
+KV rows (the dxB dispatches, the host attention, the MoE kinds) would pass the capacity with
+a padded tail, so that tail prefills one token at a time. The attention products
+(OPEN-PREFILL-ATTN) write only the real rows, so their blocks run up to the capacity
+(`block_host_test.cpp`, `block_prefill_tokens`). Only the real tokens of a padded block touch the
 state, write KV rows, run the MoE or advance the position, and the conv state,
 S and the KV rows leave the buffers as the sequential path would (bf16 where
 the kernels keep bf16). A projection the container stores at q8 -- `attn`,
