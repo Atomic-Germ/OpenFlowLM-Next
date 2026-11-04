@@ -661,7 +661,15 @@ void AutoModel::set_sampler(sampler_config& sampler_config) {
     if (this->sampler != nullptr) {
         this->sampler.reset();
     }
-    this->sampler = std::make_unique<Sampler>(this->lm_config->get("vocab_size"), sampler_config);
+    // get() reads 0 for a missing key, and a sampler over 0 logits faults on the first
+    // token. A config.json with the text fields nested under text_config (HuggingFace's
+    // layout, not the flat one the app reads) is how that happens.
+    const u32 vocab = this->lm_config->get("vocab_size");
+    if (vocab == 0) {
+        throw std::runtime_error("config.json has no top-level vocab_size (" + this->lm_config->model_path +
+                                 "): the app reads the flat config, not HuggingFace's text_config layout");
+    }
+    this->sampler = std::make_unique<Sampler>(vocab, sampler_config);
 }
 
 void AutoModel::snapshot_request_defaults() {

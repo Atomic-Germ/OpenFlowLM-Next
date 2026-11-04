@@ -49,8 +49,17 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
         if (complete(env, &why)) { chose("OFLM_OPEN_KERNELS_DIR"); return env; }
         std::fprintf(stderr, "open_qwen36: OFLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
     }
+    // A directory that exists but fails the check is named with the reason: otherwise the
+    // caller reports "no open kernels installed" for a set that is there and incomplete
+    // (a GGUF-only build has no q4nx-route xclbins, and the check counts both routes).
+    auto incomplete = [](const fs::path& dir, const std::string& reason) {
+        std::error_code ec;
+        if (fs::exists(dir, ec))
+            std::fprintf(stderr, "open_qwen36: %s is not a complete kernel set: %s\n", dir.string().c_str(), reason.c_str());
+    };
     fs::path local = fs::path(config.model_path) / "open_kernels";
     if (complete(local, &why)) { chose("beside the model"); return local.string(); }
+    incomplete(local, why);
     // Every xclbins root the closed path would consider, not just the first one
     // find_xclbin_path() happens to return: oflm-add links a set under the user
     // root ($OFLM_XCLBIN_PATH / ~/.config/oflm) while the shipped sets live in the
@@ -65,6 +74,7 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     for (const std::string& r : roots) {
         fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
         if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
+        incomplete(cand, why);
     }
     return {};
 }

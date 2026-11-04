@@ -185,7 +185,16 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them
-                 defaults={"qk_norm_post_rope": False, "qkv_bias": False}),),
+                 defaults={"qk_norm_post_rope": False, "qkv_bias": False}),
+                 # Gemma 4's three knobs, checked as their own group: a V norm, a score scale
+                 # replacing 1/sqrt(HD), and a RoPE pair distance other than ROT/2. Every point
+                 # above has them off; a Gemma 4 layer is therefore a new point even where its
+                 # shape is an old one (its sliding layers are Gemma 3 12B's shape), and enters
+                 # here only after OPEN-FAMILY-GEMMA4's hardware pass.
+                 combination(
+                     (False, 0.0, 0),
+                     keys=("v_norm", "attn_scale", "rope_pair"),
+                     defaults={"v_norm": False, "attn_scale": 0.0, "rope_pair": 0})),
              note="ATTN_* are compile-time macros, and the geometry is validated as a WHOLE "
                   "tuple: checking head_dim / num_heads / num_kv_heads one at a time let "
                   "(128, 16, 8) -- a GQA group of 2 at head dim 128 -- through silently, "

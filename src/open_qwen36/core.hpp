@@ -566,6 +566,7 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
+    void softcap_logits();                  ///< the manifest's final_logit_softcapping, in place
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
     /// T-wide scratch buffer (`wide`, e.g. "gact") and an ordinary T=1
     /// per-layer scratch buffer (`scratch1`, e.g. "act").

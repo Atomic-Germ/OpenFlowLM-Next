@@ -64,8 +64,12 @@ BLOCK_ONLY_MEASURED = ("qwen36moe",)
 # cores at 8192; France 22+12 greedy tokens token-for-token identical, corr min 0.99985,
 # argmax 12/12; the 2L boundary hybrids at 8190/16382 and the 16384 capacity guard
 # unchanged -- stage 2.9).
+# gemma4 (OPEN-FAMILY-GEMMA4) is here WITHOUT the measurement the others have: its global layers
+# (head dim 512, 16 heads) cannot be built on the single-core path at all -- the output
+# accumulator alone is 16 x 512 fp32 = 32 KB of the core's 64 -- so there is no slow kernel to
+# measure against. Its sliding layers are Gemma 3 12B's shape, measured above.
 FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3",
-                  "qwen2", "lfm2", "k2")
+                  "qwen2", "lfm2", "k2", "gemma4")
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):
 # six columns for the split, whatever the head count.
 MAX_ATTN_CORES = 6

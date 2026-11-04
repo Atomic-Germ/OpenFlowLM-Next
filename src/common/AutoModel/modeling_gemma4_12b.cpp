@@ -24,12 +24,21 @@ void Gemma4_12B::load_model(std::string model_path, json model_info, int default
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+    // The open kernels when installed for this model (text only: the decoder runs there, the
+    // image and audio towers do not yet), the closed gemma4_12b_npu DLL otherwise
+    // (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA4_ENGINE", "Gemma 4 12B");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
-    // free the q4nx
-    this->q4nx.reset();
+        this->lm_engine->load_weights(*this->q4nx);
+        // free the q4nx
+        this->q4nx.reset();
+    }
     // The soft token budget is a preprocessing constant (processor_config.json
     // image_seq_length / image_processor.max_soft_tokens), read by the engine
     // along with the rest of the image front end parameters.
@@ -112,6 +121,26 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
         return false;
     }
 
+
+    // The open engine runs the decoder only; every image/audio path below reads the closed
+    // engine's front-end constants through a cast that is null there.
+    if (dynamic_cast<gemma4_12b_npu*>(this->lm_engine.get()) == nullptr) {
+        // A key is not media: the server's own text replies carry "images": null, and a
+        // client sends them back with the conversation.
+        const auto carries = [](const nlohmann::json& message, const char* key) {
+            if (!message.contains(key)) return false;
+            const auto& v = message[key];
+            return !(v.is_null() || (v.is_array() && v.empty()));
+        };
+        bool media = !input.images.empty() || !input.audios.empty();
+        for (const auto& message : input.messages)
+            media = media || carries(message, "images") || carries(message, "audios");
+        if (media) {
+            header_print("ERROR", "Gemma 4 12B on the open kernels is text only: images and audio need the "
+                                  "closed engine (OFLM_GEMMA4_ENGINE=closed)");
+            return false;
+        }
+    }
 
     gemma4_12b_image_payload_t image_payload;
     gemma4_12b_audio_payload_t audio_payload;
@@ -476,10 +505,9 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
 
     // hardware
     int restore_idx = -1;
-    gemma4_12b_npu *gemma4_12b_engine = dynamic_cast<gemma4_12b_npu*>(this->lm_engine.get());
 
     if (meta_info.restore_allowed) {
-        restore_idx = gemma4_12b_engine->restore();
+        restore_idx = this->lm_engine->restore();
         this->total_tokens = restore_idx;
         this->token_history = checkpoint_his; // restore the token history to be consistent with the restored KV cache, which is crucial for correct functioning of _shared_insert's prefix-matching logic
     }
@@ -508,7 +536,7 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
         : this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
 
     checkpoint_his = token_history;
-    int checkpoint_idx = gemma4_12b_engine->checkpoint();
+    int checkpoint_idx = this->lm_engine->checkpoint();
     return success;
 }
 
