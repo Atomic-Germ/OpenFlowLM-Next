@@ -50,6 +50,22 @@ def test_a_recipe_edit_changes_the_key(tmp_path):
     assert build_key(spec, root) != before
 
 
+def test_a_dit_gemm_edit_changes_a_dense_key(tmp_path):
+    # Traces: OPEN-PREFILL-GEMM8 -- the dense set's 8-bit route builds dit_gemm
+    from recipes.load import load_spec
+    spec = load_spec(ROOT / "recipes" / "specs" / "qwen3-8b.json")
+    root = tmp_path / "dit"
+    for f in source_files(spec):
+        rel = f.relative_to(ROOT)
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(f, root / rel)
+    for rel in ("designs/dit_gemm/dit_gemm.py", "designs/dit_gemm/mm_dit.cc", "designs/dit_gemm/pack.py"):
+        before = build_key(spec, root)
+        p = root / rel
+        p.write_text(p.read_text(encoding="utf-8") + "\n\n", encoding="utf-8")
+        assert build_key(spec, root) != before, rel
+
+
 def test_spec_and_quant_change_the_key_but_extra_does_not():
     spec = default_spec()
     k = build_key(spec)

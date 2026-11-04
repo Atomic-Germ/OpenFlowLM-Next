@@ -1,4 +1,4 @@
-// Traces: OPEN-PREFILL-BATCH, OPEN-SPEC-VERIFY (canonical spec: specs/open-engine/spec.md)
+// Traces: OPEN-PREFILL-BATCH, OPEN-PREFILL-ATTN, OPEN-SPEC-VERIFY (canonical spec: specs/open-engine/spec.md)
 // The block prefill's host stages against open_kernels/model/replica_block.py's fixture:
 //   python open_kernels/model/replica_block.py --fixture <dir>
 //   block_host_test.exe <dir>
@@ -384,6 +384,43 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < g.pos0 * kv_row; ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
         for (size_t i = (g.pos0 + t_real) * kv_row; i < kv.size(); ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
         check(untouched, "attention_block: rows before the block and past t_real are untouched");
+    }
+
+    // ---- the attention stage's host half when its products run on the NPU (OPEN-PREFILL-ATTN):
+    // attention_prep with the q / k norms (prep "qknorm_rope", Qwen3) and with none (null qn / kn,
+    // prep "rope", K2), against replica_block's. The fixture's block starts past row 0, holds
+    // fewer real tokens than T and rotates part of the head, so all three reach these copies.
+    {
+        host::AttnGeom g;
+        g.T = T; g.t_real = t_real; g.nh = S.at("nh"); g.kvh = S.at("kvh"); g.hd = S.at("hd"); g.rot = S.at("rot");
+        g.pos0 = S.at("pos0");
+        const auto q = read<float>(dir, "q.f32"), k = read<float>(dir, "k.f32"), v = read<float>(dir, "v.f32");
+        const auto qn = read<float>(dir, "qn.f32"), kn = read<float>(dir, "kn.f32");
+        const auto inv_freq = read<double>(dir, "inv_freq.f64");
+        const auto kv_in = read<float>(dir, "kv.f32");
+        const size_t qw = g.nh * g.hd, kv_row = 2 * g.kvh * g.hd;
+        struct Prep { const char* name; bool normed; const char* q_ref; const char* kv_ref; };
+        for (const Prep& c : {Prep{"qknorm_rope", true, "out_q_prep_qknorm.f32", "out_kv.f32"},
+                              Prep{"rope", false, "out_q_prep_rope.f32", "out_kv_prep_rope.f32"}}) {
+            const std::string tag = std::string("attention_prep (") + c.name + "): ";
+            auto kv = to_bf16(kv_in);
+            std::vector<float> Q(T * qw, 9.f);     // stale rows the padding past t_real has to clear
+            host::attention_prep(g, q.data(), k.data(), v.data(), c.normed ? qn.data() : nullptr,
+                                 c.normed ? kn.data() : nullptr, inv_freq.data(), kv.data(), kv_row, Q.data());
+            const double e1 = maxrel(Q, read<float>(dir, c.q_ref));
+            const double e2 = maxrel(from_bf16(kv), read<float>(dir, c.kv_ref));
+            check(e1 < tol, tag + "Q roped and scaled by 1/sqrt(hd) vs replica_block (maxrel " + std::to_string(e1) + ")");
+            check(e2 < 4e-3, tag + "the block's KV rows vs replica_block, within a bf16 ulp (maxrel " +
+                                 std::to_string(e2) + ")");
+            bool zero = true;
+            for (size_t i = t_real * qw; i < Q.size(); ++i) zero = zero && Q[i] == 0.f;
+            check(zero, tag + "Q rows past t_real are zero");
+            bool untouched = true;
+            for (size_t i = 0; i < g.pos0 * kv_row; ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
+            for (size_t i = (g.pos0 + t_real) * kv_row; i < kv.size(); ++i)
+                untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
+            check(untouched, tag + "rows before the block and past t_real are untouched");
+        }
     }
 
     // ---- the router
