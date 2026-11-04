@@ -150,3 +150,17 @@ forward, sample and emitted-token counts. A one-token cap allows only the preamb
 forwards and one sample. Initial EOS retains EOT precedence, including at the
 context boundary; its one cache-commit forward does not sample another token.
 Keep this control-flow evidence separate from the numerical NPU gates above.
+
+## GEMM8 merge regression (2026-11-04)
+
+After merging upstream `3d5f2d78`, manifest v4 supports both paired Qwen3.8
+prefill and the dense Qwen3-8B `bfp16_dit` route. Both generated manifests are
+loaded without overrides by `test_prefill_precision_runtime.py`.
+A freshly built standalone CLI passed `decode_transition.py --check state
+--prompt 257 --decode 2 --layers 4`, with `oracle.CLI` set to that build and
+`oracle.MODEL` set to `oflm-data/models/Qwen3.8-27B-NPU2` (19,844,633,616 bytes).
+The historical default model path points to a different artifact; choose paths
+explicitly when reproducing this run. Binary, source hashes, kernel manifest
+hash, logs and all state/logit comparisons are retained under
+`Models/qwen38-27b/main-merge-20261104/validation.json` and `state/result.json`.
+All gates passed; this is a layer-slice regression, not full-model validation.

@@ -84,6 +84,15 @@ def test_paired_manifest_and_legacy_both_load(native,tmp_path):
     assert run_manifest(native,tmp_path,m).returncode == 0
 
 
+@pytest.mark.parametrize('spec_name', ['qwen35-27b.json', 'qwen3-8b.json'])
+def test_both_version_four_exports_load_without_manifest_overrides(native, tmp_path, spec_name):
+    """Paired prefill and dense GEMM8 independently require and load version 4."""
+    m = manifest(load_spec(ROOT / 'open_kernels/recipes/specs' / spec_name))
+    assert m['manifest_version'] == 4
+    result = run_manifest(native, tmp_path, m)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize('fault', ['old_version','missing_low','same_kernel','wrong_component','partial',
                                   'wrong_role','split','epsilon','kv','history','unknown_role','wrong_shape','swapped_low','same_context','same_stream','empty'])
 def test_malformed_precision_is_refused(native,tmp_path,fault):
