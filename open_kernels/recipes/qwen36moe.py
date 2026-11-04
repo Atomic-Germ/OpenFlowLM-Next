@@ -1124,10 +1124,12 @@ def pack_plan(spec: ModelSpec) -> dict:
         plan["layer_types"][FULL] = {
             "pool": experts + [
                 # q_proj is the fused [q | gate] rows; the pool splits the halves
-                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, qw, hid, hid, chunk0=0),
+                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, qw, hid, hid,
+                        chunk0=0, qgate="q"),
                 proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, kvw, hid, hid),
                 proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, kvw, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_GATE, qw, hid, hid, chunk0=nq),
+                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_GATE, qw, hid, hid,
+                        chunk0=nq, qgate="gate"),
                 proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, qw, qw),
             ],
             "consts": [

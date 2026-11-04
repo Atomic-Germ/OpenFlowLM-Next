@@ -72,8 +72,8 @@ def main() -> int:
     v = c[2 * KEY_WIDTH:].reshape(NHEAD, HD)
     vec = np.zeros((NHEAD, 512), np.float32)
     for h in range(NHEAD):
-        vec[h, :HD] = k[h // GRP]
-        vec[h, HD:2 * HD] = q[h // GRP]
+        vec[h, :HD] = k[h % KEY_HEADS]
+        vec[h, HD:2 * HD] = q[h % KEY_HEADS]
         vec[h, 2 * HD:3 * HD] = v[h]
         vec[h, 384] = decay[h]
         vec[h, 385] = beta[h]

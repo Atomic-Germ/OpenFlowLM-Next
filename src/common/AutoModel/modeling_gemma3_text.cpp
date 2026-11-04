@@ -59,6 +59,8 @@ std::string Gemma3_Text_Only::apply_chat_template(nlohmann::ordered_json& messag
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -71,7 +73,7 @@ bool Gemma3_Text_Only::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& i
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;

@@ -90,7 +90,8 @@ FILES = ("final.xclbin", "insts.bin")
 KEY_FILE = ".build_key"
 
 
-def build_content_key(design: Path, out: Path, env: dict, spec: Path | None = None) -> str:
+def build_content_key(design: Path, out: Path, env: dict, spec: Path | None = None,
+                      extra_dirs: tuple[Path, ...] = ()) -> str:
     """Hash of everything that determines the build's output.
 
     Covers the design's source files (excluding build outputs and caches) and
@@ -114,19 +115,22 @@ def build_content_key(design: Path, out: Path, env: dict, spec: Path | None = No
         h.update(b"\0")
     h.update(str(out.relative_to(DESIGNS)).encode())
     h.update(b"\0")
-    for f in sorted(design.rglob("*")):
-        if not f.is_file():
+    for root in (design, *extra_dirs):
+        if not root.is_dir():
             continue
-        rel = f.relative_to(design)
-        top = rel.parts[0] if rel.parts else ""
-        if top.startswith("build") or top in ("__pycache__", ".staging", ".locks"):
-            continue
-        if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
-            continue
-        h.update(rel.as_posix().encode())
-        h.update(b"\0")
-        h.update(f.read_bytes())
-        h.update(b"\0")
+        for f in sorted(root.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(root.parent if root in extra_dirs else design)
+            top = rel.parts[0] if rel.parts else ""
+            if top.startswith("build") or top in ("__pycache__", ".staging", ".locks"):
+                continue
+            if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
+                continue
+            h.update(rel.as_posix().encode())
+            h.update(b"\0")
+            h.update(f.read_bytes())
+            h.update(b"\0")
     for k in sorted(env):
         h.update(f"{k}={env[k]}".encode())
         h.update(b"\0")
@@ -376,7 +380,12 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
         # The cache lives next to the output, so it is covered by the same lock
         # as the build: a spec that finds a current key reuses the xclbin
         # instead of rebuilding an identical one.
-        key = build_content_key(src.parent, out, knobs, spec=spec_file)
+        extra = ((src.parent.parent / "dn_glue", src.parent.parent / "dn_post")
+                 if src.name in ("lx.py", "ux.py", "mx.py") else ())
+        uses_spec = src.parent.name in ("short_conv", "dense", "dxl", "layer_x")
+        key = build_content_key(src.parent, out, knobs,
+                                spec=spec_file if uses_spec else None,
+                                extra_dirs=extra)
         marker = out / KEY_FILE
         have = all((out / f).is_file() for f in FILES)
         if have and marker.is_file() and marker.read_text(encoding="utf-8").strip() == key:

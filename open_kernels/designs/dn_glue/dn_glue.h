@@ -149,7 +149,7 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
 static inline void glue_emit(const float *__restrict qk, const float *__restrict vt,
                              const float *__restrict decay, const float *__restrict beta,
                              float *__restrict rec, unsigned h) {
-  const unsigned kh = h / kGrp;
+  const unsigned kh = h % kKeyHeads;
   const float *kp = qk + kKeyWidth + kh * kHD;
   const float *qp = qk + kh * kHD;
   const float *vp = vt + (h % 8) * kHD;

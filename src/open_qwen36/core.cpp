@@ -24,6 +24,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
 #endif
 #include <immintrin.h>
 
@@ -187,7 +189,7 @@ nlohmann::json derive_config(const GgufFile& g) {
     // The MoE block's geometry, for a GGUF with no config.json at all (the hub's config
     // is merged over this and wins where it has the key). `full_attention_interval` is
     // what check_model derives `layer_types` from when the file has no such list.
-    if (g.kv_has(arch + ".expert_count")) {
+    if (g.kv_has(arch + ".expert_count") && u("expert_count") > 0) {
         c["num_experts"] = u("expert_count");
         c["num_experts_per_tok"] = u("expert_used_count");
         c["moe_intermediate_size"] = u("expert_feed_forward_length");
@@ -695,8 +697,52 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     }
 }
 
+Core::HostArena::~HostArena() {
+#ifndef _WIN32
+    if (p) ::munmap(p, n);
+#endif
+}
+
+Core::HostArena& Core::HostArena::operator=(HostArena&& o) noexcept {
+    if (this == &o) return *this;
+#ifndef _WIN32
+    if (p) ::munmap(p, n);
+#endif
+    p = o.p;
+    n = o.n;
+    o.p = nullptr;
+    o.n = 0;
+    return *this;
+}
+
+xrt::bo Core::device_bo(size_t bytes) {
+    const size_t n = padup(bytes);
+#ifndef _WIN32
+    // The BOs xrt::ext::bo(dev, size) creates are shmem-backed. A 35B's 40 x 512 MB
+    // expert pools exhaust that heap while the box still has 24 GB free -- the
+    // driver's mmap then fails with ENOMEM inside drm_gem_shmem_mmap, which reads
+    // as "cannot allocate memory" at the 40th layer. Ordinary process memory
+    // registered as a userptr BO is not on the shmem heap, and the NPU reads it
+    // through the same HMM path; the pages are pinned, so nothing is copied.
+    if (n >= (1u << 20)) {
+        void* p = ::mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (p == MAP_FAILED)
+            throw std::runtime_error("open_qwen36: cannot reserve " + std::to_string(n >> 20) +
+                                     " MB of host memory for a device buffer");
+        host_arenas_.emplace_back(p, n);
+        try {
+            return xrt::ext::bo(*dev_, p, n);
+        } catch (...) {
+            host_arenas_.pop_back();
+            throw;
+        }
+    }
+#endif
+    return xrt::ext::bo(*dev_, n);
+}
+
 xrt::bo Core::alloc(size_t bytes, const uint8_t* init, size_t init_bytes) {
-    xrt::bo bo = xrt::ext::bo(*dev_, padup(bytes));
+    xrt::bo bo = device_bo(bytes);
     auto* m = bo.map<uint8_t*>();
     std::memset(m, 0, padup(bytes));
     if (init) std::memcpy(m, init, init_bytes);
@@ -708,6 +754,8 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     auto t0 = std::chrono::steady_clock::now();
     pools_.clear(); consts_.clear(); act_.clear(); state_.clear(); globals_.clear();
     gemm_w_.clear(); hc_.clear();
+    lora_.clear(); lora_none_ = xrt::bo();
+    host_arenas_.clear();   // the BOs above are gone; the pages they pinned can go
     ln_w_bf16_.clear(); post_ln_w_bf16_.clear(); pre_ffn_w_.clear(); post_ffn_w_.clear();
     pools_.reserve(nl_); consts_.reserve(nl_); act_.reserve(nl_); state_.reserve(nl_);
     if (gemm_block_t_) {
@@ -729,7 +777,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             if (from == "pack") {
                 size_t bytes = 0;
 for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::op_bytes(o, w_->chunk_bytes));
-                xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
+                xrt::bo w = device_bo(bytes);
                 std::memset(w.map<uint8_t*>(), 0, padup(bytes));
                 for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, w_->chunk_bytes);
                 w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
@@ -745,7 +793,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                                              " are not contiguous -- the route needs one memcpy per weight buffer");
                 total += bytes;
             }
-            xrt::bo w = xrt::ext::bo(*dev_, padup(total));
+            xrt::bo w = device_bo(total);
             std::memcpy(w.map<uint8_t*>(), host + off0, total);
             w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             v[l] = std::move(w);
@@ -753,7 +801,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
     };
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
-        xrt::bo pool = xrt::ext::bo(*dev_, w_->pool_bytes);
+        xrt::bo pool = device_bo(w_->pool_bytes);
         uint8_t* pool_host = pool.map<uint8_t*>();
         pools::pack_pool(*w_, lt, *file_, l, pool_host);
         // Bring-up probe (OFLM_OPEN_DUMP_POOLS=<dir>): layer 0's packed pool, so it can
@@ -768,7 +816,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
-        xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
+        xrt::bo c = device_bo(lt.consts_bytes);
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(*w_, lt, *file_, l, c_host);
@@ -871,7 +919,22 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": alpha and beta disagree on lanes");
                     h.A = file_->f32(const_tensor(lt, "ssm_a", l));
                     h.dtb = file_->f32(const_tensor(lt, "ssm_dt.bias", l));
-                    h.convw = bf("ssm_conv1d.weight");
+                    // A GGUF stores ssm_conv1d as [channels, taps] (channels-major); the host conv expects
+                    // [taps, channels] (taps-major), which the container stores natively. Transpose here so
+                    // the GGUF path matches the container path's convw layout.
+                    {
+                        std::vector<float> raw = bf("ssm_conv1d.weight");
+                        const size_t taps = gb.conv_kernel, channels = gb.qkv_dim;
+                        if (gguf_) {
+                            std::vector<float> t(taps * channels);
+                            for (size_t c = 0; c < channels; ++c)
+                                for (size_t tp = 0; tp < taps; ++tp)
+                                    t[tp * channels + c] = raw[c * taps + tp];
+                            h.convw = std::move(t);
+                        } else {
+                            h.convw = std::move(raw);
+                        }
+                    }
                     h.nw = bf("ssm_norm.weight");
                     want(h.Wb, w_->hidden * h.lanes, "ssm_beta_proj");
                     want(h.A, gb.value_heads, "ssm_a");
@@ -913,7 +976,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
     // computed, everything else zero (xres, zero, xresf, hn, logits)
     for (const auto& [name, bytes] : w_->globals) {
         if (name == "lmpool") {
-            xrt::bo lm = xrt::ext::bo(*dev_, bytes);
+            xrt::bo lm = device_bo(bytes);
             pools::pack_lmhead(*w_, *file_, lm.map<uint8_t*>());
             lm.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             globals_[name] = std::move(lm);
@@ -966,7 +1029,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 noise_high_ = static_cast<size_t>(v);
             }
             for (int l = 0; l < nl_; ++l) {
-                xrt::bo b = xrt::ext::bo(*dev_, man_.rows.lora_pool_bytes);
+                xrt::bo b = device_bo(man_.rows.lora_pool_bytes);
                 std::memset(b.map<uint8_t*>(), 0, man_.rows.lora_pool_bytes);
                 for (const PackOp& o : man_.rows.lora_pack)
                     pools::apply(o, uno, l, b.map<uint8_t*>(), man_.rows.lora_pool_bytes, w_->chunk_bytes);

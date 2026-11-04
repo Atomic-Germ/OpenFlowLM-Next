@@ -88,7 +88,7 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
                      const float* convw, const float* Wa, const float* Wb, const float* A, const float* dtb,
                      const float* nw, uint16_t* conv_state, float* S, float* og) {
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
-    const size_t grp = g.value_heads / g.key_heads, R = g.t_real, pre = g.taps - 1;
+    const size_t R = g.t_real, pre = g.taps - 1;
     const float inv_sqrt = 1.0f / std::sqrt(static_cast<float>(dim));
     std::fill(og, og + g.T * vw, 0.f);
 
@@ -148,8 +148,8 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
     for (size_t h = 0; h < g.value_heads; ++h) {
         float* Sh = S + h * g.s_rows * dim;
         for (size_t t = 0; t < R; ++t) {
-            const float* kk = Kk.data() + t * key_w + (h / grp) * dim;
-            const float* qq = Q.data() + t * key_w + (h / grp) * dim;
+            const float* kk = Kk.data() + t * key_w + (h % g.key_heads) * dim;
+            const float* qq = Q.data() + t * key_w + (h % g.key_heads) * dim;
             const float* v = V.data() + t * vw + h * dim;
             const float dc = decay[t * g.value_heads + h], bt = beta[t * g.value_heads + h];
             std::fill(tv.begin(), tv.end(), 0.f);

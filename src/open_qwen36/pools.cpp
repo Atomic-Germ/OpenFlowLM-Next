@@ -249,10 +249,21 @@ void gguf_chunk(const GgufFile& g, const std::string& name, const GgufFile::Tens
     size_t n = 0;
     const uint8_t* src = raw(g, name, 0, &n);
     if (kq) rd.resize(in_dim);
+    const bool granite_qk = g.kv_has("general.architecture") && g.kv_str("general.architecture") == "granite" &&
+                            (name.find(".self_attn.q_proj.") != std::string::npos ||
+                             name.find(".self_attn.k_proj.") != std::string::npos);
+    const uint64_t granite_hd = granite_qk
+        ? (g.kv_has("granite.attention.key_length") ? g.kv_u64("granite.attention.key_length")
+                                                    : g.kv_u64("granite.embedding_length") / g.kv_u64("granite.attention.head_count"))
+        : 0;
     std::memset(d, 0, ch);
     for (size_t r = 0; r < 32; ++r) {
-        const uint64_t row = row0 + r;
+        uint64_t row = row0 + r;
         if (row >= rows) break;                           // padded rows: zeroed scales/codes
+        if (granite_hd) {
+            const uint64_t hb = (row / granite_hd) * granite_hd, ih = row % granite_hd, half = granite_hd / 2;
+            row = hb + (ih < half ? 2 * ih : 2 * (ih - half) + 1);
+        }
         const uint8_t rb = static_cast<uint8_t>(r / 16), rl = static_cast<uint8_t>(r % 16);
         if (kq) g.embed_row(name, row, in_dim, rd.data());   // exact f32 row, once
         const uint8_t* srow = kq ? nullptr : src + row * nb * blk;
@@ -698,14 +709,26 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // may read a piece of it (the qwen35 family's gated q is two halves of
         // one tensor, the second op's chunk0 pointing at the second half).
         const uint64_t rows = t.dims.size() > 1 ? t.dims[1] : (t.dims.empty() ? 0 : t.dims[0]);
-        const uint64_t out_dim = op.chunk0 ? rows : (op.nch / (op.in_dim / 256) * 32);
+        const size_t ncol = op.in_dim / 256;
+        const uint64_t op_rows = op.nch / ncol * 32;
+        size_t chunk0 = op.chunk0;
+        if (!chunk0 && rows > op_rows) {
+            // Fused GGUF tensors (Phi-3: attn_qkv is [q | k | v], ffn_up is [gate | up])
+            // when the manifest names the split projections with chunk0 == 0.
+            if (name.find(".self_attn.k_proj.") != std::string::npos && rows > 2 * op_rows)
+                chunk0 = static_cast<size_t>((rows - 2 * op_rows) / 32) * ncol;
+            else if (name.find(".self_attn.v_proj.") != std::string::npos)
+                chunk0 = static_cast<size_t>((rows - op_rows) / 32) * ncol;
+            else if (name.find(".mlp.up_proj.") != std::string::npos && rows == 2 * op_rows)
+                chunk0 = op.nch;
+        }
+        const uint64_t out_dim = chunk0 ? rows : op_rows;
         const size_t src_blk = t.type == GgufFile::Type::Q4_1 ? 20 : 18;
         if (!kq && n < static_cast<size_t>(out_dim) * nb * src_blk)
             fail(name + " is " + std::to_string(n) + " B, the plan needs " +
                  std::to_string(static_cast<uint64_t>(out_dim) * nb * src_blk));
         bounds(op, op.nch * ch, dst_bytes);
         auto perm = std_perm(op.nch, op.in_dim);
-        const size_t ncol = op.in_dim / 256;
         // A FUSED q|gate projection is ordered differently by the two sources: a .q4nx
         // container holds [all q | all gate], while llama.cpp writes it per head --
         // [q_head0 | gate_head0 | q_head1 | ...] -- so a pool chunk that should hold q's
@@ -722,12 +745,12 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             uint8_t* d = dst + op.dst + c * ch;
             // the file's chunk this pool chunk reads: the op's range (chunk0)
             // and the permutation inside it
-            size_t fc = op.chunk0 + perm[c];
+            size_t fc = chunk0 + perm[c];
             if (qgate_hpb) {
                 // relative to THIS op's half: the gate op's chunk0 is already the second
                 // half, so its first rowblock is chunk0/ncol, not 0. The file's rowblock
                 // for that half is then (r / hpb) * 2*hpb + (r % hpb) [+ hpb for the gate].
-                const size_t rb0 = op.chunk0 / ncol;
+                const size_t rb0 = chunk0 / ncol;
                 const size_t r = fc / ncol - rb0, kt = fc % ncol;
                 fc = ((r / qgate_hpb) * 2 * qgate_hpb + (r % qgate_hpb) +
                       (op.qgate_gate ? qgate_hpb : 0)) * ncol + kt;

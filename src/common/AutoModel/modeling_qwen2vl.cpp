@@ -64,6 +64,8 @@ std::string Qwen2VL::apply_chat_template(nlohmann::ordered_json& messages, nlohm
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -158,7 +160,7 @@ bool Qwen2VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
 
                 qwenvl_message.push_back(newItem);
             }
-            templated_text = this->apply_chat_template(qwenvl_message);
+            templated_text = this->apply_chat_template(qwenvl_message, input.tools);
             header_print_g("OFLM", "Total images: " + std::to_string(total_images));
         }
         else if (!input.prompt.empty()) { // a pure text, usually from the cli

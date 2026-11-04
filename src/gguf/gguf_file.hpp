@@ -50,7 +50,7 @@ public:
     GgufFile(const GgufFile&) = delete;
     GgufFile& operator=(const GgufFile&) = delete;
 
-    bool has(const std::string& name) const override { return tensors_.count(gguf_name(name, sandwich_, post_norm_)) != 0; }
+    bool has(const std::string& name) const override;
     /// Raw bytes of a tensor (the GGUF's own block layout; a view into the mapping).
     const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const override;
     /// One embedding row as f32, dequantized from whatever type stores it.

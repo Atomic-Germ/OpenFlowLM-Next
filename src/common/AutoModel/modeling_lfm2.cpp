@@ -62,7 +62,8 @@ std::string LFM2::apply_chat_template(nlohmann::ordered_json& messages, nlohmann
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    // inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs, opt);
 }
 
@@ -103,6 +104,31 @@ std::string LFM2::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_i
         return "";
     }
     return this->generate(meta_info, length_limit, os, is_cancelled);
+}
+
+NonStreamResult LFM2::parse_nstream_content(const std::string response_text) {
+    NonStreamResult result;
+    buffer_.clear();
+    is_in_tool_block_ = false;
+    tool_name_.clear();
+    current_mode_ = StreamEventType::CONTENT;
+    StreamResult ev = this->parse_stream_content(response_text);
+    while (true) {
+        if (ev.type == StreamEventType::TOOL_DONE) {
+            result.tool_calls_list.emplace_back(ev.tool_name, ev.tool_args_str);
+        } else if (ev.type == StreamEventType::REASONING) {
+            result.reasoning_content += ev.content;
+        } else if (ev.type == StreamEventType::CONTENT) {
+            result.content += ev.content;
+        }
+        if (buffer_.empty()) break;
+        ev = this->parse_stream_content("");
+    }
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
+    }
+    return result;
 }
 
 StreamResult LFM2::parse_stream_content(const std::string content) {
@@ -327,7 +353,8 @@ std::string LFM2_5_TK::apply_chat_template(nlohmann::ordered_json& messages, nlo
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    // inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs, opt);
 }
 
@@ -340,8 +367,7 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
-        // templated_text = this->apply_chat_template(input.messages, input.tools);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;
@@ -487,23 +513,26 @@ std::string LFM2_5_TK::generate_with_prompt(chat_meta_info_t& meta_info, lm_unif
 
 NonStreamResult LFM2_5_TK::parse_nstream_content(const std::string response_text) {
     NonStreamResult result;
-
-    std::string content, reasoning_content;
-
-    std::string think_start_tag = "<think>";
-    std::string think_end_tag = "</think>";
-
-    size_t think_start_pos = response_text.find(think_start_tag);
-    size_t think_end_pos = response_text.find(think_end_tag);
-
-
-    think_start_pos += think_start_tag.length();
-    std::string reasoning_str = response_text.substr(think_start_pos, think_end_pos - think_start_pos);
-    result.reasoning_content = reasoning_str;
-
-    std::string content_str = response_text.substr(think_end_pos + think_end_tag.length());
-    result.content = content_str;
-
+    buffer_.clear();
+    is_in_tool_block_ = false;
+    tool_name_.clear();
+    current_mode_ = StreamEventType::CONTENT;
+    StreamResult ev = this->parse_stream_content(response_text);
+    while (true) {
+        if (ev.type == StreamEventType::TOOL_DONE) {
+            result.tool_calls_list.emplace_back(ev.tool_name, ev.tool_args_str);
+        } else if (ev.type == StreamEventType::REASONING) {
+            result.reasoning_content += ev.content;
+        } else if (ev.type == StreamEventType::CONTENT) {
+            result.content += ev.content;
+        }
+        if (buffer_.empty()) break;
+        ev = this->parse_stream_content("");
+    }
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
+    }
     return result;
 }
 

@@ -356,8 +356,40 @@ const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
         n = final_norm_name();
         it = n.empty() ? tensors_.end() : tensors_.find(n);
     }
+    if (it == tensors_.end() && n.rfind("blk.", 0) == 0) {
+        // Fused QKV (Phi-3: blk.<l>.attn_qkv.weight holds [q | k | v]) and fused
+        // gate|up (Phi-3: blk.<l>.ffn_up.weight holds [gate | up]).
+        for (const char* sfx : {".attn_q.weight", ".attn_k.weight", ".attn_v.weight"}) {
+            const std::string s(sfx);
+            if (n.size() > s.size() && n.compare(n.size() - s.size(), s.size(), s) == 0) {
+                it = tensors_.find(n.substr(0, n.size() - s.size()) + ".attn_qkv.weight");
+                break;
+            }
+        }
+        const std::string gate_sfx = ".ffn_gate.weight";
+        if (it == tensors_.end() && n.size() > gate_sfx.size() &&
+            n.compare(n.size() - gate_sfx.size(), gate_sfx.size(), gate_sfx) == 0) {
+            it = tensors_.find(n.substr(0, n.size() - gate_sfx.size()) + ".ffn_up.weight");
+        }
+    }
     if (it == tensors_.end()) fail("no tensor " + name + " in " + path_);
     return it->second;
+}
+
+bool GgufFile::has(const std::string& name) const {
+    std::string n = gguf_name(name, sandwich_, post_norm_);
+    if (tensors_.count(n)) return true;
+    if (n.rfind("blk.", 0) == 0) {
+        for (const char* sfx : {".attn_q.weight", ".attn_k.weight", ".attn_v.weight"}) {
+            const std::string s(sfx);
+            if (n.size() > s.size() && n.compare(n.size() - s.size(), s.size(), s) == 0)
+                return tensors_.count(n.substr(0, n.size() - s.size()) + ".attn_qkv.weight") != 0;
+        }
+        const std::string gate_sfx = ".ffn_gate.weight";
+        if (n.size() > gate_sfx.size() && n.compare(n.size() - gate_sfx.size(), gate_sfx.size(), gate_sfx) == 0)
+            return tensors_.count(n.substr(0, n.size() - gate_sfx.size()) + ".ffn_up.weight") != 0;
+    }
+    return false;
 }
 
 std::string GgufFile::final_norm_name() const {

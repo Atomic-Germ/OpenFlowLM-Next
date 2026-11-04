@@ -68,7 +68,7 @@ def deltanet_block(qkv, z, xn, convw, Wa, Wb, A, dtb, nw, conv_state, S, *, key_
         beta = sigmoid((xn[t] @ Wb)[:value_heads])
         o = np.zeros((value_heads, head_dim))
         for h in range(value_heads):
-            kk, qq = k[h // grp], q[h // grp]
+            kk, qq = k[h % key_heads], q[h % key_heads]
             Sh = S[h, :head_dim]
             Sh *= decay[h]
             delta = beta[h] * (v[h] - Sh.T @ kk)

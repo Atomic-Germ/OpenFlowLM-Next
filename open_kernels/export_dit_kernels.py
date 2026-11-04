@@ -668,7 +668,7 @@ def main() -> int:
         assemble(ew_out, dirs, marker, {
             "family": args.family,
             "kernel": "dit_ew",
-            "row_element": el,
+            "row_element": ew_el,
             "resolutions": resolutions, "edits": edits,
             "streams": ew_streams,
         })

@@ -2161,7 +2161,7 @@ def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
         src = src_dir / (gguf_name if fname == "model.gguf" else fname)
         if src.is_file():
             dest = target / fname
-            if dest.is_file() and not force:
+            if dest.is_file() and (not force or src.resolve() == dest.resolve()):
                 obtained.append(fname)
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2886,7 +2886,10 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
         return False
-    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
+    if prefer and kernel_set_spec_hash(prefer) == spec_hash:
+        kernel_dir, source = Path(prefer), Path(prefer).parent.name
+    else:
+        kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
     if kernel_dir:
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
@@ -3742,6 +3745,9 @@ def main():
             return install_diffusion_gguf(args, repo, dit_name, local_dir, dir_name)
 
     gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want)
+    if gguf_name is None and local_dir and "model.gguf" in gguf_names and not gguf_want:
+        gguf_name = "model.gguf"
+        gguf_refused.pop("model.gguf", None)
     if gguf_want and gguf_name is None:
         if not gguf_names:
             all_files = sorted(e.name for e in local_dir.iterdir() if e.is_file()) if local_dir else sorted(root_file_names(tree))

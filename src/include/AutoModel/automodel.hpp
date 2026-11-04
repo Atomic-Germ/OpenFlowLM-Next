@@ -432,20 +432,10 @@ public:
 
 	virtual std::string apply_chat_template(nlohmann::ordered_json& messages, nlohmann::ordered_json tools = nlohmann::ordered_json::object()) = 0;
 
-	virtual NonStreamResult parse_nstream_content(const std::string response_text) {
-		NonStreamResult result;
-		result.content = response_text;
-		return result;
-	}
+	virtual NonStreamResult parse_nstream_content(const std::string response_text);
 
 	virtual StreamResult parse_stream_content(const std::string content) {
-		//header_print("AUTOMODEL PARSING", content);
-
-		StreamResult result;
-		result.type = StreamEventType::CONTENT; 
-		result.content = content;
-
-		return result;
+		return _shared_think_tool_calling_pasrsed(content);
 	}
 
 	virtual StreamResult parse_stream_content_final(const std::string content) {

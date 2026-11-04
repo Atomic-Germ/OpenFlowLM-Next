@@ -57,6 +57,8 @@ std::string Gemma3::apply_chat_template(nlohmann::ordered_json& messages, nlohma
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -128,7 +130,7 @@ bool Gemma3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std:
             filtered_messages.push_back(filtered_message);
         }
         header_print("OFLM", "Total images: " << total_images);
-        templated_text = this->apply_chat_template(filtered_messages);
+        templated_text = this->apply_chat_template(filtered_messages, input.tools);
 
         if (total_images > 0) {
             pixel_values.resize(3 * 896 * 896 * sizeof(bf16) * total_images);

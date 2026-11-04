@@ -325,6 +325,22 @@ private:
     std::map<std::string, std::unique_ptr<xrt::hw_context>> ctxs_;
     std::map<std::string, Kern> kerns_;
 
+    /// Host memory registered as a userptr BO (Core::device_bo). Declared before the
+    /// BO vectors so it is destroyed AFTER them: the BO handle has to go before the
+    /// pages it pinned are unmapped.
+    struct HostArena {
+        void* p = nullptr;
+        size_t n = 0;
+        HostArena() = default;
+        HostArena(void* p_, size_t n_) : p(p_), n(n_) {}
+        ~HostArena();
+        HostArena(const HostArena&) = delete;
+        HostArena& operator=(const HostArena&) = delete;
+        HostArena(HostArena&& o) noexcept : p(o.p), n(o.n) { o.p = nullptr; o.n = 0; }
+        HostArena& operator=(HostArena&& o) noexcept;
+    };
+    std::vector<HostArena> host_arenas_;
+
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
     std::vector<xrt::bo> lora_;                 ///< per layer: the draft pass's LoRA pool (rows.lora_file), if any
     xrt::bo lora_none_;                         ///< what the verify stream's unused LoRA argument binds to
@@ -519,6 +535,9 @@ private:
     xrt::hw_context& context(const std::string& name);
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
+    /// A large buffer the NPU reads or writes: ordinary host memory wrapped as a
+    /// userptr BO on Linux (see the definition), the driver's own BO elsewhere.
+    xrt::bo device_bo(size_t bytes);
     xrt::bo& buffer(const std::string& name, int layer);
 void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                    const float* deepstack = nullptr, int n_deepstack = 0);
