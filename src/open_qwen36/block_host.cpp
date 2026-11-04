@@ -598,5 +598,11 @@ void router_block(size_t T, size_t hid, size_t E, size_t topk, const float* xm, 
     }
 }
 
+size_t block_prefill_tokens(size_t pos, size_t n, size_t gt, size_t max_ctx, bool pads_cache) {
+    const size_t tail = n % gt;
+    if (pads_cache && tail && pos + (n - tail) + gt > max_ctx) return n - tail;
+    return n;
+}
+
 }  // namespace host
 }  // namespace open_qwen36

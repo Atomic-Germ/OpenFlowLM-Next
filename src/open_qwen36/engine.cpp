@@ -163,7 +163,8 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // calls. On by default (#109); OFLM_OPEN_GEMM_BLOCK=0 turns it off. The
         // whole prompt runs in GT-wide blocks, the tail padded with a repeated
         // in-range id (hardware-proven exact: the real columns' output does not
-        // depend on the padding), never falling back to step(). A kernel set with
+        // depend on the padding), falling back to step() only for a padded tail that
+        // would pass the context capacity. A kernel set with
         // no gemm_block program (GT == 0) runs exactly the sequential path this
         // engine always has.
         return guarded([&] {
@@ -189,14 +190,18 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                 }
                 const size_t GT = core_->gemm_block_t();
                 if (GT > 0) {
+                    const size_t n_block = host::block_prefill_tokens(static_cast<size_t>(core_->position()), ids.size(), GT,
+                                                                      core_->max_ctx(), core_->gemm_block_pads_cache());
                     size_t i = 0;
-                    while (i < ids.size()) {
-                        const size_t t_real = std::min(GT, ids.size() - i);
+                    while (i < n_block) {
+                        const size_t t_real = std::min(GT, n_block - i);
                         std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
                         block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
                         core_->step_gemm_block(block, t_real, i + t_real == ids.size());
                         i += t_real;
                     }
+                    // a padded tail that would pass the context capacity
+                    for (; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
                     return logits_view();
                 }
                 // no route in this kernel set: fall through to the sequential path below

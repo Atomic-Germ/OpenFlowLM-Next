@@ -128,5 +128,10 @@ void softmax_chunk(size_t M, size_t L, size_t hd, size_t c0, const float* s, con
 void router_block(size_t T, size_t hid, size_t E, size_t topk, const float* xm, const float* Wr, float* probs,
                   int32_t* idx, float* w);
 
+/// How many of the n prompt tokens at `pos` run as gt-wide blocks; the rest prefill one token
+/// at a time. A block whose padding writes KV rows (`pads_cache`) must fit whole in max_ctx, so
+/// a padded tail that would pass it is left to the sequential path; otherwise all n run as blocks.
+size_t block_prefill_tokens(size_t pos, size_t n, size_t gt, size_t max_ctx, bool pads_cache);
+
 }  // namespace host
 }  // namespace open_qwen36
