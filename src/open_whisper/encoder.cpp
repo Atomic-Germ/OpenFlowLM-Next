@@ -6,8 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 
+#include "gguf/gguf_file.hpp"
 #include "host_ops.hpp"
 
 namespace ow {
@@ -39,7 +41,16 @@ Encoder::Encoder(const std::string &model_dir, const std::string &kernels_dir_hi
   std::printf("  b_layout   tile_k=%lld tile_n=%lld mac=%lld/%lld\n",
              (long long)bl.tile_k, (long long)bl.tile_n, (long long)bl.mac_s, (long long)bl.mac_t);
 
-  weights_ = std::make_unique<Weights>(model_dir, bl.tile_k, bl.tile_n, bl.mac_s, bl.mac_t);
+  // A GGUF install ships model.gguf (whisper.cpp's `whisper` arch); the
+  // container ships model.open.safetensors + weights_manifest.json. Read the
+  // GGUF-direct path first, matching the other open engines.
+  if (std::filesystem::is_regular_file(model_dir + "/model.gguf")) {
+    open_qwen36::GgufFile gf(model_dir + "/model.gguf");
+    weights_ = std::make_unique<Weights>(
+        Weights::from_gguf(gf, bl.tile_k, bl.tile_n, bl.mac_s, bl.mac_t));
+  } else {
+    weights_ = std::make_unique<Weights>(model_dir, bl.tile_k, bl.tile_n, bl.mac_s, bl.mac_t);
+  }
   device_ = std::make_unique<npue::npu::Device>();
   kernels_ = std::make_unique<KernelSet>(*device_, kdir, model_dir, bl.tile_k, bl.tile_n,
                                         bl.mac_s, bl.mac_t);
