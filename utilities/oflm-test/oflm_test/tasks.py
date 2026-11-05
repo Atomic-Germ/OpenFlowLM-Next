@@ -204,11 +204,17 @@ class LLMTask(BaseTestTask):
     """
     Tests language models over two-round conversations, streamed and not.
 
-    The checks here are deliberately not about answer quality: they are the
-    things the server owes every client whatever the weights say. An answer
-    that is empty, that reports no finish_reason, that comes back under a
-    different model's name or with usage counts that do not add up is a server
-    defect, and this suite used to write all four to CSV without comment.
+    The checks here are deliberately not about whether the answer is *right*:
+    they are the things the server owes every client whatever the weights say.
+    An answer that is empty, that reports no finish_reason, that comes back
+    under a different model's name or with usage counts that do not add up is a
+    server defect, and this suite used to write all four to CSV without
+    comment.
+
+    The one exception is degeneracy. A wrong kernel or a mis-packed container
+    still returns a finish_reason and a plausible length, so length alone
+    cannot see it -- but a model that loops on one block or emits replacement
+    characters is not answering either, and that is worth a hard verdict.
     """
 
     SUITE_NAME = "llm"
@@ -229,11 +235,54 @@ class LLMTask(BaseTestTask):
         self.models = [m for m in self.models if m not in NON_CHAT_MODELS]
         self.csv_filename = self.get_csv_filename("llm")
 
+    # Degeneracy thresholds. Repetition below LOOP_MIN_CHARS is ordinary prose
+    # ("ha ha ha"), and a repeated unit longer than LOOP_MAX_PERIOD is a
+    # repeated sentence, which a working model does produce.
+    CONTROL_OR_REPLACEMENT = 0.02
+    LOOP_MIN_CHARS = 160
+    LOOP_MAX_PERIOD = 64
+
+    @classmethod
+    def _degenerate(cls, content: str) -> str | None:
+        """A reason this answer is not text, or None.
+
+        Two shapes a mis-packed GGUF or a wrong kernel produces: replacement /
+        control characters (the tokenizer was handed bytes that are not text)
+        and a loop, where the tail is one block repeated. Both are visible in
+        the answer itself, unlike a wrong-but-fluent answer, which no string
+        check can catch.
+        """
+        text = content.strip()
+        if len(text) < cls.LOOP_MIN_CHARS:
+            return None
+        bad = sum(1 for ch in text
+                  if ch == "\ufffd" or (ord(ch) < 32 and ch not in "\n\r\t"))
+        if bad / len(text) > cls.CONTROL_OR_REPLACEMENT:
+            return (f"{bad} of {len(text)} characters are replacement or control "
+                    f"characters, so the answer is not text")
+        tail = text[-600:]
+        for period in range(1, cls.LOOP_MAX_PERIOD + 1):
+            reps = len(tail) // period
+            if reps < 3:
+                continue
+            aligned = tail[-(reps * period):]
+            block = aligned[:period]
+            if not any(ch.isalnum() for ch in block):
+                continue                      # a rule or a row of dots is not a loop
+            if all(aligned[i * period:(i + 1) * period] == block
+                   for i in range(1, reps)):
+                return (f"the last {period * reps} characters are "
+                        f"{block[:24]!r} repeated {reps} times")
+        return None
+
     @staticmethod
     def _check_round(requested_model, reported_model, content, finish_reason, usage):
         """What the server owes a chat client, whatever the model answered."""
         if not (content or "").strip():
             return ("FAIL", "empty response")
+        degenerate = LLMTask._degenerate(content)
+        if degenerate:
+            return ("FAIL", degenerate)
         if not finish_reason:
             return ("FAIL", "response carries no finish_reason, so a client "
                             "cannot tell a complete answer from a truncated one")
