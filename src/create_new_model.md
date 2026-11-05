@@ -1,476 +1,254 @@
-# Adding a New Model to OpenFlowLM
+# Adding a Model to OpenFlowLM
 
-> **Read this first.** There are now **two** ways to add a model, and you almost
-> certainly want the first one:
+> **Two cases, and only the second needs code.**
 >
-> 1. **A model whose shape already has open kernels** — no code at all. Pack the
->    weights with [`utilities/q4nx-build`](../utilities/q4nx-build) and register
->    it with [`oflm add`](../docs/docs/instructions/cli.md#-add-a-converted-model-oflm-add).
->    Because every shape-identical model links to a shared **family** xclbin, a
->    fine-tune or derivative of an existing architecture needs no kernel work and
->    no `CMakeLists.txt` edit. This is the supported path.
-> 2. **A genuinely new architecture** — the steps below. This is the closed-engine
->    path: it writes an `AutoModel` wrapper and links a **prebuilt** engine shared
->    library. It is what the open-kernel work is *replacing*.
->
-> The worked example below is `Gemma4-12B`, which is a closed-engine model today.
-> Follow it only when you are adding a new engine, not when you are adding a model.
+> 1. **The family has open kernels** (almost every model). There is nothing to
+>    write. `oflm add <repo>` derives the geometry from the weights, links the
+>    family kernel set, and — if this size has never been built — builds it
+>    from the spec. A fine-tune or derivative links its base's kernels.
+> 2. **The architecture is genuinely new.** Add a recipe and, if the arithmetic
+>    is new, a design. That is the only path that touches C++ or kernel code.
 
-This document lists every step required to bring a new model online in OpenFlowLM,
-from the prebuilt NPU engine down to a standalone test harness.
+The rule behind both: **geometry decides, scripts derive, `oflm add` runs.** A
+model is not its repo name, its fine-tune name, its quant suffix, or its
+`model_list.json` entry. It is the numbers in its weights. If those numbers
+have a family recipe, the model runs; if the size is new, the same command
+builds it.
 
-`Gemma4-12B` is used as the worked example throughout. Substitute:
-
-| Placeholder      | Gemma4-12B example      | Where it is used                                    |
-| ---------------- | ----------------------- | --------------------------------------------------- |
-| `<model>`        | `gemma4_12b`            | file / directory / engine-library names (snake_case) |
-| `<Model>`        | `Gemma4_12B`            | the `AutoModel` subclass name                        |
-| `<family>`       | `gemma4-12b`            | model-list **top-level key**, CLI tag prefix (kebab-case) |
-| `<details.family>` | `gemma4-12b`          | the engine-family key in `all_models.hpp` — often the **same**, but not always (see Step 6) |
-| `<ModelName>`    | `Gemma4-12B-IT-NPU2`    | HuggingFace repo and model folder                      |
-
-All paths below are relative to `src/` unless stated otherwise.
-
----
-
-## Architecture in one paragraph
-
-Every model has two layers:
-
-1. **The engine** — `class <model>_npu : public causal_lm`. This is the NPU kernel
-   graph (PIMPL-hidden) and is shipped as a *prebuilt* shared library
-   (`lib<model>_npu.so` / `<model>_npu.dll`). You normally do **not** write this; it
-   comes from the kernel/IRON project.
-2. **The AutoModel wrapper** — `class <Model> : public AutoModel`. This is what you
-   write. It owns the tokenizer, sampler, chat template, prompt cache and the
-   streaming / tool-call parsers, and drives the engine through
-   `prefill()` / `forward()` / `checkpoint()` / `restore()`.
-
----
-
-## Step 0 — Prerequisites (produced outside this repo)
-
-Before writing any wrapper code, these artifacts must exist:
-
-- **Engine header** — `include/models/<model>/<model>_npu.hpp`
-  Declares `class <model>_npu : public causal_lm` plus any model-specific payload
-  structs (image / audio descriptors for omni models).
-- **Engine library**
-  - Linux: `lib/xrt/lib<model>_npu.so` and, if the HRX runtime is used,
-    `lib/hrx/lib<model>_npu.so`
-  - Windows: `lib/<model>_npu.dll` + `<model>_npu.lib`
-- **Kernel binaries** — `xclbins/<ModelName>/`
-  The folder name must exactly match `name` in `model_list.json` (Step 6).
-
-> For an **open-kernel** model this is different: the xclbins live in a
-> *family* directory shared by every shape-identical model, and are linked by
-> `--family` at `oflm add` time rather than by folder name. A new model of an
-> existing shape therefore needs no xclbin directory of its own.
-- **Weights** — a `model.q4nx` plus `config.json`, `tokenizer.json`,
-  `tokenizer_config.json` and (if separate) `chat_template.jinja`.
-
-Sanity-check that the `.so` really exports what the header promises:
+## The short version
 
 ```bash
-nm -DC src/lib/xrt/libgemma4_12b_npu.so | grep gemma4_12b_npu
+oflm add Qwen/Qwen3.5-4B-GGUF
+oflm run qwen3.5:4b
 ```
-
-> `_shared_setup_tokenizer()` hard-exits if `tokenizer_config.json` is missing, and
-> the chat template must be resolvable either from `chat_template.jinja` or from the
-> `chat_template` field inside `tokenizer_config.json`.
-
----
-
-## Step 1 — Write the AutoModel header
-
-Create `include/AutoModel/modeling_<model>.hpp`.
-
-Pick the closest existing model as your template:
-
-| If your model is…                       | Copy from                     |
-| --------------------------------------- | ----------------------------- |
-| Gemma4-style (thought/tool markers)      | `modeling_gemma4e.hpp`        |
-| Qwen3-style (`<think>` tags)             | `modeling_qwen3.hpp`          |
-| Harmony / GPT-OSS-style channels         | `modeling_gpt_oss.hpp`        |
-| Vision-language                          | `modeling_qwen3vl.hpp`        |
-
-Required overrides (pure virtual in `AutoModel`):
-
-```cpp
-bool insert(chat_meta_info_t&, lm_uniform_input_t&, std::function<bool()>) override;
-std::string generate(chat_meta_info_t&, int, std::ostream&, std::function<bool()>) override;
-std::string generate_with_prompt(chat_meta_info_t&, lm_uniform_input_t&, int, std::ostream&) override;
-std::string apply_chat_template(nlohmann::ordered_json& messages,
-                                nlohmann::ordered_json tools) override;
-```
-
-Commonly overridden (non-pure, have defaults):
-
-```cpp
-void load_model(std::string model_path, json model_info,
-                int default_context_length, bool enable_preemption) override;
-chat_template_type_t get_chat_template_type() override;   // chat_ml | harmony | gemma4
-bool configure_parameter(std::string name, const std::any& value) override;
-NonStreamResult parse_nstream_content(const std::string response_text) override;
-StreamResult parse_stream_content(const std::string content) override;
-StreamResult parse_stream_content_final(const std::string content) override;
-```
-
-Also declare the private helpers the base class expects you to supply:
-`setup_tokenizer(std::string model_path)` and, if you have a streaming parser, a
-shared `parse_stream_content_impl(const std::string, bool is_final)`.
-
----
-
-## Step 2 — Implement the AutoModel source
-
-Create `common/AutoModel/modeling_<model>.cpp`. For multimodal models, split the
-extra pipelines into `modeling_<model>_image.cpp` / `_audio.cpp` — the CMake glob
-picks them up automatically.
-
-### 2a. Constructor
-
-```cpp
-Gemma4_12B::Gemma4_12B(oflm_rt::device* npu_device_inst)
-    : AutoModel(npu_device_inst, "Gemma4_12B") {}
-```
-
-### 2b. `load_model`
-
-Always in this order — the shared helper parses `config.json`, resolves `MAX_L`,
-and sets `this->model_path` / `this->lm_config` before you can construct the engine:
-
-```cpp
-this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
-                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
-this->q4nx = std::make_unique<Q4NX>(this->model_path);
-this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-this->lm_engine->load_weights(*this->q4nx);
-this->q4nx.reset();                 // free the mmap'd weights immediately
-this->lm_engine->clear_context();
-this->setup_tokenizer(model_path);
-this->sampler.reset();
-sampler_config config;              // set the model's recommended defaults here
-this->set_sampler(config);
-for (size_t i = 0; i < PROFILER_TYPE_NUM; i++) this->profiler_list[i].reset();
-```
-
-### 2c. `setup_tokenizer`
-
-Usually a one-liner delegating to `_shared_setup_tokenizer(model_path)`. Add any
-model-specific special-token or stop-token registration after it.
-
-### 2d. `apply_chat_template`
-
-Render the minja template and pass runtime toggles through `extra_context`:
-
-```cpp
-inputs.extra_context["enable_thinking"]    = this->enable_think;
-inputs.extra_context["user_system_prompt"] = this->system_prompt;   // if supported
-```
-
-Only pass `tools` when the array is non-empty — some templates branch on
-`tools is defined`.
-
-### 2e. `insert`
-
-Tokenize, then handle the prompt cache and delegate to the shared insert:
-
-```cpp
-int restore_idx = -1;
-auto* engine = dynamic_cast<gemma4_12b_npu*>(this->lm_engine.get());
-if (meta_info.restore_allowed) {
-    restore_idx        = engine->restore();
-    this->total_tokens = restore_idx;
-    this->token_history = checkpoint_his;
-}
-bool success = this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
-checkpoint_his = token_history;
-engine->checkpoint();
-return success;
-```
-
-`_shared_insert` prefix-matches against `token_history` and clears the engine
-context on a mismatch, so `checkpoint_his` must be kept in lock-step with
-`token_history` or the cache will silently desynchronize.
-
-**Text-only wrapper for an omni model:** warn and drop `input.images` /
-`input.audios`, and for REST-style `input.messages` strip the `images` / `audios`
-keys per message rather than failing.
-
-### 2f. `generate` / `generate_with_prompt`
-
-`generate` calls `_shared_generate(...)`, then re-checkpoints so the next turn can
-restore. `generate_with_prompt` is just `insert()` → optional `"<think>\n"` banner →
-`generate()`.
-
-### 2g. Stream & tool-call parsers
-
-Map the model's marker vocabulary to `StreamResult` / `NonStreamResult`. Gemma4, for
-example, uses `<|channel>thought` / `<channel|>` for reasoning and
-`<|tool_call>` / `<tool_call|>` for tool calls, with relaxed-JSON arguments delimited
-by `<|"|>` that need a normalizing rewrite pass before `nlohmann::json::parse`.
-
----
-
-## Step 3 — Expose the engine header
-
-`include/AutoModel/automodel.hpp` — add the engine include next to the others:
-
-```cpp
-#include "models/gemma4e/gemma4e_npu.hpp"
-#include "models/gemma4_12b/gemma4_12b_npu.hpp"
-```
-
-> Watch for symbol collisions with sibling engines (e.g. `is_swa_layer` overloads).
-> They are fine as long as the parameter types are distinct enums.
-
----
-
-## Step 4 — Register the model family
-
-`include/AutoModel/all_models.hpp` — **four** edits, all required:
-
-```cpp
-// 1. include
-#include "modeling_gemma4_12b.hpp"
-
-// 2. enum value
-enum class SupportedModelFamily { ... gemma4e, gemma4_12b, gpt_oss, ... };
-
-// 3. string -> enum map. The key MUST equal details.family in model_list.json
-//    (the *inner* details field, not the top-level models{} key -- they differ
-//    for entries like nanbeige4.1, where the key is nanbeige4.1 and
-//    details.family is nanbeige).
-{"gemma4-12b", SupportedModelFamily::gemma4_12b},
-
-// 4. factory switch case
-case SupportedModelFamily::gemma4_12b:
-    auto_chat_engine = std::make_unique<Gemma4_12B>(npu_device_inst);
-    break;
-```
-
-A mismatch between (3) and `model_list.json` shows up at runtime as
-"unsupported model family", not at compile time.
-
----
-
-## Step 5 — Link the engine library
-
-`src/CMakeLists.txt` — add the bare library name inside
-`target_link_libraries(oflm PUBLIC ...)` (around line 660):
-
-```cmake
-    gemma4e_npu
-    gemma4_12b_npu
-    gpt_oss_npu
-```
-
-Your new `.cpp` files need **no** CMake change — `src/CMakeLists.txt` globs
-`common/*/*.cpp` automatically. The `OFLM_USE_HRX` option selects whether the
-linker searches `lib/hrx` or `lib/xrt`.
-
----
-
-## Step 6 — Add the model-list entry
-
-`model_list.json` — add a family block under the top-level `models` object, keyed
-by `<family>`, with one entry per size variant. The CLI tag is
-`<family>:<variant>` (e.g. `gemma4-12b:12b`).
-
-The file's top level is:
-
-```json
-{
-  "model_path": "models",
-  "models": { "<family>": { "<variant>": { ...entry... } } }
-}
-```
-
-It currently holds 33 families. `model_info.json` is keyed by the **full tag**
-(`<family>:<variant>`) instead, and must be kept in step — see Step 7.
-
-```json
-"gemma4-12b": {
-  "12b": {
-    "name": "Gemma4-12B-IT-NPU2",
-    "url": "https://huggingface.co/OpenFlowLM/Gemma4-12B-IT-NPU2",
-    "file_url": "https://huggingface.co/api/models/OpenFlowLM/Gemma4-12B-IT-NPU2/tree/main",
-    "ms_url": "https://modelscope.cn/models/amd/Gemma4-12B-IT-NPU2",
-    "size": 12000000000,
-    "oflm_min_version": "0.1.0",
-    "files": ["config.json", "model.q4nx", "tokenizer.json",
-              "tokenizer_config.json", "chat_template.jinja"],
-    "vlm": false,
-    "asr": false,
-    "default_context_length": 32768,
-    "max_prefill_len": 4096,
-    "details": {
-      "format": "NPU2",
-      "family": "gemma4-12b",
-      "think_toggleable": false,
-      "think": true,
-      "parameter_size": "12B",
-      "quantization_level": "Q4_1"
-    },
-    "label": ["reasoning", "tool-calling"],
-    "footprint": 10.5
-  }
-}
-```
-
-Field notes:
-
-- `name` — **must match both** the on-disk weights folder and `xclbins/<ModelName>/`.
-- `details.family` — must match the `modelFamilyMap` key from Step 4.
-- `files` — the minimum set `oflm pull` must fetch; a missing entry surfaces as a
-  tokenizer or config load failure at first run.
-- `vlm` / `asr` — capability flags read by the runner to enable image / audio CLI paths.
-- `oflm_min_version` — the oldest `oflm` that can load this model. The downloader
-  compares it against the running build and **warns** when the model is newer
-  than the binary, so set it to a version that actually exists. It was reset to
-  `0.1.0` by the `flm` → `oflm` rename; the `0.9.x` values still in the shipped
-  registry predate that rename and currently warn on every model.
-- `modified_at` — ISO-8601 timestamp; present on shipped entries.
-- `footprint` — GiB of memory reported to the user for model-fits checks.
-
-Model resolution at runtime:
-`get_models_directory()` = `$OFLM_MODEL_PATH`, else `~/.oflm/models` on Windows or
-`~/.config/oflm/models` on Linux (older installs: `~/oflm/models`);
-`get_model_path(tag)` = `<models_dir>/<model_path>/<name>`.
-
----
-
-## Step 7 — Add the download manifest (needed for `oflm pull`)
-
-`model_info.json` — a HuggingFace file listing keyed by the full tag
-(`"gemma4-12b:12b"`), containing one object per file with `type`, `oid`, `size`,
-`path`, and an `lfs` block for large files. Consumed by
-`pull/model_downloader.cpp`. It is copied beside the binary on Windows and
-installed to `share/oflm/` alongside `model_list.json` on Linux.
-
-You can regenerate the block from the HF tree API:
 
 ```bash
-curl -s https://huggingface.co/api/models/OpenFlowLM/Gemma4-12B-IT-NPU2/tree/main
+oflm add ./Qwen3.8-35B-A3B-Distill-i1-GGUF      # a local directory or a .gguf
+oflm add mradermacher/Some-Model-i1-GGUF:Q4_K_M # pin a quant
+oflm add <repo> --dry-run                       # print the plan, change nothing
 ```
 
-Skipping this step is fine for local development (point `OFLM_MODEL_PATH` at the
-weights yourself), but `oflm pull <family>:<variant>` will not work without it.
+`oflm add` accepts a HuggingFace repo id, a ModelScope id (`--modelscope`), a
+full URL, a local directory, or a local GGUF file. It installs the weights,
+links the kernel set, registers the tag in `settings.json`, and the first run
+packs whatever container the engine needs. No manual export, manifest edit,
+hand copy, or `sudo`.
 
----
-
-## Step 8 — Optional integration points
-
-Only touch these if the model needs them.
-
-| Concern                          | File / location                                                                 |
-| -------------------------------- | ------------------------------------------------------------------------------- |
-| Audio / vision CLI plumbing      | `runner/runner.cpp` (`asr_supported` at :72, plus :107, :296) and `runner/runner.hpp:54` |
-| Template-specific tool-response rewriting | `server/rest_handler.cpp` — see `convert_tool_responses_gemma4()` at :210 and the family dispatch at :1140 |
-| REST prompt-cache validation     | `server/rest_handler.cpp:1124` uses `get_chat_template_type()` — return the right `chat_template_type_t` in Step 1 |
-| Windows installer (Inno)         | `inno/oflm.iss` — add `Source: "<model>_npu.dll"; DestDir: "{app}"; Flags: ignoreversion` |
-| Windows installer (WiX)          | `wix/oflm.wxs` — add a `<Component>` / `<File>` pair for `<model>_npu.dll`        |
-| Public documentation             | `docs/docs/models/<family>.md`, `docs/docs/benchmarks/`, and the model tables in `docs/docs/instructions/server/` |
-
----
-
-## Step 9 — Create the test harness
-
-Create `test/<model>/` with four files. Copy the closest sibling directory and
-rename; the structure is fixed.
-
-### `test/<model>/test.cpp`
-
-Boost `program_options` front-end. Minimal skeleton:
-
-```cpp
-oflm_rt::device npu_device_global;
-
-std::string exe_dir   = utils::get_executable_directory();
-std::string model_dir = utils::get_models_directory();
-model_list model_list(exe_dir + "/model_list.json", model_dir);
-
-std::string model_path = model_list.get_model_path(tag);
-nlohmann::json model_info = model_list.get_model_info(tag).second;
-
-std::unique_ptr<AutoModel> chat = std::make_unique<Gemma4_12B>(&npu_device_global);
-npu_device_global = oflm_rt::device(0);        // AFTER construction
-chat->load_model(model_path, model_info, -1, preemption);
-chat->set_topk(1);                            // deterministic output for testing
-chat->configure_parameter("enable_think", enable_think);
-```
-
-A useful three-phase short test: first prompt → follow-up on the same context
-(exercises the prompt cache) → `clear_context()` → fresh prompt. Wrap each with
-`start_total_timer()` / `stop_total_timer()` / `show_profile()`.
-
-### `test/<model>/CMakeLists.txt`
-
-```cmake
-cmake_minimum_required(VERSION 3.22)
-project(gemma4_12b VERSION 1.0.0 LANGUAGES CXX)
-
-include(${CMAKE_CURRENT_LIST_DIR}/../CMakeLists.txt)
-npu_test_setup()
-
-add_npu_test(test_gemma4_12b test/gemma4_12b
-    USE_AUTOMODEL USE_TOKENIZER USE_SAMPLER
-    SOURCES "${CMAKE_SOURCE_DIR}/../../common/AutoModel/modeling_gemma4_12b.cpp")
-
-target_compile_definitions(test_gemma4_12b PUBLIC __OFLM_VERSION__="0.9.45")
-target_link_libraries(test_gemma4_12b PUBLIC gemma4_12b_npu xrt_coreutil)
-
-add_custom_target(test_gemma4_12b_target DEPENDS test_gemma4_12b)
-```
-
-### `test/<model>/Makefile`
-
-Linux path. Starts with `-include ../common.mk` (which sets
-`BUILD_DIR := ../../build/test/$(CURRENT_DIR)`), then:
-
-```make
-SOURCES += test.cpp
-SOURCES += ../../common/AutoModel/automodel.cpp
-SOURCES += ../../common/AutoModel/modeling_gemma4_12b.cpp
-SOURCES += ../../common/tokenizer/tokenizer.cpp
-SOURCES += ../../common/modules/sampler.cpp
-
-LDFLAGS += -lgemma4_12b_npu
-```
-
-The `test` target copies `model_list.json` into `BUILD_DIR` before running — the
-executable looks for it next to itself.
-
-### `test/<model>/activate.sh` (optional convenience)
+Verify the install:
 
 ```bash
-#!/usr/bin/bash
-export OFLM_MODEL_PATH="/scratch/michyu"
-cp /path/to/kernels/build/lib/libgemma4_12b_npu.so ../../lib/xrt
-# cp -r /path/to/xclbins/Gemma4-12B-IT-NPU2 ../../xclbins/
+oflm list
+oflm check <tag>
+oflm run <tag>
+oflm-test --llm --model <tag>        # or --embedding / --vision / --tools
 ```
 
----
+## What `oflm add` actually is
 
-## Step 10 — Build and run
+It is a product surface, not a single script:
+
+- `src/src/main.cpp` dispatches `oflm add` before the normal argument parser.
+- `src/pull/add_command.cpp` hands the arguments to the bundled
+  `utilities/oflm-add/oflm_add` (or a separately installed `oflm-add`).
+- The installer is the single source of truth for the install plan. The engine
+  consumes what it wrote: `settings.json`, `<model>/open_kernels`, and the
+  model directory.
+
+What the installer does, in order:
+
+1. **Reads the weights first.** For a GGUF, the header names the architecture,
+   widths, rope law, vocabulary and tensor types. A repo's `config.json` is a
+   hint for what the file does not carry (tokenizer, chat template, vision
+   tower), never the geometry. For a q4nx/safetensors repo it derives the same
+   geometry from the config and container header.
+2. **Derives the family from the content**, then the base-model chain, then
+   (last) the kernel set or the name. `--family` is an override for a model
+   that names nothing; it is not required.
+3. **Finds a kernel set by geometry**, not by name: the installed set whose
+   `manifest.json` serves this spec and (for GGUF) carries the `gguf` section.
+   The newest manifest wins, so a fresh rebuild beats a stale installed copy.
+4. **Builds a missing size.** With a source checkout present, it writes the
+   spec it derived and runs `utilities/build-new-spec.py --spec <name>`. No
+   command is handed to the user. Without a checkout (an installed package) it
+   says the size is ours to ship.
+5. **Links the set** at `<model>/open_kernels` and writes the model entry to
+   `settings.json`. It does not edit the shipped `model_list.json`.
+6. **Packs on first load.** A `.npue` embedding container is produced locally
+   from the checkpoint (or from a GGUF staged beside it) the first time the
+   model runs. A GGUF chat model streams its pools directly. A `.q4nx` is
+   already a container.
+
+`model_list.json` is a shipped suggestion list for `oflm list` / `oflm pull`.
+It is **not** a registry, gate, oracle, or source of truth. The registry that
+matters is `settings.json` (`models` section, written by `oflm add`) merged
+with the shipped list for display only.
+
+### Useful flags
+
+| flag | meaning |
+|---|---|
+| `--tag NAME` / `--name NAME` | local tag (default: derived from the repo and the model's own numbers) |
+| `--family NAME` | override the family when the content names nothing; not normally needed |
+| `--dry-run` | print the plan and exit |
+| `--text-only` | GGUF installs only: do not fetch the vision projector |
+| `--mmproj REPO` | take the vision projector from another repo |
+| `--open-kernels DIR` | point at a locally exported set instead of scanning |
+| `--xclbin-from REF` | link a named set's xclbins |
+| `--no-xclbin` | install weights without linking kernels |
+| `--modelscope` | pull from ModelScope |
+| `--models-root DIR` | install into another model store |
+| `--force` | overwrite an existing installation |
+| `--no-verify` | skip sha256 verification |
+| `--quiet` / `--verbose` | less output / show passed-over GGUF candidates |
+
+## What "supported" means
+
+A model runs on open kernels when its **geometry** has a family recipe and a
+kernel set:
+
+| family | recipe | what it covers |
+|---|---|---|
+| `qwen2`, `qwen3`, `llama3`, `gemma3`, `hunyuan`, `granite`, `phi3`, `k2` | `recipes/dense.py` | GQA + gated FFN, one dispatch per layer |
+| `qwen35` | `recipes/qwen35.py` | Qwen3.5/3.8 dense, 3 linear : 1 full DeltaNet |
+| `qwen36moe` | `recipes/qwen36moe.py` | Qwen3.5/3.6-MoE |
+| `lfm2` | `recipes/lfm2.py` | short-conv + full-attention hybrid |
+
+The geometry is: hidden size, layer count and layer types, attention heads and
+key/value heads, head dim, rotary dim and rope law, vocabulary, FFN width,
+activation, norms, and quant format. `ModelSpec` holds it; the recipe turns it
+into a manifest; the engine interprets the manifest. No model constant lives
+in C++.
+
+A fine-tune is not a family. If the base model's spec already covers the
+geometry, `oflm add` links the base's kernels; `gen-kernel-spec.py` writes a
+`link_to` spec instead of a new set.
+
+## Adding a size
+
+If `oflm add` says the size has no set, it builds one when a checkout is
+present. To do it directly:
 
 ```bash
-cd src/test/gemma4_12b
-source activate.sh          # sets OFLM_MODEL_PATH, stages the .so / xclbins
-make                        # build only
-make test                   # build + run gemma4-12b:12b with the short prompt set
+python utilities/build-new-spec.py --repo Qwen/Qwen3-8B
+python utilities/build-new-spec.py --repo Qwen/Qwen3-8B --dry-run
 ```
 
-`OFLM_MODEL_PATH` must point at the **parent** of `models/`, so the weights end up at
-`$OFLM_MODEL_PATH/models/<ModelName>/`.
+The stages, and why each exists:
 
-Then build the full `oflm` binary and smoke-test the real entry points:
+| stage | what runs | why |
+|---|---|---|
+| SPEC | `utilities/gen-kernel-spec.py` | geometry from `config.json`, or from the GGUF header when the repo has no config. A fine-tune whose base has a spec links to it. |
+| BUILD | `export-kernels.py` with `OPEN_KERNELS_UNVALIDATED=1` | proves the design compiles at the new geometry. |
+| GATE | `designs/attn/` + `utilities/op-gate.py` | runs the production attention worker against an fp64 oracle, and every other op through its fixture. A point enters the catalogue only after it passes. |
+| CATALOGUE | `utilities/catalogue-add-point.py` | records the validated point so the next build needs no override. |
+| REBUILD | `export-kernels.py` without the override | ships a build the catalogue allows. |
+| REGISTER | `utilities/register-spec.py` | adds the spec hash (and name, when needed) to the frozen test lists. Mechanical; never hand-edit those hashes. |
+
+Only GATE needs an NPU. Nothing here needs the model's weights, a container, or
+the engine. `--dry-run` stops after SPEC and prints the recipe walls and the
+catalogue points the size would need.
+
+**GGUF-only repos** work with the same command. `gen-kernel-spec.py --repo`
+falls back to the repo's GGUF header when `config.json` is 404. For a gated
+repo, download the GGUF once and use the local file:
 
 ```bash
-oflm run gemma4-12b:12b
-oflm serve gemma4-12b:12b     # then exercise /v1/chat/completions, streaming, and tools
+python utilities/gen-kernel-spec.py --gguf model.gguf \
+    --out open_kernels/recipes/specs/<name>.json
+python utilities/build-new-spec.py --spec <name>
 ```
+
+**A design wall is not a failure to retry.** If the recipe cannot build the
+shape (a width that does not fit a core, `hidden` not a multiple of the
+256-wide q4 k-tile, a split FF with no twin), `build-new-spec.py` moves the
+spec to `open_kernels/recipes/candidates/` and names the reason. A recipe that
+later learns the shape picks it up.
+
+**Rebuild and ship.** `cmake --workflow --preset linux-package` is the
+canonical build: engine, every kernel spec, tests and package. For kernels only,
+`python utilities/export-kernels.py` (all specs) or `--specs <name>` (one).
+`export-kernels.py` is incremental by `build_key`; `--force` rebuilds.
+
+## Adding a family
+
+Do this only when the architecture's arithmetic is genuinely new. A new size of
+an existing family is the command above.
+
+1. **Derive the spec.** Add the architecture to `recipes/spec.py`
+   (`GGUF_FAMILIES` for the GGUF key names, and the HF config path if it is a
+   new `model_type`). Put family differences that are constants of the
+   architecture (post-RoPE norm, q/k/v bias, sliding-window pattern) in the
+   recipe, not in the spec, so existing spec hashes do not move.
+2. **Write the recipe.** Add a module under `open_kernels/recipes/`, expose the
+   surface listed in `recipes/families.py` (`recipe`, `layout`, `pack_plan`,
+   `programs`, `builds`, `hf_config_check`, `manifest_layout`,
+   `KERNEL_SOURCES`, `GEN_KERNELS`), and register it in `FAMILIES` and
+   `family_module()`.
+3. **Reuse or write the designs.** `designs/dense/dx.py` covers GQA + gated FFN.
+   `designs/layer_x` covers the hybrid/MoE layer. A truly new op gets its own
+   design under `designs/`.
+4. **Prove the points.** Run the op's fixture (or the attention gate) and add
+   the validated point to the catalogue. A point is not "supported" because the
+   macro compiles; it is supported because the fixture passed.
+5. **Add the spec and export.** `build-new-spec.py --repo ...` now works for
+   every size of the family.
+6. **Record what is different** in `.agents/skills/open-kernel-families` — not
+   in a new per-model skill.
+
+For a `.q4nx` container, the converter is `utilities/q4nx-build`; it must stay
+in sync with the family's tensor names and quant formats. A GGUF-direct model
+does not need a converter at all: the engine reads the file.
+
+If the arithmetic is not implemented, say so by name. `recipes/families.py`'s
+`NOT_IMPLEMENTED` is the pattern: a model routed to the nearest recipe would
+emit kernels that drop a whole stage of its layer and then "match" a replica
+making the same mistake. A named refusal is correct.
+
+## Containers, kernels, and linking
+
+| artifact | who produces it | where it lives |
+|---|---|---|
+| `.q4nx` container | `utilities/q4nx-build` | the model directory |
+| GGUF | the model author | `model.gguf` in the model directory |
+| `.npue` embedding container | the engine, on first load | `<model>/<name>.npue` |
+| kernel set | `utilities/export-kernels.py` | `src/xclbins/<set>/open_kernels/` |
+| link | `oflm add` | `<model>/open_kernels` |
+
+Kernel sets are **built, not committed** (`src/xclbins/*/open_kernels` is
+git-ignored). The package ships them pre-built. A model never carries its own
+kernels; it links a family set by geometry. The engine looks for
+`<model>/open_kernels` first, then the installed xclbin roots.
+
+## Verifying
+
+- `oflm check <tag>` — files present and compatible.
+- `oflm run <tag>` / `oflm serve <tag>` — the real test.
+- `oflm-test --llm --model <tag>` (or `--embedding`, `--vision`, `--tools`).
+  It currently checks `finish_reason` and length; read the generated text too.
+- GGUF numerics: `open_kernels/model/gguf_ref.py` +
+  `replica_prompt.py --model-dir <gguf install>` runs the fp64 reference on the
+  file itself.
+- Embeddings: `utilities/gguf-embed-check.py`, `oflm bench-embed`.
+
+## Legacy: closed-engine models
+
+This path is **not** the supported way to add a model, and it is not needed for
+anything with open kernels. It exists for a model that has a prebuilt closed
+engine library and no open recipe.
+
+The shape is: an engine header (`include/models/<model>/<model>_npu.hpp`), a
+prebuilt `lib<model>_npu.so` / `.dll`, an `AutoModel` wrapper
+(`include/AutoModel/modeling_<model>.hpp` + `common/AutoModel/modeling_<model>.cpp`),
+four edits in `include/AutoModel/all_models.hpp`, the engine library in
+`CMakeLists.txt`, a `model_list.json` entry (or a `settings.json` entry written
+by `oflm add`), a `model_info.json` manifest for `oflm pull`, and a
+`test/<model>/` harness. Copy the closest wrapper: `modeling_gemma4e.hpp`
+(thought/tool markers), `modeling_qwen3.hpp` (`think` tags), `modeling_gpt_oss.hpp`
+(harmony channels), `modeling_qwen3vl.hpp` (vision-language).
+
+The old step-by-step version of this guide is in the git history before the
+geometry-first rewrite. Keep new work on the open path unless you are
+specifically replacing a closed engine.
 
 ---
 
@@ -589,20 +367,26 @@ utilities/check-settings-ci.sh
 
 ---
 
-
 ## Checklist
 
-- [ ] `include/models/<model>/<model>_npu.hpp` present, exports verified with `nm -DC`
-- [ ] `lib/xrt/lib<model>_npu.so` (and `lib/hrx/`, `.dll` + `.lib` for Windows)
-- [ ] `xclbins/<ModelName>/` present, name matches `model_list.json`
-- [ ] `include/AutoModel/modeling_<model>.hpp`
-- [ ] `common/AutoModel/modeling_<model>.cpp`
-- [ ] Engine include added to `include/AutoModel/automodel.hpp`
-- [ ] All four edits in `include/AutoModel/all_models.hpp`
-- [ ] Engine lib added to `target_link_libraries(oflm PUBLIC …)` in `CMakeLists.txt`
-- [ ] `model_list.json` entry, `details.family` matches `modelFamilyMap`
-- [ ] `model_info.json` manifest (if `oflm pull` support is wanted)
-- [ ] `get_chat_template_type()` returns the correct value for REST prompt caching
-- [ ] Installer manifests updated (`inno/oflm.iss`, `wix/oflm.wxs`) for Windows releases
-- [ ] `test/<model>/` builds and runs; prompt-cache turn produces sane output
-- [ ] Docs updated under `docs/docs/models/`
+**A model whose family has kernels**
+
+- [ ] `oflm add <repo>` succeeds (use `--dry-run` first if unsure).
+- [ ] `oflm check <tag>` passes.
+- [ ] `oflm run <tag>` produces coherent text (or `oflm-test --embedding` for an embedding model).
+- [ ] `<model>/open_kernels` points at a set whose manifest serves the geometry.
+- [ ] The tag appears in `oflm list`.
+
+**A new size**
+
+- [ ] `python utilities/build-new-spec.py --repo <repo>` completes (or `--dry-run` shows only points the gates can cover).
+- [ ] The spec is in `open_kernels/recipes/specs/`, not `candidates/`.
+- [ ] `utilities/register-spec.py` touched the frozen test lists; commit those files with the spec.
+- [ ] `cmake --workflow --preset linux-package` still passes.
+
+**A new family**
+
+- [ ] `recipes/spec.py` derives the geometry from both HF config and GGUF metadata.
+- [ ] The recipe module exposes the `families.py` surface and is registered.
+- [ ] Every catalogue point the family needs has passed its fixture.
+- [ ] A spec builds and the engine loads it; `open-kernel-families` records the traps.

@@ -111,7 +111,21 @@ Benchmark them with `oflm bench-embed`; see
 
 ## 📝 Adding your own model
 
-For a model of a shape that already has open kernels, you do not need to write
-any code -- see [`oflm add`](/docs/instructions/cli/#-add-a-converted-model-oflm-add).
-For a genuinely new architecture, see
-[`src/create_new_model.md`](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/src/create_new_model.md).
+If the model's **family** has open kernels, there is nothing to write:
+
+```shell
+oflm add <hf-repo | local-dir | local.gguf>
+```
+
+`oflm add` reads the weights (a GGUF header, a `.q4nx` header, or a
+`config.json`), derives the geometry, links the family kernel set, and registers
+the tag. A fine-tune links its base model's kernels. If the size has never been
+built and you are running from a source checkout, the same command builds the
+kernel set from the spec; an installed package reports the size as one the
+release should ship.
+
+The shipped `model_list.json` is a suggestion list for `oflm list` and
+`oflm pull`, not a gate — the geometry decides.
+
+For a genuinely new architecture (a new recipe and, if needed, new designs),
+see [`src/create_new_model.md`](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/src/create_new_model.md).
