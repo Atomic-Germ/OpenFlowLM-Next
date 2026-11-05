@@ -1770,7 +1770,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, python3-numpy, python3-ml-dtypes, pyt
 # The diffusion converter (share/oflm/dit-chain) imports numpy and ml_dtypes. Both are in
 # every distro's repo, and nothing here needs a specific version, so they are declared rather
 # than vendored: dnf/apt resolve them.
-set(CPACK_RPM_PACKAGE_REQUIRES "python3-numpy, python3-ml-dtypes")
+set(CPACK_RPM_PACKAGE_REQUIRES "python3-numpy, python3-ml-dtypes, python3-huggingface-hub, xrt-base, xrt-npu, xrt-plugin-amdxdna, python3-xrt")
 # shlibdeps can only derive libc6/libstdc++6/... on a host with a *populated*
 # Debian package database. An absent or empty dpkg status (typical on Fedora,
 # and the CI image) would silently contribute nothing, leaving the package
