@@ -911,6 +911,37 @@ def test_the_two_family_maps_keep_their_own_spellings():
     assert "hunyuan_v1_dense" not in oflm_add.GGUF_ARCH_FAMILIES
 
 
+def test_projector_vision_config_writes_the_preprocessing_defaults(tmp_path):
+    """The mmproj names the tower geometry, not the smart_resize/normalize constants.
+    `projector_vision_config` fills those with the Qwen-shared defaults so the install's
+    config.json is self-describing -- the preprocessing reader must not refuse on zeros."""
+    (tmp_path / "mmproj.gguf").write_bytes(b"GGUF")
+    clip = {
+        "general.architecture": "clip",
+        "clip.vision.block_count": 27,
+        "clip.vision.embedding_length": 1152,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.feed_forward_length": 4304,
+        "clip.vision.projection_dim": 2048,
+        "clip.vision.patch_size": 16,
+        "clip.vision.spatial_merge_size": 2,
+    }
+    tensors = [("v.patch_embd.weight", 0, [16, 16, 3, 1152]),
+               ("v.position_embd.weight", 0, [64, 1152])]
+    orig = oflm_add.read_gguf_inventory
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=16: (clip, tensors)
+    try:
+        vc = oflm_add.projector_vision_config(str(tmp_path))
+    finally:
+        oflm_add.read_gguf_inventory = orig
+    assert vc["patch_size"] == 16 and vc["spatial_merge_size"] == 2
+    assert vc["temporal_patch_size"] == 1           # one patch_embed slice
+    assert vc["model_type"] == "qwen3_vl"           # the shared tower
+    assert vc["shortest_edge"] == 65536 and vc["longest_edge"] == 16777216
+    assert abs(vc["rescale_factor"] - 1.0 / 255.0) < 1e-9
+    assert vc["rescale_mean"] == 0.5 and vc["rescale_std"] == 0.5
+
+
 def test_an_i1_repo_takes_its_projector_from_the_sibling():
     """A mradermacher -i1 repo has no mmproj; the non-i1 repo of the same model does, and
     the only difference in the id is that marker."""

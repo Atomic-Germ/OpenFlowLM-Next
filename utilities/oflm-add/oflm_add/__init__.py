@@ -1544,6 +1544,16 @@ def projector_vision_config(target, base=None):
         "spatial_merge_size": n("clip.vision.spatial_merge_size"),
         "in_channels": int(pe[2]) if len(pe) >= 3 else 3,
         "hidden_act": "gelu_pytorch_tanh",
+        # The preprocessing constants are not in the mmproj (they are the model's
+        # smart_resize / normalize defaults, not tower geometry), and the OFLM
+        # containers bake them under family-prefixed names. Qwen3-VL and every
+        # Qwen that shares its tower use one set; write it so the config is
+        # self-describing and the reader does not guess zeros and refuse.
+        "shortest_edge": 65536,         # min pixels before the factor rounding
+        "longest_edge": 16777216,       # max pixels
+        "rescale_factor": 1.0 / 255.0,  # 0..255 -> 0..1
+        "rescale_mean": 0.5,
+        "rescale_std": 0.5,
     }
     if pos:
         vc["num_position_embeddings"] = int(pos[1])
