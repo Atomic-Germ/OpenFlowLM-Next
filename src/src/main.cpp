@@ -17,6 +17,7 @@
 #include "config/config_cmd.hpp"
 #include "config/config_store.hpp"
 #include "config/settings_resolver.hpp"
+#include "open_qwen36/core.hpp"   // reexec_with_passive
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -534,6 +535,13 @@ int main(int argc, char* argv[]) {
 #elif !defined(OFLM_USE_HRX)
     // XRT backend: preload bundled XRT libraries from the executable directory.
     preload_bundled_libraries();
+#endif
+
+#ifndef _WIN32
+    // libgomp fixes its wait policy when the library loads, so an in-process setenv cannot
+    // apply it -- and the spinning workers cost 16% of a prefill block on this box. Re-exec
+    // once with the variable in the environment; nothing has touched the device yet.
+    if (open_qwen36::reexec_with_passive(argv)) return 0;
 #endif
 
     // `add` owns a richer, repository-oriented option set than the runtime

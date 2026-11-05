@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>   // execv for reexec_with_passive
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -130,6 +131,12 @@ struct OmpWaitPolicy {
         g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
+        // On Linux this setenv is too late and has no effect: libgomp reads
+        // OMP_WAIT_POLICY in its ELF constructor, which runs when the library is mapped --
+        // before any constructor of this file. The variable still reads back correctly
+        // (which is why the log line below looked right for a year), so the only way to
+        // tell is to measure. reexec_with_passive() in main() closes this: it execs the
+        // same binary with the variable in its environment, so libgomp sees it at load.
         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
 #endif
     }
@@ -158,6 +165,29 @@ unsigned omp_thread_budget() {
 }
 
 }  // namespace
+
+#ifdef _WIN32
+bool reexec_with_passive(char** argv) {
+    (void)argv;
+    return false;   // vcomp is delay-loaded on Windows, so the constructor above is in time
+}
+#else
+bool reexec_with_passive(char** argv) {
+    // NOT `if (getenv("OMP_WAIT_POLICY")) return false;`: the static initialiser above has
+    // already set it in this process, which is exactly the state this function exists for.
+    // OFLM_OPEN_OMP_REEXEC is the only guard -- the second process has it and stops there,
+    // whether or not the variable came from the caller.
+    if (std::getenv("OFLM_OPEN_OMP_REEXEC")) return false;          // already re-exec'd once
+    const char* off = std::getenv("OFLM_OPEN_OMP_PASSIVE");
+    if (off && std::string(off) == "0") return false;
+    if (!argv || !argv[0]) return false;
+    setenv("OMP_WAIT_POLICY", "PASSIVE", 1);
+    setenv("OFLM_OPEN_OMP_REEXEC", "1", 1);
+    execv("/proc/self/exe", argv);
+    return false;   // execv returned: it failed, so the in-process attempt is all there is
+}
+#endif
+
 
 void Core::apply_thread_budget() const {
     if (omp_threads_ > 0 && omp_get_max_threads() != omp_threads_) omp_set_num_threads(omp_threads_);
