@@ -223,7 +223,16 @@ def main() -> int:
     name = a.spec_name
     if a.spec:
         sp = Path(a.spec)
-        spec_path = sp if sp.is_file() else SPECS / (sp.stem if sp.suffix else f"{a.spec}.json")
+        # A spec stem can contain dots (qwen3-0.6b, qwen3-1.7b, lfm2-2.6b), so a
+        # naif Path.stem would turn "qwen3-0.6b" into "qwen3-0". Treat an
+        # existing path as a path, a name that already ends in .json as a file
+        # name, and everything else as a bare stem to append .json to.
+        if sp.is_file():
+            spec_path = sp
+        elif a.spec.endswith(".json"):
+            spec_path = SPECS / a.spec
+        else:
+            spec_path = SPECS / f"{a.spec}.json"
         if not spec_path.is_file():
             print(f"build-new-spec: no such spec: {a.spec}", file=sys.stderr)
             return 1
