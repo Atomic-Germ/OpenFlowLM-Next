@@ -29,7 +29,7 @@ from open_kernels.gguf_pool import (  # noqa: F401
     q8_chunk_bytes,
 )
 
-from open_kernels.gguf_scale_width import (  # noqa: F401
+from open_kernels.gguf_pool.gguf_scale_width import (  # noqa: F401
     Q8_CH_F32,
     gguf_scale_width,
 )
