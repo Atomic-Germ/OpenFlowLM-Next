@@ -139,7 +139,7 @@ struct LayerTiming {
     double gemm_tile_ms = 0, gemm_tr_ms = 0, tail_ms = 0, state_ms = 0, sync_ms = 0;
     double shared_ms = 0, setup_ms = 0, qkv_scatter_ms = 0;
     double moe_prep_ms = 0, moe_patch_ms = 0, moe_run_ms = 0, moe_read_ms = 0;
-    double dispatch_ms = 0;       ///< device time the layer's dispatches took (> wall_ms when pipelined)
+    double dispatch_ms = 0;       ///< overlapping host submit-to-completion intervals, including queueing
 };
 
 /// The config.json fields a manifest checks, derived from a GGUF's metadata
@@ -566,7 +566,7 @@ private:
     /// single predictable branch. Measurement only -- never touches a computed value.
     FILE* profile_ = nullptr;
     bool profile_first_ = true;               ///< one "header" line per file, for the reader
-    std::string profile_what_;                ///< "gemm-block" / "gemm-prompt" / "sequential"
+    std::string profile_what_;                ///< "gemm-block" / "gemm-prompt" / phase-neutral "step"
     size_t profile_tokens_ = 0, profile_blocks_ = 0;
     std::vector<LayerTiming> profile_rows_;
     StepTiming profile_base_;

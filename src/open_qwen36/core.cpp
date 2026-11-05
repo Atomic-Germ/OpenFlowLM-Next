@@ -623,8 +623,8 @@ static LayerTiming diff_timing(const StepTiming& a, const StepTiming& b, const c
     r.moe_patch_ms = b.moe_patch_ms - a.moe_patch_ms;
     r.moe_run_ms = b.moe_run_ms - a.moe_run_ms;
     r.moe_read_ms = b.moe_read_ms - a.moe_read_ms;
-    // A layer's dispatch time is what it spent ON THE DEVICE; `blocked` is how much of the
-    // layer the host sat in wait() for. The two differ only once a dispatch is queued ahead.
+    // Host-observed submit-to-completion intervals include queueing and can overlap.
+    // This is not device execution time or a measure of NPU utilization.
     r.dispatch_ms = b.dispatch_ms - a.dispatch_ms;
     return r;
 }
@@ -2157,11 +2157,11 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     // OFLM_OPEN_PROFILE: one row per layer of this token, for at most OFLM_OPEN_PROFILE_STEPS
     // steps. A prompt is stepped and a decode loop is stepped, and the second is thousands of
     // records long, so the budget is what keeps a profile of a request's first tokens small
-    // enough to read. The label says which of the two this is: a step that wants logits is a
-    // prompt position, one that does not is a generated token.
+    // enough to read. want_logits does not identify the phase: the final prompt position
+    // and every sampled-token step both need logits. Keep the label phase-neutral.
     if (profile_ && profile_steps_left_ > 0) {
         --profile_steps_left_;
-        profile_begin(want_logits ? "sequential" : "decode", 1, 1);
+        profile_begin("step", 1, 1);
     }
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
@@ -3229,7 +3229,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
         }
     }
 
-    profile_begin("gemm-block", T, 1);
+    profile_begin("gemm-block", t_real, 1);
     for (int l = 0; l < nl_; ++l) {
         profile_switch(l);
         if (types_[l]->gemm_block.t == 0)

@@ -1,277 +1,142 @@
-# Qwen3.8-27B on open XDNA2 — performance baseline and profiling (PR #1)
+# Qwen3.8-27B profiling baseline
 
-**Verdict: instrumentation PASS; no speedup claimed.** This is performance-plan PR #1: it
-establishes a reproducible baseline, adds an opt-in per-layer profiler, and ranks the
-bottlenecks. It changes no arithmetic and no schedule.
+**Status: review fixes validated on the NPU; controlled performance acceptance remains pending.**
+This change adds instrumentation, without changing kernel arithmetic, model weights or
+routing policy. It does not claim an inference speedup.
 
-Machine-readable companion: [`qwen38-performance-baseline.json`](../../../utilities/prefill-block/qwen38-performance-baseline.json).
-Correctness baseline (unchanged): [`qwen38-27b.md`](qwen38-27b.md) and
-[`qwen38-production-baseline.json`](../../../utilities/prefill-block/qwen38-production-baseline.json).
+Machine-readable evidence: [baseline JSON](../../../utilities/prefill-block/qwen38-performance-baseline.json).
+The [production correctness baseline](qwen38-27b.md) remains separate.
 
----
+## Review corrections
 
-## 1. Conditions
+- `layer_profile.py --route layer-major` explicitly forces `OFLM_OPEN_LAYER_MAJOR=1`
+  and verifies that the profile contains `gemm-prompt`. Previously, the labelled
+  layer-major capture actually executed `gemm-block`: the reported 2.3% route
+  comparison is invalidated, not evidence of a scheduling improvement.
+- Per-token calls are labelled `step`. `want_logits` cannot distinguish prefill
+  from decode: both the final prompt token and generated-token steps need logits.
+- The CLI finishes the prefill dispatch trace before starting the decode timer.
+  The previous attribution contained 32 prefill and 3 decode steps; its 429.8 ms
+  average and LM-head share must not be presented as decode-only measurements.
+- `dispatch_ms` measures host-observed submit-to-completion intervals, including
+  queue residence. Those intervals overlap under submit-ahead. They are not device
+  execution time, and same-context elapsed-time differences do not establish
+  kernel variability or an optimization opportunity.
+- The overhead driver profiles the entire prompt plus every measured decode step,
+  verifies coverage and generated-token identity, discards warm-up pairs and uses
+  at least five measured pairs in alternating order. The former two-step budget
+  expired during prefill, invalidating the old enabled-overhead PASS.
+- The parser rejects missing/duplicate/out-of-order layers, misplaced records,
+  mismatched phases and nonfinite timings. Every request must cover all declared
+  layers. Multi-block token/block counts are summed; post-prefill step samples
+  remain in raw records but do not contaminate block-prefill summaries.
 
-| | |
-|---|---|
-| host | Ryzen AI 9 365 / Radeon 880M (EVO14-AI9-STP), 20 CPUs, 91 GiB |
-| NPU | Strix `aie2p` 6x8 |
-| XRT / driver / firmware | 2.26.0 / `amdxdna` 2.26.0_20260817 / 1.1.2.64 |
-| NPU power mode | `performance` (set by the CLI's `--pmode`) |
-| CPU governor | `powersave` — unchanged for these runs |
-| **load average** | **0.42** at the start (1.4 over the preceding 5 min) |
-| **available memory** | **62 GiB** |
-| kernel set | `Models/qwen38-27b/production-v2/kernels-model`, manifest v4, physical block 256 |
+## What the retained measurements establish
 
-### A first pass was rejected for a measurement reason
+These observations predate the corrections; they are not repeated measurements
+of the corrected tree. The machine was a Ryzen AI 9 365, 91 GiB RAM, XDNA2 Strix,
+XRT 2.26.0, amdxdna 2.26.0_20260817, firmware 1.1.2.64, NPU performance mode and
+CPU powersave governor. Load average was recorded as 0.42, available RAM 62 GiB.
+Temperature and repeat-based variability were not recorded.
 
-The first measurement pass ran while the box carried unrelated work (load average 6.4–10.8)
-**and** was short of memory (17 GiB free, 12 GiB swapped out). Prefill TTFT came out at
-62.2 / 118.9 / 234.4 s, 1.58–1.64× the Phase 31 baseline, while decode reproduced exactly at
-2.076 tok/s.
+| Observation | Recorded value | Limitation |
+|---|---:|---|
+| TTFT at 256 / 512 / 1024 prompt tokens | 38.37 / 73.36 / 141.93 s | Single observation per length |
+| Decode loop at 40 / 300 prompt tokens | 2.074 / 2.056 tok/s | Separate from the invalid mixed-phase trace |
+| 256-token block, total | 35007.2 ms | One complete 64-layer capture |
+| GEMM dispatch accounting | 25020.1 ms | Host-observed dispatch intervals |
+| Host stage accounting | 6160.0 ms | Named windows, some nested |
+| Activation tiling / output transpose | 3047.7 / 956.4 ms | Plausible host optimization targets |
+| Not assigned to named top-level stages | approximately 3800.1 ms | Must remain visible in attribution |
 
-The split is the diagnosis: prefill's host stages touch hundreds of megabytes of scratch per
-block and fault under memory pressure, while decode is device-bound and does not. So the
-inflation was an environment artefact, not a property of the code. The pass was discarded and
-every number below is a re-measurement on the idle box.
+The 96.5 ms outside layer walls **includes** the 27.1 ms LM head. It is not the
+3.8 s unassigned to stage counters, and must not be added to the LM head again.
 
-**What survived the change of conditions** — and is therefore the part worth acting on — is
-the ratio structure: GEMM 72 % / host 17 % before, 71.5 % / 17.6 % after; activation tiling
-50.5 % of host before, 49.5 % after.
+An earlier slower pass under high load and low free memory is retained as rejected
+measurement evidence. The correlation does not prove page faults caused the slowdown.
 
----
+## Profiling and reproduction
 
-## 2. Baseline reproduced
-
-| metric | Phase 31 | idle box | Δ |
-|---|---|---|---|
-| TTFT, 256 prompt | 39.49 s | **38.37 s** | −2.8 % |
-| TTFT, 512 prompt | 73.21 s | **73.36 s** | +0.2 % |
-| TTFT, 1024 prompt | 143.02 s | **141.93 s** | −0.8 % |
-| prompt tok/s, 256 / 512 / 1024 | 6.68 / 7.10 / 7.22 | **6.88 / 7.09 / 7.27** | — |
-| decode tok/s (loop rate) | 2.087 | **2.074** (2.056 at a 300-token prompt) | −0.6 % |
-
-The schedule's own shape checks pass: cost is linear in blocks, flat in the active rows inside
-a block, and the pass counts match the policy's prediction at all three lengths.
-
----
-
-## 3. What was added
-
-One opt-in instrument, in `src/open_qwen36/core.cpp` / `core.hpp`:
-
-| variable | meaning |
-|---|---|
-| `OFLM_OPEN_PROFILE=<path>` | write a JSONL profile to `<path>`: one header, one request record, one record per layer |
-| `OFLM_OPEN_PROFILE_STEPS=<n>` | how many sequential `step()` calls to profile (default 8; `0` = block routes only) |
-
-The rows are **differences of the accounting the engine already keeps** (`StepTiming`), taken
-at the layer boundaries — the engine maintains every column already, but only as a running
-sum over a whole prompt or block, so "which layer costs what" could not be read off it. The
-one column `StepTiming` cannot provide is a per-layer duration (its `total_ms` is written once
-per block), so each row also carries `wall_ms`, one steady-clock read per layer boundary.
-
-Hooks sit at the **top** of each schedule's layer loop ([`profile_switch()`](../../../src/open_qwen36/core.cpp:664)),
-so the layer calls themselves keep the exact source shape they had — the private-patch tools
-under `utilities/prefill-*/build.py` anchor on that text, and moving a hook between a call and
-its loop's closing brace breaks them. `profile_close()` flushes the last row.
-
-Schedules covered: `step_block_moe` (the Qwen3.8 path), `step_gemm_block` (the dense block
-loop), `step_gemm_prompt` (layer-major) and the per-token `step()`.
-
-```text
-{"record":"header",  "version":1,"family":"qwen35","spec_hash":"...","layers":64}
-{"record":"request", "what":"gemm-block","tokens":256,"blocks":1,"total_ms":35007.2,
-                     "gemm_ms":25020.0,"host_ms":6160.0,"per_token_ms":0,
-                     "lmhead_ms":27.0,"setup_ms":...,"embed_ms":...,"patch_ms":...,
-                     "dispatch_ms":...,"layer_wall_ms":34911.0,"residue_ms":96.0,"layers":64}
-{"record":"layer",   "what":"gemm-block","kind":"linear_attention","layer":1,"wall_ms":...,
-                     "gemm_ms":...,"host_ms":...,"mid_ms":...,"dn_conv_ms":...,"dn_rule_ms":...,
-                     "attn_ms":...,"gemm_tile_ms":...,"gemm_tr_ms":...,"tail_ms":...,
-                     "shared_ms":...,"state_ms":...,"sync_ms":...,"dispatch_ms":..., ...}
-```
-
-Two drivers, in `utilities/prefill-block/`:
-
-```bash
-python utilities/prefill-block/layer_profile.py --route block layer-major --tokens 256
-python utilities/prefill-block/profile_overhead.py --what decode --reps 3
-```
-
-`layer_profile.py` aggregates a run into totals, the host-stage split, a per-kind table and
-the widest layers, writes `result.json` + `layers.csv`, and asserts three consistencies that
-keep the report honest (§6). `profile_overhead.py` is the "the profiler must be free when it
-is off" gate.
-
----
-
-## 4. Where a 256-token block's time goes
-
-One block, 64 layers, block route, `OFLM_OPEN_PROFILE` on, idle box. The request total is the
-engine's own figure for the block; the script's `wall` also carries the model load.
-
-| | ms | share of the block |
-|---|---|---|
-| **GEMM dispatches** (`part0`) | **25 020** | **71.5 %** |
-| host stages (`part1`) | 6 160 | 17.6 % |
-| lm_head | 27 | 0.1 % |
-| residue (unaccounted) | 96 | 0.3 % |
-| **layer walls, summed** | **34 911** | 99.7 % of `total_ms` |
-| request total | 35 007 | — |
-
-Inside the host stages — note that some of these **nest**, so they must not be added:
-
-| stage | ms | of host | nests in |
-|---|---|---|---|
-| **activation tiling** (`gemm_tile`) | **3 048** | **49.5 %** | — |
-| output transpose (`gemm_tr`) | 956 | 15.5 % | — |
-| mid (attention / DeltaNet host half) | 1 117 | 18.1 % | — |
-| · DeltaNet conv+norm | 404 | 6.6 % | mid |
-| · DeltaNet delta rule on S | 388 | 6.3 % | mid |
-| · attention host half | 325 | 5.3 % | mid |
-| shared expert (silu·up, gate, add) | 684 | 11.1 % | — |
-| tail (residual, post-norm, router) | 450 | 7.3 % | — |
-| GEMM buffer syncs | 325 | 5.3 % | — |
-| input RMSNorm | 263 | 4.3 % | — |
-| state BO syncs | 8 | 0.1 % | — |
-
-**The two routes agree.** Layer-major is 2.3 % faster on this exact 256-token multiple
-(34 216 vs 35 007 ms) — the parity the route policy already predicts at an exact multiple,
-not a reason to change the default. Its host split is the same: tiling 50.7 %, transpose
-16.3 %, mid 18.1 %.
-
-**No layer stands out.** Layer 0 (first off an idle array) is 40–45 % above its neighbours;
-from layer 1 on, the spread across the other 63 layers is under 8 %:
-
-| layer | kind | wall ms |
-|---|---|---|
-| 0 | linear_attention | 786.4 |
-| 52 | linear_attention | 603.0 |
-| 9 | linear_attention | 575.7 |
-| 5 | linear_attention | 575.0 |
-| 56 | linear_attention | 569.5 |
-
-Per kind the mean is 549 ms for a `linear_attention` layer and 534 ms for a `full_attention`
-one, and the FFN dominates both (the 48 linear layers total 26.4 s, the 16 full ones 8.5 s).
-
----
-
-## 5. Where a decode token's time goes
-
-The per-layer profiler cannot answer this: the fused decode chain books blocked time into
-`StepTiming::part1_ms` (there are no host stages inside a layer to attribute it to). The
-existing per-dispatch trace can:
-
-| kernel | calls/token | min ms | mean ms | p90 ms |
-|---|---|---|---|---|
-| `lx` (48 linear layers) | 48.0 | 6.67 | 11.72 | 14.12 |
-| `ax` (16 full layers) | 16.0 | 5.38 | 5.58 | 5.85 |
-| `ln` (final norm) | 1 | 0.22 | 0.30 | 0.37 |
-| `lm` (lm_head) | 1 | 25.03 | 25.21 | 25.33 |
-
-Per token: **430 ms wall = 409 ms of dispatch (sum of minima) + ~2.9 ms of lm read**, and
-0.03 / 0.01 / 0.00 ms of embed / patch / route. So:
-
-- the **host is not the decode bottleneck** — the dispatches' own times are the step;
-- **66 dispatches per token** (16 `ax` + 48 `lx` + `ln` + `lm`);
-- **lm_head is 25 ms of 430 ms = 5.8 %** per token — real, but not the target;
-- `lx` is the one to look at: its mean is 1.76× its min, and the split by preceding context
-  shows the whole gap is same-context work (13.82 ms mean when the previous dispatch was in
-  the same context vs 7.52 ms after a switch). That is same-kernel, same-context variance —
-  the shape of a weight-streaming or scheduling effect inside `lx`, not a context-switch cost.
-
-Reproduced rate: **2.074 tok/s** loop rate, against 2.087 historical.
-
----
-
-## 6. Bottleneck ranking
-
-Ordered by expected end-to-end impact per unit of risk. "Share" is of the 256-token block.
-
-| # | bottleneck | evidence | share | impact | complexity | numerical risk |
-|---|---|---|---|---|---|---|
-| 1 | **Q4 GEMM dispatch time** | 25 020 ms of a 35 007 ms block; 391 ms per layer for ~239 MB of streamed weights (≈0.60 GB/s implied) | **71.5 %** | high | high (kernel/AIE) | medium — must keep the paired four-product sum |
-| 2 | **activation tiling + output transpose** | 3 048 + 956 ms = 4.00 s of a 35.0 s block, 65 % of all host time | 11.4 % | medium-high | **low** (pure host data movement, bit-exact by construction) | none if the layout contract is preserved |
-| 3 | **`lx` variance at decode** | mean 11.72 ms vs min 6.67 ms; the gap is same-context | decode: 48 of 66 dispatches | medium | medium | none (no arithmetic change) |
-| 4 | **DeltaNet host half** | conv 404 + rule 388 = 792 ms | 2.3 % | low-medium | medium-high (state semantics) | high — FP32 recurrence, causal order |
-| 5 | **attention at long context** | 325 ms at 256 tokens and growing with the window; Phase 31 fitted 1.63 ms/position | 0.9 % here, ≈20 % of prefill by ≈7.6K | grows with ctx | high | medium |
-| 6 | **lm_head at decode** | 25 ms of a 430 ms token | decode: 5.8 % | low-medium | medium | low |
-| 7 | **dispatch count / context switches** | 66 per token; the trace's `mean(=)` vs `mean(sw)` split shows switches are cheap | — | low on present evidence | medium | low |
-
-**What is explicitly *not* the problem**, from this data: host RMSNorm (263 ms, 4.3 % of
-host), state BO syncs (8 ms), the router/tail (450 ms), and the number of layers per se — no
-single layer is disproportionately slow.
-
----
-
-## 7. Gates
-
-| gate | result |
-|---|---|
-| baseline reproduced | **PASS** — TTFT −2.8 / +0.2 / −0.8 % and decode −0.6 % against Phase 31 |
-| instrumentation free when off | **PASS** — decode 455.0 ms median off vs 456.0 ms on (+0.22 %), print resolution 1 ms (`profile_overhead.py`) |
-| instrumentation changes no output | **PASS** — 64-token prompt through the block route, 8 greedy ids, byte-identical with the variable unset and set |
-| layer accounting balances | **PASS** — layer walls + lm_head inside the request (34 937.8 / 35 007.2 ms); named host stages inside `host_ms` (6 160.0 / 6 160.0); dn conv+rule inside mid (791.8 / 1 117.3) |
-| unit tests, engine | **PASS** — `ctest` 4/4 in `src/open_qwen36` |
-| regression suite | **PASS** — `pytest specs/` 2438 passed, 172 skipped, 0 failed |
-| settings CI classification | **PASS** — both variables are in `NON_SETTING_ENV_VARS` (`utilities/generate-registry.py`) with a reason, and `utilities/scan-settings.py` finds both; `check-settings-ci.sh` OK |
-| shipped `oflm` builds | **PASS** — the repository's own Docker path, `cmake --build build --target oflm` |
-
----
-
-## 8. Reproducing
+Build a fresh standalone CLI from this tree, then select its path explicitly:
 
 ```bash
 source utilities/env.sh
+utilities/prefill-block/build-cli.sh Models/qwen38-27b/profile-review-fix/build
 
-# baseline through the shipped binary
-python utilities/prefill-block/oflm_sanity.py --lengths 256 512 1024
-python utilities/prefill-block/decode_rate.py --tokens 32 --prompt 40 300
+ironvenv/bin/python utilities/prefill-block/layer_profile.py \
+  --cli Models/qwen38-27b/profile-review-fix/build/open_qwen36_cli \
+  --model oflm-data/models/Qwen3.8-27B-NPU2 \
+  --route block layer-major --tokens 256 --max-tokens 16 --steps 15
 
-# per-layer attribution (the standalone CLI is rebuilt by build-cli.sh)
-./utilities/prefill-block/build-cli.sh
-python utilities/prefill-block/layer_profile.py --route block layer-major --tokens 256
-
-# the "free when off" gate
-python utilities/prefill-block/profile_overhead.py --what decode --reps 3
-
-# decode attribution: the engine's own dispatch table
-OFLM_OPEN_STEP_TRACE=1 <the CLI> ... --max-tokens 4 --quiet
+ironvenv/bin/python utilities/prefill-block/profile_overhead.py \
+  --cli Models/qwen38-27b/profile-review-fix/build/open_qwen36_cli \
+  --model oflm-data/models/Qwen3.8-27B-NPU2 \
+  --what decode --reps 5 --warmup 1
 ```
 
-`runs/` is scratch and is not committed; each driver writes `result.json` (and
-`layers.csv`) under `runs/<tool>-<stamp>/`.
+`OFLM_OPEN_PROFILE=<path>` writes a header and request/layer groups as JSONL.
+`OFLM_OPEN_PROFILE_STEPS` caps per-token calls across the entire Core lifetime;
+zero profiles block routes only. The API deliberately labels these calls `step`.
+The overhead driver knows the CLI's prompt length and checks the decode suffix.
 
----
+Both drivers retain full CLI logs and hash the binary, model and kernel artifacts.
+Files under `Models/` and benchmark `runs/` are local evidence, not shipping assets.
+Do not compare runs with different input IDs, weights, kernels or runtime options.
 
-## 9. Limitations
+The optional `--baseline-cli /path/to/parent/cli` adds parent-OFF/new-OFF timing
+and greedy comparisons. Without it, **disabled-path regression is NOT MEASURED**;
+an enabled-overhead PASS must never be substituted for that check.
 
-- **The weight-stream and TFLOPS figures in §6 row 1 are derived**, from wall time and an
-  assumed 4.5 bit/packed weight — an order-of-magnitude check, not a kernel measurement. A
-  kernel-side figure (the dispatch trace's `stream_mb` / `gbps` helpers already exist per
-  dispatch) belongs to PR #3.
-- **Per-layer device/host split does not exist on the sequential route**, because the fused
-  chain has no host stages to attribute (§5). The dispatch trace covers it.
-- **Prefill was profiled at 256 tokens only.** The block loop's cost is linear in blocks, so a
-  1024-token prompt is four of these plus a stepped 8-token tail — an inference from the shape
-  check, not a measured row.
-- **The first pass's numbers are kept only as a rejected experiment** (§1). They are not a
-  second baseline and are not to be compared against these.
-- **No speedup is claimed.** PR #1 is instrumentation.
+## Remaining acceptance work
 
----
+- Repeated production `oflm run` TTFT measurements at 256/512/1024 tokens, with
+  warm-up, at least five measured repetitions, variability and thermal conditions.
+- Parent-OFF/new-OFF and new-OFF/new-ON comparisons for both prefill and decode.
+- Updated full-model correctness evidence and production CLI/server regression coverage.
+- Device execution versus queue/idle attribution remains NOT MEASURED without
+  device timestamps or a separately validated measurement method.
 
-## 10. Recommended first target for PR #2
+Host tiling and transpose remain candidate targets for the next optimization PR,
+not demonstrated speedups. Complete profiling acceptance before advancing that PR.
 
-**The host data movement in front of every GEMM** (`host::tile_x` into the kernel's tiled bf16
-layout, and the `[N, T]` → `[T, N]` transpose behind it): 4.00 s of a 35.0 s block, 65 % of
-all host time, zero numerical risk by construction (it is a permutation, and the kernel's
-layout contract is what it must reproduce), and it needs no kernel rebuild.
+## Review-fix validation — 2026-11-05
 
-A second, independent candidate is the **`lx` same-context variance at decode** (mean 11.72 ms
-vs min 6.67 ms over 48 dispatches a token): it is the largest single term in the 430 ms token,
-and it is a scheduling/streaming question rather than an arithmetic one — but it belongs to
-PR #5, not #2.
+The full `pytest specs/` suite passed **2460 tests, 172 skipped**, including
+22 profiling regression tests and a host-compiled harness of the real C++
+profiling methods. Fresh standalone and production builds passed. Standalone CTest passed 4/4;
+production CTest passed 29 tests with 2 skipped. The settings scanner/generator
+produced a byte-identical registry. The merged-target CI helper refuses a dirty
+worktree, so that check is not claimed for these uncommitted changes.
 
-Both are hypotheses to be measured, not conclusions: PR #2 begins by measuring its chosen
-change against these exact numbers.
+Both routes ran 256 prompt tokens through all 64 layers and generated the same
+16 token IDs. Their profiles now identify `gemm-block` and `gemm-prompt`
+respectively, each followed by 15 complete step groups. This validates the
+instrumentation/routing checks, not an independent numerical oracle.
+
+The decode experiment executed one warm-up triplet followed by five measured
+triplets (parent-OFF/new-OFF/new-ON), alternating order. All eight generated IDs
+agreed in every run. Each ON profile has 39 requests and 2496 layer records:
+32 prompt steps plus all seven timed decode steps.
+
+| Mode | Measured ms/token | Median |
+|---|---|---:|
+| Parent OFF | 445, 449, 448, 451, 449 | 449 |
+| New OFF | 466, 451, 448, 449, 446 | 449 |
+| New ON | 463, 448, 448, 449, 450 | 449 |
+
+**These timings are exploratory, not controlled performance-mode acceptance.**
+Every CLI log reports a failed request to configure `performance`; a subsequent
+`xrt-smi examine --report platform` observed `default`. NPU temperature was N/A;
+host ACPI readings changed from 75°C to 67°C and are not NPU die temperatures.
+The drivers now reject a failed requested power setting instead of issuing a
+benchmark PASS. Use `--pmode none` only when deliberately retaining an externally
+observed mode, and record that observation. Production settings are unchanged.
+
+Local evidence: `Models/qwen38-27b/profile-review-fix/{routes,overhead}/result.json`
+and `build-evidence.json`. The machine-readable baseline pins their hashes and
+retains superseded measurements separately with the reason for invalidation.
+
+A separate trace check with `--pmode none` confirmed **32 prefill steps / 2050
+dispatches** and **3 decode steps / 198 dispatches** in distinct tables. This
+checks phase isolation; their submit-to-completion intervals are not device
+execution-time measurements. Evidence: `profile-review-fix/trace.log`.

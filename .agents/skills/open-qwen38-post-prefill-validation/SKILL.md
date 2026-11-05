@@ -8,6 +8,27 @@ description: Validate the standard FP32 DeltaNet post-output export over full-de
 The [final model report](../../../specs/open-engine/reports/qwen38-27b.md)
 summarizes production validation, measured performance and context limits.
 
+## Profiling controls
+
+For timing-only investigations, use `utilities/prefill-block/layer_profile.py`
+and `profile_overhead.py`; see the [profiling report](../../../specs/open-engine/reports/qwen38-npu-performance.md).
+Force `OFLM_OPEN_LAYER_MAJOR=1` for a layer-major experiment and require
+`gemm-prompt` in the observed profile. Unsetting the override selects the dense
+block-loop default. Validate complete layer groups for every request.
+
+Per-token profile records use the neutral label `step`: `want_logits` is not a
+phase indicator. The CLI closes the prefill dispatch trace before decode. An
+ON overhead measurement must cover every measured decode step, excluding the
+warm-up pairs. Compare parent-OFF/new-OFF separately from new-OFF/new-ON; the
+latter cannot establish disabled-path regression. Use at least five measured
+pairs, retain artifact hashes, conditions, full logs and generated-token checks.
+Treat a failed CLI power-mode configuration as a failed benchmark setup. Use
+`--pmode none` only to intentionally retain a mode observed externally; record
+that mode and do not label it as successfully configured performance mode.
+Submit-to-completion includes queue residence and overlapping intervals; it
+does not measure device execution or NPU idle time. Profiling validation alone
+does not replace the independent numerical acceptance gates below.
+
 Use the existing standard 46-set export from open-qwen38-post-output-integration.
 No kernel rebuild or model repacking is needed. Historical BF16 output hashes
 are not the expected results for this arithmetic. Do not rewrite old evidence.

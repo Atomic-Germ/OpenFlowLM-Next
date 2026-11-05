@@ -1,8 +1,8 @@
 {
  "tool": "qwen38-performance-baseline",
- "version": 2,
+ "version": 3,
  "pr": "performance plan PR #1 -- baseline and profiling infrastructure",
- "status": "UNLOADED",
+ "status": "REVIEW_FIXES_VALIDATED_PERFORMANCE_ACCEPTANCE_PENDING",
  "model": "Qwen3.8-27B",
  "scope": "text-only, open XDNA2 (aie2p) kernels, block prefill route",
  "commit": "3a99eede",
@@ -16,16 +16,28 @@
   "host_cpus": 20,
   "host_ram_gib": 91,
   "cpu_governor": "powersave (unchanged for these runs)",
-  "npu_pmode": "performance (set by the CLI's --pmode)",
+  "npu_pmode": "historically requested performance; successful configuration was not independently established",
   "load_average": "0.42 at the start of the run, 1.4 over the preceding 5 minutes",
   "available_memory_gib": 62,
   "note": "a FIRST pass of these measurements was taken on a box that was both loaded (load average 6.4-10.8) and short of memory (17 GiB free, 12 GiB in swap). Prefill TTFT was 1.6x the historical baseline under those conditions. The numbers in this file are the RE-MEASUREMENT on an idle box, and they reproduce the historical baseline within noise. The first pass is kept in the report as the record of an experiment that was rejected for a measurement reason, not a performance one."
  },
  "historical_reference": {
   "source": "utilities/prefill-block/qwen38-production-baseline.json (Phase 31)",
-  "prefill_ttft_ms": [39491.9, 73212.3, 143022.0],
-  "prompt_tokens": [256, 512, 1024],
-  "prompt_tok_s": [6.68, 7.1, 7.22],
+  "prefill_ttft_ms": [
+   39491.9,
+   73212.3,
+   143022.0
+  ],
+  "prompt_tokens": [
+   256,
+   512,
+   1024
+  ],
+  "prompt_tok_s": [
+   6.68,
+   7.1,
+   7.22
+  ],
   "decode_tok_s_median": 2.087
  },
  "prefill": {
@@ -97,7 +109,7 @@
   "method": "OFLM_OPEN_PROFILE=<path> on the standalone open_qwen36_cli: one JSON row per layer, the columns being differences of the engine's existing StepTiming at the layer boundaries, plus a steady-clock wall per layer",
   "gate": "layer_profile.py --route block layer-major --tokens 256",
   "prompt_tokens": 256,
-  "engine_tokens": 264,
+  "engine_tokens": 256,
   "layers": 64,
   "wall_note": "the request total is the model's own timing for one 256-token block; the script's `wall_s` also carries the model load",
   "block_route": {
@@ -123,17 +135,94 @@
     "state_ms": 7.9
    },
    "by_kind_mean_per_layer_ms": {
-    "linear_attention": {"n": 48, "wall": 549.4, "gemm": 393.6, "host": 97.4, "tile": 48.4, "tr": 15.2, "mid": 16.5},
-    "full_attention": {"n": 16, "wall": 533.6, "gemm": 382.9, "host": 92.7, "tile": 45.2, "tr": 14.0, "mid": 20.3}
+    "linear_attention": {
+     "n": 48,
+     "wall": 549.4,
+     "gemm": 393.6,
+     "host": 97.4,
+     "tile": 48.4,
+     "tr": 15.2,
+     "mid": 16.5
+    },
+    "full_attention": {
+     "n": 16,
+     "wall": 533.6,
+     "gemm": 382.9,
+     "host": 92.7,
+     "tile": 45.2,
+     "tr": 14.0,
+     "mid": 20.3
+    }
    },
    "widest_layers": [
-    {"layer": 0, "kind": "linear_attention", "wall_ms": 786.4},
-    {"layer": 52, "kind": "linear_attention", "wall_ms": 603.0},
-    {"layer": 9, "kind": "linear_attention", "wall_ms": 575.7},
-    {"layer": 5, "kind": "linear_attention", "wall_ms": 575.0}
+    {
+     "layer": 0,
+     "kind": "linear_attention",
+     "wall_ms": 786.4
+    },
+    {
+     "layer": 52,
+     "kind": "linear_attention",
+     "wall_ms": 603.0
+    },
+    {
+     "layer": 9,
+     "kind": "linear_attention",
+     "wall_ms": 575.7
+    },
+    {
+     "layer": 5,
+     "kind": "linear_attention",
+     "wall_ms": 575.0
+    }
    ],
-   "widest_layer_note": "layer 0 is the first layer off an idle array and is 40-45% above its neighbours; from layer 1 on the spread across 63 layers is under 8%, so no single layer is a target"
+   "widest_layer_note": "Layer 0 was the slowest in this single capture; no repeat-based variability conclusion is established.",
+   "stage_unaccounted_ms": 3800.1,
+   "residue_definition": "outside layer walls; includes lm_head, not the residual of named stage counters"
   },
+  "derived": {
+   "weight_bytes_per_linear_layer_mb": 238.9,
+   "measured_gemm_per_layer_ms": 391.0,
+   "implied_weight_stream_gbs": 0.6,
+   "effective_tflops_ffn_t256": 0.39,
+   "note": "the streamed-weight estimate assumes 4.5 bit/packed weight and a linear layer's qkv|z + o + up|gate + down; it is an order-of-magnitude check on where the GEMM time is, not a kernel measurement"
+  },
+  "artefact": "utilities/prefill-block/runs/layer-profile-256-20261105-123018/ (result.json, layers.csv, profile-block.jsonl, profile-layer-major.jsonl)"
+ },
+ "instrumentation": {
+  "variables": {
+   "OFLM_OPEN_PROFILE": "path of a JSONL file; one header, one request and one row per layer. Unset = no hooks run.",
+   "OFLM_OPEN_PROFILE_STEPS": "how many sequential step() calls to profile (default 8, 0 = block routes only)"
+  },
+  "records": {
+   "header": "version, family, spec_hash, layers",
+   "request": "what, tokens, blocks, total_ms, gemm_ms, host_ms, per_token_ms, lmhead_ms, setup_ms, embed_ms, patch_ms, dispatch_ms, layer_wall_ms, residue_ms, layers; what=step is phase-neutral, not a prefill/decode classification",
+   "layer": "what, kind, layer, wall_ms and every StepTiming column that layer moved"
+  },
+  "overhead_when_enabled": "Clock reads at layer boundaries plus JSON serialization/flush; measured over complete ON decode coverage",
+  "overhead_when_disabled": "one null check per layer boundary (profile_switch)"
+ },
+ "gates": {
+  "baseline_reproduced": "Historical single-run observations retained; warm-up plus five repeated measurements and variability are still required.",
+  "instrumentation_is_free_when_off": "PENDING controlled power-mode validation; exploratory parent-OFF/new-OFF medians both 449 ms",
+  "instrumentation_changes_no_output": "PASS: 16 greedy tokens match between observed block/layer-major routes; eight greedy IDs match every parent/OFF/ON run. This is not an independent numerical oracle.",
+  "layer_accounting_balances": "PASS: fresh route captures validate all 64 layers per request, route identities and stage nesting; stage-unaccounted time remains explicit",
+  "settings_registry": "the two new variables are classified in NON_SETTING_ENV_VARS in utilities/generate-registry.py; utilities/scan-settings.py finds both",
+  "unit_tests": "PASS on review fixes: pytest specs/ 2460 passed, 172 skipped; standalone CTest 4/4; production CTest 29 passed, 2 skipped",
+  "enabled_profiling_overhead": "PENDING controlled power-mode validation; exploratory new-OFF/new-ON medians both 449 ms, all seven measured decode steps profiled"
+ },
+ "rejected_experiment": {
+  "what": "the first measurement pass, taken while the box was loaded (load average 6.4-10.8) and short of memory (17 GiB free, 12 GiB swapped out)",
+  "result": "prefill TTFT 62.2 / 118.9 / 234.4 s, i.e. 1.58-1.64x the historical baseline, while decode reproduced at 2.076 tok/s",
+  "conclusion": "the prefill host stages fault and contend for pages under memory pressure while the fully device-bound decode path does not, so the inflation was an environment artefact. Rejected and re-measured on an idle box; the ratios inside a run (GEMM 72% / host 17%, tiling 50% of host) were unchanged between the two passes, which is why they are the figures the next PR is chosen from"
+ },
+ "not_claimed": [
+  "any speedup -- this PR is instrumentation only",
+  "a GEMM efficiency figure from the kernel side; the 0.60 GB/s and 0.39 TFLOPS here are derived from wall time and assumed weight bytes",
+  "decode throughput outside 4K context",
+  "anything about vision or long-context attention"
+ ],
+ "superseded_review_findings": {
   "layer_major_route": {
    "request_ms": 34216.1,
    "layer_wall_ms": 34187.0,
@@ -154,71 +243,145 @@
    },
    "comparison": "layer-major is 2.3% faster than the block loop at this exact 256-token multiple (34216 vs 35007 ms), against 1.6% in the first pass; both are the parity the route policy predicts at an exact multiple, and the block loop stays the shipped default"
   },
-  "derived": {
-   "weight_bytes_per_linear_layer_mb": 238.9,
-   "measured_gemm_per_layer_ms": 391.0,
-   "implied_weight_stream_gbs": 0.60,
-   "effective_tflops_ffn_t256": 0.39,
-   "note": "the streamed-weight estimate assumes 4.5 bit/packed weight and a linear layer's qkv|z + o + up|gate + down; it is an order-of-magnitude check on where the GEMM time is, not a kernel measurement"
+  "decode_attribution": {
+   "method": "OFLM_OPEN_STEP_TRACE=1 on the same binary: the engine's per-kernel dispatch table over a decode loop, on the idle box",
+   "prompt_tokens": 32,
+   "generated": 4,
+   "steps_sampled": 35,
+   "dispatches": 2248,
+   "per_step": {
+    "wall_ms": 429.8,
+    "dispatch_sum_of_minima_ms": 408.9,
+    "dispatch_sum_of_means_ms": 654.8,
+    "variance_ms": 245.9,
+    "host_embed_ms": 0.03,
+    "host_patch_ms": 0.01,
+    "host_route_ms": 0.0,
+    "host_lm_read_ms": 2.93
+   },
+   "per_kernel": {
+    "ax": {
+     "calls_per_step": 16.0,
+     "min_ms": 5.383,
+     "mean_ms": 5.58,
+     "p90_ms": 5.846,
+     "blocked_ms": 5.553
+    },
+    "lx": {
+     "calls_per_step": 48.0,
+     "min_ms": 6.665,
+     "mean_ms": 11.721,
+     "p90_ms": 14.124,
+     "blocked_ms": 6.92,
+     "mean_same_ctx_ms": 13.815
+    },
+    "ln": {
+     "calls_per_step": 0.1,
+     "min_ms": 0.219,
+     "mean_ms": 0.301
+    },
+    "lm": {
+     "calls_per_step": 0.1,
+     "min_ms": 25.031,
+     "mean_ms": 25.207
+    }
+   },
+   "reading": "one token is 16 ax + 48 lx + 1 ln + 1 lm = 66 dispatches; the dispatches' own times (sum of minima 409 ms) are essentially the whole 430 ms step, so the host is not the decode bottleneck. lm_head is 25 ms of 430 = 5.8% per token. lx's mean (11.72 ms) is 1.76x its min (6.67 ms) and the gap is entirely same-context work (13.82 ms vs 7.52 ms after a switch), so it is not a context-switch cost.",
+   "limitation": "the sequential route books blocked time into StepTiming::part1_ms (the fused dispatch chain has no host stages), so the per-layer profile cannot split device from host there; the dispatch trace is the instrument that can.",
+   "artefact": "captured during the run; runs/ is scratch and is not committed"
   },
-  "artefact": "utilities/prefill-block/runs/layer-profile-256-20261105-123018/ (result.json, layers.csv, profile-block.jsonl, profile-layer-major.jsonl)"
+  "reason": "The labelled layer-major capture executed gemm-block. Decode attribution mixed 32 prompt steps and 3 generated-token steps; submit-to-completion includes queue residence. Neither supports the former route comparison or kernel-variance ranking."
  },
- "decode_attribution": {
-  "method": "OFLM_OPEN_STEP_TRACE=1 on the same binary: the engine's per-kernel dispatch table over a decode loop, on the idle box",
-  "prompt_tokens": 32,
-  "generated": 4,
-  "steps_sampled": 35,
-  "dispatches": 2248,
-  "per_step": {
-   "wall_ms": 429.8,
-   "dispatch_sum_of_minima_ms": 408.9,
-   "dispatch_sum_of_means_ms": 654.8,
-   "variance_ms": 245.9,
-   "host_embed_ms": 0.03,
-   "host_patch_ms": 0.01,
-   "host_route_ms": 0.0,
-   "host_lm_read_ms": 2.93
+ "limitations": [
+  "Existing TTFT/rate observations are retained, not new measurements of the corrected tree.",
+  "No hardware device timestamps: queue residence, dispatch execution and idle time remain unresolved.",
+  "The rejected first-pass slowdown correlates with load/memory pressure; page faults were not measured to prove causation."
+ ],
+ "review_validation": {
+  "source": "uncommitted corrections over e04bf9bc",
+  "parent_commit": "3a99eede60b2b228ffcb9fcb170f33d20fa0dda6",
+  "routes": {
+   "artifact": "Models/qwen38-27b/profile-review-fix/routes/result.json",
+   "layers": 64,
+   "prompt_tokens": 256,
+   "generated_tokens": 16,
+   "greedy_agreement": true,
+   "observed_routes": {
+    "block": "gemm-block",
+    "layer-major": "gemm-prompt"
+   },
+   "complete_profile_groups": true
   },
-  "per_kernel": {
-   "ax": {"calls_per_step": 16.0, "min_ms": 5.383, "mean_ms": 5.580, "p90_ms": 5.846, "blocked_ms": 5.553},
-   "lx": {"calls_per_step": 48.0, "min_ms": 6.665, "mean_ms": 11.721, "p90_ms": 14.124, "blocked_ms": 6.920, "mean_same_ctx_ms": 13.815},
-   "ln": {"calls_per_step": 0.1, "min_ms": 0.219, "mean_ms": 0.301},
-   "lm": {"calls_per_step": 0.1, "min_ms": 25.031, "mean_ms": 25.207}
+  "decode_comparison": {
+   "artifact": "Models/qwen38-27b/profile-review-fix/overhead/result.json",
+   "warmup_triplets": 1,
+   "measured_triplets": 5,
+   "generated_tokens_per_run": 8,
+   "all_generated_ids_agree": true,
+   "new_off_ms": [
+    466.0,
+    451.0,
+    448.0,
+    449.0,
+    446.0
+   ],
+   "new_on_ms": [
+    463.0,
+    448.0,
+    448.0,
+    449.0,
+    450.0
+   ],
+   "parent_off_ms": [
+    445.0,
+    449.0,
+    448.0,
+    451.0,
+    449.0
+   ],
+   "median_ms": {
+    "parent_off": 449.0,
+    "new_off": 449.0,
+    "new_on": 449.0
+   },
+   "on_profile_steps": 39,
+   "on_profile_layer_rows": 2496,
+   "measured_decode_steps_profiled": 7,
+   "acceptance": "EXPLORATORY ONLY: requested performance mode failed; default mode observed after the run. No controlled performance-mode acceptance."
   },
-  "reading": "one token is 16 ax + 48 lx + 1 ln + 1 lm = 66 dispatches; the dispatches' own times (sum of minima 409 ms) are essentially the whole 430 ms step, so the host is not the decode bottleneck. lm_head is 25 ms of 430 = 5.8% per token. lx's mean (11.72 ms) is 1.76x its min (6.67 ms) and the gap is entirely same-context work (13.82 ms vs 7.52 ms after a switch), so it is not a context-switch cost.",
-  "limitation": "the sequential route books blocked time into StepTiming::part1_ms (the fused dispatch chain has no host stages), so the per-layer profile cannot split device from host there; the dispatch trace is the instrument that can.",
-  "artefact": "captured during the run; runs/ is scratch and is not committed"
- },
- "instrumentation": {
-  "variables": {
-   "OFLM_OPEN_PROFILE": "path of a JSONL file; one header, one request and one row per layer. Unset = no hooks run.",
-   "OFLM_OPEN_PROFILE_STEPS": "how many sequential step() calls to profile (default 8, 0 = block routes only)"
+  "power_observation": {
+   "mode_after_run": "default",
+   "NPU_temperature": "N/A",
+   "host_ACPI_temperature_C_start": 75,
+   "host_ACPI_temperature_C_end": 67
   },
-  "records": {
-   "header": "version, family, spec_hash, layers",
-   "request": "what, tokens, blocks, total_ms, gemm_ms, host_ms, per_token_ms, lmhead_ms, setup_ms, embed_ms, patch_ms, dispatch_ms, layer_wall_ms, residue_ms, layers",
-   "layer": "what, kind, layer, wall_ms and every StepTiming column that layer moved"
+  "builds": {
+   "artifact": "Models/qwen38-27b/profile-review-fix/build-evidence.json",
+   "standalone_ctest": "4 passed",
+   "production_ctest": "29 passed, 2 skipped",
+   "production_build": "PASS"
   },
-  "overhead_when_enabled": "one steady-clock read per layer boundary; measured in profile_overhead.py",
-  "overhead_when_disabled": "one null check per layer boundary (profile_switch)"
- },
- "gates": {
-  "baseline_reproduced": "PASS -- prefill TTFT 38.4 / 73.4 / 141.9 s and decode 2.074 tok/s, all within noise of the Phase 31 baseline",
-  "instrumentation_is_free_when_off": "PASS -- profile_overhead.py; see the report for the idle-box numbers",
-  "instrumentation_changes_no_output": "PASS -- 64-token prompt through the block route, 8 greedy ids, byte-identical with OFLM_OPEN_PROFILE unset and set",
-  "layer_accounting_balances": "PASS -- layer walls + lm_head inside the request (34937.8 / 35007.2 ms); named host stages fit inside host_ms (6160.0 / 6160.0); dn conv + rule fit inside mid (791.8 / 1117.3)",
-  "settings_registry": "the two new variables are classified in NON_SETTING_ENV_VARS in utilities/generate-registry.py; utilities/scan-settings.py finds both",
-  "unit_tests": "PASS -- ctest 4/4 in src/open_qwen36, pytest specs/ 2438 passed 172 skipped"
- },
- "rejected_experiment": {
-  "what": "the first measurement pass, taken while the box was loaded (load average 6.4-10.8) and short of memory (17 GiB free, 12 GiB swapped out)",
-  "result": "prefill TTFT 62.2 / 118.9 / 234.4 s, i.e. 1.58-1.64x the historical baseline, while decode reproduced at 2.076 tok/s",
-  "conclusion": "the prefill host stages fault and contend for pages under memory pressure while the fully device-bound decode path does not, so the inflation was an environment artefact. Rejected and re-measured on an idle box; the ratios inside a run (GEMM 72% / host 17%, tiling 50% of host) were unchanged between the two passes, which is why they are the figures the next PR is chosen from"
- },
- "not_claimed": [
-  "any speedup -- this PR is instrumentation only",
-  "a GEMM efficiency figure from the kernel side; the 0.60 GB/s and 0.39 TFLOPS here are derived from wall time and assumed weight bytes",
-  "decode throughput outside 4K context",
-  "anything about vision or long-context attention"
- ]
+  "settings": "Local scanner/generator PASS, registry byte-identical. Merged-target helper refused the dirty worktree; merged-target CI not claimed.",
+  "evidence_sha256": {
+   "Models/qwen38-27b/profile-review-fix/routes/result.json": "0bbd6951b81e842c28e60fd68ffbbc7ea14f4914cadef68b5bd9689f32288b50",
+   "Models/qwen38-27b/profile-review-fix/overhead/result.json": "ad4e5665b011a6aa82777b38d6d10753299122995fb2c9d14e7e414992075ee3",
+   "Models/qwen38-27b/profile-review-fix/build-evidence.json": "eaa970e855984f1244c3f3f8d16ff95a277b2090d6c36593ccdf4a90c2f1467a",
+   "Models/qwen38-27b/profile-review-fix/trace.log": "762ca3ad43124dc0900a8a343816c27df17fabbe69770cf3438a5188b70063dc"
+  },
+  "trace_phase_separation": {
+   "artifact": "Models/qwen38-27b/profile-review-fix/trace.log",
+   "prefill_steps": 32,
+   "decode_steps": 3,
+   "decode_dispatches": 198,
+   "verdict": "PASS",
+   "pmode": "none (unchanged)"
+  },
+  "tests": {
+   "command": "OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -m pytest -q specs/",
+   "passed": 2460,
+   "skipped": 172,
+   "failed": 0,
+   "profiling_regression_tests": 22
+  }
+ }
 }

@@ -31,8 +31,11 @@ the engine attributed to a stage, not a percentage of a budget.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -55,6 +58,79 @@ HOST_COLS = ('prenorm_ms', 'gemm_tile_ms', 'gemm_tr_ms', 'mid_ms', 'dn_conv_ms',
 SUBSETS = {'dn_conv_ms': 'mid_ms', 'dn_rule_ms': 'mid_ms', 'mid_ms': 'host_ms'}
 
 
+def validate_profile(header, requests, layers):
+    """Require complete, ordered layer coverage for every request, not just small sums."""
+    if not header or header.get('version') != 1 or not requests:
+        raise ValueError('missing header/requests or unsupported profile version')
+    count = header.get('layers')
+    if type(count) is not int or count <= 0 or len(layers) != count * len(requests):
+        raise ValueError('incomplete layer coverage')
+    for i, request in enumerate(requests):
+        group = layers[i * count:(i + 1) * count]
+        if (request.get('layers') != count or request.get('tokens', 0) <= 0
+                or request.get('blocks', 0) <= 0
+                or [r.get('layer') for r in group] != list(range(count))
+                or any(r.get('what') != request.get('what') for r in group)):
+            raise ValueError('duplicate, missing, out-of-order or mismatched layer records')
+        for record in [request, *group]:
+            required = ('total_ms', 'lmhead_ms') if record is request else LAYER_COLS + HOST_COLS
+            if any(k not in record for k in required):
+                raise ValueError('missing timing columns')
+            if any(not isinstance(v, (int, float)) or not math.isfinite(v)
+                   or (v < 0 and k != 'residue_ms')
+                   for k, v in record.items() if k.endswith('_ms')):
+                raise ValueError('invalid timing value')
+
+
+def provenance(paths):
+    result = {}
+    for path in paths:
+        with path.open('rb') as f:
+            result[str(path)] = dict(bytes=path.stat().st_size,
+                                     sha256=hashlib.file_digest(f, 'sha256').hexdigest())
+    return result
+
+
+def conditions():
+    """Host observations, not a claim to measure the NPU die temperature."""
+    def read(path):
+        try:
+            return Path(path).read_text().strip()
+        except OSError:
+            return None
+    return dict(time=time.strftime('%Y-%m-%dT%H:%M:%S%z'), system=platform.platform(),
+                loadavg=read('/proc/loadavg'), meminfo=read('/proc/meminfo'),
+                cpu_governor=read('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor'),
+                thermal_zones=[dict(type=read(p / 'type'), temp_millicelsius=read(p / 'temp'))
+                               for p in sorted(Path('/sys/class/thermal').glob('thermal_zone*'))],
+                runtime_env={k: os.environ.get(k) for k in (
+                    'OMP_NUM_THREADS', 'OMP_WAIT_POLICY', 'OPENBLAS_NUM_THREADS',
+                    'OFLM_OPEN_SUBMIT_AHEAD', 'OFLM_OPEN_SPIN_US', 'OFLM_OPEN_STAGE_MAJOR')})
+
+
+def require_power_mode(log, requested):
+    """Do not silently turn a failed power-mode request into a benchmark PASS."""
+    if requested == 'none':
+        return 'left unchanged; actual mode requires an external observation'
+    expected = f'NPU power mode: {requested}'
+    if expected not in log.splitlines():
+        raise ValueError('requested NPU power mode was not confirmed; inspect the retained CLI log')
+    return 'CLI configure command succeeded'
+
+
+def validate_route(route, requests, *, tokens, steps, max_tokens):
+    expected = {'block': 'gemm-block', 'layer-major': 'gemm-prompt', 'sequential': 'step'}[route]
+    prompt = [r for r in requests if r['what'] == expected]
+    if route == 'sequential':
+        if len(requests) != min(steps, tokens + max_tokens - 1) or len(prompt) != len(requests):
+            raise ValueError('sequential profile coverage differs from requested budget')
+    elif (not prompt or sum(r['tokens'] for r in prompt) != tokens
+          or any(r['what'] not in (expected, 'step') for r in requests)
+          or (route == 'layer-major' and len(prompt) != 1)
+          or sum(r['what'] == 'step' for r in requests) != min(steps, max_tokens - 1)):
+        raise ValueError(f'{route}: observed route/token coverage differs from requested route')
+
+
 def read_jsonl(path: Path) -> tuple[dict | None, list[dict], list[dict]]:
     """(header, request rows, layer rows) from an OFLM_OPEN_PROFILE file."""
     header, requests, layers = None, [], []
@@ -68,13 +144,20 @@ def read_jsonl(path: Path) -> tuple[dict | None, list[dict], list[dict]]:
             raise SystemExit(f'{path}: not JSONL at {line[:60]!r}: {exc}')
         kind = rec.get('record')
         if kind == 'header':
+            if header is not None or requests or layers:
+                raise ValueError('duplicate or misplaced profile header')
             header = rec
         elif kind == 'request':
+            if header is None or len(layers) != len(requests) * header['layers']:
+                raise ValueError('request before previous layer group is complete')
             requests.append(rec)
         elif kind == 'layer':
+            if not requests or len(layers) >= len(requests) * header['layers']:
+                raise ValueError('layer outside a request')
             layers.append(rec)
         else:
             raise SystemExit(f'{path}: unknown record {kind!r}')
+    validate_profile(header, requests, layers)
     return header, requests, layers
 
 
@@ -92,10 +175,11 @@ def run(ids: list[int], route: str, *, layers: int, max_ctx: int, max_tokens: in
     env.pop('OFLM_OPEN_PREFILL_ROLE_MODE', None)
     env['OFLM_OPEN_PROFILE'] = str(prof)
     env['OFLM_OPEN_PROFILE_STEPS'] = str(steps)
-    # The model's own default is a dense block loop; --block-major names it, and the
-    # layer-major branch is reached by leaving the flag off.
+    # Dense Qwen defaults to block-loop even without --block-major.
     if route == 'block':
         env['OFLM_OPEN_LAYER_MAJOR'] = '0'
+    elif route == 'layer-major':
+        env['OFLM_OPEN_LAYER_MAJOR'] = '1'
     else:
         env.pop('OFLM_OPEN_LAYER_MAJOR', None)
     cmd = [str(O.CLI), '--model', str(O.MODEL), '--kernels', str(O.KERNELS),
@@ -116,24 +200,37 @@ def run(ids: list[int], route: str, *, layers: int, max_ctx: int, max_tokens: in
             raise SystemExit(f'{route}: timed out after {timeout}s') from exc
     wall = time.monotonic() - t0
     text = proc.stdout + '\n' + proc.stderr
+    (workdir / f'{route}.log').write_text(text)
     if proc.returncode != 0:
         raise SystemExit(f'{route} failed (rc {proc.returncode}):\n'
                          + '\n'.join(text.strip().splitlines()[-20:]))
+    power_mode = require_power_mode(text, pmode)
     if not prof.exists():
         raise SystemExit(f'{route}: the run wrote no profile at {prof}\n'
                          + '\n'.join(text.strip().splitlines()[-10:]))
     header, requests, rows = read_jsonl(prof)
+    if header['layers'] != layers:
+        raise ValueError('observed layer count differs from requested count')
+    validate_route(route, requests, tokens=len(ids), steps=steps, max_tokens=max_tokens)
     return dict(route=route, rc=proc.returncode, wall_s=round(wall, 2), profile=str(prof),
+                power_mode=power_mode,
                 header=header, requests=requests, layers=rows, command=' '.join(cmd),
+                generated_ids=[int(line.split()[1]) for line in proc.stdout.splitlines()
+                               if line.startswith('token ')],
                 stderr_tail='\n'.join(text.strip().splitlines()[-8:]))
 
 
 def summarise(run_rec: dict) -> dict:
     """Aggregate one run's layer rows: totals, the model-wide stage split, the worst layers."""
     rows, reqs = run_rec['layers'], run_rec['requests']
-    if not rows:
-        return dict(route=run_rec['route'], layers=0, empty=True,
-                    reason='no layer rows; the route may not have run a profiled block')
+    validate_profile(run_rec['header'], reqs, rows)
+    # Keep prefill and post-prefill step samples separate in block-route summaries.
+    if run_rec['route'] != 'sequential':
+        count = run_rec['header']['layers']
+        groups = [(r, rows[i * count:(i + 1) * count]) for i, r in enumerate(reqs)
+                  if r['what'] != 'step']
+        reqs = [r for r, _ in groups]
+        rows = [row for _, group in groups for row in group]
     # A block-loop run profiles one block at a time and, on a multi-block prompt, the LAST
     # block is the padded one. Rows from every block are summed for the model-wide split, and
     # the per-layer table is summed per layer index too -- so a 256-token prompt (one block)
@@ -169,8 +266,9 @@ def summarise(run_rec: dict) -> dict:
     return dict(
         route=run_rec['route'], wall_s=run_rec['wall_s'], profile=run_rec['profile'],
         header=run_rec['header'], requests=reqs, layers=len(table), rows=len(rows),
-        block=reqs[0]['blocks'] if reqs else 0,
-        tokens=reqs[0]['tokens'] if reqs else 0,
+        block=sum(r['blocks'] for r in reqs),
+        tokens=sum(r['tokens'] for r in reqs),
+        stage_unaccounted_ms=request_total - lm - stage['gemm_ms'] - stage['host_ms'] - stage['per_token_ms'],
         request_total_ms=request_total, lmhead_ms=lm, residue_ms=residue,
         layer_total_ms=total, stage=stage, by_kind=sorted(by_kind.values(), key=lambda k: -k['wall_ms']),
         per_layer=table,
@@ -186,9 +284,9 @@ def check_consistency(summary: dict) -> list[dict]:
     checks say what nests, so a reader cannot add `mid_ms` to `host_ms` and call it a total.
     """
     rows = []
-    st = summary['stage']
     if not summary.get('layers'):
-        return rows
+        return [dict(check='complete profile required', a_ms=0, b_ms=0, ok=False)]
+    st = summary['stage']
     # 1. The layer walls must fit inside the request. Both are taken with the same clock, so
     #    the request total is a real denominator for this column and not a second estimate.
     covered = summary['layer_total_ms'] + summary['lmhead_ms']
@@ -227,9 +325,10 @@ def report(summary: dict, checks: list[dict]) -> None:
         return
     print(f"  {summary['tokens']} tokens, {summary['block']} block(s), {summary['rows']} layer rows, "
           f"request {summary['request_total_ms']:.0f} ms, wall {summary['wall_s']:.1f} s")
-    print(f"  layer wall {summary['layer_total_ms']:.0f} ms + lm_head {summary['lmhead_ms']:.0f} ms "
-          f"+ residue {summary['residue_ms']:.0f} ms")
-    print(f"  device {st['gemm_ms']:.0f} ms, host {st['host_ms']:.0f} ms, "
+    print(f"  layer wall {summary['layer_total_ms']:.0f} ms; outside layers {summary['residue_ms']:.0f} ms "
+          f"(includes lm_head {summary['lmhead_ms']:.0f} ms)")
+    print(f"  unattributed to stages {summary['stage_unaccounted_ms']:.0f} ms")
+    print(f"  dispatch/part0 {st['gemm_ms']:.0f} ms, host/part1 {st['host_ms']:.0f} ms, "
           f"per-token {st['per_token_ms']:.0f} ms")
     print("  --- inside the host stages (mid contains dn conv/rule; host contains mid) ---")
     for c in HOST_COLS:
@@ -264,7 +363,13 @@ def main() -> int:
     ap.add_argument('--pmode', default='performance')
     ap.add_argument('--timeout', type=float, default=3600)
     ap.add_argument('--out', type=Path, default=None)
+    ap.add_argument('--cli', type=Path, default=O.CLI)
+    ap.add_argument('--model', type=Path, default=O.MODEL)
+    ap.add_argument('--kernels', type=Path, default=O.KERNELS)
     a = ap.parse_args()
+    if a.tokens <= 0 or a.layers <= 0 or a.steps < 0 or a.max_tokens <= 0:
+        ap.error('positive token/layer counts and nonnegative step budget required')
+    O.CLI, O.MODEL, O.KERNELS = a.cli.resolve(), a.model.resolve(), a.kernels.resolve()
     if a.tokens > O.POOL:
         raise SystemExit(f'the oracle fixture pool is {O.POOL} ids; choose --tokens <= {O.POOL}')
     ids = O.fixture(a.tokens, seed=26026)
@@ -276,6 +381,9 @@ def main() -> int:
                   gate='performance plan PR #1: per-layer attribution, not a throughput claim',
                   model_acceptance=False, cli=str(O.CLI), kernels=str(O.KERNELS),
                   started=stamp, prompt_tokens=a.tokens, layers=a.layers, pmode=a.pmode,
+                  conditions_start=conditions(),
+                  provenance=provenance([O.CLI, O.MODEL / 'model.q4nx', O.KERNELS / 'manifest.json',
+                                         *O.KERNELS.glob('*/final.xclbin'), *O.KERNELS.glob('*/insts.bin')]),
                   note='engine-internal accounting for target selection; the wall time carries '
                        'the model load and is not a throughput figure')
     summaries, checks, runs = [], [], {}
@@ -283,6 +391,8 @@ def main() -> int:
         r = run(ids, route, layers=a.layers, max_ctx=a.max_ctx, max_tokens=a.max_tokens,
                 steps=a.steps, pmode=a.pmode, workdir=out, timeout=a.timeout)
         runs[route] = r
+        if len(r['generated_ids']) != a.max_tokens:
+            raise ValueError('incomplete generated trajectory')
         s = summarise(r)
         summaries.append(s)
         checks.extend(check_consistency(s))
@@ -290,8 +400,12 @@ def main() -> int:
     result['runs'] = {k: {kk: vv for kk, vv in v.items() if kk not in ('layers',)} for k, v in runs.items()}
     result['summary'] = summaries
     result['checks'] = checks
-    ok = all(c['ok'] for c in checks) and all(s.get('layers') for s in summaries)
+    result['greedy_agreement'] = all(r['generated_ids'] == next(iter(runs.values()))['generated_ids']
+                                   for r in runs.values())
+    ok = (all(c['ok'] for c in checks) and all(s.get('layers') for s in summaries)
+          and result['greedy_agreement'])
     result['verdict'] = 'PASS' if ok else 'FAIL'
+    result['conditions_end'] = conditions()
     (out / 'result.json').write_text(json.dumps(result, indent=1, default=str) + '\n')
     write_csv(out / 'layers.csv', summaries)
     print(f"\n{result['verdict']} -> {out / 'result.json'}")
