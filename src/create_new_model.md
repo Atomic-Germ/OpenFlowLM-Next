@@ -79,9 +79,12 @@ What the installer does, in order:
    already a container.
 
 `model_list.json` is a shipped suggestion list for `oflm list` / `oflm pull`.
-It is **not** a registry, gate, oracle, or source of truth. The registry that
-matters is `settings.json` (`models` section, written by `oflm add`) merged
-with the shipped list for display only.
+It is **not** a registry, gate, oracle, or source of truth, and it does not
+even match the open kernels: a size can run with no entry, and an entry can
+name a size no kernel set covers. Maintain it only as a hint of what a user
+*can* add — for new families and sizes — never as the source of what works.
+The registry that matters is `settings.json` (`models` section, written by
+`oflm add`), merged with the shipped list for display only.
 
 ### Useful flags
 
