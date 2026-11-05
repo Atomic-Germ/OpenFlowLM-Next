@@ -72,6 +72,10 @@ NON_SETTING_ENV_VARS = {
     "OFLM_DECODE_AUTO_THRESHOLD", "OFLM_DET_ROUTE", "OFLM_GRANITE_ENGINE",
     "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_BLOCK_FAIL_AT", "OFLM_OPEN_BLOCK_FAIL_INJECT",
     "OFLM_OPEN_DISPATCH_LOG",
+    # Performance-plan PR #1: per-layer accounting as JSONL, and how many sequential steps to
+    # profile. Measurement only -- they change no computed value and are silent when unset,
+    # so they are diagnostics rather than preferences about how to run a model.
+    "OFLM_OPEN_PROFILE", "OFLM_OPEN_PROFILE_STEPS",
     "OFLM_OPEN_DXB_LOG",
     "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN", "OFLM_OPEN_PREFILL_ROUTE",
     "OFLM_OPEN_HOST_ATTN", "OFLM_OPEN_HOST_ATTN_DECODE",
