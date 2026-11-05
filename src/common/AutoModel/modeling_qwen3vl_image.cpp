@@ -193,17 +193,17 @@ void Qwen3VL::preprocess_image(qwen3vl_image_t& image, std::vector<bf16> &pixel_
     smart_resize(
         height, width,
         resized_height, resized_width,
-        QWEN3_PATCH_SIZE * QWEN3_IMAGE_MERGE_SIZE,
-        QWEN3_SHORTEST_EDGE,
-        QWEN3_LONGEST_EDGE
+        vision_.patch * vision_.merge,
+        vision_.shortest_edge,
+        vision_.longest_edge
     );
     // std::cout << "resized_height "<< resized_height << " resized_width " << resized_width <<std::endl;
 
     // Cache size calculations for efficiency
     const uint32_t single_frame_size = resized_height * resized_width * channels;
-    const uint32_t total_patch_size = single_frame_size * QWEN3_TEMPORAL_PATCH_SIZE;
-    const uint32_t grid_h = resized_height / QWEN3_PATCH_SIZE;
-    const uint32_t grid_w = resized_width / QWEN3_PATCH_SIZE;
+    const uint32_t total_patch_size = single_frame_size * vision_.temporal;
+    const uint32_t grid_h = resized_height / vision_.patch;
+    const uint32_t grid_w = resized_width / vision_.patch;
 
     // Pre-allocate final buffer to avoid reallocation
     const uint32_t prev_pixel_values_size = pixel_values.size();
@@ -224,13 +224,13 @@ void Qwen3VL::preprocess_image(qwen3vl_image_t& image, std::vector<bf16> &pixel_
     imgproc::avx512::rescale_and_normalize_avx512(
         resize_image.data(), patch_vector_scratch.data(),
         resized_width, resized_height, channels,
-        true, QWEN3_VISION_RESCALE_FACTOR,
-        true, QWEN3_VISION_RESCALE_IMAGE_MEAN, QWEN3_VISION_RESCALE_IMAGE_STD
+        true, vision_.rescale,
+        true, vision_.mean, vision_.stdv
     );
     
-    // Replicate first frame for temporal patches (optimized for QWEN3_TEMPORAL_PATCH_SIZE = 2)
+    // Replicate first frame for temporal patches (optimized for TEMPORAL_PATCH_SIZE = 2)
     // This is more efficient than a loop for the common case
-    if constexpr (QWEN3_TEMPORAL_PATCH_SIZE == 2) {
+    if (vision_.temporal == 2) {
         memcpy(
             patch_vector_scratch.data() + single_frame_size,
             patch_vector_scratch.data(),
@@ -238,7 +238,7 @@ void Qwen3VL::preprocess_image(qwen3vl_image_t& image, std::vector<bf16> &pixel_
         );
     } else {
         // Generic loop for other TEMPORAL_PATCH_SIZE values
-        for(unsigned l = 1; l < QWEN3_TEMPORAL_PATCH_SIZE; l++){
+        for(unsigned l = 1; l < vision_.temporal; l++){
             memcpy(
                 patch_vector_scratch.data() + l * single_frame_size,
                 patch_vector_scratch.data(),
@@ -252,11 +252,11 @@ void Qwen3VL::preprocess_image(qwen3vl_image_t& image, std::vector<bf16> &pixel_
         patch_vector_scratch.data(),
         pixel_values.data() + prev_pixel_values_size,
         1, 1, // something special for image
-        QWEN3_TEMPORAL_PATCH_SIZE,
+        vision_.temporal,
         channels,
         grid_h, grid_w,
-        QWEN3_MERGE_SIZE,
-        QWEN3_PATCH_SIZE
+        vision_.merge,
+        vision_.patch
     );
 
 

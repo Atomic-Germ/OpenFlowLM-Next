@@ -34,6 +34,23 @@ void Qwen3VL::load_model(std::string model_path, json model_info, int default_co
         //free the q4nx
         this->q4nx.reset();
     }
+    {
+        // The container ships no vision_config (the Qwen3-VL defaults on the
+        // struct stand); a GGUF install carries the HF-shaped vision_config
+        // translated from the mmproj (`patch_size`, `spatial_merge_size`, ...).
+        // Read the plain names to override the defaults, so Qwen3-VL takes the
+        // tower from the config like every Qwen that shares it.
+        const auto& v = this->lm_config->sub("vision_config");
+        vision_.patch = v.value("patch_size", vision_.patch);
+        vision_.merge = v.value("spatial_merge_size", vision_.merge);
+        vision_.spatial_merge = v.value("spatial_merge_size", vision_.spatial_merge);
+        vision_.temporal = v.value("temporal_patch_size", vision_.temporal);
+        vision_.shortest_edge = v.value("shortest_edge", vision_.shortest_edge);
+        vision_.longest_edge = v.value("longest_edge", vision_.longest_edge);
+        vision_.rescale = v.value("rescale_factor", vision_.rescale);
+        vision_.mean = v.value("rescale_mean", vision_.mean);
+        vision_.stdv = v.value("rescale_std", vision_.stdv);
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
@@ -252,9 +269,9 @@ bool Qwen3VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                 const int img_tokens =
                     (img.grid_h * img.grid_w) / 4;
                 const size_t img_bf16 =
-                    static_cast<size_t>(img.grid_h) * QWEN3_PATCH_SIZE *
-                    static_cast<size_t>(img.grid_w) * QWEN3_PATCH_SIZE *
-                    3u * QWEN3_TEMPORAL_PATCH_SIZE;
+                    static_cast<size_t>(img.grid_h) * vision_.patch *
+                    static_cast<size_t>(img.grid_w) * vision_.patch *
+                    3u * vision_.temporal;
                 if (consumed_image_tokens + img_tokens <= skipped_image_tokens) {
                     consumed_image_tokens += img_tokens;
                     bf16_to_drop += img_bf16;
