@@ -1,0 +1,15 @@
+# Nothing under runs/ is tracked.
+#
+# A run is the output of a tool on the NPU: the raw dumps (gigabytes) and the result.json
+# beside them. Neither belongs in the repository:
+#
+#   * the dumps are reproducible from the tool that wrote them;
+#   * result.json is not, on the machine that matters -- CI has no NPU, so a test that read
+#     one was asserting what somebody once observed, not what the code does now. Those tests
+#     are gone; the behaviour they guarded is pinned by the C++ unit tests instead
+#     (src/test/buffer_range_test.cpp, diagnostic_range_test.cpp, prefill_route_reason_test.cpp,
+#     layer_major_policy_test.cpp), which run on every runner.
+#
+# A tool still writes here so a person can inspect a run, and the reports quote a path when
+# it matters. It is a scratch directory, not a fixture.
+runs/
