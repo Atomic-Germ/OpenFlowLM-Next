@@ -140,3 +140,30 @@ A separate trace check with `--pmode none` confirmed **32 prefill steps / 2050
 dispatches** and **3 decode steps / 198 dispatches** in distinct tables. This
 checks phase isolation; their submit-to-completion intervals are not device
 execution-time measurements. Evidence: `profile-review-fix/trace.log`.
+
+
+## Main merge regression — 2026-11-05
+
+Merged `origin/main` at `bc12da7a` (Granite optimization `f2957e03`).
+The diagnostic registry retains both upstream switches and the profiling controls.
+The standalone builder now enables AVX2 for the CLI's new vectorized argmax;
+`core.cpp` explicitly includes the intrinsics header used by its read fence.
+The Qwen3.8 recipe, generation metadata fixes and profiling helpers are retained.
+
+Fresh host validation: **2512 passed, 172 skipped**. The standalone script and
+CMake builds pass, with **5/5 native CTest** checks. The production Docker build
+and CTest pass (**29 passed, 2 skipped**). The settings generator
+produces the committed registry byte-for-byte.
+
+With the existing Qwen3.8 kernel export, both block and layer-major routes ran
+256 prompt tokens through all 64 layers and emitted identical 16-token sequences,
+also identical to the retained pre-merge sequences. Each route produced one
+complete prefill profile and 15 complete decode profiles. Decode traces contain
+990 dispatches over 15 steps, separate from prefill. A four-layer sequential/block
+comparison at 257 prompt tokens plus two generated tokens also passed the
+existing logits, greedy-token, conv/recurrent-state and KV-cache checks.
+
+Evidence is retained in `Models/qwen38-27b/main-merge-20261105/`, including source
+and artifact hashes in `validation.json`. These are merge regression checks,
+not new throughput measurements: `--pmode none` retained the observed `default`
+power mode. The NPU checks used the retained kernel export; no performance baseline was replaced.

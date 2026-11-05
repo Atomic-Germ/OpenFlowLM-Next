@@ -70,13 +70,13 @@ NON_SETTING_ENV_VARS = {
     # a think preamble the shared path does not. Off unless set; never a setting.
     "OFLM_CTX_TRACE",
     "OFLM_DECODE_AUTO_THRESHOLD", "OFLM_DET_ROUTE", "OFLM_GRANITE_ENGINE",
-    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_BLOCK_FAIL_AT", "OFLM_OPEN_BLOCK_FAIL_INJECT",
-    "OFLM_OPEN_DISPATCH_LOG",
-    # Performance-plan PR #1: per-layer accounting as JSONL, and how many sequential steps to
-    # profile. Measurement only -- they change no computed value and are silent when unset,
-    # so they are diagnostics rather than preferences about how to run a model.
+    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_ATTN_FA", "OFLM_OPEN_BLOCK_FAIL_AT", "OFLM_OPEN_BLOCK_FAIL_INJECT",
+    "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
+    # Per-layer accounting and its sequential-step budget are measurement-only diagnostics.
     "OFLM_OPEN_PROFILE", "OFLM_OPEN_PROFILE_STEPS",
-    "OFLM_OPEN_DXB_LOG",
+    # Granite prefill/dispatch A/B switches; these force experimental paths
+    # for kernel parity and timing checks, rather than model preferences.
+    "OFLM_OPEN_FUSED_NORM", "OFLM_OPEN_PREFILL_PREP", "OFLM_OPEN_RUN_REUSE",
     "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN", "OFLM_OPEN_PREFILL_ROUTE",
     "OFLM_OPEN_HOST_ATTN", "OFLM_OPEN_HOST_ATTN_DECODE",
     "OFLM_OPEN_LAYER_MAJOR", "OFLM_OPEN_MOE_BATCH",
@@ -94,12 +94,9 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_TIMEOUT_RETRY_MS", "OFLM_ROUTE_CHECK",
     "OFLM_WHISPER_DUMP_MEL", "OFLM_WHISPER_ENGINE",
     "OFLM_WHISPER_PROTOCOL",
-    # The Uno draft pass (K2-Horizon): a presence switch, read as "== 1", that
-    # turns on a pass the MODEL has to ship (its lora_file). It is a feature
-    # flag for a draft path still under development, not a preference about how
-    # to run a model, so it stays out of the settings UI. It becomes a
-    # per-model setting when the drafter settles.
-    "OFLM_SPECULATIVE",
+    # Development policy override for choosing lookup, Uno, or plain on a
+    # speculative cycle. OFLM_SPECULATIVE is the registered user setting.
+    "OFLM_SPEC_MODE",
 }
 
 def generate_cpp_header(settings):

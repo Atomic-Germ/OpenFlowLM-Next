@@ -26,6 +26,9 @@ void attn_stepb(const bfloat16 *__restrict K0, const bfloat16 *__restrict V0,
 #if ATTN_BLOCK_ONLY
   const unsigned nv = kRB;     // a full block off the fifo: every slot is a real cached row
 #endif
+#ifdef ATTN_REPEAT
+  for (int rep = 0; rep < ATTN_REPEAT; ++rep)    // PROBE ONLY: compute the block again, prices pure compute
+#endif
   attn_rowb_impl(K, V, qs, oacc, ml ATTN_NV_ARG ATTN_H0_ARG);
 #else
   (void)K; (void)V; (void)qs; (void)oacc; (void)ml;   // the probe covers the block path too

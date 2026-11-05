@@ -47,6 +47,14 @@ if errorlevel 1 goto :clfail
 set "WHICH=gguf_pack_test"
 out\gguf_pack_test.exe
 if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] spec_lookup_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
+   /I ".." /I "..\include" ^
+   spec_lookup_test.cpp /Fe:out\spec_lookup_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=spec_lookup_test"
+out\spec_lookup_test.exe ..\..\specs\open-engine\tests\fixtures\spec_lookup_cases.json
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^

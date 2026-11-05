@@ -15,7 +15,11 @@ void dxl_out_job(const float *__restrict acc, float *__restrict y, const int32_t
     const float *__restrict g = acc + (unsigned)(r[F_G0] + b) * kL * kBandFloats;
 #pragma clang loop unroll(disable)
     for (unsigned i = 0; i < kL * kBandFloats; i += 32) {
+#ifdef DXL_NULL_OUT
+      const v32f a = aie::load_v<32>(g + i);       // probe only: no silu
+#else
       const v32f a = vsiluN<32>(aie::load_v<32>(g + i));
+#endif
       aie::store_v(y + i, fmul32(a, aie::load_v<32>(u + i)));
     }
   }

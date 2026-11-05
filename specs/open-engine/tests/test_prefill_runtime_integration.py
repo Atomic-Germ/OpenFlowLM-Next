@@ -69,14 +69,15 @@ def test_the_dense_route_uses_the_functions_the_oracle_measured():
     """engine.cpp prefers step_gemm_prompt only for MoE; dense takes the block loop."""
     src = engine()
     assert 'layer_major_ok()' in src
-    # layer_major_ok requires every layer kind to be linear/full and is documented as the
-    # MoE kinds, so a dense set (which has other kinds) takes the step_gemm_block loop.
+    # layer_major_ok accepts the MoE kinds (linear/full), and a dense set only on the host-attention
+    # stage-major route (OPEN-PREFILL-BFP16); any other dense set takes the step_gemm_block loop.
     hpp = CORE_HPP.read_text()
     assert 'layer_major_ok' in hpp
     core = (ROOT / 'src/open_qwen36/core.cpp').read_text()
     fn = core[core.index('bool Core::layer_major_ok'):]
     fn = fn[:fn.index('Core::~Core')]
-    assert 'kind != "linear" && kind != "full"' in fn
+    assert 'kind == "linear" || kind == "full"' in fn
+    assert 'dense && host_attn_on_ && stage_major_on_' in fn
 
 
 def test_the_physical_tile_is_read_from_the_manifest_not_a_setting():
