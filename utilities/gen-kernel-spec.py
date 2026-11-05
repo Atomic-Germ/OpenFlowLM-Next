@@ -7,10 +7,15 @@ Usage:
 Fetches config.json (and README frontmatter for base_model), derives dims and
 family via the same heuristics as oflm-add/q4nx-build, and emits a spec JSON
 that still needs manual routing/heuristic review before building.
+
+A repo that ships only GGUF weights has no config.json: the GGUF header names
+its own geometry, so `--repo` falls back to it (the same file `oflm add`
+installs). `--gguf <file>` pins a local file explicitly.
 """
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -120,6 +125,32 @@ def family_from_config(cfg: dict) -> str | None:
     return None
 
 
+def repo_gguf_url(repo: str) -> str | None:
+    """A resolve URL for the repo's GGUF, when it ships no config.json.
+
+    A GGUF-only upload is the common shape of a quantized repository, and it
+    names its own geometry -- there is nothing in config.json to read. Pick the
+    file `oflm add` would install (the same preference order), and fall back to
+    any single-file GGUF when every quant is one the kernels do not stream: for
+    a SPEC, only the header matters, not whether the quant is servable.
+    """
+    from oflm_add import choose_gguf_file, hf_file_tree, root_file_names
+    try:
+        tree = hf_file_tree(repo)
+    except Exception as exc:                      # noqa: BLE001 - gated / offline
+        print(f"warn: could not list {repo}: {exc}", file=sys.stderr)
+        return None
+    names = root_file_names(tree)
+    chosen, _ = choose_gguf_file(names)
+    if not chosen:
+        single = [n for n in names if n.endswith(".gguf")
+                  and not re.search(r"-\d+-of-\d+\.gguf$", n)]
+        chosen = single[0] if single else None
+    if not chosen:
+        return None
+    return f"https://huggingface.co/{repo}/resolve/main/{chosen}"
+
+
 def base_model_from_readme(repo: str) -> str | None:
     try:
         from huggingface_hub import hf_hub_download
@@ -198,6 +229,20 @@ def main():
                          "of writing a link file when another spec covers the geometry")
     args = ap.parse_args()
 
+    cfg = real_vocab = None
+    if not args.gguf and args.repo:
+        try:
+            cfg, real_vocab = spec_config(args.repo)
+        except Exception as exc:                  # noqa: BLE001 - 404 on config.json
+            # A GGUF-only repo has no config.json, but the file names its own
+            # geometry. Derive from the same file `oflm add` would install.
+            url = repo_gguf_url(args.repo)
+            if not url:
+                raise
+            print(f"no config.json for {args.repo} ({exc}); "
+                  f"deriving the spec from the GGUF header")
+            args.gguf = url
+
     if args.gguf:
         # A GGUF names its own geometry: architecture, dimensions, vocab, rope. A gated
         # base repo (meta-llama/*) leaves oflm add with a stub config and leaves this
@@ -216,7 +261,8 @@ def main():
         out.write_text(json.dumps(spec, indent=2), encoding="utf-8")
         print(f"Wrote candidate spec to {out} (from the GGUF metadata)")
         return 0
-    cfg, real_vocab = spec_config(args.repo)
+    if cfg is None:
+        cfg, real_vocab = spec_config(args.repo)
     family = family_from_config(cfg)
     if not family:
         print(f"ERROR: could not derive family from config for {args.repo}", file=sys.stderr)

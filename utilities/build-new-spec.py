@@ -6,9 +6,11 @@
 What it does, in order, and why each step exists:
 
   1. SPEC      the geometry comes from the model's config.json on HuggingFace
-               (utilities/gen-kernel-spec.py). A fine-tune whose base model
-               already has a spec LINKS to it instead -- a fine-tune never gets
-               its own kernels.
+               (utilities/gen-kernel-spec.py), or from the GGUF header when the
+               repo ships only GGUF weights (a quantized upload has no
+               config.json -- the file names its own geometry). A fine-tune
+               whose base model already has a spec LINKS to it instead -- a
+               fine-tune never gets its own kernels.
   2. BUILD     the family's kernel set is compiled for the new size. This is
                where the catalogue refuses a geometry it has not seen, so the
                run is made with OPEN_KERNELS_UNVALIDATED=1: the build proves the
