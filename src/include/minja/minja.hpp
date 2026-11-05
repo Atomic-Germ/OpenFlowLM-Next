@@ -1372,12 +1372,6 @@ public:
               if (name == "iterable") return l.is_iterable();
               if (name == "sequence") return l.is_array();
               if (name == "defined") return !l.is_null();
-              // Jinja's other spelling of the same test. Qwen3.8-27B's template opens with
-              // `{%- if enable_thinking is undefined or enable_thinking is true %}` and
-              // upstream minja (3e4c61c) only knows `defined`, so the model loads on the NPU
-              // and then dies building the chat template. Same defect class as the trailing
-              // comma: valid Jinja the vendored parser did not accept.
-              if (name == "undefined") return l.is_null();
               if (name == "true") return l.to_bool();
               if (name == "false") return !l.to_bool();
               throw std::runtime_error("Unknown type for 'is' operator: " + name);
