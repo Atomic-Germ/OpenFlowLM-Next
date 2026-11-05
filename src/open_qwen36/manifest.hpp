@@ -144,6 +144,8 @@ struct GemmBlockProgram {
     std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
     bool sandwich = false;
     std::string act = "silu";
+    // dense: "q4" (gemm_q4_prefill) or "dit" (dit_gemm: bf16 rows in and out, kernel args x, weight, y)
+    std::string gemm = "q4";
     // >1: the route's HOST norms split each row into `norm_groups` equal groups and
     // RMS each group separately (K2's GroupRMSNorm(2)), the same split the `ln`
     // design's LN_GROUPS bakes into the NPU kernel -- 1 is the plain whole-row
@@ -156,6 +158,7 @@ struct GemmBlockProgram {
     // weight's exact q4_1 split, and the host adds them (OPEN-PREFILL-BATCH)
     bool out_split = false;
     uint64_t state_s_off = 0, s_head_bytes = 0, s_rows = 0;
+    bool conv_f32 = false;
     // full: heads, kv heads, head dim, rotary dim (qw / kvw as above)
     uint64_t nh = 0, kvh = 0, hd = 0, rot = 0;
     // linear and full: the per-token MoE dispatch (moeroute2-patched, its own xclbin), its
@@ -176,6 +179,8 @@ struct GemmBlockProgram {
     // `ff` is its width. Present => the layer type has no MoE block (has_dense_ffn()).
     std::vector<Step> ffn_program;
     std::map<std::string, GemmWeight> ffn_weights;
+    // High-kernel -> BF16 dequantization-residual kernel; four products per projection.
+    std::map<std::string, std::string> low_kernels;
     bool has_dense_ffn() const { return !ffn_program.empty(); }
     // full: the attention products on the NPU (absent: attention on the host)
     AttnBlock attn_block;
@@ -193,6 +198,7 @@ struct LayerType {
 };
 
 struct KernelDesc {
+    std::string weight_component;            ///< empty (normal) | bf16_residual (paired prefill only)
     std::string context;                     ///< name in Manifest::contexts
     std::string insts;                       ///< relative path of insts.bin
     std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows
@@ -239,6 +245,8 @@ struct Manifest {
     // layout
     size_t hidden = 0, vocab = 0, real_vocab = 0;
     size_t chunk_bytes = 0, pool_bytes = 0, lmhead_pool_bytes = 0, lmhead_chunk_bytes = 0;
+    bool linear_conv_f32 = false;
+    bool attn_kv_pair = false;  ///< paired BF16 cache and FP32 sequential attention output
     size_t kv_row = 0, ptab_row = 0, rotary_dim = 0, rout_idx_off = 1024;
     double rope_theta = 0;
     std::vector<double> rope_inv_freq;       ///< per rotary pair (rotary_dim / 2 values; Llama 3's scaling is in here)
@@ -246,6 +254,16 @@ struct Manifest {
                                              ///< (2i, 2i + 1), llama.cpp's NORM layout for the llama
                                              ///< archs -- vs the default half-split (i, i + rot/2)
     bool has_moe = false;                    ///< layout.moe present (a family with routed experts)
+    /// The kernel set DECLARES that the block-loop schedule was measured correct on it, so
+    /// it may be preferred over layer-major for a set with no routed experts.
+    ///
+    /// Absent means "not declared", and the conservative reading applies: a set that can run
+    /// layer-major keeps it. That matters because `Core::layer_major_ok()` is a capability
+    /// test -- most dense sets pass it -- so choosing the block loop for them on capability
+    /// alone would move models nobody measured. Phase 28 validated exactly one set (Qwen3.8-27B)
+    /// and its recipe declares this; the other dense sets keep the schedule they shipped with
+    /// until their own run says otherwise.
+    bool block_loop_preferred = false;
     stream_patch::MoeGeometry moe;
     stream_patch::AttnGeometry attn;
     // the model and its programs

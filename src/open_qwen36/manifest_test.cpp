@@ -71,6 +71,89 @@ int main(int argc, char** argv) {
         std::printf("FAIL  load: %s\n", e.what());
         return 1;
     }
+    // Cache and output precision are one ABI. Test the parser independently of XRT.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_kv_dtype"] = "bfloat16_pair";
+        j["layout"]["attn_output_dtype"] = "float32";
+        const size_t row = m.kv_row * 2;
+        j["layout"]["kv_row"] = row;
+        j["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row;
+        try {
+            auto pair = Manifest::parse(j, "paired cache");
+            check(pair.attn_kv_pair && pair.kv_row == row, "paired KV ABI accepted");
+        } catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 4; ++bad) {
+            auto broken = j;
+            if (bad == 0) broken["layout"]["attn_output_dtype"] = "bfloat16";
+            if (bad == 1) broken["layout"]["attn_kv_dtype"] = "float16";
+            if (bad == 2) broken["layout"]["kv_row"] = row / 2;
+            if (bad == 3) broken["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row / 2;
+            try { Manifest::parse(broken, "bad paired cache"); check(false, "bad paired ABI accepted"); }
+            catch (const std::runtime_error&) { check(true, "bad paired ABI refused"); }
+        }
+    }
+    // Entry norm dtype is explicit; the parser must not silently accept a typo.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_entry_dtype"] = "float32";
+        try { Manifest::parse(j, "FP32 entry"); check(true, "FP32 entry accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        j["layout"]["attn_entry_dtype"] = "float16";
+        try { Manifest::parse(j, "bad entry dtype"); check(false, "bad entry dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad entry dtype refused"); }
+    }
+    // An explicit post-output region must fit the declared linear scratch BO.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt = j["layer_types"]["linear_attention"];
+        const uint64_t offset = (lt["buffers"]["act"].get<uint64_t>() + 4095) / 4096 * 4096;
+        lt["buffers"]["act"] = offset + 24576;
+        lt["post_output"] = {{"dtype", "float32"}, {"offset", offset}, {"bytes", 24576}};
+        try { Manifest::parse(j, "FP32 post"); check(true, "FP32 post accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 6; ++bad) {
+            auto broken = j;
+            auto& t = broken["layer_types"]["linear_attention"];
+            if (bad == 0) t["post_output"]["dtype"] = "float16";
+            if (bad == 1) t["post_output"]["offset"] = offset + 1;
+            if (bad == 2) t["post_output"]["bytes"] = 0;
+            if (bad == 3) t["buffers"]["act"] = offset + 24575;
+            if (bad == 4) t["post_output"]["offset"] = UINT64_MAX - 4095;
+            if (bad == 5) t["buffers"]["state"] = {{"kind", "kv"}, {"row", 4096}};
+            try { Manifest::parse(broken, "bad post output"); check(false, "bad post ABI accepted"); }
+            catch (const std::exception&) { check(true, "bad post ABI refused"); }
+        }
+    }
+    // Linear entry/history dtypes are an explicit ABI, not optional hints.
+    for (const char* field : {"linear_entry_dtype", "linear_conv_dtype"}) {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"][field] = "float16";
+        try { Manifest::parse(j, "bad linear dtype"); check(false, "bad linear dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad linear dtype refused"); }
+    }
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt=j["layer_types"]["linear_attention"];
+        if (lt.contains("gemm_block")) {
+            auto& gb=lt["gemm_block"];
+            const auto old_off=gb["state_s_off"].get<uint64_t>();
+            j["layout"]["linear_entry_dtype"]="float32";
+            j["layout"]["linear_conv_dtype"]="float32";
+            gb["conv_dtype"]="float32"; gb["state_s_off"]=2*old_off;
+            lt["buffers"]["state"]["bytes"]=lt["buffers"]["state"]["bytes"].get<uint64_t>()+old_off;
+            try { auto m=Manifest::parse(j,"FP32 linear state"); check(m.linear_conv_f32,"FP32 state accepted"); }
+            catch (const std::exception& e) { check(false,e.what()); }
+            for(int bad=0;bad<3;++bad) {
+                auto b=j; auto& t=b["layer_types"]["linear_attention"];
+                if(bad==0) t["gemm_block"].erase("conv_dtype");
+                if(bad==1) t["gemm_block"]["state_s_off"]=old_off;
+                if(bad==2) t["buffers"]["state"]["bytes"]=1;
+                try { Manifest::parse(b,"bad FP32 state"); check(false,"incompatible linear state accepted"); }
+                catch(const std::runtime_error&) { check(true,"incompatible linear state refused"); }
+            }
+        }
+    }
     // ---- what the recipe wrote for the 27B
     // Only exercise the new pack-op schema; this synthetic manifest is not a
     // claim that a 48-head kernel has been built or validated.
@@ -248,12 +331,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 4}"));
+    json j = json::parse(std::string("{\"manifest_version\": 5}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 4 is refused");
+        check(false, "manifest_version 5 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 4") != std::string::npos, std::string("manifest_version 4 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 5") != std::string::npos, std::string("manifest_version 5 is refused: ") + e.what());
     }
     // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
     auto bf16_weight = [](json& j, int version, bool mixed) {
@@ -276,6 +359,17 @@ int main(int argc, char** argv) {
         try { Manifest::parse(g, "q8 gemm"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
         check(ok, "a version 3 manifest with a bf16_gemm weight loads");
     }
+    // OPEN-PREFILL-GEMM8: the dit_gemm weight op needs version 4
+    auto dit_weight = [](json& j, int version) {
+        j["manifest_version"] = version;
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"] = {
+            {"from", "pack"},
+            {"pack", json::array({{{"op", "bfp16_dit"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
+                                   {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}}})}};
+    };
+    // the 9-bit layout is read only by a dense dit route; a linear route would run it through the q4 / bf16 GEMM
+    refused_manifest(argv[1], "only a dense route", "a bfp16_dit weight on a linear route is refused at load",
+                     [&](json& j) { dit_weight(j, 4); });
     // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
     auto with_lean = [](json& j) {
         j["kernels"]["gemm_lean"] = {{"context", "gemm"}, {"insts", "gemm_lean/insts.bin"}};
@@ -296,14 +390,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = Manifest::parse(g, "lean");  // Manifest is move-only since #180 (its gguf view)
+        Manifest fast = Manifest::parse(g, "fast route");
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = Manifest::parse(g, "lean");
+        Manifest lean = Manifest::parse(g, "lean route");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -416,7 +510,9 @@ int main(int argc, char** argv) {
             // dx / ln / lm plus the block prefill route's four: the attention dispatch's own
             // xclbin ("dxa"), the ONE context every projection shape streams over ("gemm"), and
             // the attention products' two ("ag_s", "ag_pv": 8 and 4 columns wide at head dim 128)
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") &&
+                  d.contexts.size() == 7 && d.contexts.count("ag_s") && d.contexts.count("ag_pv"),
+                  "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
@@ -474,6 +570,56 @@ int main(int argc, char** argv) {
                              [](json& j) {
                                  j["manifest_version"] = 2;
                                  j["layer_types"]["dense"]["gemm_block"]["program"][0]["split"] = true;
+                             });
+            // OPEN-PREFILL-GEMM8: the fixture's route made an 8-bit one at t 1024, the q4 route kept as lean
+            auto with_dit = [](json& j) {
+                j["manifest_version"] = 4;
+                json& lt = j["layer_types"]["dense"];
+                json q4 = lt["gemm_block"], d = q4;
+                d["t"] = 1024;
+                d["gemm"] = "dit";
+                for (auto& [name, w] : d["weights"].items())
+                    w = {{"from", "pack"}, {"pack", json::array({{{"op", "bfp16_dit"}, {"tensor", "model.layers.{l}.mlp.up_proj.weight"},
+                                                                  {"nch", 4}, {"in_dim", 256}, {"dst", 0}}})}};
+                for (auto& s : d["program"]) s["args"] = {"g8" + s["args"][0].get<std::string>().substr(1), "g8_a", "g8_c"};
+                json w8 = json::object();
+                for (auto& [name, w] : d["weights"].items()) w8["g8" + name.substr(1)] = w;
+                d["weights"] = w8;
+                j["globals"]["g8_a"] = 4096;
+                j["globals"]["g8_c"] = 4096;
+                lt["gemm_block"] = d;
+                lt["gemm_block_variants"]["lean"] = q4;
+            };
+            {
+                std::ifstream f(argv[2]);
+                json g = json::parse(f);
+                with_dit(g);
+                Manifest fast = Manifest::parse(g, "dit"), lean = Manifest::parse(g, "dit");
+                fast.select_prefill_route("");
+                lean.select_prefill_route("lean");
+                const auto& fg = fast.layer_types.at("dense").gemm_block;
+                const auto& lg = lean.layer_types.at("dense").gemm_block;
+                check(fg.gemm == "dit" && fg.t == 1024 && lg.gemm == "q4" && lg.t == 256 &&
+                          fast.globals.count("g8_a") && !lean.globals.count("g8_a"),
+                      "qwen3: an 8-bit route at t 1024 parses beside a q4 lean at 256; each mode keeps its own route and globals");
+            }
+            refused_manifest(argv[2], "needs version 4", "qwen3: a bfp16_dit weight in a version 3 manifest is refused at load",
+                             [&](json& j) { with_dit(j); j["manifest_version"] = 3; });
+            refused_manifest(argv[2], "only a dense route", "qwen3: a bfp16_dit weight on a q4 dense route is refused",
+                             [&](json& j) { with_dit(j); j["layer_types"]["dense"]["gemm_block"].erase("gemm"); });
+            refused_manifest(argv[2], "needs the attention products", "qwen3: an 8-bit route without the products' prep is refused",
+                             [&](json& j) { with_dit(j); j["layer_types"]["dense"]["gemm_block"]["attn_block"].erase("prep"); });
+            refused_manifest(argv[2], "is not packed by bfp16_dit", "qwen3: an 8-bit step reading the q4 pool is refused",
+                             [&](json& j) {
+                                 with_dit(j);
+                                 j["layer_types"]["dense"]["gemm_block"]["weights"]["g8o_w"] = {{"from", "pool"}, {"ops", {3}}};
+                             });
+            refused_manifest(argv[2], "at t 512", "qwen3: a q4 lean variant at another t than a q4 route is still refused",
+                             [&](json& j) {
+                                 json& lt = j["layer_types"]["dense"];
+                                 json v = lt["gemm_block"];
+                                 v["t"] = 512;
+                                 lt["gemm_block_variants"]["lean"] = v;
                              });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
@@ -697,7 +843,7 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a split out projection parses: ") + e.what());
             }
         }
-        refused_manifest(argv[5], "std_perm or bf16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
+        refused_manifest(argv[5], "std_perm, bf16_gemm or bfp16_dit ops", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);
                              json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];

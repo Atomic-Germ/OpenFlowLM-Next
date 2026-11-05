@@ -41,7 +41,6 @@ xclbin and nowhere else (see src/open_qwen36/README.md).
 from __future__ import annotations
 
 import argparse
-import atexit
 import concurrent.futures
 import contextlib
 import hashlib
@@ -51,7 +50,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -66,7 +64,7 @@ from recipes.load import default_spec, load_spec, spec_from_model_dir  # noqa: E
 from recipes.manifest import dumps, manifest  # noqa: E402
 
 # knobs that must NOT leak in from the caller's shell
-CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
+CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC", "GQP_WEIGHT_LOW")
 FILES = ("final.xclbin", "insts.bin")
 
 
@@ -113,7 +111,8 @@ def build_content_key(design: Path, out: Path, env: dict, spec: Path | None = No
         h.update(b"\0spec=")
         h.update(spec.read_bytes())
         h.update(b"\0")
-    h.update(str(out.relative_to(DESIGNS)).encode())
+    # relpath, not relative_to: a --build-root output can live outside DESIGNS.
+    h.update(os.path.relpath(out.resolve(), DESIGNS.resolve()).encode())
     h.update(b"\0")
     for root in (design, *extra_dirs):
         if not root.is_dir():
@@ -154,10 +153,13 @@ LOCKS = DESIGNS / ".locks"
 @contextlib.contextmanager
 def design_lock(out: Path):
     """Hold an exclusive cross-process lock for one build directory."""
-    LOCKS.mkdir(parents=True, exist_ok=True)
-    # The build dir is designs/<design>/<build_dir>; flatten it for the lock name.
-    key = str(out.relative_to(DESIGNS)).replace("/", "__").replace("\\", "__")
-    lock_path = LOCKS / f"{key}.lock"
+    canonical = out.resolve()
+    locks = LOCKS if canonical.is_relative_to(DESIGNS.resolve()) else canonical.parent / ".locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    # Private --build-root workspaces may be outside designs/. Hash the
+    # canonical path so aliases share a lock and long paths stay valid names.
+    key = hashlib.sha256(str(canonical).encode()).hexdigest()
+    lock_path = locks / f"{key}.lock"
     fh = open(lock_path, "a+b")
     try:
         if os.name == "nt":
@@ -297,6 +299,13 @@ def disambiguate_build_dirs(sets: dict) -> dict:
     return out
 
 
+def staging_root(spec, build_root: Path | None = None) -> Path:
+    """Keep relative design imports while isolating private compiler workspaces."""
+    suffix = "" if build_root is None else "_" + hashlib.sha256(
+        str(build_root.resolve()).encode()).hexdigest()[:16]
+    return HERE / f".staging_{spec.spec_hash()[7:26]}{suffix}"
+
+
 def stage_design_tree(stage_root: Path) -> None:
     """Copy the design sources into a per-spec stage.
 
@@ -318,7 +327,22 @@ def stage_design_tree(stage_root: Path) -> None:
         return skipped
 
     if stage_root.exists():
-        shutil.rmtree(stage_root)
+        try:
+            shutil.rmtree(stage_root)
+        except OSError as ex:
+            # The stage is named after the spec, so an earlier run that left it
+            # root-owned makes every later export of that spec fail HERE, on a
+            # PermissionError hundreds of lines above the message the log ends
+            # on. Move it out of the way instead: the name is then free, the
+            # leftover can be deleted by whoever owns it, and this run proceeds.
+            stale = stage_root.with_name(
+                f"{stage_root.name}.stale_{os.getpid()}")
+            try:
+                stage_root.rename(stale)
+            except OSError:
+                raise ex
+            print(f"warning: could not remove stale stage {stage_root} ({ex}); "
+                  f"moved it to {stale}", flush=True)
     stage_root.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(DESIGNS, stage_root, ignore=_ignore, dirs_exist_ok=True)
 
@@ -373,7 +397,7 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
     t0 = time.time()
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
-          f"{out.relative_to(HERE).as_posix()}", flush=True)
+          f"{os.path.relpath(out, HERE)}", flush=True)
     # The lock keeps two specs out of the same build dir at once: the designs
     # are shared, and build_design.py wipes its work dir before compiling.
     with design_lock(out):
@@ -434,6 +458,7 @@ def main() -> int:
     g.add_argument("--spec", help="a ModelSpec JSON (default: recipes/specs/qwen36-35b-a3b.json)")
     ap.add_argument("--out", default=None,
                     help="destination (default src/xclbins/<model name>/open_kernels)")
+    ap.add_argument("--build-root", type=Path, help="separate compiler workspace; default: recipe build directories")
     ap.add_argument("--only", default=None, help="comma-separated subset of the recipe's kernel sets")
     ap.add_argument("--no-build", action="store_true", help="copy/hash the existing build dirs without rebuilding")
     ap.add_argument("--force", action="store_true", help="rebuild even when <out>/manifest.json has this build key")
@@ -475,6 +500,8 @@ def main() -> int:
             )
         raise
     sets = disambiguate_build_dirs(F.builds(spec))
+    if a.build_root:
+        sets = {n: dict(v, build_dir=str(a.build_root.resolve() / n)) for n, v in sets.items()}
     names = [n.strip() for n in a.only.split(",") if n.strip()] if a.only else list(sets)
     bad = [n for n in names if n not in sets]
     if bad:
@@ -520,13 +547,10 @@ def main() -> int:
     # spec's gen could overwrite the sources another spec was compiling, and
     # the xclbin that came out was silently wrong. So each spec stages its
     # own copy of the design tree and compiles from that.
-    # A UNIQUE stage per run, removed on exit. It used to be named after the spec's hash, so
-    # a build that ran as root left a root-owned staging dir under a name the next run had to
-    # remove-and-reuse -- and one such dir then failed every later export for that spec on
-    # `shutil.rmtree` (PermissionError), hundreds of lines above the message the log ends on.
-    # Nothing can strand now: the name is never reused, and the cleanup is best-effort.
-    stage_root = Path(tempfile.mkdtemp(prefix=".staging_", dir=HERE))
-    atexit.register(shutil.rmtree, stage_root, ignore_errors=True)
+    # The stage is named after the spec (and the private build root) so the
+    # audit tooling can find the tree a finished export compiled from, which
+    # also means a stage left behind by an earlier run has to be replaced.
+    stage_root = staging_root(spec, a.build_root)
 
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)
@@ -543,7 +567,7 @@ def main() -> int:
         gen_design_dir = gen_dir.parent.relative_to(DESIGNS)
         (stage_root / gen_design_dir).mkdir(parents=True, exist_ok=True)
         gen.generate(F.recipe(spec), out=stage_root / gen_design_dir)
-    
+
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
     if a.no_build:

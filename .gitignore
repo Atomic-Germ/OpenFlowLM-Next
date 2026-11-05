@@ -111,3 +111,4 @@ bin/
 TestGGUF/
 *.gguf
 ./bin/act
+compose.override.yaml

@@ -95,7 +95,9 @@ def _check(spec: ModelSpec) -> None:
         # PR #148 implements the >32-head case (glue_ab_w.cc's 64-lane tile and the
         # half-outer walk in glue_side_fills), so the old "fused wide glue needs 3 input
         # DMA channels" refusal is gone: head count no longer gates this recipe.
-        if fills > LIMITS["shim_fills"]:
+        # The FP32 route has 17 sequential fills, bounded by Pipeline(3);
+        # its half-tile schedule is hardware-validated independently.
+        if fills > LIMITS["shim_fills"] and not M.linear_fp32(spec):
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
                 f"(each xn half, then both accumulators' weight tiles for it, then small and conv), "
@@ -115,7 +117,7 @@ def _check(spec: ModelSpec) -> None:
 
 def xn_side_elems(spec: ModelSpec) -> int:
     """4 KB elements the layer-entry norm output arrives in on the glue's `side` channel."""
-    return roundup(spec.hidden * 2, ELEM) // ELEM
+    return roundup(spec.hidden * (4 if M.linear_fp32(spec) else 2), ELEM) // ELEM
 
 
 def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
@@ -123,7 +125,7 @@ def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
     4 KB element of the projection -- 64 rows at 32 lanes, 32 rows at the 27B's 64 -- and a
     half carries min(2048, HID - h*2048) rows. Equal halves only when HID is a multiple of
     2048 -- at HID 2560 the two halves are 32 and 8 tiles."""
-    rows = ELEM // 2                                  # bf16 rows in one 4 KB element
+    rows = ELEM // (4 if M.linear_fp32(spec) else 2)
     per_tile = ELEM // (2 * ab_lanes(spec))
     return [min(rows, spec.hidden - h * rows) // per_tile for h in range(xn_side_elems(spec))]
 
@@ -244,6 +246,53 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+# The one configuration whose block-loop *preference* was measured. Anything else on this
+# family may still RUN the block loop -- that is a capability -- but this flag is a claim
+# that someone ran it, and only these geometries earned it.
+#
+# Keyed on the complete spec hash, not on a hand-picked tuple: `ModelSpec.spec_hash()`
+# serialises every field except `extra` (name and provenance), and `from_dict` refuses an
+# unknown field, so a field added to the dataclass is in this key by construction. That is
+# the property a three-field tuple did not have: heads, kv heads, head_dim, rotary_dim, the
+# linear-attention key/value geometry, conv_kernel, the layer-type layout and the quant
+# roles all change the generated route and the measured cost, and none of them moved the
+# old key.
+#
+# A new geometry is adopted by being MEASURED and then added here with its hash and the
+# evidence that earned it -- never by matching a neighbour on three numbers.
+BLOCK_LOOP_VALIDATED = {
+    # Qwen3.8-27B: 1.80x at 264 engine tokens, 13/13 boundary cases, 16/16 decode tokens
+    # (Phase 28.2/28.5). `Atomic-Germ/Qwen3.8-27B-NPU2`'s own config.json derives this.
+    "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458": "Qwen3.8-27B",
+}
+
+
+def block_loop_validated(spec: ModelSpec) -> bool:
+    """Whether THIS exact configuration's block-loop prefill was measured correct and faster.
+
+    `Core::layer_major_ok()` passes for most dense sets, so the block loop is *available*
+    nearly everywhere; taking it on availability alone would move models nobody ran. This
+    is the recipe saying "this geometry was measured", and the key is the whole spec rather
+    than a subset of it: a near-match that differs only in, say, `num_kv_heads` produces a
+    different route and a different cost, and must not inherit the flag.
+
+    Dense sizes other than 27B keep the block loop as an available route; they just do not
+    claim it was measured better. `paired_prefill()` below still covers the wide dense
+    geometry for the precision route, which is a separate claim.
+    """
+    return spec.spec_hash() in BLOCK_LOOP_VALIDATED
+
+
+def paired_prefill(spec: ModelSpec) -> bool:
+    """The independently validated dense wide input/weight precision route."""
+    return (spec.hidden == 5120 and spec.intermediate == 17408 and
+            spec.lin_key_heads == 16 and spec.lin_value_heads == 48 and
+            spec.lin_key_dim == spec.lin_value_dim == 128 and spec.conv_kernel == 4 and
+            spec.num_heads == 24 and spec.num_kv_heads == 4 and spec.head_dim == 256 and
+            spec.rotary_dim == 64 and spec.norm_eps == 1e-6 and
+            all(spec.quant_of(role) == "q4_1" for role in ("attn", "linear", "linear_out", "ffn")))
+
+
 def gemm_route(spec: ModelSpec) -> dict | None:
     """The block prefill route (OPEN-PREFILL-BATCH): `qwen36moe.gemm_route` over this family's
     pack plan, with the dense FFN in place of the MoE block. None means the sequential set,
@@ -258,7 +307,21 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             # engine then prefills through step() (decode-as-prefill), which is
             # exact. The same holds for the MoE recipe.
             return None
-        return M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        route = M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        if route and paired_prefill(spec):
+            for g in route["layer_types"].values():
+                g["low_kernels"] = {}
+                for step in g["program"] + g["ffn_program"]:
+                    high = step["kernel"]
+                    low = high + "_low"
+                    g["low_kernels"][high] = low
+                    route["contexts"][low] = f"{low}/final.xclbin"
+                    route["kernels"][low] = dict(context=low, insts=f"{low}/insts.bin",
+                                                 build=low, weight_component="bf16_residual")
+                    b = route["builds"][high]
+                    route["builds"][low] = dict(design=b["design"], build_dir=b["build_dir"] + "_low",
+                                                env=dict(b["env"], GQP_WEIGHT_LOW="1", GQP_BREUSE="0"))
+        return route
     except OpRangeError:
         return None
 
@@ -289,6 +352,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
+            **({"post_output": {"dtype": "float32", "offset": L.A_OG,
+                                 "bytes": spec.lin_value_width * 4}} if M.linear_post_fp32(spec) else {}),
             "program": [{"op": "run", "kernel": "lx", "args": args}],
         }
     if spec.has_full:
@@ -307,6 +372,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        # Only a set whose block loop was measured declares it; see block_loop_validated().
+        if block_loop_validated(spec):
+            out["block_loop_preferred"] = True
     sec = GGUF.section(spec, max_ctx, programs)
     if sec:
         # The GGUF-direct view: the SAME builds and chunk law, with the pack ops in their
@@ -328,6 +396,12 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     `has_moe` goes false and nothing asks for the router record."""
     L = layout(spec, max_ctx)
     return {
+        **({"attn_kv_dtype": "bfloat16_pair", "attn_output_dtype": "float32"} if M.paired_attention(spec) else {}),
+        **({"attn_entry_dtype": "float32"} if M.attention_entry_fp32(spec) else {}),
+        **({"linear_entry_dtype": "float32", "linear_conv_dtype": "float32"} if M.linear_fp32(spec) else {}),
+        **({"linear_recurrence": "factored_compensated"} if M.factored_recurrence(spec) else {}),
+        **({"q4_activation_sum": "quantized_fp32"} if M.consistent_q4_sum(spec) else {}),
+        **({"ffn_norm_dtype": "float32"} if ffn_geometry(spec).XM_F32 else {}),
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
         "chunk_bytes": M.pool_chunk(spec), "pool_bytes": L.POOL_BYTES,
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,

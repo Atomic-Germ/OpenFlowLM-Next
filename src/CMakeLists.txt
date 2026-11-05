@@ -663,7 +663,7 @@ if(NOT OFLM_USE_HRX)
     if(MSVC)
         set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
-        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-ffp-contract=off")
     endif()
 endif()
 
@@ -1525,6 +1525,35 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# chat_template: the Jinja dialect a shipped chat template is written in. NO device,
+# NO weights, NO network -- minja is a header. The shipped Qwen3.x template asks
+# `enable_thinking is undefined`, and minja implemented `defined` but not `undefined`,
+# so every chat request to that family was refused with a well-formed 400 and the
+# server stayed up. The smoke test above cannot see this: the model simply cannot
+# answer anything, which looks like a client problem.
+add_executable(chat_template_test server/chat_template_test.cpp)
+target_include_directories(chat_template_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(chat_template_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(chat_template_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
+endif()
+add_test(NAME OPEN-CHAT-TEMPLATE
+         COMMAND chat_template_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/../chat_templates/qwen3.x/chat_template.jinja")
+
+# PULL-STALE, PULL-RECORD, PULL-FORCE: which files `oflm pull` fetches. No network, no device.
+add_executable(pull_plan_test pull/pull_plan_test.cpp pull/install_record.cpp)
+target_include_directories(pull_plan_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/pull" "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(pull_plan_test PRIVATE /EHsc /Zc:__cplusplus)
+    target_compile_definitions(pull_plan_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME pull_plan COMMAND pull_plan_test)
+
 # SERVER-IMAGES-EDITS: which part a multipart form names. Header-only Boost.Beast; no device.
 add_executable(multipart_test server/multipart_test.cpp server/multipart.cpp)
 target_include_directories(multipart_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/server")
@@ -1782,6 +1811,12 @@ set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
 # Not REQUIRED: a build that never runs the target (the Windows release)
 # must still configure on a machine with no python3.
 find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME oflm_model_registry_merge
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/utilities/test-model-registry.py"
+                $<TARGET_FILE:oflm> "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+endif()
 if(NOT Python3_EXECUTABLE)
     set(Python3_EXECUTABLE "python3")
     message(STATUS "No python3 interpreter found: generate-settings will use 'python3' from PATH")

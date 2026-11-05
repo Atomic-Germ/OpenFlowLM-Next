@@ -2155,6 +2155,8 @@
        "tensor": "model.layers.{l}.self_attn.q_proj.weight",
        "dst": 94371840,
        "chunk0": 0,
+       "qgate_rows": 256,
+       "qgate_gate": false,
        "nch": 2048,
        "in_dim": 4096
       },
@@ -2177,6 +2179,8 @@
        "tensor": "model.layers.{l}.self_attn.q_proj.weight",
        "dst": 110100480,
        "chunk0": 2048,
+       "qgate_rows": 256,
+       "qgate_gate": true,
        "nch": 2048,
        "in_dim": 4096
       },

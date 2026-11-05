@@ -130,6 +130,10 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
              "fast (default) or lean: lean uses less memory and processes prompts more slowly, "
              "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill)")
+            ("prefill-precision", po::value<std::string>(&parsed_args.prefill_precision)->default_value(""),
+             "Products per prefill projection on the open engine's block route: paired (default, the exact "
+             "four-term sum), three_term (omits only W_lo X_lo, ~2^-18 of the projection), weight_high "
+             "(drops the BF16 weight residual; measured to fail the logit gate), or single")
             ("speculative", po::bool_switch(&parsed_args.speculative),
              "Use the model's draft (Uno) pass for a lossless greedy speedup; "
              "needs a model that ships one")
@@ -237,6 +241,20 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 }
                 if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean") {
                     std::cerr << "Error: --prefill-mode is fast or lean, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                    return false;
+                }
+            }
+
+            // Same reasoning as --prefill-mode above: this picks the arithmetic of the
+            // block route the open engine loads, so only the commands that load one.
+            if (!vm["prefill-precision"].defaulted()) {
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --prefill-precision is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+                const std::string& pp = parsed_args.prefill_precision;
+                if (pp != "paired" && pp != "three_term" && pp != "weight_high" && pp != "single") {
+                    std::cerr << "Error: --prefill-precision is paired, three_term, weight_high or single, not '" << pp << "'" << std::endl;
                     return false;
                 }
             }

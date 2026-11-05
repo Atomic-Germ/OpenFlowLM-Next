@@ -1372,6 +1372,13 @@ public:
               if (name == "iterable") return l.is_iterable();
               if (name == "sequence") return l.is_array();
               if (name == "defined") return !l.is_null();
+              // Jinja's `undefined`, as opposed to `defined`. Templates in the wild
+              // write the two in the same expression ("enable_thinking is undefined or
+              // enable_thinking is true" is Qwen3.x's), and without this name the
+              // parser threw for the WHOLE template, so every request to such a model
+              // was refused. It is NOT `!defined` here: minja reads a present-but-null
+              // name as "not defined", which keeps `defined`'s existing meaning intact.
+              if (name == "undefined") return l.is_null();
               if (name == "true") return l.to_bool();
               if (name == "false") return !l.to_bool();
               throw std::runtime_error("Unknown type for 'is' operator: " + name);

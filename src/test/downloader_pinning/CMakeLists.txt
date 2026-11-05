@@ -34,6 +34,7 @@ add_executable(test_downloader_pinning
     test_downloader_pinning.cpp
     "${OFLM_SOURCE_DIR}/pull/model_downloader.cpp"
     "${OFLM_SOURCE_DIR}/pull/download_model.cpp"
+    "${OFLM_SOURCE_DIR}/pull/install_record.cpp"
     "${OFLM_SOURCE_DIR}/common/utils.cpp")
 target_include_directories(test_downloader_pinning PRIVATE
     "${OFLM_SOURCE_DIR}/include"
