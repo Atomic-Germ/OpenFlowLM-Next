@@ -117,6 +117,17 @@ NPU_EMBED_FILES = [
     "config.json", "model.safetensors", "tokenizer.json",
     "tokenizer_config.json", "vocab.txt", "1_Pooling/config.json",
 ]
+# Speech-to-text (the open whisper_gemm engine). Like the embedding families it
+# is NOT a chat model -- no chat template, no vision projector, no chat-model
+# open-kernel link -- and unlike the .npue packers it needs no design-set
+# symlink: the open engine discovers its kernel set (whisper_kernels.json +
+# design.json, both written by export_whisper_kernels.py) at the same
+# <xclbin_root>/xclbins/<model_name>/open_kernels the chat sets use. The GGUF
+# path is just the base-repo climb for config.json + tokenizer +
+# generation_config.json, exactly as a text model climbs for its aux files.
+WHISPER_FAMILIES = {"whisper-v3"}
+WHISPER_AUX = ["config.json", "tokenizer.json", "tokenizer_config.json",
+               "generation_config.json"]
 # The quant must run to the end of the stem: 'Q4_0_4_4' is a different
 # tensor layout (ik_llama matmul shuffles), not Q4_0, and matching only a
 # prefix once installed exactly that as Q4_0 pools (silent garbage).
@@ -555,6 +566,7 @@ GGUF_ARCH_FAMILIES = {
     "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
     "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
     "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
+    "whisper": "whisper-v3",         # speech-to-text, on the open whisper_gemm set
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -588,6 +600,7 @@ CONFIG_MODEL_FAMILIES = {
     "qwen2_vl": "qwen2vl",
     "qwen2_5_vl": "qwen2vl",
     "qwen2_5_vl_text": "qwen2vl",
+    "whisper": "whisper-v3",
 }
 
 
@@ -2418,6 +2431,30 @@ def link_npue_design(system_prefixes, user_root, design_family, force=False, qui
     _link_one(user_root, design_family, str(src), force, quiet)
 
 
+def link_whisper_set(model_dir, system_prefixes, model_name, force=False, quiet=False):
+    """Symlink the open whisper_gemm set into <model_dir>/open_kernels so the
+    open whisper engine finds it (whisper_kernels.json + design.json), keyed by
+    the official model name exactly where export_whisper_kernels.py writes it:
+    <xclbin_root>/xclbins/<model_name>/open_kernels.
+
+    This mirrors link_npue_design: the kernel set ships under a system xclbin
+    root and the install links it, so a whisper GGUF install needs no manual
+    step to transcribe on NPU."""
+    src = None
+    for p in system_prefixes:
+        cand = Path(p) / "xclbins" / model_name / "open_kernels"
+        if (cand / "whisper_kernels.json").is_file() or (cand / "design.json").is_file():
+            src = cand
+            break
+    if src is None:
+        if not quiet:
+            log(f"[WARN] No open whisper set for '{model_name}' under any system "
+                "xclbin root; the engine cannot transcribe without it. Build it with "
+                "open_kernels/export_whisper_kernels.py.")
+        return
+    _link_one(str(model_dir), "open_kernels", str(src), force, quiet)
+
+
 def build_entry(base_entry, dir_name, files, size):
     # Deep copy: the new entry shares no nested objects with the registry it
     # was seeded from, so stamping details below cannot corrupt the curated
@@ -3956,6 +3993,7 @@ def main():
         if family is None:
             raise
     npue_embed = family in NPU_EMBED_FAMILIES
+    whisper_model = family in WHISPER_FAMILIES
     if npue_embed:
         # NPU-embedding (NpuEmbeddings) model: the authoritative registry entry
         # carries `npue_design_family` + the safetensors file list, and the engine
@@ -4027,6 +4065,13 @@ def main():
         official, official_note = resolve_official(system_registry, dir_name, family, size_value)
         base_entry = official[3] if official else None
         src_tag = f"{official[1]}:{official[2]}" if official else None
+        if whisper_model and official:
+            # The open whisper engine's kernel discovery keys off the official
+            # entry's name (xclbins/<name>/open_kernels) and routes by tag the
+            # way npue_embed does, so a whisper model installs as its official
+            # tag, not a slug derived from the quant repo's name.
+            tag = src_tag
+            bucket, size_token = tag.split(":", 1)
         # A set whose KERNELS match this model's geometry is the right answer, and
         # resolve_official's last resort -- the nearest official size -- is not: a
         # Qwen3-14B model was being handed Qwen3-8B's kernels because the registry
@@ -4047,9 +4092,12 @@ def main():
     # because the registry named a set that is not on disk.
     gguf_kernel_dir = None
     built_set = None                   # the set this install built for a new size
-    if gguf_mode and not npue_embed:
+    if gguf_mode and not npue_embed and not whisper_model:
         # (An NpuEmbeddings model skips this gate: its kernels are the
-        # npue_design_family design set, not a chat open-kernels manifest.)
+        # npue_design_family design set, not a chat open-kernels manifest. A
+        # whisper model skips it too: the open engine discovers its own
+        # whisper_gemm set the same way the chat sets are discovered, and its
+        # weights come from the GGUF's host dequant, not a pool law.)
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
@@ -4124,7 +4172,10 @@ def main():
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
         if gguf_mode and not npue_embed:
-            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
+            if whisper_model:
+                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, host dequant)")
+            else:
+                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
             # The geometry decision, in the dry run: which set serves this file,
             # or why none does. This is what makes `oflm add --dry-run <repo>` the
@@ -4225,7 +4276,11 @@ def main():
             required = ["config.json", "model.safetensors", "tokenizer.json",
                         "tokenizer_config.json"]
     else:
-        required = ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode else REQUIRED_FILES
+        required = (["model.gguf", "tokenizer.json", "tokenizer_config.json",
+                     "generation_config.json"]   # whisper: the hf-decode protocol needs it
+                    if gguf_mode and whisper_model
+                    else ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode
+                    else REQUIRED_FILES)
     missing = [f for f in required if not (target / f).is_file()]
     if gguf_mode:
         # GGUF-quant repos (mradermacher etc.) often ship only the GGUF: take the
@@ -4242,6 +4297,11 @@ def main():
             # improvement, not a requirement.
             aux_want = ["config.json", "tokenizer.json", "tokenizer_config.json",
                         "vocab.txt", "1_Pooling/config.json"]
+        elif whisper_model:
+            # The whisper engine reads config.json + generation_config.json (the
+            # hf decode protocol) + tokenizer; the base repo has the author's
+            # own copies. generation_config.json is REQUIRED, not optional.
+            aux_want = WHISPER_AUX
         else:
             aux_want = ["config.json", "chat_template.jinja"]
         aux_missing = [f for f in aux_want if not (target / f).is_file()]
@@ -4285,6 +4345,11 @@ def main():
                 # vocab.txt; a BPE tokenizer.json rebuilt from a WordPiece GGUF
                 # would be a different tokenizer than the one packed.
                 pass
+            elif whisper_model:
+                # A whisper GGUF is not a chat model: its GPT-2 tiktoken
+                # tokenizer comes from the base repo, and there is no usable
+                # chat-vocab path to extract from the GGUF itself.
+                pass
             elif gguf_mode and (target / "tokenizer.json").is_file():
                 # tokenizer.json already exists (from base repo); skip GGUF extraction
                 log("[INFO] tokenizer.json already present from base repo; skipping GGUF extraction")
@@ -4305,9 +4370,10 @@ def main():
     _off_repo = official_repo_id(base_entry, system_registry)
     if _off_repo and _off_repo not in _chain:
         _chain.append(_off_repo)
-    fill_chat_template(target, repo, _chain, modelscope)
+    if not whisper_model and not npue_embed:
+        fill_chat_template(target, repo, _chain, modelscope)
     projector = ""
-    if gguf_mode and not args.text_only and not npue_embed:
+    if gguf_mode and not args.text_only and not npue_embed and not whisper_model:
         # The tower is a second file, and the engine reads it from the model directory.
         # BEFORE the config repair: the repair translates the projector into the
         # vision_config the adapter reads (a GGUF model has no other description of it).
@@ -4379,7 +4445,13 @@ def main():
     log(f"[INFO] Registered tag '{tag}' in {settings_path}")
 
     system_root = find_system_xclbin_root()
-    if not args.no_xclbin:
+    # A whisper model takes neither the closed container's xclbins nor the chat
+    # open-kernels link: the open whisper engine discovers its shipped
+    # whisper_gemm set (whisper_kernels.json + design.json) under
+    # <xclbin_root>/xclbins/<model_name>/open_kernels, or beside the model at
+    # <model>/open_kernels. Link the latter so the repo-slug directory name is
+    # irrelevant.
+    if not args.no_xclbin and not whisper_model:
         if npue_embed:
             design = base_entry.get("npue_design_family")
             if design:
@@ -4399,8 +4471,10 @@ def main():
 
     # Open kernels: keyed by this model's spec, not by an official model name.
     # NPU-embedding uses the npue_design_family design set (already installed),
-    # not the chat-model open-kernel link, so it is skipped here.
-    if (args.open_kernels or gguf_kernel_dir or not args.no_xclbin) and not npue_embed:
+    # not the chat-model open-kernel link, so it is skipped here; whisper does
+    # the same by discovering its own set.
+    if (args.open_kernels or gguf_kernel_dir or not args.no_xclbin) and not npue_embed \
+            and not whisper_model:
         setup_open_kernels(
             target,
             dir_name,
@@ -4410,6 +4484,10 @@ def main():
             force=args.force,
             quiet=args.quiet,
         )
+
+    if whisper_model and not args.no_xclbin:
+        link_whisper_set(target, SYSTEM_XCLBIN_PREFIXES, (base_entry or {}).get("name"),
+                         force=args.force, quiet=args.quiet)
 
     write_vision_sidecar(target, dir_name, quiet=args.quiet)
 
