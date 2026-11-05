@@ -8,8 +8,8 @@ same container bytes and agree on them. This is the check that the bytes are the
     python open_kernels/model/container_vs_hf.py --model-dir DIR --hf-shard model-00001-of-000NN.safetensors
         [--layers 0,3] [--prefix model.language_model.]
 
-Only the layers whose tensors are in the given shard are compared (pass the shard that
-holds them; the HF index says which).
+Every requested layer must be present in the given shard. Select layers/shards
+using the HF index; missing coverage is a failure, not a successful empty check.
 """
 from __future__ import annotations
 
@@ -55,7 +55,15 @@ class Shard:
 
 def corr(a, b):
     a, b = np.ravel(a), np.ravel(b)
+    if not np.isfinite(a).all() or not np.isfinite(b).all() or not a.size or a.size != b.size:
+        return float("nan")
+    if np.ptp(a) == 0 or np.ptp(b) == 0:
+        return 1.0 if np.array_equal(a, b) else 0.0
     return float(np.corrcoef(a, b)[0, 1]) if a.size > 1 else float("nan")
+
+
+def matches(got, want):
+    return got.shape == want.shape and bool(corr(got, want) > 0.99)
 
 
 def main() -> int:
@@ -85,7 +93,8 @@ def main() -> int:
     for l in map(int, a.layers.split(",")):
         c, h = f"model.layers.{l}.", f"{a.prefix}layers.{l}."
         if not hf.has(h + "input_layernorm.weight"):
-            print(f"layer {l}: not in this shard")
+            print(f"layer {l}: MISSING from this shard")
+            bad += 1
             continue
         rows = []
         # (container name, HF name, expected transform of the HF tensor)
@@ -125,8 +134,9 @@ def main() -> int:
             got = got.reshape(want.shape)
             r = corr(got, want)
             raw = corr(got, w.reshape(got.shape)) if tf is not None and w.size == got.size else float("nan")
-            flag = "" if r > 0.99 else "   <-- MISMATCH"
-            bad += r <= 0.99
+            ok = matches(got, want)
+            flag = "" if ok else "   <-- MISMATCH"
+            bad += not ok
             rows.append(f"  {cn:42s} {str(want.shape):16s} corr {r:9.6f}  (untransformed {raw:9.6f}){flag}")
         print(f"layer {l} ({'linear' if hf.has(h + 'linear_attn.in_proj_qkv.weight') else 'full'}):")
         print("\n".join(rows))

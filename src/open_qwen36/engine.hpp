@@ -9,9 +9,25 @@
 ///       time by default, which is exact but ~0.12 s per prompt token on the full
 ///       model; batched prefill (0167/#32) runs instead whenever the loaded kernel
 ///       set carries a GEMM-route block program (Core::gemm_block_t() > 0) and the
-///       prompt is at least OFLM_OPEN_GEMM_BLOCK_MIN (64) tokens: T tokens per layer
+///       prompt is at least `prefill::kDenseBlockLoop` (96) tokens: T tokens per layer
 ///       as whole-array GEMM dispatches instead of T sequential steps.
 ///       OFLM_OPEN_GEMM_BLOCK=0 turns it off.
+///
+///       The number is 96, and a prompt of 64-95 engine tokens is STEPPED, not blocked.
+///       Two thresholds exist and they answer different questions:
+///
+///         96  `prefill::kDenseBlockLoop` -- the dense sequential-to-block-loop
+///             crossover. This is the one that decides the route here. Measured on
+///             Qwen3.8-27B: fitted crossing 78, first clear win 92, applied 96.
+///         64  `prefill::kLayerMajor` -- the crossover for the layer-major schedule,
+///             which exists to amortise a routed expert's weight stream across a whole
+///             prompt (measured on the Qwen3.6-35B MoE family). A dense set can run
+///             layer-major but has nothing for it to amortise, so it is not the dense
+///             default; `OFLM_OPEN_LAYER_MAJOR=1` forces it where the set is capable.
+///
+///       Both are in `prefill_thresholds.hpp`. OFLM_OPEN_GEMM_BLOCK_MIN overrides the
+///       effective boundary at runtime for a diagnostic A/B; it does not change either
+///       constant.
 #pragma once
 
 #include <memory>
@@ -84,6 +100,12 @@ private:
     vision::VitConfig vcfg_;
     std::unique_ptr<vision::VitWeights> vit_;   ///< loaded on the first image (~0.85 GB, ~3 s)
     void ensure_vit();
+    /// 27.11: remember the caches so a block-prefill failure part-way through a prompt
+    /// can be undone before the sequential path runs. Only taken when the prompt does
+    /// not begin at position 0, because that case is recoverable by `reset()` for free.
+    /// Returns false when no snapshot could be taken, which the caller reports rather
+    /// than mistaking for success.
+    bool save_pre_prompt_state();
     template <class Payload> buffer<bf16> prefill_images(std::vector<int>& ids, const Payload& p);
 
     buffer<bf16> logits_view();
@@ -97,6 +119,11 @@ private:
     /// write - so an intermittent dispatch failure used to show up as a client
     /// timeout and the one line that would diagnose it was thrown away.
     static void note_failure(const char* what);
+    /// \brief Diagnostic: how many prefill calls this engine has served.
+    /// Only read by the OFLM_OPEN_BLOCK_FAIL_INJECT arm, which needs "the second
+    /// prompt of this session" to reach the snapshot path (position != 0).
+    int prefill_calls_ = 0;
+
     template <class F> auto guarded(F&& f) -> decltype(f()) {
         ensure_alive();
         try {

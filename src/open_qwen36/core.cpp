@@ -1,6 +1,7 @@
 /// \file core.cpp
 /// \brief The resident open-kernel decode engine: a manifest interpreter (see core.hpp).
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/buffer_range.hpp"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +35,9 @@
 namespace open_qwen36 {
 
 namespace fs = std::filesystem;
+// PHASE 23: the role/model helpers and the dispatch below all speak of these, so the
+// alias lives at file scope rather than inside one function.
+namespace sw = prefill_precision_switch;
 
 namespace {
 
@@ -207,6 +211,29 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     man_.select_prefill_route(cfg_.prefill_mode == "lean" ? "lean" : "");
     if (has_lean) prefill_route_ = cfg_.prefill_mode;
     else if (cfg_.prefill_mode == "lean") log("this kernel set has one prefill route; lean changes nothing");
+    // Say which arithmetic the block route will run. Two runs of the same prompt that
+    // differ only in this are the A/B this setting exists for; a silent fall back to
+    // `paired` would make both halves identical and read as "no measurable effect".
+    {
+        bool any_low = false;
+        for (const auto& [n, t] : man_.layer_types) any_low = any_low || !t.gemm_block.low_kernels.empty();
+        const auto m = cfg_.prefill_precision;
+        if (!any_low && m != prefill_precision_switch::Mode::paired)
+            log("this kernel set ships no weight-residual product; prefill precision " +
+                prefill_precision_switch::name(m) + " runs the same kernels as paired");
+        else
+            log("prefill precision: " + prefill_precision_switch::name(m) + " (" +
+                std::to_string(prefill_precision_switch::dispatches(m)) + " products per projection)");
+        // Say it when only some roles differ, or a role sweep's "control" run would
+        // look identical to a variant that silently did nothing.
+        if (!cfg_.prefill_role_precision.empty()) {
+            std::string names;
+            for (const auto r : cfg_.prefill_role_precision)
+                names += (names.empty() ? "" : ",") + prefill_precision_switch::role_name(r);
+            log("prefill role precision: " + names + " -> " +
+                prefill_precision_switch::name(cfg_.prefill_role_mode) + "; all other roles paired");
+        }
+    }
     fs::path md(cfg_.model_dir);
     // ---- the weight file: the shipped container (model.q4nx) or a GGUF
     // (model.gguf, the direct path). When both exist the shipped container
@@ -332,6 +359,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.ffn_program) wanted[s.kernel] = true;
+        for (const auto& [high, low] : types_[l]->gemm_block.low_kernels) wanted[low] = true;
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted[types_[l]->gemm_block.attn_kernel] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
@@ -368,8 +396,17 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
-    if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
+    // Three states, not a boolean: unset is the automatic policy, and only an explicit
+    // request may override it. layer_major_preferred() is where the request is honoured.
+    layer_major_force_ = layer_major::from_environment();
     if (const char* env = std::getenv("OFLM_OPEN_STAGE_MAJOR")) stage_major_on_ = std::string(env) != "0";
+    for (const auto* type : types_)
+        if (!type->gemm_block.low_kernels.empty()) {
+            // Stage-major submits raw GEMMs and would bypass the four-product sum.
+            stage_major_on_ = false;
+            log("paired prefill projections: block-at-a-time dispatch within each layer");
+            break;
+        }
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
     // Measurement only; off (and free) unless the env names a file.
@@ -463,26 +500,70 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
-            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)")
-                      : any_dense ? "not in this kernel set (one dxB dispatch a token)"
-                                  : "not in this kernel set (attention on the host)"));
+            (w_->attn_kv_pair ? "not implemented for paired KV (attention on the host)" :
+             any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") :
+             any_dense ? "not in this kernel set (one dxB dispatch a token)" :
+                         "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
+        // Three different facts, said separately: whether the set CAN run layer-major, what
+        // the operator asked for, and -- absent a request -- what the automatic rule says.
+        // The first branch below is the one this wording exists for: if it says "layer-major
+        // (forced)" then Engine::prefill() takes the layer-major branch, because both read
+        // the same pure decision.
         log(std::string("prefill schedule: ") +
-            (layer_major_ok() ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
-                                                    : "layer-major (the whole prompt through each layer)") +
-                                    (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
-                                                     : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
-                              : std::string(layer_major_on_ ? "block-major (a MoE kind's layer types only)"
-                                                            : "block-major (OFLM_OPEN_LAYER_MAJOR=0)")));
+            (layer_major_preferred()
+                 ? std::string(any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
+                                       : "layer-major (the whole prompt through each layer)") +
+                       (layer_major_force_ == layer_major::Force::On
+                            ? ", forced by OFLM_OPEN_LAYER_MAJOR=1"
+                            : "") +
+                       (stage_major_on_ ? ", stage-major inside it (the next block's GEMM overlaps the host)"
+                                        : ", block at a time inside it (OFLM_OPEN_STAGE_MAJOR=0)")
+                 : !layer_major_ok()
+                       ? std::string("block-major (this kernel set has no layer-major route: every layer "
+                                     "needs a linear/full gemm_block program"
+                                     // say why the force could not be honoured, rather than silently
+                                     // ignoring it
+                                     ) +
+                             (layer_major_force_ == layer_major::Force::On
+                                  ? "; OFLM_OPEN_LAYER_MAJOR=1 cannot be honoured here"
+                                  : "") + ")"
+                       : std::string("block-major (layer-major is runnable here but amortises nothing: no "
+                                     "routed experts in this kernel set; OFLM_OPEN_LAYER_MAJOR=1 forces it)")
+                             + (layer_major_force_ == layer_major::Force::Off
+                                    ? ", disabled by OFLM_OPEN_LAYER_MAJOR=0"
+                                    : "")));
 }
 
 bool Core::layer_major_ok() const {
-    if (!layer_major_on_ || !gemm_block_t_) return false;
+    // Capability only: can this set RUN layer-major at all? An explicit force-off is an
+    // operator decision, not a capability, so it is applied in layer_major_preferred().
+    if (!gemm_block_t_) return false;
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
         if (kind != "linear" && kind != "full") return false;
     }
     return nl_ > 0;
+}
+
+bool Core::layer_major_preferred() const {
+    layer_major::Facts f;
+    f.capable = layer_major_ok();
+    // What made layer-major worth having is ONE expert pass a layer: the whole prompt goes
+    // through the layer before the next one, so a routed expert's ~2 MB streams once per
+    // layer instead of once per 256-token block.
+    for (int l = 0; l < nl_; ++l)
+        if (!types_[l]->gemm_block.moe_kernel.empty() ||
+            !types_[l]->gemm_block.moe_batch.kernels.empty()) {
+            f.has_routed_experts = true;
+            break;
+        }
+    // No routed experts: the block loop is the better schedule, but only take it where that
+    // was actually MEASURED -- the Qwen3.8-27B recipe declares `block_loop_preferred`, and a
+    // set that does not declare it keeps the layer-major it shipped with.
+    f.block_loop_preferred = man_.block_loop_preferred;
+    // The decision itself is a pure function, so it can be tested without a device.
+    return layer_major::preferred(layer_major_force_, f);
 }
 
 Core::~Core() {
@@ -746,8 +827,15 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
             globals_[name] = alloc(bytes);
         }
     }
-    // a "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU uses the other
-    if (stage_major_on_ && layer_major_ok())
+    // A "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU
+    // uses the other. Only the layer-major body reads them (`layer_linear_staged` /
+    // `layer_full_staged`, reached from `step_gemm_prompt`), so the test is whether that
+    // schedule will RUN -- `layer_major_preferred()` -- and not merely whether the set could
+    // support it. Gating on `layer_major_ok()` used to work by accident, because that
+    // function also consulted OFLM_OPEN_LAYER_MAJOR; now that capability and the operator's
+    // choice are separate, asking capability alone would allocate these for every set that
+    // will never enter the schedule, including an explicit OFLM_OPEN_LAYER_MAJOR=0.
+    if (stage_major_on_ && layer_major_preferred())
         for (int l = 0; l < nl_; ++l) {
             const GemmBlockProgram& gb = types_[l]->gemm_block;
             for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
@@ -2211,7 +2299,72 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
     throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
 }
 
+sw::Role Core::gemm_role(const Step& s, int layer) const {
+    // Identity, not a kernel name: the export fuses several logical projections into
+    // one GEMM (qkv+z, q+k+v+gate, up+gate), so a name can belong to a role this
+    // projection is not. Pointer identity into the exported program cannot drift.
+    const auto& gb = types_.at(layer)->gemm_block;
+    if (!gb.program.empty() && &s == &gb.program[0]) {
+        // program[0] is the layer's input projection: fused qkv+z on a DeltaNet
+        // layer, fused q+k+v+gate on a full-attention layer. Kind, not the model
+        // name, decides which -- the same rule the packer used.
+        return gb.kind == "linear" ? sw::Role::qkvz : sw::Role::attn_in;
+    }
+    if (gb.program.size() > 1 && &s == &gb.program[1]) return sw::Role::out;
+    if (!gb.ffn_program.empty() && &s == &gb.ffn_program[0]) return sw::Role::ffn_up;
+    if (gb.ffn_program.size() > 1 && &s == &gb.ffn_program[1]) return sw::Role::ffn_down;
+    return sw::Role::none;
+}
+
+sw::Mode Core::gemm_mode_for(sw::Role role) const {
+    // `prefill_role_precision` names the roles that run `prefill_role_mode`; every
+    // other role stays on the accepted arithmetic. With no roles named this is the
+    // global mode, unchanged.
+    if (cfg_.prefill_role_precision.empty()) return cfg_.prefill_precision;
+    return sw::selects(cfg_.prefill_role_precision, role) ? cfg_.prefill_role_mode
+                                                          : sw::Mode::paired;
+}
+
 const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
+    const sw::Mode mode = gemm_mode_for(gemm_role(s, layer));
+    const auto& lows = types_.at(layer)->gemm_block.low_kernels;
+    const auto companion = lows.find(s.kernel);
+    // A set that ships no `_low` kernel has one product to run and the mode cannot add one.
+    // This is the pre-existing path for every set that never had a companion: unchanged.
+    if (companion == lows.end() || mode == sw::Mode::single)
+        return gemm_dispatch(s, x, T, K, N, layer);
+    // OPEN-PREFILL-PRECISION: the set ships the weight residual; the run may decline it.
+    // Declining it gives up no accuracy the weights had -- see prefill_precision_switch.hpp:
+    // `_low` carries the bf16 ROUNDING of the dequantised weight, not its int4 quantisation
+    // error. It is what Phase 20 accepted, though, so only an explicit mode drops it.
+    if (!sw::uses_weight_residual(mode))
+        // `Workspace::high`, NOT `Workspace`: the four-product fold would run the high
+        // weight against both input halves AND then repeat it for the low half, issuing
+        // four dispatches where this mode promises two. Measured on hardware: the first
+        // version did exactly that and cost 68576.5 ms where two products cost 36132.9.
+        return precision_workspaces_[s.args.at(2)].high.run(x, T * K, T * N,
+            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); });
+    Step residual = s;
+    residual.kernel = companion->second;
+    prefill_precision::Workspace& ws = precision_workspaces_[s.args.at(2)];
+    if (!sw::needs_low_input(mode)) {
+        // W_hi X_hi + W_hi X_lo + W_lo X_hi: the same fold with the input's residual
+        // removed from the W_lo pass only. The order of the first three additions is
+        // unchanged, so the accepted route's sum is a strict superset of this one.
+        const float* h = ws.high.run(x, T * K, T * N,
+            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); });
+        ws.output.assign(h, h + T * N);
+        const float* l = gemm_dispatch(residual, x, T, K, N, layer);
+        for (size_t i = 0; i < T * N; ++i) ws.output[i] += l[i];
+        return ws.output.data();
+    }
+    return ws.run(x, T * K, T * N,
+        [&](bool low_weight, const float* input) {
+            return gemm_dispatch(low_weight ? residual : s, input, T, K, N, layer);
+        });
+}
+
+const float* Core::gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
     // A split step's weight is [hi | lo] of a q8 projection's exact q4_1 split (OPEN-PREFILL-BATCH):
     // the dispatch returns 2N rows, and rows N.. are added into rows 0.. below, so every caller
     // sees the projection's [N, T] whether its weight was split or not.
@@ -2540,7 +2693,7 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     timing_.state_ms += ms_since(tt);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
     host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
@@ -3184,12 +3337,12 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
-    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
     double phase[2] = {0, 0};
     host::deltanet_block(g, qkv, z, xn, hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
-                         hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                         hc.dtb.data(), hc.nw.data(), sp,
                          reinterpret_cast<float*>(sp + gb.state_s_off), og, phase);
     timing_.dn_conv_ms += phase[0];
     timing_.dn_rule_ms += phase[1];
@@ -3465,10 +3618,10 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
-    if (attn_block_on_ && gb.attn_block.present()) {
+    if (attn_block_on_ && gb.attn_block.present() && !g.kv_pair) {
         float* Q = BlockScratch::fit(bs_.qrope, T * qw);
         host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), w_->rope_inv_freq.data(),
                              st.map<uint16_t*>(), row / 2, Q);
@@ -3672,7 +3825,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
     host::DeltaGeom g;
     g.T = T; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
-    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     // DeltaNet still goes block by block in order: S and the conv rows chain through it
     gemm_phase(l, gb.program[0], B, T, hid, nch + vw,
                [&](size_t b) -> const float* {
@@ -3695,7 +3848,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
                    auto t0 = std::chrono::steady_clock::now();
                    double phase[2] = {0, 0};
                    host::deltanet_block(g, qkv, z, xn_all + b * T * hid, hc.convw.data(), hc.Wa.data(), hc.Wb.data(),
-                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                                        hc.A.data(), hc.dtb.data(), hc.nw.data(), sp,
                                         reinterpret_cast<float*>(sp + gb.state_s_off), og_all + b * T * vw, phase);
                    timing_.dn_conv_ms += phase[0];
                    timing_.dn_rule_ms += phase[1];
@@ -4007,18 +4160,60 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
     if (row < 0 || static_cast<size_t>(row) >= cfg_.max_ctx) throw std::runtime_error("open_qwen36: KV row out of range");
     const size_t kv_row = types_[layer]->state_row;
     size_t off = static_cast<size_t>(row) * kv_row + (value ? kv_row / 2 : 0);
-    read_back(state_[layer], kv_row / 2, off);
-    std::memcpy(out, state_[layer].map<uint8_t*>() + off, kv_row / 2);
+    // The public API returns BF16; expose the high plane, not both planes as heads.
+    const size_t bytes = kv_row / (w_->attn_kv_pair ? 4 : 2);
+    read_back(state_[layer], bytes, off);
+    std::memcpy(out, state_[layer].map<uint8_t*>() + off, bytes);
 }
 
 void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {
     if (layer < 0 || layer >= nl_) throw std::runtime_error("open_qwen36: read_act: layer " + std::to_string(layer) + " out of range");
     const size_t bytes = types_[layer]->act_bytes;
-    if (off + n > bytes)
-        throw std::runtime_error("open_qwen36: read_act: [" + std::to_string(off) + ", " + std::to_string(off + n) +
-                                 ") is outside the layer's " + std::to_string(bytes) + "-byte act buffer");
+    // overflow-safe: `off + n > bytes` wraps (SIZE_MAX + 2 == 1) and a negative offset that
+    // reached here as size_t is exactly SIZE_MAX. require_range subtracts instead.
+    require_range(off, n, bytes, "read_act", "layer's act");
     read_back(act_[layer], n, off);
     std::memcpy(dst, act_[layer].map<uint8_t*>() + off, n);
+}
+
+// ---- Phase 26: the oracle's view of the persistent state (bring-up only) ----
+//
+// The BO is sized in load_weights as `state_bytes` for a linear layer and
+// `(max_ctx + kv_slack) * state_row` for a kv layer -- the slack exists because some
+// attnpos kernels read past the real prompt, so the manifest's size is NOT the BO's size
+// for a kv layer. A caller that sized a read from the manifest would silently under-read,
+// which is the reason this is computed from the BO itself.
+size_t Core::state_region_bytes(int layer) const {
+    if (layer < 0 || layer >= nl_)
+        throw std::runtime_error("open_qwen36: state_region_bytes: layer " + std::to_string(layer) + " out of range");
+    return static_cast<size_t>(state_[layer].size());
+}
+
+void Core::read_state(int layer, size_t off, size_t n, uint8_t* dst) {
+    const size_t bytes = state_region_bytes(layer);
+    require_range(off, n, bytes, "read_state", "layer's state");
+    read_back(state_[layer], n, off);
+    std::memcpy(dst, state_[layer].map<uint8_t*>() + off, n);
+}
+
+void Core::read_global(const std::string& name, size_t off, size_t n, uint8_t* dst) {
+    auto it = globals_.find(name);
+    if (it == globals_.end())
+        throw std::runtime_error("open_qwen36: read_global: this kernel set has no global '" + name + "'");
+    xrt::bo& bo = it->second;
+    require_range(off, n, static_cast<size_t>(bo.size()), "read_global " + name, "global");
+    read_back(bo, n, off);
+    std::memcpy(dst, bo.map<uint8_t*>() + off, n);
+}
+
+void Core::write_state_canary(int layer, size_t off, size_t n, uint8_t pattern) {
+    const size_t bytes = state_region_bytes(layer);
+    require_range(off, n, bytes, "write_state_canary", "layer's state");
+    // Write through the map and sync TO_DEVICE. Writing into the map without the sync
+    // leaves the device's copy untouched, and the canary would then "pass" while testing
+    // nothing -- the mirror of the read_back trap the split-sum path documents.
+    std::memcpy(state_[layer].map<uint8_t*>() + off, std::string(n, static_cast<char>(pattern)).data(), n);
+    state_[layer].sync(XCL_BO_SYNC_BO_TO_DEVICE, n, off);
 }
 
 }  // namespace open_qwen36

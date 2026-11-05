@@ -43,11 +43,14 @@
 
 #include "open_qwen36/block_host.hpp"
 #include "open_qwen36/gguf_file.hpp"
+#include "open_qwen36/layer_major_policy.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 #include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
+#include "open_qwen36/prefill_precision.hpp"
+#include "open_qwen36/prefill_precision_switch.hpp"
 
 namespace open_qwen36 {
 
@@ -59,6 +62,15 @@ struct CoreConfig {
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
     std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    prefill_precision_switch::Mode prefill_precision =
+        prefill_precision_switch::kDefault;  ///< OPEN-PREFILL-PRECISION: products per projection
+    /// PHASE 23 attribution: when non-empty, ONLY these projection roles run
+    /// `prefill_role_mode`; every other role keeps the accepted `paired` arithmetic.
+    /// Empty (the default) means the global `prefill_precision` applies everywhere,
+    /// so the production path is untouched.
+    std::vector<prefill_precision_switch::Role> prefill_role_precision;
+    prefill_precision_switch::Mode prefill_role_mode =
+        prefill_precision_switch::Mode::three_term;  ///< what the named roles run
     bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 
@@ -234,6 +246,29 @@ public:
     /// only: it is how you tell a stage that computes the wrong thing from a stage that
     /// never ran, without inferring either from the logits.
     void read_act(int layer, size_t off, size_t n, uint8_t* dst);
+
+    // ---- Phase 26: the block-vs-sequential oracle's view of the persistent state ----
+    //
+    // Bring-up only, like read_act: nothing on the production path calls these, and the
+    // default route is untouched by their existence. They exist because the oracle has to
+    // compare the state a block produces against the state a token-at-a-time run produces,
+    // and because it has to PROVE production does not write outside its own region rather
+    // than infer it from the numbers.
+    /// The state BO's real size for this layer. A `linear` layer's BO is the manifest's
+    /// `state_bytes`; a `kv` layer's is `(max_ctx + slack) * state_row`, which is why this
+    /// is a call and not a manifest field lookup.
+    size_t state_region_bytes(int layer) const;
+    /// `n` bytes of a layer's state BO at `off`, straight off the device.
+    void read_state(int layer, size_t off, size_t n, uint8_t* dst);
+    /// Bring-up: read part of a named GLOBAL buffer (the position records `ptab`, xres, hn).
+    /// The position record lives in a global rather than a layer's state, so read_state
+    /// cannot reach it, and Phase 29's addressing probe needs the cos/sin the engine
+    /// actually wrote at a high position rather than a re-derivation of them.
+    void read_global(const std::string& name, size_t off, size_t n, uint8_t* dst);
+    /// Fill [off, off+n) of a layer's state BO with `pattern` and push it to the DEVICE
+    /// before the run. A region production must not touch can then be read back and
+    /// required to be unchanged. Destroys whatever was there: bring-up only.
+    void write_state_canary(int layer, size_t off, size_t n, uint8_t pattern);
     /// T = gemm_block_t() tokens through every layer on the block route: the
     /// projections as whole-array GEMM dispatches, the stages between them
     /// per layer-type kind (dense: T single-token attention dispatches and
@@ -254,9 +289,32 @@ public:
     /// the tail block is padded here with the last id, exactly as the caller did.
     /// Only for the MoE kinds (linear / full) -- layer_major_ok() says so.
     void step_gemm_prompt(const std::vector<int>& ids, bool want_logits);
-    /// Whether step_gemm_prompt() can run this kernel set: a block route whose every
-    /// layer is a MoE kind, and OFLM_OPEN_LAYER_MAJOR not set to 0.
+    /// Whether step_gemm_prompt() can RUN this kernel set: a block route whose every layer
+    /// carries a gemm_block program. This is a capability, not a preference, and it ignores
+    /// OFLM_OPEN_LAYER_MAJOR on purpose -- an operator cannot force a schedule onto a set
+    /// with no kernels for it. The force is applied in layer_major_preferred().
     bool layer_major_ok() const;
+    /// Whether layer-major is also the schedule to USE for this kernel set, which is a
+    /// different question from whether it can run.
+    ///
+    /// `step_gemm_prompt` pads the prompt to whole blocks (`TOT = B * T`) and runs every one
+    /// of them at full width, while the block loop steps a short tail token by token. For a
+    /// kernel set whose layers carry no routed experts, the layer-major body IS the block
+    /// body -- `layer_linear_staged` / `layer_full_staged` call the same kernels with the
+    /// same host stages -- so the only thing layer-major adds is a padded block for the
+    /// tail. Measured on Qwen3.8-27B (Phase 28.2, Phase 28.5's exact-multiple control):
+    /// block-loop is never slower and is 1.8x faster at 264 engine tokens, decaying to
+    /// parity as the tail becomes a negligible fraction of the prompt.
+    ///
+    /// For the MoE kinds the answer stays YES: there `step_gemm_prompt` runs each layer once
+    /// over the whole prompt, so one expert's weights stream once per layer instead of once
+    /// per block, which is the measured win layer-major was built for (Qwen3.6-35B).
+    ///
+    /// OFLM_OPEN_LAYER_MAJOR overrides this: `1` (or any nonzero value) selects layer-major
+    /// wherever the set is capable, and `0` disables it. Unset leaves the rule above in
+    /// force. The decision itself is `open_qwen36::layer_major::preferred()`, a pure
+    /// function, so the operator contract is tested without a device.
+    bool layer_major_preferred() const;
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
     /// sequential path needs. Off by default; costs a tail per token.
@@ -375,7 +433,7 @@ private:
     std::string prefill_route_;  ///< "fast" | "lean" on a set that carries both, "" on a set with one route
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
-    bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
+    layer_major::Force layer_major_force_ = layer_major::Force::Auto; ///< OFLM_OPEN_LAYER_MAJOR, as the operator set it
     bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count
@@ -564,6 +622,12 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// mapping is returned, so a caller that is going to slice the output can transpose
     /// straight into its own arrays. Valid until the next GEMM on the same buffer.
     const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
+    /// Which separable projection a step is, from its position in the exported program.
+    prefill_precision_switch::Role gemm_role(const Step& s, int layer) const;
+    /// The arithmetic a role runs under the current configuration.
+    prefill_precision_switch::Mode gemm_mode_for(prefill_precision_switch::Role role) const;
+    const float* gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
+    std::map<std::string, prefill_precision::Workspace> precision_workspaces_;
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
