@@ -1,4 +1,4 @@
-// Traces: OPEN-PREFILL-BATCH, OPEN-SPEC-VERIFY (canonical spec: specs/open-engine/spec.md)
+// Traces: OPEN-PREFILL-BATCH, OPEN-PREFILL-ATTN, OPEN-SPEC-VERIFY (canonical spec: specs/open-engine/spec.md)
 // The block prefill's host stages against open_kernels/model/replica_block.py's fixture:
 //   python open_kernels/model/replica_block.py --fixture <dir>
 //   block_host_test.exe <dir>
@@ -86,14 +86,16 @@ void rms_vec(const float* x, size_t d, const float* w, double eps, float* out) {
 // alpha / beta loops have to match bit for bit.
 void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z, const float* xn,
                      const float* convw, const float* Wa, const float* Wb, const float* A, const float* dtb,
-                     const float* nw, uint16_t* conv_state, float* S, float* og) {
+                     const float* nw, void* history, float* S, float* og) {
+    auto* conv_state=static_cast<uint16_t*>(history);
+    auto* conv_fp32=static_cast<float*>(history);
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     const size_t grp = g.value_heads / g.key_heads, R = g.t_real, pre = g.taps - 1;
     const float inv_sqrt = 1.0f / std::sqrt(static_cast<float>(dim));
     std::fill(og, og + g.T * vw, 0.f);
 
     std::vector<float> carry(pre * nch);
-    for (size_t i = 0; i < carry.size(); ++i) carry[i] = bf16_to_f32(conv_state[i]);
+    for (size_t i = 0; i < carry.size(); ++i) carry[i] = g.conv_f32 ? conv_fp32[i] : bf16_to_f32(conv_state[i]);
     std::vector<float> Q(R * key_w), Kk(R * key_w), V(R * vw), decay(R * g.value_heads), beta(R * g.value_heads);
     std::vector<float> c(nch), al(g.lanes), be(g.lanes);
     for (size_t t = 0; t < R; ++t) {
@@ -106,7 +108,7 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
                 for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * v[j];
             } else {
                 const float* v = qkv + static_cast<size_t>(s) * nch;
-                for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
+                for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * (g.conv_f32 ? v[j] : bf16r(v[j]));
             }
         }
         for (size_t j = 0; j < nch; ++j) c[j] = silu(c[j]);
@@ -138,10 +140,14 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
     for (size_t r = 0; r < pre; ++r) {
         const long long s = static_cast<long long>(R) - static_cast<long long>(pre) + static_cast<long long>(r);
         if (s < 0) {
-            std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
+            if (g.conv_f32) std::copy(conv_fp32 + (R+r)*nch, conv_fp32 + (R+r+1)*nch, conv_fp32 + r*nch);
+            else std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
         } else {
             const float* row = qkv + static_cast<size_t>(s) * nch;
-            for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(row[j]);
+            for (size_t j = 0; j < nch; ++j) {
+                if(g.conv_f32) conv_fp32[r*nch+j]=row[j];
+                else conv_state[r*nch+j]=f32_to_bf16(row[j]);
+            }
         }
     }
     std::vector<float> tv(dim), delta(dim), o(dim), on(dim);
@@ -361,6 +367,63 @@ int main(int argc, char** argv) {
         }
     }
 
+    // FP32 history preserves low bits across short and split blocks.
+    {
+        host::DeltaGeom g;
+        g.T=4; g.t_real=4; g.hid=2; g.key_heads=1; g.value_heads=1;
+        g.head_dim=3; g.taps=4; g.lanes=1; g.s_rows=3; g.conv_f32=true;
+        const size_t nch=9, vw=3;
+        std::vector<float> q(4*nch), z(4*vw,1.f), x(8,1.f), cw(4*nch,.25f);
+        for(size_t i=0;i<q.size();++i) q[i]=1.001f+float(i)*.0001f;
+        float wa[2]={.1f,.2f}, wb[2]={.2f,.1f}, a[1]={-.5f}, dt[1]={0}, nw[3]={1,1,1};
+        std::vector<float> c(3*nch,.0031f), cs=c, st(9,0.f), sts=st, out(4*vw), outs(4*vw);
+        auto cref=c, sref=st; std::vector<float> oref(out.size());
+        deltanet_scalar(g,q.data(),z.data(),x.data(),cw.data(),wa,wb,a,dt,nw,cref.data(),sref.data(),oref.data());
+        host::deltanet_block(g,q.data(),z.data(),x.data(),cw.data(),wa,wb,a,dt,nw,c.data(),st.data(),out.data());
+        check(c==cref && maxrel(st,sref)<1e-6 && maxrel(out,oref)<1e-6, "FP32 conv and recurrence match scalar oracle");
+        for(size_t t=0;t<4;++t) {
+            auto one=g; one.T=one.t_real=1;
+            host::deltanet_block(one,q.data()+t*nch,z.data()+t*vw,x.data()+t*2,cw.data(),
+                                wa,wb,a,dt,nw,cs.data(),sts.data(),outs.data()+t*vw);
+            if(t==0) check(cs[0]==.0031f && cs[2*nch]==q[0], "FP32 short history shift retains low bits");
+        }
+        check(c==cs && std::equal(c.begin(),c.end(),q.begin()+nch), "FP32 block history equals exact final rows");
+        check(maxrel(st,sts)<1e-6 && maxrel(out,outs)<1e-6, "FP32 whole/split block carry parity");
+
+        // A taped FP32 block must restore every accepted prefix without a BF16
+        // round trip, including k=0 and prefixes shorter than the conv window.
+        const std::vector<float> initial_conv(3*nch,.0031f), initial_state(9,.0073f);
+        auto taped_conv=initial_conv, taped_state=initial_state;
+        host::DeltaTape tape;
+        host::deltanet_block(g,q.data(),z.data(),x.data(),cw.data(),wa,wb,a,dt,nw,
+                            taped_conv.data(),taped_state.data(),out.data(),nullptr,&tape);
+        for(size_t k=0;k<=g.t_real;++k) {
+            auto restored_conv=taped_conv, restored_state=taped_state;
+            host::deltanet_rollback(g,tape,k,q.data(),restored_conv.data(),restored_state.data());
+            auto expected_conv=initial_conv, expected_state=initial_state;
+            auto one=g; one.T=one.t_real=1;
+            for(size_t t=0;t<k;++t)
+                host::deltanet_block(one,q.data()+t*nch,z.data()+t*vw,x.data()+t*2,cw.data(),
+                                    wa,wb,a,dt,nw,expected_conv.data(),expected_state.data(),outs.data());
+            check(restored_conv==expected_conv, "FP32 rollback preserves exact conv history at prefix "+std::to_string(k));
+            check(std::memcmp(restored_state.data(),expected_state.data(),9*sizeof(float))==0,
+                  "FP32 rollback preserves exact recurrence at prefix "+std::to_string(k));
+        }
+        auto bf_geom=g; bf_geom.conv_f32=false;
+        auto bf_conv=to_bf16(initial_conv); auto bf_state=initial_state;
+        bool rejected=false;
+        try { host::deltanet_rollback(bf_geom,tape,1,q.data(),bf_conv.data(),bf_state.data()); }
+        catch(const std::runtime_error&) { rejected=true; }
+        check(rejected && bf_conv==to_bf16(initial_conv) && bf_state==initial_state,
+              "rollback refuses a different conv format before changing state");
+        // Reusing the tape for a legacy BF16 block must discard its FP32 history.
+        host::deltanet_block(bf_geom,q.data(),z.data(),x.data(),cw.data(),wa,wb,a,dt,nw,
+                            bf_conv.data(),bf_state.data(),out.data(),nullptr,&tape);
+        host::deltanet_rollback(bf_geom,tape,0,q.data(),bf_conv.data(),bf_state.data());
+        check(bf_conv==to_bf16(initial_conv) && bf_state==initial_state,
+              "reused FP32 tape restores a subsequent BF16 block");
+    }
+
     // ---- the attention stage
     {
         host::AttnGeom g;
@@ -384,6 +447,43 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < g.pos0 * kv_row; ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
         for (size_t i = (g.pos0 + t_real) * kv_row; i < kv.size(); ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
         check(untouched, "attention_block: rows before the block and past t_real are untouched");
+    }
+
+    // ---- the attention stage's host half when its products run on the NPU (OPEN-PREFILL-ATTN):
+    // attention_prep with the q / k norms (prep "qknorm_rope", Qwen3) and with none (null qn / kn,
+    // prep "rope", K2), against replica_block's. The fixture's block starts past row 0, holds
+    // fewer real tokens than T and rotates part of the head, so all three reach these copies.
+    {
+        host::AttnGeom g;
+        g.T = T; g.t_real = t_real; g.nh = S.at("nh"); g.kvh = S.at("kvh"); g.hd = S.at("hd"); g.rot = S.at("rot");
+        g.pos0 = S.at("pos0");
+        const auto q = read<float>(dir, "q.f32"), k = read<float>(dir, "k.f32"), v = read<float>(dir, "v.f32");
+        const auto qn = read<float>(dir, "qn.f32"), kn = read<float>(dir, "kn.f32");
+        const auto inv_freq = read<double>(dir, "inv_freq.f64");
+        const auto kv_in = read<float>(dir, "kv.f32");
+        const size_t qw = g.nh * g.hd, kv_row = 2 * g.kvh * g.hd;
+        struct Prep { const char* name; bool normed; const char* q_ref; const char* kv_ref; };
+        for (const Prep& c : {Prep{"qknorm_rope", true, "out_q_prep_qknorm.f32", "out_kv.f32"},
+                              Prep{"rope", false, "out_q_prep_rope.f32", "out_kv_prep_rope.f32"}}) {
+            const std::string tag = std::string("attention_prep (") + c.name + "): ";
+            auto kv = to_bf16(kv_in);
+            std::vector<float> Q(T * qw, 9.f);     // stale rows the padding past t_real has to clear
+            host::attention_prep(g, q.data(), k.data(), v.data(), c.normed ? qn.data() : nullptr,
+                                 c.normed ? kn.data() : nullptr, inv_freq.data(), kv.data(), kv_row, Q.data());
+            const double e1 = maxrel(Q, read<float>(dir, c.q_ref));
+            const double e2 = maxrel(from_bf16(kv), read<float>(dir, c.kv_ref));
+            check(e1 < tol, tag + "Q roped and scaled by 1/sqrt(hd) vs replica_block (maxrel " + std::to_string(e1) + ")");
+            check(e2 < 4e-3, tag + "the block's KV rows vs replica_block, within a bf16 ulp (maxrel " +
+                                 std::to_string(e2) + ")");
+            bool zero = true;
+            for (size_t i = t_real * qw; i < Q.size(); ++i) zero = zero && Q[i] == 0.f;
+            check(zero, tag + "Q rows past t_real are zero");
+            bool untouched = true;
+            for (size_t i = 0; i < g.pos0 * kv_row; ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
+            for (size_t i = (g.pos0 + t_real) * kv_row; i < kv.size(); ++i)
+                untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
+            check(untouched, tag + "rows before the block and past t_real are untouched");
+        }
     }
 
     // ---- the router

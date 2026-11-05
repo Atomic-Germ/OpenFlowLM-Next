@@ -428,6 +428,35 @@ TEST(get_merged_model_entry_not_found) {
     ASSERT_TRUE(entry.empty() || entry.is_null());
 }
 
+TEST(user_model_collision_matches_the_loaded_registry) {
+    nlohmann::json shipped = {{"models", {{"qwen3.8", {{"27b", {
+        {"name", "shipped"}, {"default_context_length", 32768}, {"url", "old"}
+    }}}}}}};
+    nlohmann::json user = {{"models", {{"qwen3.8", {{"27b", {
+        {"name", "local"}, {"default_context_length", 4096}
+    }}}}}}};
+    Fixture f(shipped, user);
+    auto cfg = oflm::config::load_effective_config();
+    auto entry = oflm::config::get_merged_model_entry(cfg, "qwen3.8:27b");
+    ASSERT_EQ(entry, cfg.merged["models"]["qwen3.8"]["27b"]);
+    ASSERT_EQ(entry["default_context_length"], 4096);
+    ASSERT_FALSE(entry.contains("url"));
+}
+
+TEST(user_model_metadata_survives_a_settings_overlay) {
+    nlohmann::json user;
+    user["models"]["local"]["27b"] = {
+        {"name", "local"}, {"default_context_length", 4096}
+    };
+    user["settings"]["local"]["27b"] = {{"prefill_mode", "lean"}};
+    Fixture f({{"models", nlohmann::json::object()}}, user);
+    auto cfg = oflm::config::load_effective_config();
+    auto entry = oflm::config::get_merged_model_entry(cfg, "local:27b");
+    ASSERT_EQ(entry, cfg.merged["models"]["local"]["27b"]);
+    ASSERT_EQ(entry["name"], "local");
+    ASSERT_EQ(entry["default_context_length"], 4096);
+}
+
 // ============================================================================
 // Main
 // ============================================================================

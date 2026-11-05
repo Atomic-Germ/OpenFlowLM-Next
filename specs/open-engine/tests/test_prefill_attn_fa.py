@@ -45,7 +45,7 @@ def test_granite_prep_stream_rides_the_attention_context():
     lt = m["layer_types"]["dense"]
     for gb in (lt["gemm_block"], lt["gemm_block_variants"]["bfp16"]):
         assert gb["attn_fa"]["prep"] == {"kernel": "afp", "n_pad": 4096}
-    assert m["kernels"]["afp"]["context"] == "af" and m["manifest_version"] == 6
+    assert m["kernels"]["afp"]["context"] == "af" and m["manifest_version"] == 7
     env = m["builds"]["afp"]["env"]
     assert (env["AF_MODE"], env["AF_QKV_NPAD"], env["AF_HEADS"], env["AF_KV_HEADS"], env["AF_KV_LD"]) == ("prep", "4096", "40", "8", "1024")
 

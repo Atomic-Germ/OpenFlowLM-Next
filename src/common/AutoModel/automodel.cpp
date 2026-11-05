@@ -257,6 +257,14 @@ bool AutoModel::_shared_insert(chat_meta_info_t& meta_info, std::vector<int>& to
     this->profiler_list[SAMPLING_TIME].start();
     this->last_token = this->sampler->sample(y);
     this->profiler_list[SAMPLING_TIME].stop(1);
+    // Phase 31 diagnostic (OFLM_CTX_TRACE): who owns the position after prefill. The sample
+    // above is the token AT the prompt's last position, so the engine's next free row is one
+    // past the prompt. When this differs from `pos_`, generation asks for a row that does not
+    // exist -- which is the CLI/serve disagreement being closed here.
+    if (std::getenv("OFLM_CTX_TRACE"))
+        std::fprintf(stderr, "ctx-trace insert: prompt=%zu total=%zu MAX_L=%zu engine_pos=%d\n",
+                     tokens.size(), this->total_tokens, static_cast<size_t>(this->MAX_L),
+                     this->lm_engine->get_current_context_length());
     return true;
 }
 
@@ -343,6 +351,12 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         return result;
     }
     while (this->total_tokens < this->MAX_L){
+        if (std::getenv("OFLM_CTX_TRACE"))
+            std::fprintf(stderr, "ctx-trace generate: total=%zu MAX_L=%zu engine_pos=%d "
+                                 "-> forward will consume row %d\n",
+                         this->total_tokens, static_cast<size_t>(this->MAX_L),
+                         this->lm_engine->get_current_context_length(),
+                         this->lm_engine->get_current_context_length());
         if (is_cancelled()) {
             reason = CANCEL_DETECTED;
             // reset stream content 
@@ -372,6 +386,12 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         this->token_history.push_back(sampled_token);
         if (this->is_eos(sampled_token)){
             meta_info.generated_tokens++;
+            if (std::getenv("OFLM_CTX_TRACE"))
+                std::fprintf(stderr, "ctx-trace eos: total=%zu MAX_L=%zu engine_pos=%d "
+                                     "forward_on_eos=%d\n",
+                             this->total_tokens, static_cast<size_t>(this->MAX_L),
+                             this->lm_engine->get_current_context_length(),
+                             this->forward_on_eos ? 1 : 0);
             if (this->forward_on_eos) {
                 this->lm_engine->forward(last_sampled_token);
             }

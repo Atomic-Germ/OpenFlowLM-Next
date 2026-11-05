@@ -87,6 +87,9 @@ void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint1
 /// glu "gate" | "up": the rows go where bfp16_glu_row puts that half (n_total = 2 ff, row0 0)
 void bfp16_gemm_pack(const uint8_t* src, size_t rows, size_t cols, size_t row0, size_t n_total, uint8_t* dst,
                      const std::string& glu = "");
+
+/// q4_1 chunks of a [rows, cols] projection -> dit_gemm's bfp16ebs8 B for its transpose (twin: pack.py pack_b)
+void bfp16_dit_pack(const uint8_t* src, size_t rows, size_t cols, uint8_t* dst);
 /// Bytes `op` writes at its dst: `nch` chunks of the pool's format, or of the GEMM pool it builds.
 uint64_t op_bytes(const PackOp& op, size_t chunk_bytes);
 /// `nch` Q4_K chunks (4736 B each) -> `nch` q4_1 chunks (5120 B each), in the SAME chunk

@@ -111,3 +111,4 @@ bin/
 TestGGUF/
 *.gguf
 .claude/plans/
+compose.override.yaml

@@ -134,13 +134,8 @@ def bf16_of_q8(codes: np.ndarray, scales: np.ndarray) -> np.ndarray:
     return _bf16_rne(codes.astype(np.float32) * s)
 
 
-def bf16_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
-    """q4_1 chunks in the same raster -> bf16 bits [rows, cols] of m + n * d, rounded once as the q4_1 GEMM's mac does."""
-    return _bf16_rne(f32_of_q4_1(chunks, rows, cols))
-
-
 def f32_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
-    """q4_1 chunks in the same raster -> float32 [rows, cols] of m + n * d, unrounded."""
+    """q4_1 chunks in the same raster -> f32 [rows, cols] of m + n * d, as pools.cpp q4_1_value computes it."""
     if rows % 32 or cols % 256:
         raise ValueError(f"q4_1 [{rows}, {cols}] is not whole 32 x 256 chunks")
     nr, nc = rows // 32, cols // 256
@@ -154,11 +149,27 @@ def f32_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
     return (scale(mn) + q * scale(d)).astype(np.float32)
 
 
+def bf16_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
+    """The same, as bf16 bits rounded once as the q4_1 GEMM's mac does."""
+    return _bf16_rne(f32_of_q4_1(chunks, rows, cols))
+
+
 def _gemm_bfp16_pack():
     import importlib.util
     from pathlib import Path
     spec = importlib.util.spec_from_file_location(
         "gemm_bfp16_pack", Path(__file__).resolve().parents[1] / "designs" / "gemm_bfp16" / "pack.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _dit_pack():
+    # dit_gemm's own packer, so the bytes the engine packs at load are the ones its tests check
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parent.parent / "designs" / "dit_gemm" / "pack.py"
+    spec = importlib.util.spec_from_file_location("dit_gemm_pack", p)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -194,6 +205,11 @@ def pack_bfp16_gemm_glu(w: np.ndarray, half: str, n_total: int, dst: np.ndarray)
     rr = (r % n)[:, None]
     idx = tile * n * kb + ((rr // 16) * kb + cb[None, :] % kb) * 16 + rr % 16
     dst.reshape(-1, bp.BLOCK_BYTES)[idx] = bp.encode_blocks(w.reshape(ff, K // 8, 8))
+
+
+def pack_bfp16_dit(w: np.ndarray) -> np.ndarray:
+    """f32 [N, K] projection -> dit_gemm's B for B = w^T, bfp16ebs8 in its streaming order (pools.cpp bfp16_dit_pack)."""
+    return _dit_pack().pack_b(np.ascontiguousarray(np.asarray(w, np.float32).T))
 
 
 def pack_bf16_gemm(w: np.ndarray) -> np.ndarray:
@@ -729,6 +745,21 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         else:
             pack_bfp16_gemm(f32_of_q4_1(sel, rows, op["in_dim"]), op.get("row0", 0), op["n_total"],
                             dst[op["dst"]:op["dst"] + n_bytes])
+    elif kind == "bfp16_dit":
+        # `nch` SOURCE chunks from `chunk0`, read as the q4 ops read them (OPEN-PREFILL-GEMM8)
+        name = _name(op, "tensor", layer)
+        if not op.get("nch") or not op.get("in_dim"):
+            raise ValueError(f"{kind} {name} without nch / in_dim")
+        ncol, c0 = op["in_dim"] // 256, op.get("chunk0", 0)
+        if op["in_dim"] % 256 or op["nch"] % ncol or (op["nch"] // ncol) % 4:
+            raise ValueError(f"{kind} {name}: {op['nch']} chunks is not whole 128-row tiles of a {op['in_dim']}-wide tensor")
+        sel = q4_chunks_of(m, name, _raw(m, name), c0, op["nch"])
+        if sel.shape[0] != op["nch"]:
+            raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
+        out = pack_bfp16_dit(f32_of_q4_1(sel, op["nch"] // ncol * 32, op["in_dim"]))
+        if op["dst"] + out.size > len(dst):
+            raise ValueError(f"{kind} {name}: {out.size} B at dst {op['dst']} runs past the {len(dst)} B buffer")
+        dst[op["dst"]:op["dst"] + out.size] = out
     elif kind == "q8_perm":
         # the q8 twin of std_perm: `nch` is the count of POOL half-tiles (5120 B each, twice
         # the q4_1 bytes of the same tensor); `chunk0` is a SOURCE file-chunk offset, as it is

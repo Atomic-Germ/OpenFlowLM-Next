@@ -27,13 +27,17 @@ MANIFEST_VERSION = 1
 SPLIT_MANIFEST_VERSION = 2
 # 2 plus the bf16_gemm pack op (OPEN-PACK-PLAN), which an engine that reads 2 cannot pack
 GEMM_POOL_MANIFEST_VERSION = 3
+PAIRED_PREFILL_MANIFEST_VERSION = 4
 GEMM_POOL_OPS = ("bf16_gemm",)
-# 3 plus the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16)
-BFP16_MANIFEST_VERSION = 4
-# 4 plus OPEN-PREFILL-BFP16-FFN's glu steps and pack halves, which an engine that reads 4 would misrun
-GLU_MANIFEST_VERSION = 5
-# 5 plus OPEN-PREFILL-GLUE-PREP: every attn_fa stream takes a fourth buffer, which an engine that reads 5 would not pass
-PREP_MANIFEST_VERSION = 6
+# 3 plus the bfp16_dit pack op (OPEN-PREFILL-GEMM8), likewise
+DIT_MANIFEST_VERSION = 4
+DIT_OPS = ("bfp16_dit",)
+# 4 plus the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16)
+BFP16_MANIFEST_VERSION = 5
+# 5 plus OPEN-PREFILL-BFP16-FFN's glu steps and pack halves, which an engine that reads 5 would misrun
+GLU_MANIFEST_VERSION = 6
+# 6 plus OPEN-PREFILL-GLUE-PREP: every attn_fa stream takes a fourth buffer, which an engine that reads 6 would not pass
+PREP_MANIFEST_VERSION = 7
 
 
 def has_attn_fa_prep(layer_types: dict) -> bool:
@@ -53,8 +57,8 @@ def routes(layer_types: dict) -> list[dict]:
             for g in [lt.get("gemm_block") or {}, *(lt.get("gemm_block_variants") or {}).values()]]
 
 
-def has_gemm_pool_op(layer_types: dict) -> bool:
-    return any(op.get("op") in GEMM_POOL_OPS
+def has_gemm_pool_op(layer_types: dict, ops: tuple = GEMM_POOL_OPS) -> bool:
+    return any(op.get("op") in ops
                for g in routes(layer_types)
                for key in ("weights", "shared_weights", "ffn_weights")
                for w in (g.get(key) or {}).values()
@@ -117,6 +121,10 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["manifest_version"] = SPLIT_MANIFEST_VERSION
     if has_gemm_pool_op(m["layer_types"]):
         m["manifest_version"] = GEMM_POOL_MANIFEST_VERSION
+    if any(g.get("low_kernels") for g in routes(m["layer_types"])):
+        m["manifest_version"] = PAIRED_PREFILL_MANIFEST_VERSION
+    if has_gemm_pool_op(m["layer_types"], DIT_OPS):
+        m["manifest_version"] = DIT_MANIFEST_VERSION
     if has_bfp16_route(m["layer_types"]):
         m["manifest_version"] = BFP16_MANIFEST_VERSION
     if has_glu_step(m["layer_types"]):

@@ -49,6 +49,7 @@
 
 #include "open_qwen36/core.hpp"
 #include "open_qwen36/spec_lookup.hpp"
+#include "open_qwen36/diagnostic_range.hpp"
 
 using open_qwen36::Core;
 using open_qwen36::CoreConfig;
@@ -141,6 +142,18 @@ struct Args {
     bool block_major = false;       // --block-major: force the old block-at-a-time schedule
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
     std::string dump_act;           // bring-up: "<layer>:<off>:<bytes>:<path>"
+    // Phase 26 oracle: a layer's persistent state, and the canary that proves production
+    // does not write outside its own region. Both are bring-up only.
+    //
+    // A VECTOR, not one spec: an 8-layer comparison needs 16 slices (conv + S per layer),
+    // and a single-valued member silently keeps only the LAST flag -- which compared one
+    // tensor and printed PASS. That is the exact failure mode this phase exists to avoid.
+    std::vector<std::string> dump_state;   // "<layer>:<off>:<bytes>:<path>", repeatable
+    std::vector<std::string> state_canary; // "<layer>:<off>:<bytes>:<pattern>", repeatable
+    // Bring-up, Phase 29: "<global>:<off>:<bytes>:<path>", repeatable. The position records
+    // are a global (`ptab`), not a layer's state, so --dump-state cannot reach them -- and
+    // proving a high position's RoPE needs the cos/sin the engine actually wrote.
+    std::vector<std::string> dump_global;
     int bench = 0;                  // --bench N[:LAYER]: time the route's dispatches instead of running a prompt
     int bench_layer = 0;            // which layer's route -- the 35B's two types run different GEMM shapes
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
@@ -183,16 +196,26 @@ void set_power_mode(const std::string& mode) {
     std::fprintf(stderr, "NPU power mode: %s%s\n", mode.c_str(), rc == 0 ? "" : " (xrt-smi failed; mode is whatever it was)");
 }
 
+using open_qwen36::diagnostic::range_ok;
+using open_qwen36::diagnostic::to_size;
+
+/// The CLI's rule, one place: a negative offset or a non-positive length is not a range.
+///
+/// `to_size` is only ever reached past this, so `static_cast<size_t>(-1)` cannot happen.
+bool diagnostic_range_ok(long long off, long long n) { return range_ok(off, n) && n != 0; }
+
 /// Write a slice of a layer's act scratch to a file, so a bring-up run can compare one
 /// stage's output against the reference instead of inferring it from the logits.
 void dump_act_slice(Core& core, const std::string& spec) {
     int layer = 0; long long off = 0, n = 0;
     char path[512] = {0};
-    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 || n <= 0) {
-        std::fprintf(stderr, "--dump-act wants <layer>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0) {
+        std::fprintf(stderr, "--dump-act wants <layer>:<offset>=0>:<bytes, >0>:<path>, got %s\n",
+                     spec.c_str());
         return;
     }
-    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    std::vector<uint8_t> buf(to_size(n));
     core.read_act(layer, static_cast<size_t>(off), buf.size(), buf.data());
     std::FILE* f = std::fopen(path, "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
@@ -201,12 +224,75 @@ void dump_act_slice(Core& core, const std::string& spec) {
     std::fprintf(stderr, "wrote %lld B of layer %d act at %lld -> %s\n", n, layer, off, path);
 }
 
+/// The same, for a layer's persistent state: the DeltaNet conv history and S, or the KV
+/// rows. Phase 26 compares these between the block and sequential paths, and reads a
+/// canary back through it, so one dump path serves both.
+void dump_global_slice(Core& core, const std::string& spec) {
+    char name[128] = {0};
+    long long off = 0, n = 0;
+    char path[512] = {0};
+    if (std::sscanf(spec.c_str(), "%127[^:]:%lld:%lld:%511s", name, &off, &n, path) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0) {
+        std::fprintf(stderr, "--dump-global wants <name>:<offset>=0>:<bytes, >0>:<path>, got %s\n",
+                     spec.c_str());
+        return;
+    }
+    std::vector<uint8_t> buf(to_size(n));
+    core.read_global(name, static_cast<size_t>(off), buf.size(), buf.data());
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
+    std::fwrite(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    std::fprintf(stderr, "wrote %lld B of global %s at %lld -> %s\n", n, name, off, path);
+}
+
+void dump_state_slice(Core& core, const std::string& spec) {
+    int layer = 0; long long off = 0, n = 0;
+    char path[512] = {0};
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0) {
+        std::fprintf(stderr, "--dump-state wants <layer>:<offset>=0>:<bytes, >0>:<path>, got %s\n",
+                     spec.c_str());
+        return;
+    }
+    std::vector<uint8_t> buf(to_size(n));
+    core.read_state(layer, static_cast<size_t>(off), buf.size(), buf.data());
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
+    std::fwrite(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    std::fprintf(stderr, "wrote %lld B of layer %d state at %lld -> %s\n", n, layer, off, path);
+}
+
+/// Fill a region of a layer's state BO with a constant so a later dump can prove
+/// production never wrote there. Applied after load, before the request runs.
+void set_state_canary(Core& core, const std::string& spec) {
+    int layer = 0, pattern = -1; long long off = 0, n = 0;
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%d", &layer, &off, &n, &pattern) != 4 ||
+        !diagnostic_range_ok(off, n) || n == 0 || pattern < 0 || pattern > 255) {
+        std::fprintf(stderr,
+                     "--state-canary wants <layer>:<offset>=0>:<bytes, >0>:<0-255>, got %s\n",
+                     spec.c_str());
+        return;
+    }
+    core.write_state_canary(layer, static_cast<size_t>(off), to_size(n),
+                            static_cast<uint8_t>(pattern));
+    std::fprintf(stderr, "canary %d over layer %d state [%lld, %lld)\n", pattern, layer, off, off + n);
+}
+
 Args parse(int argc, char** argv) {
     Args a;
     a.cfg.model_dir = std::getenv("OFLM_MODEL_DIR") ? std::getenv("OFLM_MODEL_DIR") : "";
     a.cfg.kernel_dir = std::getenv("OFLM_OPEN_KERNELS_DIR") ? std::getenv("OFLM_OPEN_KERNELS_DIR") : "";
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) a.cfg.prefill_mode = pm;
     bool no_draft = false;
+    if (const char* pp = std::getenv("OFLM_OPEN_PREFILL_PRECISION"))
+        a.cfg.prefill_precision = open_qwen36::prefill_precision_switch::parse(pp);
+    // PHASE 23 attribution: name the roles that run the experimental arithmetic.
+    if (const char* rp = std::getenv("OFLM_OPEN_PREFILL_ROLES"))
+        a.cfg.prefill_role_precision = open_qwen36::prefill_precision_switch::parse_roles(rp);
+    if (const char* rm = std::getenv("OFLM_OPEN_PREFILL_ROLE_MODE"))
+        a.cfg.prefill_role_mode = open_qwen36::prefill_precision_switch::parse(rm);
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {
@@ -216,6 +302,9 @@ Args parse(int argc, char** argv) {
         if (k == "--model") a.cfg.model_dir = val();
         else if (k == "--kernels") a.cfg.kernel_dir = val();
         else if (k == "--prefill-mode") a.cfg.prefill_mode = val();
+        else if (k == "--prefill-precision") a.cfg.prefill_precision = open_qwen36::prefill_precision_switch::parse(val());
+        else if (k == "--prefill-roles") a.cfg.prefill_role_precision = open_qwen36::prefill_precision_switch::parse_roles(val());
+        else if (k == "--prefill-role-mode") a.cfg.prefill_role_mode = open_qwen36::prefill_precision_switch::parse(val());
         else if (k == "--ids") a.ids = parse_ids(val());
         else if (k == "--ids-list") a.ids_list = val();
         else if (k == "--list-out") a.list_out = val();
@@ -237,6 +326,9 @@ Args parse(int argc, char** argv) {
         else if (k == "--repeat") a.repeat = std::atoi(val().c_str());
         else if (k == "--at-position") a.at_position = std::atoi(val().c_str());
         else if (k == "--dump-act") a.dump_act = val();            // "<layer>:<off>:<n>:<path>"
+        else if (k == "--dump-state") a.dump_state.push_back(val());   // repeatable
+        else if (k == "--state-canary") a.state_canary.push_back(val());  // repeatable
+        else if (k == "--dump-global") a.dump_global.push_back(val());  // repeatable (29.4)
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--block-major") a.block_major = true;
@@ -286,7 +378,7 @@ Args parse(int argc, char** argv) {
                              "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean|bfp16] "
                              "[--rows-check N] [--uno N] [--spec N [--spec-mode adaptive|lookup|lookup-uno|uno|plain] "
                              "[--spec-ngram NMAX[:NMIN]] [--spec-no-extend] [--no-draft]] [--spec-probe N --spec-dump <json> "
-                             "[--spec-probe-seed]]\n");
+                             "[--spec-probe-seed]] [--dump-state L:off>=0:n>0:path] [--state-canary L:off>=0:n>0:pat]\n");
         std::exit(2);
     }
     return a;
@@ -678,7 +770,12 @@ std::vector<int> request(Core& core, const Args& a) {
     // B(2): the whole prompt through each layer before the next, so a layer's MoE streams
     // each expert once for every token of the prompt that wants it instead of once per
     // block. Bit-exact against the block-at-a-time loop below, which --block-major forces.
-    if (a.gemm_block && core.layer_major_ok() && !a.block_major) {
+    //
+    // The schedule is the Core's decision, not this flag's: --gemm-block asks for the block
+    // route, --block-major names the loop inside it, and OFLM_OPEN_LAYER_MAJOR still gets the
+    // last word. Asking layer_major_ok() here would ignore an explicit =0, because that is a
+    // capability test by design -- the override lives in layer_major_preferred().
+    if (a.gemm_block && core.layer_major_preferred() && !a.block_major) {
         core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty() && a.ids2.empty());   // with a turn 2, its positions are the dump
         core.step_gemm_prompt(a.ids, true);
         stages("gemm-prompt", 0, a.ids.size(), a.ids.size());
@@ -852,6 +949,9 @@ int main(int argc, char** argv) {
         else if (!std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) core.set_decode_route("auto");
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        // Phase 26: before the request, not after -- a canary written afterwards could only
+        // ever be a canary this run already overwrote.
+        for (const auto& spec : a.state_canary) set_state_canary(core, spec);
         if (a.bench) {
             core.bench_dispatch(a.bench_layer, a.bench);
             std::printf("DONE\n");
@@ -914,6 +1014,8 @@ int main(int argc, char** argv) {
         if (!a.ids_list.empty()) return run_list(core, a);
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
+        for (const auto& spec : a.dump_state) dump_state_slice(core, spec);
+        for (const auto& spec : a.dump_global) dump_global_slice(core, spec);
         int reps = a.twice ? 2 : a.repeat;
         for (int r = 1; r < reps; ++r) {
             // The app checkpoints after the prompt and restores before the next
