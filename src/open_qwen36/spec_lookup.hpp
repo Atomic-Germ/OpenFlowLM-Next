@@ -73,6 +73,8 @@ struct SpecPolicy {
         if (m == SpecMethod::lookup) return (1.0 + acc_lookup[std::clamp(matched, 1, 4)]) / cost(1);
         return (2.0 + acc_uno) / (cost(2) + cost(1));
     }
+    /// Whether choose() can ever return a lookup verify: plain and uno never read the drafts, so the history scan is skipped.
+    bool uses_lookup() const { return mode != Mode::plain && mode != Mode::uno; }
     SpecMethod choose(int matched, bool lookup_room, bool uno_room) const {
         const bool can_lookup = matched > 0 && lookup_room, can_uno = uno_room;
         switch (mode) {

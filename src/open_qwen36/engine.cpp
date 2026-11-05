@@ -381,7 +381,7 @@ bool Engine::spec_cycle(int seed, const std::vector<int>& history, std::vector<i
             throw std::runtime_error("open_qwen36: spec_cycle's history must end with the seed");
         p = core_->position();
         std::vector<int> drafts;
-        const int matched = lookup_drafts(history.data(), history.size(), L - 1, 4, 1, drafts);
+        const int matched = spec_.uses_lookup() ? lookup_drafts(history.data(), history.size(), L - 1, 4, 1, drafts) : 0;
         // strict: the cycle's last seek lands on its next position, which must itself be inside the capacity
         const SpecMethod m = spec_.choose(matched, static_cast<size_t>(p) + L < cap,
                                           core_->has_draft() && static_cast<size_t>(p) + 1 + L < cap);

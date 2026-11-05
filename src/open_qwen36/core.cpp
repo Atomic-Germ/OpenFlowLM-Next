@@ -394,11 +394,12 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     // Stage 2.5 Gate B: opt-in host attention for the dense block route.
     // OPEN-PREFILL-HOST-ATTN: the plain shape (no qk-norm, window, gate) defaults to the host; =0 keeps dxB
-    host_attn_on_ = gemm_block_t_ && host_attn_fits();
+    // OPEN-HOST-ATTN-GUARD: the default only picks a family the host computes (k2, granite); other families, Llama 3 among them, stay on dxB.
+    host_attn_refusal_ = man_.host_attention_refusal();
+    host_attn_on_ = gemm_block_t_ && host_attn_fits() && host_attn_refusal_.empty();
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN")) host_attn_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
-    // OPEN-HOST-ATTN-GUARD: refuse at load, not on the first dispatch, and keep Auto off the host route.
-    host_attn_refusal_ = man_.host_attention_refusal();
+    // an explicit request for a family the host cannot compute is refused at load, not on the first dispatch
     if ((host_attn_on_ || host_attn_decode_on_) && !host_attn_refusal_.empty())
         throw std::runtime_error("open_qwen36: OFLM_OPEN_HOST_ATTN / OFLM_OPEN_HOST_ATTN_DECODE: " + host_attn_refusal_);
     attn_fa_on_ = attn_fa_on_ && host_attn_on_ && nl_ > 0 && types_[0]->gemm_block.attn_fa.present();

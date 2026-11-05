@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "nlohmann/json.hpp"
@@ -23,6 +24,17 @@ int main(int argc, char** argv) {
         bad += !ok;
         ++n;
         std::printf("%s  %s\n", ok ? "ok  " : "FAIL", c.at("what").get<std::string>().c_str());
+    }
+    // plain and uno never read the drafts, so the engine skips the history scan for them
+    using Mode = open_qwen36::SpecPolicy::Mode;
+    for (auto [m, want, name] : {std::tuple{Mode::plain, false, "plain"}, {Mode::uno, false, "uno"}, {Mode::lookup, true, "lookup"},
+                                 {Mode::lookup_uno, true, "lookup-uno"}, {Mode::adaptive, true, "adaptive"}}) {
+        open_qwen36::SpecPolicy pol;
+        pol.mode = m;
+        const bool ok = pol.uses_lookup() == want;
+        bad += !ok;
+        ++n;
+        std::printf("%s  uses_lookup: %s\n", ok ? "ok  " : "FAIL", name);
     }
     std::printf(bad ? "SPEC-LOOKUP FAIL (%d of %d)\n" : "SPEC-LOOKUP OK (%d of %d failed)\n", bad, n);
     return bad ? 1 : 0;
