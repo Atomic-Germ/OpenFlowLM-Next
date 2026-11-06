@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 #include <omp.h>
+#include <immintrin.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -580,6 +581,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             break;
         }
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
+    // OFLM_OPEN_PROFILE=<path>: per-layer accounting as JSONL. Measurement only, and off unless
+    // asked for; an open failure is reported once and leaves the run untouched.
+    if (const char* env = std::getenv("OFLM_OPEN_PROFILE")) {
+        profile_ = std::fopen(env, "w");
+        if (profile_) log("layer profile: " + std::string(env));
+        else std::fprintf(stderr, "open_qwen36: cannot open OFLM_OPEN_PROFILE=%s; profiling off\n", env);
+    }
+    // How many sequential steps to profile. A prefill of N tokens is N steps and a decode loop
+    // is one per generated id, so the default covers a short prompt and stops; 0 is legal and
+    // profiles only the block routes.
+    if (const char* env = std::getenv("OFLM_OPEN_PROFILE_STEPS"))
+        profile_steps_left_ = std::atoi(env);
+    else if (profile_)
+        profile_steps_left_ = 8;
     // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
     // Measurement only; off (and free) unless the env names a file.
     if (const char* env = std::getenv("OFLM_OPEN_DXB_LOG")) {
@@ -783,6 +798,128 @@ Core::~Core() {
         std::fclose(dxb_log_);
         dxb_log_ = nullptr;
     }
+    if (profile_) {
+        std::fflush(profile_);
+        std::fclose(profile_);
+        profile_ = nullptr;
+    }
+}
+
+// ---- OFLM_OPEN_PROFILE: the per-layer rows, taken as differences of the accounting the
+// engine already keeps. `kind` / `layer` are the manifest's layer type and index; the row
+// carries every StepTiming column that layer moved, so a stage's cost is answerable per
+// layer instead of per prompt.
+static LayerTiming diff_timing(const StepTiming& a, const StepTiming& b, const char* kind, int layer) {
+    LayerTiming r;
+    r.kind = kind;
+    r.layer = layer;
+    r.total_ms = b.total_ms - a.total_ms;
+    r.gemm_ms = b.part0_ms - a.part0_ms;
+    r.host_ms = b.part1_ms - a.part1_ms;
+    r.per_token_ms = b.route_ms - a.route_ms;
+    r.lmhead_ms = b.lmhead_ms - a.lmhead_ms;
+    r.mid_ms = b.mid_ms - a.mid_ms;
+    r.dn_conv_ms = b.dn_conv_ms - a.dn_conv_ms;
+    r.dn_rule_ms = b.dn_rule_ms - a.dn_rule_ms;
+    r.attn_ms = b.attn_ms - a.attn_ms;
+    r.prenorm_ms = b.prenorm_ms - a.prenorm_ms;
+    r.gemm_tile_ms = b.gemm_tile_ms - a.gemm_tile_ms;
+    r.gemm_tr_ms = b.gemm_tr_ms - a.gemm_tr_ms;
+    r.tail_ms = b.tail_ms - a.tail_ms;
+    r.state_ms = b.state_ms - a.state_ms;
+    r.sync_ms = b.sync_ms - a.sync_ms;
+    r.shared_ms = b.shared_ms - a.shared_ms;
+    r.setup_ms = b.setup_ms - a.setup_ms;
+    r.qkv_scatter_ms = b.qkv_scatter_ms - a.qkv_scatter_ms;
+    r.moe_prep_ms = b.moe_prep_ms - a.moe_prep_ms;
+    r.moe_patch_ms = b.moe_patch_ms - a.moe_patch_ms;
+    r.moe_run_ms = b.moe_run_ms - a.moe_run_ms;
+    r.moe_read_ms = b.moe_read_ms - a.moe_read_ms;
+    // Host-observed submit-to-completion intervals include queueing and can overlap.
+    // This is not device execution time or a measure of NPU utilization.
+    r.dispatch_ms = b.dispatch_ms - a.dispatch_ms;
+    return r;
+}
+
+void Core::profile_begin(const char* what, size_t tokens, size_t blocks) {
+    if (!profile_) return;
+    profile_what_ = what;
+    profile_tokens_ = tokens;
+    profile_blocks_ = blocks;
+    profile_rows_.clear();
+    profile_base_ = timing_;
+    profile_pending_ = -1;
+    profile_active_ = true;
+    profile_t0_ = std::chrono::steady_clock::now();
+    if (profile_first_) {
+        profile_first_ = false;
+        std::fprintf(profile_, "{\"record\":\"header\",\"version\":1,\"family\":\"%s\",\"spec_hash\":\"%s\","
+                               "\"layers\":%d}\n",
+                     man_.family.c_str(), man_.spec_hash.c_str(), nl_);
+    }
+}
+
+void Core::profile_layer(const char* kind, int layer) {
+    if (!profile_active_) return;
+    LayerTiming r = diff_timing(profile_base_, timing_, kind, layer);
+    const auto now = std::chrono::steady_clock::now();
+    r.wall_ms = ms_since(profile_t0_);
+    profile_t0_ = now;
+    profile_rows_.push_back(r);
+    profile_base_ = timing_;
+}
+
+// The rows are closed at the TOP of a schedule's layer loop rather than after the layer
+// call: the layer call is an anchor other tools patch against, and a hook placed between it
+// and the loop's closing brace changes the text they look for. Nothing about the timing
+// changes -- the wall and the accounting are still measured between two boundaries.
+void Core::profile_switch(int layer) {
+    if (!profile_active_) return;
+    if (profile_pending_ >= 0) profile_layer(types_[profile_pending_]->name.c_str(), profile_pending_);
+    profile_pending_ = layer;
+    profile_t0_ = std::chrono::steady_clock::now();
+}
+
+void Core::profile_close() {
+    if (!profile_active_) return;
+    if (profile_pending_ >= 0) profile_layer(types_[profile_pending_]->name.c_str(), profile_pending_);
+    profile_pending_ = -1;
+}
+
+void Core::profile_end() {
+    if (!profile_active_) return;
+    profile_active_ = false;
+    // The request line carries the whole request and the parts that belong to no layer:
+    // `embed_ms` and `patch_ms` are the token's own prologue on the sequential route, and
+    // `residue_ms` is whatever the layer rows do not account for, so nothing is absorbed.
+    double layer_wall = 0;
+    for (const LayerTiming& r : profile_rows_) layer_wall += r.wall_ms;
+    std::fprintf(profile_, "{\"record\":\"request\",\"what\":\"%s\",\"tokens\":%zu,\"blocks\":%zu,"
+                           "\"total_ms\":%.3f,\"gemm_ms\":%.3f,\"host_ms\":%.3f,\"per_token_ms\":%.3f,"
+                           "\"lmhead_ms\":%.3f,\"setup_ms\":%.3f,\"embed_ms\":%.3f,\"patch_ms\":%.3f,"
+                           "\"dispatch_ms\":%.3f,\"layer_wall_ms\":%.3f,\"residue_ms\":%.3f,"
+                           "\"layers\":%zu}\n",
+                 profile_what_.c_str(), profile_tokens_, profile_blocks_, timing_.total_ms, timing_.part0_ms,
+                 timing_.part1_ms, timing_.route_ms, timing_.lmhead_ms, timing_.setup_ms, timing_.embed_ms,
+                 timing_.patch_ms, timing_.dispatch_ms, layer_wall, timing_.total_ms - layer_wall,
+                 profile_rows_.size());
+    for (const LayerTiming& r : profile_rows_)
+        std::fprintf(profile_,
+                         "{\"record\":\"layer\",\"what\":\"%s\",\"kind\":\"%s\",\"layer\":%d,\"wall_ms\":%.3f,"
+                         "\"total_ms\":%.3f,"
+                     "\"gemm_ms\":%.3f,\"host_ms\":%.3f,\"per_token_ms\":%.3f,\"lmhead_ms\":%.3f,"
+                     "\"mid_ms\":%.3f,\"dn_conv_ms\":%.3f,\"dn_rule_ms\":%.3f,\"attn_ms\":%.3f,"
+                     "\"prenorm_ms\":%.3f,\"gemm_tile_ms\":%.3f,\"gemm_tr_ms\":%.3f,\"tail_ms\":%.3f,"
+                     "\"state_ms\":%.3f,\"sync_ms\":%.3f,\"shared_ms\":%.3f,\"setup_ms\":%.3f,"
+                     "\"qkv_scatter_ms\":%.3f,\"moe_prep_ms\":%.3f,\"moe_patch_ms\":%.3f,"
+                     "\"moe_run_ms\":%.3f,\"moe_read_ms\":%.3f,\"dispatch_ms\":%.3f}\n",
+                     profile_what_.c_str(), r.kind, r.layer, r.wall_ms, r.total_ms, r.gemm_ms, r.host_ms,
+                     r.per_token_ms, r.lmhead_ms, r.mid_ms, r.dn_conv_ms, r.dn_rule_ms, r.attn_ms,
+                     r.prenorm_ms, r.gemm_tile_ms, r.gemm_tr_ms, r.tail_ms, r.state_ms, r.sync_ms,
+                     r.shared_ms, r.setup_ms, r.qkv_scatter_ms, r.moe_prep_ms, r.moe_patch_ms,
+                     r.moe_run_ms, r.moe_read_ms, r.dispatch_ms);
+    std::fflush(profile_);
+    profile_rows_.clear();
 }
 
 xrt::hw_context& Core::context(const std::string& name) {
@@ -2389,6 +2526,15 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
     const bool pipe = submit_ahead_ > 0 && !layer_nan_ && !deepstack;
+    // OFLM_OPEN_PROFILE: one row per layer of this token, for at most OFLM_OPEN_PROFILE_STEPS
+    // steps. A prompt is stepped and a decode loop is stepped, and the second is thousands of
+    // records long, so the budget is what keeps a profile of a request's first tokens small
+    // enough to read. want_logits does not identify the phase: the final prompt position
+    // and every sampled-token step both need logits. Keep the label phase-neutral.
+    if (profile_ && profile_steps_left_ > 0) {
+        --profile_steps_left_;
+        profile_begin("step", 1, 1);
+    }
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
@@ -2419,6 +2565,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
             if (layer_nan_) layer_nan_check(xres, l);
+            profile_layer(types_[l]->name.c_str(), l);
             continue;
         }
         // (1) the previous layer's last dispatch, so its instruction BO is free to patch and
@@ -2440,6 +2587,13 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             const auto [elapsed, blocked] = wait_run(tail_in);
             timing_.part1_ms += blocked;
             timing_.dispatch_ms += elapsed;
+        }
+        // Everything layer l - 1 dispatched has now completed (its last one was `tail_in`),
+        // so its profile row can be closed. The pipelined path cannot close it inside its own
+        // iteration without waiting there, which is the whole thing the pipeline avoids.
+        if (profile_pending_ >= 0) {
+            profile_layer(types_[profile_pending_]->name.c_str(), profile_pending_);
+            profile_pending_ = -1;
         }
         if (prog.size() == 1) {
             // A dense family's layer is ONE dispatch with nothing on the host after it, so it
@@ -2480,6 +2634,9 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 timing_.dispatch_ms += head.submit_ms;
             }
         }
+        // The last layer has no successor to wait for its tail, so its row stays open and is
+        // closed below; the others were closed at the top of the next iteration.
+        profile_pending_ = l;
     }
     // A tail in its own hardware context queues ahead only at level 2 (which hangs); in the layers' it queues like a layer.
     Inflight tail0;
@@ -2493,6 +2650,11 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         const auto [elapsed, blocked] = wait_run(tail_in);
         timing_.part1_ms += blocked;
         timing_.dispatch_ms += elapsed;
+    }
+    // the last layer's row, now that everything it dispatched has completed
+    if (profile_pending_ >= 0) {
+        profile_layer(types_[profile_pending_]->name.c_str(), profile_pending_);
+        profile_pending_ = -1;
     }
     if (want_logits) {
         if (cfg_.verbose) {
@@ -2522,6 +2684,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     ++pos_;
     if (!mpos && mrope_on_) ++mrope_pos_;      // a text token after an image: (c, c, c), then c + 1
     timing_.total_ms = ms_since(t0);
+    profile_end();
     if (step_trace_) {
         ++trace_steps_;
         trace_wall_ms_ += timing_.total_ms;
@@ -3447,11 +3610,14 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
         }
     }
 
+    profile_begin("gemm-block", t_real, 1);
     for (int l = 0; l < nl_; ++l) {
+        profile_switch(l);
         if (types_[l]->gemm_block.t == 0)
             throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no gemm_block program");
         step_gemm_block_layer(l, xres, T, t_real);
     }
+    profile_close();
     pos_ += static_cast<int>(t_real);
 
     block_logits_.clear();
@@ -3470,6 +3636,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
         tail_logits(last_row.data());
     }
     timing_.total_ms = ms_since(t0);
+    profile_end();
 }
 
 // ---- the MoE families' block: kinds linear and full. Timing: part0 = the GEMM
@@ -3509,13 +3676,19 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
     std::vector<float> xres(T * hid);
     for (size_t t = 0; t < T; ++t) embedding_row(static_cast<size_t>(ids[t]), xres.data() + t * hid);
     moe_stage_resize(T);
+    // the prompt's embedding rows happen once a request, outside any layer
+    timing_.setup_ms += ms_since(t0);
+    timing_.part1_ms += ms_since(t0);
+    profile_begin("gemm-block", t_real, 1);
     for (int l = 0; l < nl_; ++l) {
+        profile_switch(l);
         const std::string& kind = types_[l]->gemm_block.kind;
         if (kind == "linear") block_layer_linear(l, xres.data(), T, t_real, 0, true, true);
         else if (kind == "full") block_layer_full(l, xres.data(), T, t_real, static_cast<size_t>(pos_), 0, true);
         else throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no block route");
         block_layer_moe(l, T, t_real, xres.data());
     }
+    profile_close();
     pos_ += static_cast<int>(t_real);
     block_logits_.clear();
     if (block_logits_all_)
@@ -3525,6 +3698,7 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
         }
     if (want_logits) tail_logits(xres.data() + (t_real - 1) * hid);
     timing_.total_ms = ms_since(t0);
+    profile_end();
 }
 
 // ---- B(2) of .claude/plans/prefill-parity.md: the same layers in the other order.
@@ -3569,7 +3743,9 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     moe_stage_resize(TOT);
     timing_.setup_ms += ms_since(tsetup);
     timing_.part1_ms += ms_since(tsetup);
+    profile_begin("gemm-prompt", N, B);
     for (int l = 0; l < nl_; ++l) {
+        profile_switch(l);
         const std::string& kind = types_[l]->gemm_block.kind;
         if (stage_major_on_) {
             if (kind == "linear") layer_linear_staged(l, xres.data(), B, T, N);
@@ -3584,6 +3760,7 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
         }
         block_layer_moe(l, TOT, N, xres.data());
     }
+    profile_close();
     pos_ += static_cast<int>(N);
     block_logits_.clear();
     if (block_logits_all_)
@@ -3593,6 +3770,7 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
         }
     if (want_logits) tail_logits(xres.data() + (N - 1) * hid);
     timing_.total_ms = ms_since(t0);
+    profile_end();
 }
 
 // OPEN-PREFILL-HOST-ATTN: the dense kind layer-major, each GEMM step over every block so the NPU runs b + 1 while the host works b
