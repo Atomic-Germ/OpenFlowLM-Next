@@ -186,22 +186,25 @@ hash, logs and all state/logit comparisons are retained under
 `Models/qwen38-27b/main-merge-20261104/validation.json` and `state/result.json`.
 All gates passed; this is a layer-slice regression, not full-model validation.
 
-## Granite runtime merge regression (2026-11-05)
+## Building the standalone CLI
 
-After merging `bc12da7a`, rebuild the standalone CLI: its vectorized argmax
-requires `-mavx2 -mfma` for `cli.cpp` in `utilities/prefill-block/build-cli.sh`.
-Keep the explicit intrinsics include in `core.cpp` for `_mm_mfence`; do not rely
-on transitive includes from build flags. Retain both upstream diagnostic switches
-and `OFLM_OPEN_PROFILE` / `OFLM_OPEN_PROFILE_STEPS` in the settings scanner registry.
+`utilities/prefill-block/build-cli.sh` needs `-mavx2 -mfma` for `cli.cpp`: its
+argmax is vectorised. `core.cpp` includes the intrinsics header for `_mm_mfence`
+explicitly — do not rely on transitive includes from build flags.
 
-The existing Qwen3.8 export passed 64-layer block and layer-major profile checks
-with 256 prompt tokens and 16 generated tokens. Both trajectories match the
-pre-merge control; each profile includes all 15 decode steps. Evidence and
-build identities are under `Models/qwen38-27b/main-merge-20261105/`.
-The observed power mode was `default`, retained with `--pmode none`. These
-checks establish merge regression coverage, not controlled throughput or
-acceptance of newly compiled kernels.
+Every `OFLM_*` switch the engine reads must be classified, or the settings CI
+fails on the merged tree. For diagnostics that is `NON_SETTING_ENV_VARS` in
+`utilities/generate-registry.py`.
 
-For merge-only Docker checks, name the host build targets explicitly. The
-default `all` target also runs `utilities/export-kernels.py` for every configured
-family; it is not needed to rebuild `oflm` and the CTest executables.
+For a merge-only Docker check, name the host build targets explicitly
+(`cmake --build build --target oflm`). The default `all` target also runs
+`utilities/export-kernels.py` for every configured family, which is not needed
+to rebuild `oflm` and the CTest executables.
+
+## What a route check establishes
+
+A block-vs-layer-major comparison at 256 prompt tokens over all 64 layers with
+identical generated tokens establishes that the two routes agree. It does not
+establish controlled throughput, and it does not accept newly compiled kernels:
+those need their own numerical gates. Pin the power mode explicitly (or record
+the observed one when using `--pmode none`) before quoting any timing.

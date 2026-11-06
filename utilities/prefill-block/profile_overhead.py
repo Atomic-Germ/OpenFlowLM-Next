@@ -56,9 +56,7 @@ def one(ids: list[int], what: str, profiled: bool, workdir: Path, tag: str,
         cmd.append('--gemm-block')
         cmd.append('--block-major')
     t0 = time.monotonic()
-    with O.LOCK.open('a') as handle:
-        import fcntl
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with P.lock_exclusive(O.LOCK.open('a')):
         proc = subprocess.run(cmd, cwd=str(O.ROOT), env=env, capture_output=True, text=True,
                              timeout=timeout)
     wall = time.monotonic() - t0
