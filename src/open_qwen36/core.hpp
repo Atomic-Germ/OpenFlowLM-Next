@@ -131,6 +131,23 @@ struct StepTiming {
     GemmStageMs gemm_stage[6];
 };
 
+/// What one layer added to the engine's own accounting: the difference of two
+/// StepTiming snapshots, so a per-layer row costs no extra clock reads.
+struct LayerTiming {
+    const char* kind = "";
+    int layer = 0;
+    /// Steady-clock duration of the layer's own call, taken at the two boundaries. This is
+    /// the only column that cannot be derived from StepTiming -- `StepTiming::total_ms` is
+    /// written once per block, not per layer -- and it is what "the widest layer" ranks on.
+    double wall_ms = 0;
+    double total_ms = 0, gemm_ms = 0, host_ms = 0, per_token_ms = 0, lmhead_ms = 0;
+    double mid_ms = 0, dn_conv_ms = 0, dn_rule_ms = 0, attn_ms = 0, prenorm_ms = 0;
+    double gemm_tile_ms = 0, gemm_tr_ms = 0, tail_ms = 0, state_ms = 0, sync_ms = 0;
+    double shared_ms = 0, setup_ms = 0, qkv_scatter_ms = 0;
+    double moe_prep_ms = 0, moe_patch_ms = 0, moe_run_ms = 0, moe_read_ms = 0;
+    double dispatch_ms = 0;       ///< overlapping host submit-to-completion intervals, including queueing
+};
+
 /// The config.json fields a manifest checks, derived from a GGUF's metadata
 /// (the llama-family `<arch>.embedding_length` keys). A key the model does not
 /// carry is refused by name; families whose config carries GGUF-invisible
@@ -349,6 +366,29 @@ public:
     int num_layers() const { return nl_; }
     bool is_attention_layer(int l) const { return types_[l]->state_kind == "kv"; }
     const StepTiming& last_timing() const { return timing_; }
+
+    // ---- OFLM_OPEN_PROFILE: per-layer accounting, for the performance plan's PR #1 ----
+    //
+    // The engine already maintains every column of StepTiming, but only as a running sum over
+    // a whole prompt/block, so "which layer costs what" cannot be read off it. These four calls
+    // take differences of that same accounting at the layer boundaries: no extra clock reads
+    // inside a layer, and nothing at all when the env is unset (every hook returns at once).
+    //
+    //   OFLM_OPEN_PROFILE=<path>   one JSON object per layer per block, one per request, JSONL
+    //
+    // Measurement only: no hook touches a computed value, and an unset profile is a branch.
+    void profile_begin(const char* what, size_t tokens, size_t blocks);
+    /// Close the current layer: the columns that moved since the last call become its row,
+    /// and `wall_ms` is the steady-clock duration since the previous close.
+    void profile_layer(const char* kind, int layer);
+    /// Close the previous layer's row and take up layer `l`'s. One line at the TOP of a
+    /// schedule's layer loop, so the layer call itself keeps the shape it always had.
+    void profile_switch(int layer);
+    /// Close whatever row is still open (the last layer of a loop, or of a request).
+    void profile_close();
+    /// Write the request line and every buffered layer row, then flush.
+    void profile_end();
+    bool profiling() const { return profile_ != nullptr; }
     const Manifest& manifest() const { return man_; }
     /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
     const Manifest& weights() const { return w_ ? *w_ : man_; }
@@ -548,6 +588,23 @@ private:
     /// window-dependence of each phase regresses from a single run. Null = off,
     /// zero cost. Measurement only -- never touches a computed value.
     FILE* dxb_log_ = nullptr;
+    /// OFLM_OPEN_PROFILE: the JSONL sink, the request's accumulated layer rows, and the
+    /// StepTiming snapshot the last layer closed at. Null (the default) makes every hook a
+    /// single predictable branch. Measurement only -- never touches a computed value.
+    FILE* profile_ = nullptr;
+    bool profile_first_ = true;               ///< one "header" line per file, for the reader
+    std::string profile_what_;                ///< "gemm-block" / "gemm-prompt" / phase-neutral "step"
+    size_t profile_tokens_ = 0, profile_blocks_ = 0;
+    std::vector<LayerTiming> profile_rows_;
+    StepTiming profile_base_;
+    std::chrono::steady_clock::time_point profile_t0_{};
+    /// The layer whose row is still open: the pipelined walk cannot close a layer's row until
+    /// the next iteration has waited for its last dispatch.
+    int profile_pending_ = -1;
+    bool profile_active_ = false;     ///< between profile_begin() and profile_end()
+    /// step() is profiled only when OFLM_OPEN_PROFILE_STEPS asks, and only for that many
+    /// steps: a decode loop would otherwise write one 64-row record per generated token.
+    int profile_steps_left_ = 0;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;

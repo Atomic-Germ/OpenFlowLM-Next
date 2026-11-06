@@ -64,8 +64,10 @@ FLAGS=(-O3 -DNDEBUG -std=c++20 -fopenmp
 # is not cosmetic: -ffp-contract=off stops the compiler fusing a multiply-add into an FMA,
 # which would change the host arithmetic the whole prefill is validated against. The AVX2
 # is what its intrinsics need. Reproduced per-unit rather than globally so the other units
-# keep the same code generation CMake gave them.
+# keep the same code generation CMake gave them. The CLI's vectorized argmax
+# also requires AVX2, matching the standalone CMake target.
 declare -A UNIT_FLAGS=(
+    [cli]="-mavx2 -mfma"
     [block_host]="-mavx2 -mfma -ffp-contract=off"
 )
 

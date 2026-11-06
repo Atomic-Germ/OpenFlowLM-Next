@@ -8,6 +8,27 @@ description: Validate the standard FP32 DeltaNet post-output export over full-de
 The [final model report](../../../specs/open-engine/reports/qwen38-27b.md)
 summarizes production validation, measured performance and context limits.
 
+## Profiling controls
+
+For timing-only investigations, use `utilities/prefill-block/layer_profile.py`
+and `profile_overhead.py`; see the [profiling report](../../../specs/open-engine/reports/qwen38-npu-performance.md).
+Force `OFLM_OPEN_LAYER_MAJOR=1` for a layer-major experiment and require
+`gemm-prompt` in the observed profile. Unsetting the override selects the dense
+block-loop default. Validate complete layer groups for every request.
+
+Per-token profile records use the neutral label `step`: `want_logits` is not a
+phase indicator. The CLI closes the prefill dispatch trace before decode. An
+ON overhead measurement must cover every measured decode step, excluding the
+warm-up pairs. Compare parent-OFF/new-OFF separately from new-OFF/new-ON; the
+latter cannot establish disabled-path regression. Use at least five measured
+pairs, retain artifact hashes, conditions, full logs and generated-token checks.
+Treat a failed CLI power-mode configuration as a failed benchmark setup. Use
+`--pmode none` only to intentionally retain a mode observed externally; record
+that mode and do not label it as successfully configured performance mode.
+Submit-to-completion includes queue residence and overlapping intervals; it
+does not measure device execution or NPU idle time. Profiling validation alone
+does not replace the independent numerical acceptance gates below.
+
 Use the existing standard 46-set export from open-qwen38-post-output-integration.
 No kernel rebuild or model repacking is needed. Historical BF16 output hashes
 are not the expected results for this arithmetic. Do not rewrite old evidence.
@@ -164,3 +185,26 @@ explicitly when reproducing this run. Binary, source hashes, kernel manifest
 hash, logs and all state/logit comparisons are retained under
 `Models/qwen38-27b/main-merge-20261104/validation.json` and `state/result.json`.
 All gates passed; this is a layer-slice regression, not full-model validation.
+
+## Building the standalone CLI
+
+`utilities/prefill-block/build-cli.sh` needs `-mavx2 -mfma` for `cli.cpp`: its
+argmax is vectorised. `core.cpp` includes the intrinsics header for `_mm_mfence`
+explicitly — do not rely on transitive includes from build flags.
+
+Every `OFLM_*` switch the engine reads must be classified, or the settings CI
+fails on the merged tree. For diagnostics that is `NON_SETTING_ENV_VARS` in
+`utilities/generate-registry.py`.
+
+For a merge-only Docker check, name the host build targets explicitly
+(`cmake --build build --target oflm`). The default `all` target also runs
+`utilities/export-kernels.py` for every configured family, which is not needed
+to rebuild `oflm` and the CTest executables.
+
+## What a route check establishes
+
+A block-vs-layer-major comparison at 256 prompt tokens over all 64 layers with
+identical generated tokens establishes that the two routes agree. It does not
+establish controlled throughput, and it does not accept newly compiled kernels:
+those need their own numerical gates. Pin the power mode explicitly (or record
+the observed one when using `--pmode none`) before quoting any timing.
