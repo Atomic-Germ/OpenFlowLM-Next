@@ -3364,6 +3364,13 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
             "from the base repo named in the GGUF repo's README")
     types = kv.get("tokenizer.ggml.token_type") or [1] * len(tokens)
     table = _bytes_to_unicode()
+    # GPT-2 byte-level BPE (Qwen, GPT-2, Llama-3) stores its vocab keys and
+    # merges ALREADY byte-mapped (`\u0120` for the space). Re-mapping them a
+    # second time turns every space-prefixed token into a nonsense pair of
+    # U+0100+ code points, so the reconstructed tokenizer emits a control token
+    # between every word. q4nx-build's converter reads these tokens directly;
+    # do the same for this family.
+    byte_level = model == "gpt2"
 
     def raw(i):
         return tokens[i].encode("utf-8", "surrogateescape")
@@ -3373,7 +3380,7 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
         typ = types[i] if i < len(types) else 1
         if typ == 5:  # unused slot
             continue
-        content = _map_token(raw(i), table)
+        content = tok if byte_level else _map_token(raw(i), table)
         if typ in (2, 3, 4):  # unknown / control / user-defined specials
             added.append({"id": i, "content": content, "single_word": False,
                           "lstrip": False, "rstrip": False, "normalized": False,
@@ -3385,6 +3392,13 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
             vocab[content] = i
     hf_merges = []
     for m in merges:
+        if byte_level:
+            # Already "Ġ t" (the two byte-mapped tokens joined by a plain
+            # space), exactly what a HF tokenizer.json merges entry is.
+            if not m or " " not in m:
+                continue
+            hf_merges.append(m)
+            continue
         raw_m = m.encode("utf-8", "surrogateescape")
         # Pairs join on ONE space; a side may itself hold 0x20, so split right.
         left, _, right = raw_m.decode("utf-8", "surrogateescape").rpartition(" ")
@@ -3397,7 +3411,7 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
     def tok_content(tid, default=None):
         if tid is None or not (0 <= tid < len(tokens)):
             return default
-        return _map_token(raw(tid), table)
+        return tokens[tid] if byte_level else _map_token(raw(tid), table)
 
     bos_id = kv.get("tokenizer.ggml.bos_token_id")
     eos_id = kv.get("tokenizer.ggml.eos_token_id")
@@ -4303,7 +4317,12 @@ def main():
             # own copies. generation_config.json is REQUIRED, not optional.
             aux_want = WHISPER_AUX
         else:
-            aux_want = ["config.json", "chat_template.jinja"]
+            # The full model tree's own tokenizer is the authority -- the root
+            # repo has the byte-perfect vocab + template -- and the GGUF's
+            # embedded tokenizer is only the fallback (gated/vanished base).
+            # Fetch the tokenizer files here, not from the reconstruction below.
+            aux_want = ["config.json", "tokenizer.json", "tokenizer_config.json",
+                        "chat_template.jinja"]
         aux_missing = [f for f in aux_want if not (target / f).is_file()]
         if aux_missing:
             bases = get_base_chain()

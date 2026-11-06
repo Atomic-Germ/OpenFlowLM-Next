@@ -548,6 +548,35 @@ def test_extract_tokenizer_from_gguf_round_trips(tmp_path):
     assert (out / "chat_template.jinja").read_text(encoding="utf-8").startswith("hello")
 
 
+def test_gpt2_tokenizer_keeps_the_byte_mapped_space(tmp_path):
+    # A gpt2 (byte-level BPE) GGUF stores its vocab and merges ALREADY
+    # byte-mapped (`\u0120` for the space). extract must NOT re-map them --
+    # that double-mapping turns every space-prefixed token into a nonsense
+    # pair of U+0100+ code points and a control token lands between every word
+    # (the Qwen3.5-4B-DeepThought install regression).
+    kv = [
+        ("general.architecture", (8, "qwen3")),
+        ("tokenizer.ggml.model", (8, "gpt2")),
+        ("tokenizer.ggml.tokens", (9, (8, ["hello", "\u0120world", "\u0120se",
+                                                   "<|im_start|>", "<|im_end|>"]))),
+        ("tokenizer.ggml.merges", (9, (8, ["h e", "\u0120w orld", "\u0120 s", "\u0120s e"]))),
+        ("tokenizer.ggml.token_type", (9, (5, [1, 1, 1, 3, 3]))),
+        ("tokenizer.ggml.bos_token_id", (4, 3)),
+        ("tokenizer.ggml.eos_token_id", (4, 4)),
+        ("tokenizer.chat_template", (8, "hello {{ x }}")),
+    ]
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(_gguf_bytes(kv))
+    oflm_add.extract_tokenizer_from_gguf(gguf, tmp_path)
+    tok = json.loads((tmp_path / "tokenizer.json").read_text(encoding="utf-8"))
+    vocab = tok["model"]["vocab"]
+    assert vocab["hello"] == 0
+    assert vocab["\u0120world"] == 1                    # space kept as \u0120
+    assert vocab["\u0120se"] == 2
+    assert not any("\u0100" in k or "Äł" in k for k in vocab)   # no double-mapped garbage
+    assert tok["model"]["merges"][1] == "\u0120w orld"
+
+
 def test_extract_tokenizer_refuses_mergeless_spm(tmp_path):
     kv = [kv for kv in _llama_kv() if kv[0] != "tokenizer.ggml.merges"]
     gguf = tmp_path / "model.gguf"
