@@ -1,0 +1,19 @@
+{
+ "requirement": "OPEN-SPEC-LOOKUP",
+ "note": "Each expected n / drafts was derived by hand from the rule: the most recent earlier occurrence of the longest suffix n-gram (nmax down to nmin), its continuation, extended by looking up again on history + drafts.",
+ "cases": [
+  {"what": "no repeated token: no draft", "hist": [1, 2, 3, 4, 5], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 0, "drafts": []},
+  {"what": "a bigram's continuation", "hist": [5, 6, 7, 8, 9, 5, 6], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 2, "drafts": [7, 8, 9]},
+  {"what": "the most recent occurrence wins", "hist": [1, 2, 10, 1, 2, 20, 1, 2], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 2, "drafts": [20, 1, 2]},
+  {"what": "a longer match beats a more recent shorter one", "hist": [7, 1, 2, 30, 31, 9, 2, 40, 7, 1, 2], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 3, "drafts": [30, 31, 9]},
+  {"what": "a continuation cut by the end is extended", "hist": [8, 3, 3, 3], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 2, "drafts": [3, 3, 3]},
+  {"what": "the same without extension", "hist": [8, 3, 3, 3], "k": 3, "nmax": 4, "nmin": 1, "extend": false, "n": 2, "drafts": [3]},
+  {"what": "nmin 2 refuses a unigram match", "hist": [1, 2, 3, 9, 3], "k": 3, "nmax": 4, "nmin": 2, "extend": true, "n": 0, "drafts": []},
+  {"what": "a unigram match, extended by a trigram", "hist": [1, 2, 3, 9, 3], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 1, "drafts": [9, 3, 9]},
+  {"what": "a single token has nothing before it", "hist": [5], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 0, "drafts": []},
+  {"what": "k 1", "hist": [5, 6, 7, 5, 6], "k": 1, "nmax": 4, "nmin": 1, "extend": true, "n": 2, "drafts": [7]},
+  {"what": "nmax 1", "hist": [1, 2, 3, 1, 4, 1], "k": 2, "nmax": 1, "nmin": 1, "extend": true, "n": 1, "drafts": [4, 1]},
+  {"what": "a period-2 run matches itself", "hist": [9, 1, 2, 1, 2, 1, 2], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 4, "drafts": [1, 2, 1]},
+  {"what": "a line of the user turn repeated by the assistant turn (Granite's role ids around it)", "hist": [100256, 882, 198, 755, 16178, 1471, 997, 198, 262, 3365, 198, 100257, 198, 100256, 78191, 198, 755, 16178, 1471], "k": 3, "nmax": 4, "nmin": 1, "extend": true, "n": 4, "drafts": [997, 198, 262]}
+ ]
+}

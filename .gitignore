@@ -111,4 +111,5 @@ bin/
 TestGGUF/
 *.gguf
 ./bin/act
+.claude/plans/
 compose.override.yaml

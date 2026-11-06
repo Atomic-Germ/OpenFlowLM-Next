@@ -336,7 +336,7 @@ oflm serve llama3.2:1b --prefill-chunk-len 8192
 
 ### 🪶 Trade Prefill Speed for Memory
 
-Some models' kernels carry two ways to process a prompt. `--prefill-mode lean` loads the one that uses less memory and processes prompts more slowly; `fast` is the default. On Qwen3.6-35B, `lean` uses about 1.1 GiB less RAM and prefills about 20% slower (116 against 145 tokens/s on a 1024-token prompt). Models with only one way ignore the flag and say so in the log. The mode is picked when the model loads, so changing it means restarting.
+Some models' kernels carry two ways to process a prompt. `--prefill-mode lean` loads the one that uses less memory and processes prompts more slowly; `fast` is the default. On Qwen3.6-35B, `lean` uses about 1.1 GiB less RAM and prefills about 20% slower (116 against 145 tokens/s on a 1024-token prompt). Models with only one way ignore the flag and say so in the log. On Granite 4.2 3B, `--prefill-mode bfp16` picks a third way: bfp16 operands for the projections and the whole attention step (RoPE, attention, cache write) on the NPU, about three times faster than `fast` at 512 to 2048 tokens for 1.7 GiB more memory. The mode is picked when the model loads, so changing it means restarting.
 
 For **CLI mode**:
 
