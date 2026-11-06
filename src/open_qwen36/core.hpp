@@ -55,17 +55,10 @@
 
 namespace open_qwen36 {
 
-/// Re-exec this process once with OMP_WAIT_POLICY=PASSIVE, so libgomp reads it at load.
-///
-/// libgomp fixes its wait policy when the library is mapped, before any constructor of ours,
-/// so an in-process setenv cannot change it (it reads back correctly and has no effect). The
-/// policy is worth 16% of one 256-token prefill block on this box: 35.0 s with the workers
-/// spinning against 29.4 s with them sleeping. Windows closes the same hole by delay-loading
-/// vcomp; on Linux the equivalent is to exec a process that already has the variable.
-///
-/// Call from main() before the device or OpenMP is touched. Returns true when a re-exec
-/// HAPPENED -- this address space is gone and the caller must return immediately.
-/// `OFLM_OPEN_OMP_PASSIVE=0` still opts out, and OFLM_OPEN_OMP_REEXEC keeps it to one hop.
+/// Install the default passive OpenMP policy before libgomp loads, via Linux re-exec.
+/// An explicit OMP_WAIT_POLICY wins; OFLM_OPEN_OMP_PASSIVE=0 opts out. Windows
+/// uses its delay-loaded vcomp constructor and does not re-exec. Call from main
+/// before device access. A successful exec never returns; otherwise returns false.
 bool reexec_with_passive(char** argv);
 
 struct CoreConfig {

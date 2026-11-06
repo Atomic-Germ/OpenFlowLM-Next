@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
 
         open_qwen36::host::tile_x(x.data(), s.T, s.K, a.data());
         open_qwen36::host::tile_x(x.data(), s.T, s.K, mapped);
-        bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE, s.T * s.K * 2, 0);
+        bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, s.T * s.K * 2, 0);
         std::memcpy(c.data(), mapped, s.T * s.K * 2);
         tile_x_avx2(x.data(), s.T, s.K, b.data());
 
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
         const double t_host = best_ms([&] { open_qwen36::host::tile_x(x.data(), s.T, s.K, a.data()); }, reps);
         const double t_dev = best_ms([&] {
             open_qwen36::host::tile_x(x.data(), s.T, s.K, mapped);
-            bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE, s.T * s.K * 2, 0);   // drain, as a real GEMM's sync does
+            bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, s.T * s.K * 2, 0);   // publish the CPU-written input, as the real GEMM does
         }, reps);
         const double t_avx = best_ms([&] { tile_x_avx2(x.data(), s.T, s.K, b.data()); }, reps);
         std::printf("%-18s %9.2fms %12.2fms %9.2fms %8.1fx%s%s\n", s.what, t_host, t_dev, t_avx,

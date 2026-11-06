@@ -1,93 +1,116 @@
-"""The OpenMP wait policy has to reach libgomp, and only a re-exec does that on Linux.
-
-`src/open_qwen36/core.cpp` has carried a `setenv("OMP_WAIT_POLICY", "PASSIVE")` in a static
-initialiser for a long time. On Linux it does nothing: libgomp reads the variable in its ELF
-constructor, which runs when the library is mapped, before any constructor of the program.
-The variable then reads back correctly, so the log line says PASSIVE and the workers still
-spin -- measured as 34.8 s against 29.4 s for one 256-token prefill block, a 15% difference
-between two runs of the same binary.
-
-These tests pin the three things that make the fix work, without needing an NPU:
-
-  * the guards are exactly `OFLM_OPEN_OMP_REEXEC` and `OFLM_OPEN_OMP_PASSIVE=0`, and in
-    particular NOT "is OMP_WAIT_POLICY already set" -- the static initialiser sets it in this
-    very process, which is the state the re-exec exists to escape;
-  * the function is declared in the public header and defined outside the anonymous
-    namespace, or the programs that call it cannot link;
-  * the variable is classified, so the settings CI stays green.
-"""
-from __future__ import annotations
-
+"""Execute the real startup constructor and re-exec helper without XRT or weights."""
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-CORE_CPP = ROOT / 'src/open_qwen36/core.cpp'
-CORE_HPP = ROOT / 'src/open_qwen36/core.hpp'
-MAIN_CPP = ROOT / 'src/src/main.cpp'
-CLI_CPP = ROOT / 'src/open_qwen36/cli.cpp'
-REGISTRY = ROOT / 'utilities/generate-registry.py'
 
 
-@pytest.fixture(scope='module')
-def core() -> str:
-    return CORE_CPP.read_text()
+@pytest.fixture(scope="module")
+def startup(tmp_path_factory):
+    compiler = shutil.which("g++")
+    if not compiler:
+        pytest.skip("g++ required")
+    work = tmp_path_factory.mktemp("omp-startup")
+    source = (ROOT / "src/open_qwen36/core.cpp").read_text()
+    ctor = source[source.index("struct OmpWaitPolicy {"):source.index("/// Host threads for the block")]
+    start = source.index("#ifdef _WIN32\nbool reexec_with_passive")
+    helper = source[start:source.index("\n#endif", start) + len("\n#endif")]
+    # Constructor, helper and actual execv are production code. Only the error case
+    # replaces execv, so it is deterministic without requiring a restrictive sandbox.
+    prefix = r'''#include <cstdlib>
+#include <cstdio>
+#include <string>
+#include <cerrno>
+#include <unistd.h>
+#include <omp.h>
+#ifdef FAIL_EXEC
+static int failed_exec(const char*, char* const*) { errno = EACCES; return -1; }
+#define execv failed_exec
+#endif
+'''
+    main = r'''
+int main(int argc, char** argv) {
+    puts("ENTER"); fflush(stdout);
+    reexec_with_passive(argv);
+    const char* policy = getenv("OMP_WAIT_POLICY");
+    const char* guard = getenv("OFLM_OPEN_OMP_REEXEC");
+    printf("POLICY=%s\nGUARD=%s\n", policy ? policy : "unset", guard ? guard : "unset");
+    for (int i = 1; i < argc; ++i) printf("ARG=%s\n", argv[i]);
+    omp_display_env(0);
+}
+'''
+    cpp = work / "startup.cpp"
+    cpp.write_text(prefix + ctor + helper + main)
+    for name, flags in [("normal", []), ("failure", ["-DFAIL_EXEC"])]:
+        subprocess.run([compiler, "-std=c++17", "-fopenmp", *flags, str(cpp), "-o", str(work / name)], check=True)
+    return work
 
 
-@pytest.fixture(scope='module')
-def core_hpp() -> str:
-    return CORE_HPP.read_text()
+def run(startup, env=None, binary="normal"):
+    clean = {k: v for k, v in os.environ.items()
+             if k not in ("OMP_WAIT_POLICY", "OFLM_OPEN_OMP_REEXEC", "OFLM_OPEN_OMP_PASSIVE")}
+    return subprocess.run([str(startup / binary), "argument with spaces", "--literal=value"],
+                          env=clean | (env or {}), capture_output=True, text=True, timeout=5, check=True)
 
 
-def _definition_body(core: str) -> str:
-    """The body of reexec_with_passive, from its `#else` (the POSIX arm) to the next `#endif`."""
-    at = core.index('bool reexec_with_passive(char** argv)')
-    # the first definition is the _WIN32 arm; find the POSIX one after it
-    posix = core.index('bool reexec_with_passive(char** argv)', at + 1)
-    end = core.index('#endif', posix)
-    return core[posix:end]
+def test_default_reexecs_once_and_preserves_arguments(startup):
+    result = run(startup)
+    assert result.stdout.count("ENTER\n") == 2
+    assert "POLICY=PASSIVE\n" in result.stdout
+    assert "OMP_WAIT_POLICY = 'PASSIVE'" in result.stderr
+    assert "ARG=argument with spaces\nARG=--literal=value\n" in result.stdout
 
 
-def _code_lines(body: str) -> list[str]:
-    """`body` with comments stripped, so a comment that NAMES the wrong guard cannot satisfy
-    (or trip) an assertion about the code."""
-    return [ln.split('//')[0] for ln in body.splitlines()]
+@pytest.mark.parametrize("policy", ["ACTIVE", "PASSIVE", "active", "passive"])
+def test_explicit_policy_wins_without_reexec(startup, policy):
+    result = run(startup, {"OMP_WAIT_POLICY": policy})
+    assert result.stdout.count("ENTER\n") == 1
+    assert f"POLICY={policy}\n" in result.stdout
+    assert f"OMP_WAIT_POLICY = '{policy.upper()}'" in result.stderr
 
 
-def test_guards_do_not_include_the_variable_itself(core: str):
-    """The whole point: a process whose constructor already exported the variable must still
-    re-exec, because libgomp has not read it. A getenv check here would return early and the
-    fix would silently do nothing -- which is how the first version of it behaved."""
-    code = '\n'.join(_code_lines(_definition_body(core)))
-    assert 'OFLM_OPEN_OMP_REEXEC' in code
-    assert 'getenv("OMP_WAIT_POLICY")' not in code
+def test_opt_out_leaves_environment_untouched(startup):
+    result = run(startup, {"OFLM_OPEN_OMP_PASSIVE": "0"})
+    assert result.stdout.count("ENTER\n") == 1
+    assert "POLICY=unset\nGUARD=unset\n" in result.stdout
 
 
-def test_opt_out_and_loop_guard_are_honoured(core: str):
-    body = _definition_body(core)
-    # OFLM_OPEN_OMP_PASSIVE=0 is the documented opt-out and must still turn the policy off
-    assert 'OFLM_OPEN_OMP_PASSIVE' in body
-    # the re-exec sets the guard, so a second hop cannot happen
-    assert 'setenv("OFLM_OPEN_OMP_REEXEC"' in body
-    assert 'execv(' in body
+def test_guard_disables_reexec_without_claiming_policy(startup):
+    result = run(startup, {"OFLM_OPEN_OMP_REEXEC": "1"})
+    assert result.stdout.count("ENTER\n") == 1
+    assert "POLICY=unset\n" in result.stdout
 
 
-def test_declared_publicly_and_defined_outside_the_anonymous_namespace(core: str, core_hpp: str):
-    """Both callers (the standalone CLI and the app's main) include the header; a definition
-    inside `namespace { ... }` links as an internal symbol and the call fails at link time."""
-    assert 'bool reexec_with_passive(char** argv);' in core_hpp
-    anon_end = core.index('}  // namespace')
-    posix = core.index('bool reexec_with_passive(char** argv)', core.index('#else\nbool reexec_with_passive'))
-    assert posix > anon_end, 'the definition must sit outside the anonymous namespace'
+def test_failed_exec_reports_error_and_restores_environment(startup):
+    result = run(startup, binary="failure")
+    assert result.stdout.count("ENTER\n") == 1
+    assert "POLICY=unset\nGUARD=unset\n" in result.stdout
+    assert "re-exec" in result.stderr and "Permission denied" in result.stderr
 
 
-@pytest.mark.parametrize('path', [MAIN_CPP, CLI_CPP], ids=['app-main', 'standalone-cli'])
-def test_every_entry_point_calls_it(path: Path):
-    text = path.read_text()
-    assert 'reexec_with_passive(argv)' in text
+@pytest.mark.parametrize("path", ["src/src/main.cpp", "src/open_qwen36/cli.cpp"])
+def test_entry_point_wiring(path):
+    assert "reexec_with_passive(argv)" in (ROOT / path).read_text()
 
 
-def test_variable_is_classified_for_the_settings_ci():
-    text = REGISTRY.read_text()
-    assert '"OFLM_OPEN_OMP_REEXEC"' in text, 'a new OFLM_* variable must be classified'
+def test_windows_preamble_does_not_include_posix_header(tmp_path):
+    """Run the preprocessor on real include guards with no POSIX SDK available.
+
+    This checks platform selection; it does not claim a native MSVC build.
+    """
+    import re
+    compiler = shutil.which('g++')
+    if not compiler:
+        pytest.skip('g++ required')
+    source = (ROOT / 'src/open_qwen36/core.cpp').read_text().split('namespace open_qwen36 {')[0]
+    for name in re.findall(r'^#include [<"]([^>"]+)', source, re.M):
+        header = tmp_path / name
+        header.parent.mkdir(parents=True, exist_ok=True)
+        header.write_text('#error POSIX header unavailable on Windows\n' if name == 'unistd.h' else '')
+    result = subprocess.run([compiler, '-E', '-P', '-x', 'c++', '-nostdinc', '-I', str(tmp_path),
+                             '-D_WIN32', '-U__linux__', '-'], input=source, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr

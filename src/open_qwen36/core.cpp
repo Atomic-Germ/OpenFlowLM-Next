@@ -11,7 +11,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#ifdef __linux__
 #include <unistd.h>   // execv for reexec_with_passive
+#endif
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -131,13 +133,8 @@ struct OmpWaitPolicy {
         g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
-        // On Linux this setenv is too late and has no effect: libgomp reads
-        // OMP_WAIT_POLICY in its ELF constructor, which runs when the library is mapped --
-        // before any constructor of this file. The variable still reads back correctly
-        // (which is why the log line below looked right for a year), so the only way to
-        // tell is to measure. reexec_with_passive() in main() closes this: it execs the
-        // same binary with the variable in its environment, so libgomp sees it at load.
-        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+        // libgomp reads the environment before this constructor. Leave it intact
+        // so main() can distinguish a caller's policy from our default and re-exec.
 #endif
     }
 };
@@ -173,18 +170,26 @@ bool reexec_with_passive(char** argv) {
 }
 #else
 bool reexec_with_passive(char** argv) {
-    // NOT `if (getenv("OMP_WAIT_POLICY")) return false;`: the static initialiser above has
-    // already set it in this process, which is exactly the state this function exists for.
-    // OFLM_OPEN_OMP_REEXEC is the only guard -- the second process has it and stops there,
-    // whether or not the variable came from the caller.
-    if (std::getenv("OFLM_OPEN_OMP_REEXEC")) return false;          // already re-exec'd once
+    // The Linux constructor leaves the environment untouched. Respect a caller's
+    // policy; only the default needs to be installed before loading libgomp.
+    if (std::getenv("OMP_WAIT_POLICY") || std::getenv("OFLM_OPEN_OMP_REEXEC")) return false;
     const char* off = std::getenv("OFLM_OPEN_OMP_PASSIVE");
     if (off && std::string(off) == "0") return false;
     if (!argv || !argv[0]) return false;
-    setenv("OMP_WAIT_POLICY", "PASSIVE", 1);
-    setenv("OFLM_OPEN_OMP_REEXEC", "1", 1);
-    execv("/proc/self/exe", argv);
-    return false;   // execv returned: it failed, so the in-process attempt is all there is
+    if (setenv("OMP_WAIT_POLICY", "PASSIVE", 1) != 0) {
+        std::perror("open_qwen36: cannot set OpenMP policy for re-exec");
+        return false;
+    }
+    if (setenv("OFLM_OPEN_OMP_REEXEC", "1", 1) == 0) {
+        execv("/proc/self/exe", argv);
+        std::perror("open_qwen36: OpenMP re-exec failed");
+    } else {
+        std::perror("open_qwen36: cannot set OpenMP re-exec guard");
+    }
+    // Failed startup must not advertise a policy that libgomp never read.
+    unsetenv("OMP_WAIT_POLICY");
+    unsetenv("OFLM_OPEN_OMP_REEXEC");
+    return false;
 }
 #endif
 
