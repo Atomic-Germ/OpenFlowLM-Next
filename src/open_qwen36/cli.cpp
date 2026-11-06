@@ -830,6 +830,7 @@ std::vector<int> request(Core& core, const Args& a) {
     double prefill_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
     std::fprintf(stderr, "prefill %zu tokens: %.0f ms (%.0f ms/token)\n", a.ids.size(), prefill_ms, prefill_ms / (a.ids.size() + a.ids2.size()));
 
+    core.dump_step_trace("prefill");  // finish/reset the trace before timing generation
     std::vector<int> out;
     auto t1 = clock::now();
     core.take_dispatch_stats();   // prefill's dispatches are not this loop's
