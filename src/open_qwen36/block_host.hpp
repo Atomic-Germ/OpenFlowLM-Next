@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
+
 namespace open_qwen36 {
 namespace host {
 
@@ -37,7 +39,20 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
 
+/// x [T, K] fp32 -> the A operand, T * K / 8 * 9 bytes. T a multiple of m * rows, K of k.
+void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint8_t* out);
+/// ... into token rows: out [M, n_real], n_real a multiple of the tile's n.
+void bfp16_untile_rows(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* out);
+/// The kernel's c-tiled fp32 output of an M x N product -> y [n_real, M] (the GEMM's own [N, T] order).
+void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y);
+/// Token row r's columns [ct n, ct n + n) of a c-tiled M x N output: a stage reading y once needs no untiled copy
+inline const float* bfp16_c_row(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t r, size_t ct) {
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+    return c + (r / rb) * J * blk + (r % rb) * t.n + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk;
+}
+
 struct DeltaGeom {
+    bool conv_f32 = false; ///< FP32 history; legacy BF16 is the default
     size_t T = 0, t_real = 0, hid = 0;
     size_t key_heads = 0, value_heads = 0, head_dim = 0, taps = 0;
     size_t lanes = 0;       ///< columns of the packed alpha / beta projection (the value heads, padded)
@@ -49,7 +64,9 @@ struct DeltaGeom {
 /// to any prefix of it (OPEN-SPEC-VERIFY). The block-start state is in here too: a rollback
 /// replays forwards from it, so it is the tape's business to keep it rather than the caller's.
 struct DeltaTape {
+    bool conv_f32 = false;             ///< the history format of the recorded block
     std::vector<uint16_t> conv_state0;  ///< [taps-1, nch] bf16: the conv state the block started from
+    std::vector<float> conv_state0_f32; ///< FP32 history instead, when conv_f32; the unused vector is empty
     std::vector<float> S0;              ///< [value_heads, s_rows, head_dim]: the S it started from
     std::vector<float> key;             ///< [t_real, key_heads * head_dim], normed (phase 1's k)
     std::vector<float> val;             ///< [t_real, value_heads * head_dim]
@@ -60,13 +77,13 @@ struct DeltaTape {
 /// The linear-attention layer's middle over a block. qkv [T, 2*key_w + vw] and z [T, vw]
 /// are the fused projection's outputs (pre-activation), xn [T, hid] the normed layer
 /// input; convw [taps, nch], Wa / Wb [hid, lanes], A / dtb [value_heads], nw [head_dim].
-/// conv_state [taps-1, nch] (bf16) and S [value_heads, s_rows, head_dim] (f32) are the
+/// conv_state [taps-1, nch] (FP32 when conv_f32, otherwise BF16) and S [value_heads, s_rows, head_dim] (f32) are the
 /// layer's state, updated in place through the first t_real tokens. og [T, vw] out
 /// (zero past t_real). phase_ms, if given, gets the two halves' wall time: the
 /// per-token one then the delta rule. tape, if given, records what deltanet_rollback needs.
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
                     const float* Wa, const float* Wb, const float* A, const float* dtb, const float* nw,
-                    uint16_t* conv_state, float* S, float* og, double* phase_ms = nullptr,
+                    void* conv_state, float* S, float* og, double* phase_ms = nullptr,
                     DeltaTape* tape = nullptr);
 
 /// The layer's DeltaNet state after the first `k` tokens of the block `tape` came from: what
@@ -81,12 +98,13 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
 /// tokens would have written and rolling back is moving the position; and the rows past them are
 /// read by nothing until a later block overwrites them.
 void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, const float* qkv,
-                       uint16_t* conv_state, float* S);
+                       void* conv_state, float* S);
 
 struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;
     size_t pos0 = 0;        ///< the block's first position (and KV row)
     double eps = 1e-6;      ///< the q / k norms' eps
+    bool kv_pair = false;  ///< cache planes [K hi, K lo, V hi, V lo]
 };
 
 /// The full-attention layer's middle over a block. q / gate [T, nh*hd], k / v [T, kvh*hd]
@@ -97,6 +115,14 @@ struct AttnGeom {
 void attention_block(const AttnGeom& g, const float* q, const float* k, const float* v, const float* gate,
                      const float* qn, const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems,
                      float* og);
+
+/// AVX2/FMA host attention helpers kept in block_host.cpp so core.cpp retains
+/// its normal compile flags. scores_f32 returns the maximum score; exp_sum_f32
+/// overwrites scores with exponentials and returns their sum.
+float scores_f32(const float* K, size_t stride, const float* q, size_t hd, size_t n, float scale, float* s);
+double exp_sum_f32(float* s, size_t n, float mx);
+void axpy_f32(float* out, float a, const float* v, size_t n);
+int argmax_bf16_row(const float* p, size_t n);
 
 /// The host half of the block attention when its products run on the NPU (OPEN-PREFILL-ATTN):
 /// what attention_block does before its products and nothing after. Q [T, nh*hd] fp32 out,

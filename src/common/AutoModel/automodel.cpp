@@ -257,6 +257,14 @@ bool AutoModel::_shared_insert(chat_meta_info_t& meta_info, std::vector<int>& to
     this->profiler_list[SAMPLING_TIME].start();
     this->last_token = this->sampler->sample(y);
     this->profiler_list[SAMPLING_TIME].stop(1);
+    // Phase 31 diagnostic (OFLM_CTX_TRACE): who owns the position after prefill. The sample
+    // above is the token AT the prompt's last position, so the engine's next free row is one
+    // past the prompt. When this differs from `pos_`, generation asks for a row that does not
+    // exist -- which is the CLI/serve disagreement being closed here.
+    if (std::getenv("OFLM_CTX_TRACE"))
+        std::fprintf(stderr, "ctx-trace insert: prompt=%zu total=%zu MAX_L=%zu engine_pos=%d\n",
+                     tokens.size(), this->total_tokens, static_cast<size_t>(this->MAX_L),
+                     this->lm_engine->get_current_context_length());
     return true;
 }
 
@@ -343,6 +351,12 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         return result;
     }
     while (this->total_tokens < this->MAX_L){
+        if (std::getenv("OFLM_CTX_TRACE"))
+            std::fprintf(stderr, "ctx-trace generate: total=%zu MAX_L=%zu engine_pos=%d "
+                                 "-> forward will consume row %d\n",
+                         this->total_tokens, static_cast<size_t>(this->MAX_L),
+                         this->lm_engine->get_current_context_length(),
+                         this->lm_engine->get_current_context_length());
         if (is_cancelled()) {
             reason = CANCEL_DETECTED;
             // reset stream content 
@@ -372,6 +386,12 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         this->token_history.push_back(sampled_token);
         if (this->is_eos(sampled_token)){
             meta_info.generated_tokens++;
+            if (std::getenv("OFLM_CTX_TRACE"))
+                std::fprintf(stderr, "ctx-trace eos: total=%zu MAX_L=%zu engine_pos=%d "
+                                     "forward_on_eos=%d\n",
+                             this->total_tokens, static_cast<size_t>(this->MAX_L),
+                             this->lm_engine->get_current_context_length(),
+                             this->forward_on_eos ? 1 : 0);
             if (this->forward_on_eos) {
                 this->lm_engine->forward(last_sampled_token);
             }
@@ -396,7 +416,7 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
 bool AutoModel::_uno_applies() const {
 #ifdef OFLM_USE_OPEN_QWEN36
     auto* eng = dynamic_cast<open_qwen36::Engine*>(this->lm_engine.get());
-    if (!eng || !eng->uno_ok() || !this->sampler) return false;
+    if (!eng || !eng->spec_ok() || !this->sampler) return false;
     const Sampler& s = *this->sampler;
     const bool penalties = s.repeat_last_n != 0 && (s.rep_penalty != 1.0f || s.freq_penalty != 0.0f || s.pre_penalty != 0.0f);
     return s.top_k == 1 && !penalties;
@@ -430,6 +450,7 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
     }
     std::vector<int> committed;
     bool done = false;
+    eng->spec_begin();
     while (!done && this->total_tokens < this->MAX_L) {
         if (is_cancelled()) {
             reason = CANCEL_DETECTED;
@@ -441,9 +462,11 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
         }
         committed.clear();
         // a cycle writes up to L + 1 positions past the seed; with less room left, decode one token at a time
-        const bool plain = this->total_tokens + eng->core().rows_l() + 1 >= this->MAX_L;
+        bool plain = this->total_tokens + eng->core().rows_l() + 1 >= this->MAX_L;
         int p = 0;
         this->profiler_list[DECODING_TIME].start();
+        // OPEN-SPEC-LOOKUP: a lookup verify, a Uno cycle, or (false) the plain step below
+        if (!plain) plain = !eng->spec_cycle(seed, this->token_history, committed, p);
         if (plain) {
             buffer<bf16> y = this->lm_engine->forward(seed);
             this->profiler_list[DECODING_TIME].stop(1);
@@ -451,7 +474,6 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
             committed.push_back(this->sampler->sample(y));
             this->profiler_list[SAMPLING_TIME].stop(1);
         } else {
-            p = eng->uno_cycle(seed, committed);
             this->profiler_list[DECODING_TIME].stop(static_cast<int>(committed.size()));
         }
         for (size_t i = 0; i < committed.size(); ++i) {
