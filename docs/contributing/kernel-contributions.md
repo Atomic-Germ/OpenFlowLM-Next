@@ -2,272 +2,219 @@
 
 > "The code that matters." -- Keep it simple, clear, and focused.
 
-This document covers contributing **kernel builds** (AIE xclbins) for OpenFlowLM's NPU engine.
+This document covers contributing **open kernel sets** (AIE xclbins + `manifest.json`)
+for OpenFlowLM's NPU engine.
+
+**Read this first:** the authoritative description of the path is
+`.agents/skills/open-kernel-pipeline/SKILL.md` (the one-command pipeline) and
+`.agents/skills/open-kernel-families/SKILL.md` (the family recipes and their traps).
+This page is the short tour; the skills are the working manual.
 
 ---
 
 ## Overview
 
-OpenFlowLM runs models on AMD's XDNA2 NPUs. The `open_kernels/` directory holds the **design sources** that are compiled into `.xclbin` files during build time.
+OpenFlowLM runs models on AMD's XDNA2 NPUs. `open_kernels/` holds the **design sources**
+that are compiled into `.xclbin` files and shipped as a `manifest.json` the engine reads.
 
-**Two parts to understand:**
-1. **Open engine kernels** -- Built with `ironvenv`/`mlir-aie` (Linux only)
-2. **Open NPUE kernels** -- Built with `q4nx-build` (Linux only)
+The one fact to internalize: **geometry decides, scripts derive, `oflm add` runs.** A
+model is the numbers in its weights, not its repo name or a registry entry. If those
+numbers have a family recipe and a kernel set, the model runs; a new size is built by
+the same command; a new architecture is the only thing that needs kernel code.
 
-The executable builds with CMake, but the kernel xclbins need a separate toolchain.
-
----
-
-## Build Requirements
-
-### For Open Engine Kernels (`open_kernels/`)
-
-- **XRT** installed on host (`/opt/xilinx/xrt`)
-- **Kernel toolchain** (`ironvenv` with `mlir-aie` + Peano)
-- **NPU present** on build host (for embedding models)
-
-### For Open NPUE Kernels (`open_npue/`)
-
-- **q4nx-build** tool (`utilities/q4nx-build`)
-- **NPU present** (for BERT embedding export)
-- **Python 3.11** (for `open_kernels/export_qwen36_kernels.py`)
-
-### Prerequisites
-
-See [docs/linux-getting-started.md](../linux-getting-started.md) for full setup.
-
----
-
-## Building Open Engine Kernels
-
-The open engine dispatches to kernel sets derived from each model's `config.json`.
-
-### Build All Families
-
-```bash
-# Activate kernel toolchain
-source ironvenv/bin/activate
-
-# Build all kernel sets
-python open_kernels/export_qwen36_kernels.py
 ```
-
-**Output:** `src/xclbins/<model>/open_kernels/`
-
-### Build Specific Families
-
-Configure with `-DOFLM_KERNEL_SPECS` when building with CMake, or specify `--spec` for the script.
-
-```bash
-python open_kernels/export_qwen36_kernels.py --spec qwen3-4b
-python open_kernels/export_qwen36_kernels.py --only qwen3-4b:ax0
-```
-
-**Available specs:**
-- `qwen3-4b` -- Qwen3 dense 4B (all sizes)
-- `gemma3-4b` -- Gemma3 dense 4B
-- `llama-8b` -- Llama 3.1 8B
-- `hy-mt2-7b` -- Hy-MT2-7B
-- `granite-3b` -- IBM Granite 4.2 3B
-- `qwen35-4b` -- Qwen3.5 dense 4B
-- `qwen36-moe` -- Qwen3.6-MoE
-
-### Build and Verify
-
-```bash
-oflm list
-```
-
-The engine should report which kernel set it resolved when loading a model.
-
----
-
-## Building Open NPUE Kernels
-
-Open NPUE kernels are for embedding models (Gemma, MedGemma, etc.).
-
-### Build All Families
-
-```bash
-cd <repo>
-.\npu_offload\gemm_rtp\build.ps1
-```
-
-**Output:** `src/xclbins/`
-
-### Build Specific Family
-
-```bash
-.\npu_offload\gemm_rtp\build.ps1 -Only Gemma-300M-OpenNPU2
-```
-
-**Build time:** 3–4 minutes per family (~20 minutes total).
-
-### Build Flags
-
-Build flags live in `families.json`, not the script:
-
-- `-Force` -- Rebuild all families
-- `-Only <name>` -- Build one family
-- `--check DIR` -- Verify against reference
-
----
-
-## Adding New Kernel Families
-
-### Open Engine (XDNA2)
-
-1. **Find the model's `config.json`**
-   - Typically at `https://huggingface.co/<model>/<model>/resolve/main/config.json`
-   - Or download the model and read `config.json`
-
-2. **Check the recipe**
-   - Open `src/open_qwen36/engine.cpp` to see how recipes work
-   - Find or create a `ModelSpec` for your model
-
-3. **Add the shape**
-   - Edit `open_kernels/recipes/<family>.json` if adding new shape
-   - Or add `ModelSpec` entries to `open_kernels/model_specs.cpp`
-
-4. **Build the kernel set**
-   ```bash
-   python open_kernels/export_qwen36_kernels.py --model-dir DIR
-   ```
-
-5. **Verify it works**
-   ```bash
-   oflm list
-   oflm run <model>
-   ```
-
-### Open NPUE (BERT)
-
-1. **Add to families.json**
-   - Edit `npu_offload/gemm_rtp/families.json`
-   - Add your model's geometry and parameters
-
-2. **Build**
-   ```bash
-   .\npu_offload\gemm_rtp\build.ps1
-   ```
-
-3. **Verify**
-   ```bash
-   oflm list
-   oflm run <model>
-   ```
-
----
-
-## Debugging Kernel Builds
-
-### Common Issues
-
-**"No open kernels found"**
-- Check that kernels were exported to `src/xclbins/`
-- Verify `model_list.json` includes your model
-- Run `oflm list` to see which kernel set was loaded
-
-**"Kernels match but model fails"**
-- Check `manifest.json` in the kernel set
-- Verify `toolchain.json` matches your mlir-aie/Peano versions
-- Run `oflm list` to confirm kernel set resolution
-
-**Build fails on NPU**
-- Ensure NPU driver is installed (32.0.203.304+)
-- Check XRT is installed and accessible
-- Run `oflm list` to verify kernel set was built
-
-### Debug Commands
-
-```bash
-# List available kernels
-oflm list
-
-# Show kernel set resolution
-/verbose
-
-# Check kernel manifest
-cat src/xclbins/<model>/open_kernels/manifest.json
+weights (GGUF / q4nx / safetensors)
+   -> geometry     hidden, layers, heads, head_dim, rotary, vocab, FFN, layer types
+   -> family       the recipe that turns those numbers into a layer program
+   -> spec         the geometry as JSON (open_kernels/recipes/specs/*.json)
+   -> kernel set   src/xclbins/<set>/open_kernels/ (built, never committed)
+   -> link         <model>/open_kernels -> that set
+   -> pack         .q4nx already packed; .npue packed on first load; GGUF streams
 ```
 
 ---
 
-## Branch Naming for Kernels
+## The one command
 
-Use the standard format:
+```bash
+# every family, every size, engine + kernels + package
+cmake --workflow --preset linux-package
 
-- `feat/llama-8b` -- Add Llama 8B kernel support
-- `fix/kernel-llama-8b` -- Fix Llama 8B kernel build
-- `perf/lmhead-q4` -- Improve LM head quantization
-- `docs/kernel-experiment` -- Kernel experiment documentation
-- `chore/q4nx-build` -- q4nx-build tool changes
+# one new size, end to end (SPEC -> BUILD -> GATE -> CATALOGUE -> REBUILD -> REGISTER)
+python utilities/build-new-spec.py --repo Qwen/Qwen3-8B
+python utilities/build-new-spec.py --repo Qwen/Qwen3-8B --dry-run
 
----
+# kernels only, all specs or one
+python utilities/export-kernels.py
+python utilities/export-kernels.py --specs qwen3-8b
+```
 
-## Contributing to Kernel Recipes
+A user adds a model with `oflm add <repo>` (see the
+[CLI reference](/docs/instructions/cli/#-add-a-model-oflm-add)). With a source
+checkout, `oflm add` writes the derived spec and runs `build-new-spec.py` itself when
+the size has no set yet; no command is handed to the user.
 
-### Recipe Structure
+`build-new-spec.py`'s stages, and why each exists:
 
-Each family has a recipe that defines how models are exported:
+| stage | what runs | why |
+|---|---|---|
+| SPEC | `utilities/gen-kernel-spec.py` | geometry from `config.json`, or from the GGUF header when the repo has no config. A fine-tune whose base has a spec links to it. |
+| BUILD | `export-kernels.py` with `OPEN_KERNELS_UNVALIDATED=1` | proves the design compiles at the new geometry. |
+| GATE | `designs/attn/` + `utilities/op-gate.py` | runs the production attention worker against an fp64 oracle, and every other op through its fixture. A point enters the catalogue only after it passes. |
+| CATALOGUE | `utilities/catalogue-add-point.py` | records the validated point so the next build needs no override. |
+| REBUILD | `export-kernels.py` without the override | ships a build the catalogue allows. |
+| REGISTER | `utilities/register-spec.py` | adds the spec hash (and name, when needed) to the frozen test lists. Mechanical; never hand-edit those hashes. |
 
-1. **Shape extraction** from `config.json`
-2. **Kernel selection** (attention, gemv, lm_head, etc.)
-3. **Quantization path** (Q4, Q8, bf16, etc.)
+Only GATE needs an NPU. Nothing here needs the model's weights, a container, or the
+engine. `--dry-run` stops after SPEC and prints the recipe walls and the catalogue
+points the size would need.
 
-### Adding New Shapes
-
-1. Read the existing recipe for your family
-2. Identify the shape parameters needed
-3. Add to `open_kernels/model_specs.cpp` or `recipes/<family>.json`
-4. Test with `export_qwen36_kernels.py`
-
----
-
-## Testing Kernel Contributions
-
-**Before submitting:**
-1. Build the kernel set
-2. Run `oflm list` to verify
-3. Run `oflm run <model>` to test locally
-4. Check benchmarks if applicable
-
-**For new models:**
-1. Add benchmark results to `docs/benchmarks/`
-2. Include `config.json` in your test model if helpful
-3. Document known limitations
+A geometry the recipe cannot build (a width that does not fit a core, `hidden` not a
+multiple of the 256-wide q4 k-tile, a split FF with no twin) is moved to
+`open_kernels/recipes/candidates/` with the reason. It is not thrown away.
 
 ---
 
-## Getting Help
+## The artifacts, and what owns what
 
-- **Open an issue** before starting major kernel contributions
-- **Join Discord** for real-time help
-- **Ask questions** on PRs or in issues
+| artifact | path | owner | changes when |
+|---|---|---|---|
+| geometry | the weights (GGUF header / config / q4nx header) | the model | never |
+| spec | `open_kernels/recipes/specs/*.json` | `gen-kernel-spec.py` / `oflm add` | a new size or a corrected geometry |
+| recipe | `open_kernels/recipes/{dense,qwen35,qwen36moe,lfm2}.py` | kernel author | a new family or layout rule |
+| design | `open_kernels/designs/<op>/` | kernel author | a new op or datapath |
+| catalogue | `open_kernels/recipes/catalogue.py` | `op-gate.py` / `catalogue-add-point.py` | a validated hardware run |
+| manifest | `src/xclbins/<set>/open_kernels/manifest.json` | the recipe, generated | every export |
+| kernel set | `src/xclbins/<set>/open_kernels/` | `export-kernels.py` | every build; never committed |
+| container | `model.q4nx` / `<model>.npue` | `q4nx-build` / the engine | conversion or first load |
+
+The engine (`src/open_qwen36`) is an interpreter of `manifest.json`. No model constant
+lives in C++, which is why one kernel set serves every model of a geometry.
+
+---
+
+## Adding a size
+
+```bash
+python utilities/build-new-spec.py --repo Qwen/Qwen3-8B
+```
+
+For a GGUF-only repo the same command works: `gen-kernel-spec.py --repo` falls back to
+the GGUF header when `config.json` is 404. For a gated repo, download the GGUF once and
+use the local file:
+
+```bash
+python utilities/gen-kernel-spec.py --gguf model.gguf \
+    --out open_kernels/recipes/specs/<name>.json
+python utilities/build-new-spec.py --spec <name>
+```
+
+A fine-tune never gets its own kernels; if the base's spec covers the geometry,
+`gen-kernel-spec.py` writes a `link_to` spec and there is nothing to build.
+
+---
+
+## Adding a family
+
+Do this only when the architecture's arithmetic is genuinely new. A new size of an
+existing family is the command above.
+
+1. **Derive the spec.** Add the architecture to `recipes/spec.py` (`GGUF_FAMILIES` for
+   the GGUF key names, and the HF config path if it is a new `model_type`). Family
+   differences that are constants of the architecture (post-RoPE norm, q/k/v bias,
+   sliding-window pattern) go in the recipe, not the spec, so existing spec hashes do
+   not move.
+2. **Write the recipe.** Add a module under `open_kernels/recipes/`, expose the surface
+   listed in `recipes/families.py`, and register it in `FAMILIES` / `family_module()`.
+3. **Reuse or write the designs.** `designs/dense/dx.py` covers GQA + gated FFN;
+   `designs/layer_x` covers the hybrid/MoE layer. A truly new op gets its own design.
+4. **Prove the points.** Run the op's fixture (or the attention gate) and add the
+   validated point to the catalogue. A point is not "supported" because the macro
+   compiles; it is supported because the fixture passed.
+5. **Add the spec and export.** `build-new-spec.py --repo ...` now works for every size.
+6. **Record what is different** in `.agents/skills/open-kernel-families` -- not a new
+   per-model skill.
+
+If the arithmetic is not implemented, say so by name: `recipes/families.py`'s
+`NOT_IMPLEMENTED` is the pattern. A model routed to the nearest recipe would emit
+kernels that drop a whole stage of its layer and then "match" a replica making the same
+mistake.
+
+---
+
+## Build environments
+
+- **Linux (canonical):** `source utilities/env.sh` assembles XRT, ROCm/HIP, MLIR-AIE +
+  Peano and the tree's paths. `cmake --workflow --preset linux-package` configures,
+  builds the engine, exports every kernel spec, runs the tests and packages RPM + TGZ
+  (`linux-package-deb` adds the DEB on Debian/Ubuntu).
+- **Native Windows:** a downloaded XRT SDK zip + mlir-aie's own `iron_setup.py`, no WSL.
+  Check the mlir-aie clone out at **v1.4.2** (see `docs/BUILD.md`).
+- **Never run two exports in one checkout at once.** Each regenerates
+  `designs/layer_x`'s kernel TUs for its own spec; use a `git worktree` for a parallel
+  baseline.
+
+---
+
+## Verifying your change
+
+```
+oflm check <tag>
+oflm run <tag>                 # or oflm serve <tag>; the real test
+oflm-test --llm --model <tag>  # or --embedding / --vision / --tools
+cmake --workflow --preset linux-package
+```
+
+The kernel export is incremental by `build_key` (recipe + every kernel source + spec +
+quant). An unchanged set is skipped; `--force` rebuilds. `utilities/export-kernels.py
+--check <previous-export>` compares instruction streams byte-for-byte and allows only
+the build stamps in the xclbin to differ.
+
+Before you push, run the settings check the way CI runs it (it merges the target
+branch in, so a variable added elsewhere cannot break you):
+
+```bash
+utilities/check-settings-ci.sh
+```
+
+---
+
+## Failure map
+
+| message | what it means | what to do |
+|---|---|---|
+| `no open kernel set can run this model` | no installed set serves the geometry | run with a checkout so `oflm add` builds it; or install the set the release ships |
+| `this build of the set predates GGUF-direct` | the set has no `gguf` manifest section | re-export with `python utilities/export-kernels.py` |
+| `the recipe cannot build this shape` | a design wall | the spec is parked in `recipes/candidates/`; the shape needs a design change |
+| `the catalogue has not validated N point(s)` | a gate has not run at this geometry | `build-new-spec.py` runs them; do not ship with `OPEN_KERNELS_UNVALIDATED=1` |
+| `no recipe for family` / `not implemented` | the architecture has no recipe | that is the family work above; do not route it to the nearest recipe |
+| `no open kernels found` at load | the model has no `open_kernels` link and no set matches | re-run `oflm add`, or check `OFLM_OPEN_KERNELS_DIR` |
+
+---
+
+## Branch naming
+
+- `feat/llama-8b-kernels` -- a new size or family
+- `fix/...` / `perf/...` / `docs/...` / `chore/...` as usual
+
+---
+
+## Getting help
+
+- **Open an issue** before starting major kernel contributions.
+- Ask on PRs or in issues.
 
 **Kernel-specific resources:**
-- `open_kernels/README.md` -- Open engine kernel structure
-- `open_kernels/PROVENANCE.md` -- Build history and tracking
-- `docs/linux-getting-started.md` -- Full build setup
+- `.agents/skills/open-kernel-pipeline/SKILL.md` -- the one-command path and failure map.
+- `.agents/skills/open-kernel-families/SKILL.md` -- recipes, designs, geometry traps.
+- `.agents/skills/open-gguf-direct/SKILL.md` -- the GGUF front door.
+- `src/create_new_model.md` -- the geometry-first onboarding doc with the settings section.
+- `open_kernels/README.md` -- the open engine kernel structure.
+- `docs/BUILD.md` -- full build setup.
 
 ---
 
 ## License
 
-OpenFlowLM is released under the MIT License. See [LICENSE_OPEN_RUNTIME.md](../../LICENSE_OPEN_RUNTIME.md) for details.
-
-**Kernel families:**
-- Open engine kernels (XDNA2) -- MIT licensed
-- Open NPUE kernels -- MIT licensed  
-- Upstream kernels (if retained) -- Original FastFlowLM license
-
----
-
-## Quick Links
-
-- [Branch naming convention](#branch-naming-convention)
-- [Open engine kernels](#open-engine-kernels)
-- [Open NPUE kernels](#open-npue-kernels)
-- [Adding new families](#adding-new-family)
-- [Debugging](#debugging)
-- [Testing](#testing)
+OpenFlowLM is released under the MIT License. See
+[LICENSE](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/LICENSE) for details.

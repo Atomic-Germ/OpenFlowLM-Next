@@ -54,24 +54,147 @@ FAMILY = "FLUX.2-klein-4B-NPU2"
 ALIGN = 4096
 
 
+def _derive_shape(ckpt: Path, reference_repo: str | None, fam: str):
+    """The Shape the checkpoint describes, from its own configs.
+
+    `transformer/config.json` is in the checkpoint; a GGUF-sourced build has the checkpoint
+    only for its text encoder and VAE, so the transformer config comes from the repo the
+    README named (`reference_repo`).
+    """
+    import json as _json
+
+    tcfg = Path(ckpt) / "transformer" / "config.json"
+    if tcfg.is_file():
+        transformer = _json.loads(tcfg.read_text())
+    elif reference_repo:
+        from huggingface_hub import hf_hub_download
+
+        transformer = _json.loads(open(hf_hub_download(reference_repo, "transformer/config.json")).read())
+    else:
+        raise SystemExit(f"{fam}: cannot derive the shape -- no transformer/config.json and no "
+                         f"reference repo; pass --family with one of {sorted(kp.SHAPES)}")
+    te = _json.loads((Path(ckpt) / "text_encoder" / "config.json").read_text())
+    return kp.shape_from_config(transformer, te, family=fam)
+
+
+def _gguf_get(path: Path, reference_repo: str | None = None):
+    """`SafeTensors.get`-compatible reader over a klein DiT GGUF (see gguf_weights).
+
+    `reference_repo` is the checkpoint the file was converted from (the GGUF repo's README
+    names it). It is used for ONE decision: whether the modulation tensor is BFL-ordered --
+    both converters we tried emit BFL's (scale, shift) where diffusers has (shift, scale),
+    which silently graining the image (measured 2026-10-28)."""
+    sys.path.insert(0, str(HERE))
+    from gguf_weights import GgufWeights, detect_bfl_modulation
+
+    bfl = None
+    if reference_repo:
+        bfl = detect_bfl_modulation(Path(path), reference_repo)
+        if bfl is None:
+            print(f"[WARN] {reference_repo}: could not check the DiT's modulation convention; "
+                  f"assuming BFL's (scale, shift)", flush=True)
+            bfl = True
+    return GgufWeights(Path(path), bfl_modulation=bool(bfl)).get
+
+
+def _pack_dit_from_gguf(cache: Path, get, jobs: int = 4) -> dict[str, tuple[Path, int]]:
+    """{name: (file, bytes)} for the DiT's GEMM weights, packed from a GGUF getter.
+
+    The same five lines as `G.ensure_packed`'s worker (`build(get) -> pack_b_cols`), without
+    the process pool: there is one file to read and it stays mapped, so threads would only
+    contend for it. The provenance stamp is the file's identity, so a different GGUF (or a
+    repacked node) is repacked rather than reused.
+    """
+    import hashlib
+
+    specs = kp.dit_weight_specs()
+    want = {n: K * N * 9 // 8 for n, (K, N, _) in specs.items()}
+    src = get.__self__.gguf.path if hasattr(get, "__self__") else Path("?")
+    try:
+        st = src.stat()
+        fp = hashlib.sha256(f"{src}:{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()
+    except OSError:
+        fp = "?"
+    cache.mkdir(parents=True, exist_ok=True)
+    stamp = cache / "provenance.txt"
+    if stamp.exists() and stamp.read_text().strip() != fp:
+        print(f"{cache} was packed from another DiT; repacking", flush=True)
+        for p in cache.glob("*.bin"):
+            p.unlink()
+    stamp.write_text(fp + "\n")
+    todo = [n for n, nb in want.items()
+            if not (cache / f"{n}.bin").exists() or (cache / f"{n}.bin").stat().st_size != nb]
+    if todo:
+        print(f"packing {len(todo)} DiT weights from {src} -> {cache}", flush=True)
+        for n in todo:
+            K, N, build = specs[n]
+            b = build(get)
+            assert b.shape == (K, N), (n, b.shape, (K, N))
+            tmp = cache / f"{n}.tmp"
+            kp.pack_b_cols(b).tofile(tmp)
+            tmp.replace(cache / f"{n}.bin")
+        print(f"packed {len(todo)} DiT weights", flush=True)
+    return {n: (cache / f"{n}.bin", nb) for n, nb in want.items()}
+
+
 def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
-          pack_cache: Path | None = None, edits: list[int] = ()) -> list[str]:
+          pack_cache: Path | None = None, edits: list[int] = (),
+          transformer_gguf: Path | None = None, reference_repo: str | None = None,
+          family: str | None = None) -> list[str]:
     """Write the model directory; returns the files written. pack_cache: keep the per-weight
     packed files there (reused by the next build); default a temporary directory. edits: the
-    resolutions that also get an edit configuration."""
+    resolutions that also get an edit configuration.
+
+    `transformer_gguf`: take the DiT from a GGUF instead of `ckpt/transformer`. The bundle
+    packs the DiT's weights to dit_gemm's bfp16 tiles either way, so the source only has to
+    present them by HF name in HF layout -- `gguf_weights.GgufWeights` does (BFL names,
+    fused qkv, ggml orientation). The text encoder and the VAE still come from the
+    checkpoint: no GGUF of either exists. A GGUF-only source is therefore NOT possible, and
+    the caller names the checkpoint that supplies the other two.
+    """
     import export_dit_kernels as xk
     import vae_decoder as vd
     import vae_encoder as ve
 
     out.mkdir(parents=True, exist_ok=True)
-    dit, te = G.SafeTensors(ckpt / "transformer"), G.SafeTensors(ckpt / "text_encoder")
+    # The shape is one record in klein_pipeline (the diffusion equivalent of a text
+    # ModelSpec): the schedule, the packing and the params all read it, so a family switch
+    # is set_shape + the matching kernel build (export_dit_kernels.FAMILIES).
+    fam = family
+    if not fam or fam not in kp.SHAPES:
+        # not a named family: derive the shape from the checkpoint's own configs and find the
+        # kernels it can run, the way a text spec finds its set by geometry.
+        derived = _derive_shape(ckpt, reference_repo, fam)
+        fam = kp.family_for_shape(derived) or ""
+        if not fam:
+            raise SystemExit(
+                f"this checkpoint's shape ({derived.H} hidden, {derived.MLP} FFN, "
+                f"{derived.N_DBL}+{derived.N_SGL} blocks) has no kernel family.\n"
+                f"  known: {', '.join(sorted(kp.SHAPES))}\n"
+                f"  add it to export_dit_kernels.FAMILIES/FA_FAMILIES (and klein_pipeline.SHAPES) "
+                f"and build the set")
+        kp.set_shape(kp.SHAPES[fam])
+    te = G.SafeTensors(ckpt / "text_encoder")
     files = []
 
     tmp = None
     if pack_cache is None:
         tmp = tempfile.TemporaryDirectory(prefix="klein-pack-", dir=out)
         pack_cache = Path(tmp.name)
-    packed = G.ensure_packed(pack_cache, jobs, ckpt)
+    if transformer_gguf is not None:
+        # the DiT from the GGUF, the text encoder from the checkpoint (no GGUF of one exists)
+        dit_get = _gguf_get(transformer_gguf, reference_repo)
+        kp.validate_sources(dit_get, te.get)     # before the 7.5 GiB pack, not after
+        packed = _pack_dit_from_gguf(pack_cache, dit_get)
+        # its own subdirectory: ensure_packed stamps the cache with the CHECKPOINT's identity
+        # and clears every *.bin that does not match, which would drop the DiT packs above
+        packed |= G.ensure_packed(pack_cache / "text_encoder", jobs, ckpt, only=("text_encoder",),
+                                  family=fam)
+    else:
+        dit = G.SafeTensors(ckpt / "transformer")
+        dit_get = dit.get
+        kp.validate_sources(dit_get, te.get)
+        packed = G.ensure_packed(pack_cache, jobs, ckpt, family=fam)
     weights, off = {}, 0
     with open(out / "weights.bin", "wb") as f:
         for n, (p, nb) in packed.items():
@@ -86,7 +209,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     files.append("weights.bin")
     print(f"weights.bin: {len(weights)} weights, {off / 2**30:.2f} GiB", flush=True)
 
-    kp.fill_params(dit.get, te.get).tofile(out / "params.bin")
+    kp.fill_params(dit_get, te.get).tofile(out / "params.bin")
     vst = G.SafeTensors(ckpt / "vae")
     wbytes, vtable, blocks, vindex = vd.pack_weights(
         {k: vst.get(k) for k in vst._where if not k.endswith("num_batches_tracked")})
@@ -170,9 +293,9 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
         files += [name, f"tf_{R}.bin", f"dt_{R}.bin", f"qin_{R}.bin"]
         print(f"{name}: {len(ops)} ops, {len(buffers)} buffers", flush=True)
 
-    layout = xk.layout_hash(xk.set_streams(FAMILY, resolutions, edits=edits))
+    layout = xk.layout_hash(xk.set_streams(fam, resolutions, edits=edits))
     bundle = {
-        "family": FAMILY,
+        "family": fam,
         "layout": layout,
         "resolutions": schedules,
         "edits": edit_schedules,
@@ -185,7 +308,7 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     }
     (out / "bundle.json").write_text(json.dumps(bundle, indent=1), encoding="utf-8")
     # LM_Config::from_pretrained only needs config.json to parse; model_type names the engine
-    config = {"model_type": "flux2-klein", "family": FAMILY, "resolutions": resolutions,
+    config = {"model_type": "flux2-klein", "family": fam, "resolutions": resolutions,
               "edits": list(edits), "steps": kp.STEPS, "layout": layout}
     (out / "config.json").write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
     files += ["bundle.json", "config.json"]
@@ -195,18 +318,51 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--checkpoint", default=None, help="default: the HF cache's snapshot")
+    ap.add_argument("--checkpoint", default=None,
+                    help="the FLUX.2 diffusers checkpoint (text encoder + VAE). Default: resolved "
+                         "from --gguf-repo's README (its base_model), like the text models' base chain")
     ap.add_argument("--resolutions", default="512,1024")
     ap.add_argument("--edits", default="", help="resolutions that also get an edit configuration")
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, default=4, help="packing processes")
     ap.add_argument("--pack-cache", default=None,
                     help="keep the per-weight packed files here (reused next build)")
+    ap.add_argument("--transformer-gguf", default=None,
+                    help="take the DiT from this GGUF instead of --checkpoint's transformer/ "
+                         "(the text encoder and VAE still come from the checkpoint)")
+    ap.add_argument("--gguf-repo", default=None,
+                    help="the HF repo the GGUF came from: its README's base_model is the "
+                         "checkpoint to fetch (a GGUF carries only the DiT)")
+    ap.add_argument("--family", default=None,
+                    help="the diffusion family (default FLUX.2-klein-4B-NPU2); its shape comes "
+                         "from klein_pipeline.SHAPES and its kernels from export_dit_kernels.FAMILIES")
+    ap.add_argument("--reference-repo", default=None,
+                    help="the checkpoint the DiT GGUF came from, for the modulation-convention "
+                         "check (default: --gguf-repo)")
+    ap.add_argument("--checkpoint-cache", default=None,
+                    help="where resolved checkpoints live (default $OFLM_DIT_CHECKPOINT_CACHE "
+                         "or ~/.cache/oflm/dit-checkpoints)")
     a = ap.parse_args()
+    if not a.checkpoint:
+        if not a.gguf_repo:
+            ap.error("give --checkpoint, or --gguf-repo so the checkpoint can be resolved from "
+                     "the GGUF's README (a GGUF carries only the DiT)")
+        sys.path.insert(0, str(HERE))
+        from klein_checkpoint import resolve as resolve_checkpoint
+
+        ckpt, repo = resolve_checkpoint(a.gguf_repo, Path(a.checkpoint_cache) if a.checkpoint_cache else None)
+        a.checkpoint = str(ckpt)
+        # the CONVERSION source is the checkpoint, not the quant repo: that is what the
+        # modulation-convention check reads (a GGUF repo has no transformer/)
+        if not a.reference_repo:
+            a.reference_repo = repo
+        print(f"checkpoint: {a.checkpoint} (from {repo})", flush=True)
     build(Path(a.checkpoint) if a.checkpoint else G.model_dir(), Path(a.out).resolve(),
           [int(r) for r in a.resolutions.split(",")], a.jobs,
           Path(a.pack_cache) if a.pack_cache else None,
-          [int(r) for r in a.edits.split(",") if r])
+          [int(r) for r in a.edits.split(",") if r],
+          Path(a.transformer_gguf) if a.transformer_gguf else None,
+          a.reference_repo, a.family)
     return 0
 
 

@@ -49,45 +49,16 @@ void Phi4::load_model(std::string model_path, json model_info, int default_conte
 }
 
 void Phi4::setup_tokenizer(std::string model_path) {
-    // load tokenizer configurations
-    #ifdef _WIN32
-    std::string tokenizer_config_path = model_path + "\\tokenizer_config.json";
-    #else
-    std::string tokenizer_config_path = model_path + "/tokenizer_config.json";
-    #endif
-    std::ifstream fs_config(tokenizer_config_path, std::ios::in | std::ios::binary);
-    if (fs_config.fail()) {
-        std::cerr << "Cannot open " << tokenizer_config_path << std::endl;
-        exit(1);
-    }
-    std::string data_config;
-    fs_config.seekg(0, std::ios::end);
-    size_t size_config = static_cast<size_t>(fs_config.tellg());
-    fs_config.seekg(0, std::ios::beg);
-    data_config.resize(size_config);
-    fs_config.read(data_config.data(), size_config);
-    fs_config.close();
-    auto tokenizer_config = nlohmann::json::parse(data_config);
+    auto tokenizer_config = this->_shared_setup_tokenizer(model_path);
     this->has_bos_token = false;
-    // load chat template
-    this->chat_tmpl = std::make_unique<minja::chat_template>(
-        tokenizer_config["chat_template"],
-        "",
-        ""
-    );
-
-    if (this->has_bos_token) {
-        this->bos_token_id = tokenizer_config["bos_token_id"].get<int>();
+    this->bos_token_id = -1;
+    // Phi-4-mini's config.json lists only 199999 (<|endoftext|>) while generation_config.json
+    // lists [200020, 199999] (<|end|>, <|endoftext|>); include <|end|> so turns stop cleanly.
+    auto end_ids = this->tokenizer->encode("<|end|>");
+    if (end_ids.size() == 1 &&
+        std::find(this->eos_token_ids.begin(), this->eos_token_ids.end(), end_ids[0]) == this->eos_token_ids.end()) {
+        this->eos_token_ids.push_back(end_ids[0]);
     }
-    else {
-        this->bos_token_id = -1;
-    }
-    this->eos_token = "";
-    for (auto& token : tokenizer_config["eos_token_id"]) {
-        this->eos_token_ids.push_back(token.get<int>());
-    }
-    this->user_system_prompt = "";
-    this->extra_context["user_system_prompt"] = this->user_system_prompt;
 }
 
 std::string Phi4::apply_chat_template(nlohmann::ordered_json& messages, nlohmann::ordered_json tools) {
@@ -95,6 +66,8 @@ std::string Phi4::apply_chat_template(nlohmann::ordered_json& messages, nlohmann
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -107,7 +80,7 @@ bool Phi4::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::f
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;

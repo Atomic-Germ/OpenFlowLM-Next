@@ -44,6 +44,21 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
     if (!use_open) {
+        // A GGUF INSTALL HAS NO CLOSED PATH AT ALL: the closed engine reads a .q4nx container,
+        // and a GGUF model ships model.gguf instead. Falling through to it is not a fallback,
+        // it is a guaranteed failure several layers down ("Failed to open file: ...
+        // model.safetensors" from a family whose loader expects one) -- so say what is
+        // actually wrong, here, once.
+        std::error_code ec;
+        const bool gguf_install =
+            std::filesystem::is_regular_file(std::filesystem::path(this->lm_config->model_path) / "model.gguf", ec) &&
+            !std::filesystem::is_regular_file(std::filesystem::path(this->lm_config->model_path) / "model.q4nx", ec);
+        if (gguf_install)
+            throw std::runtime_error(
+                "this model was installed from a GGUF and no open kernel set serves it (" +
+                this->lm_config->model_name + "); the closed engine reads a .q4nx container, so "
+                "there is nothing for it to load. Reinstall with `oflm add`, or check that the "
+                "kernel set the install linked is present.");
         // Name the engine: a closed-engine crash otherwise reads as an open-kernel bug (#215).
         header_print("OFLM", family_label + " on the closed engine ("
                      + (kernels.empty() ? "no open kernels installed for " + this->lm_config->model_name
@@ -117,6 +132,19 @@ nlohmann::json AutoModel::_shared_setup_tokenizer(std::string model_path) {
         chat_template.resize(size_template);
         fs_template.read(chat_template.data(), size_template);
         fs_template.close();
+        // Patch templates that use Jinja constructs minja does not support, the
+        // way llama.cpp does: rewrite `is undefined` (which minja lacks) into
+        // the equivalent `is not defined`. Keeps the model loading instead of
+        // failing to build the template, without teaching the parser new syntax.
+        {
+            std::string from = "is undefined";
+            std::string to = "is not defined";
+            size_t pos = 0;
+            while ((pos = chat_template.find(from, pos)) != std::string::npos) {
+                chat_template.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        }
         // overwrite chat_template in tokenizer_config.json
         tokenizer_config["chat_template"] = chat_template;
     }
@@ -124,6 +152,37 @@ nlohmann::json AutoModel::_shared_setup_tokenizer(std::string model_path) {
     if (tokenizer_config["eos_token"].is_null()) {
         header_print("ERROR", "eos_token is null in tokenizer_config.json");
         exit(1);
+    }
+    // HuggingFace tokenizer_config.json may store chat_template as a list of
+    // {"name": "default" | "tool_use", "template": "..."} entries (e.g. Hermes-3).
+    if (tokenizer_config.contains("chat_template") && tokenizer_config["chat_template"].is_array()) {
+        std::string def_tmpl, tool_tmpl, first_tmpl;
+        for (const auto& item : tokenizer_config["chat_template"]) {
+            if (!item.is_object() || !item.contains("template") || !item["template"].is_string()) continue;
+            const std::string t = item["template"].get<std::string>();
+            if (first_tmpl.empty()) first_tmpl = t;
+            const std::string n = item.value("name", "");
+            if (n == "default") def_tmpl = t;
+            else if (n == "tool_use") tool_tmpl = t;
+        }
+        if (!def_tmpl.empty() && !tool_tmpl.empty()) {
+            tokenizer_config["chat_template"] =
+                "{%- if tools is defined and tools -%}\n" + tool_tmpl + "\n{%- else -%}\n" + def_tmpl + "\n{%- endif -%}";
+        } else {
+            tokenizer_config["chat_template"] = !def_tmpl.empty() ? def_tmpl : first_tmpl;
+        }
+    }
+    // Patch templates that use Jinja constructs minja does not support (see above).
+    if (tokenizer_config.contains("chat_template") && tokenizer_config["chat_template"].is_string()) {
+        std::string ct = tokenizer_config["chat_template"].get<std::string>();
+        std::string from = "is undefined";
+        std::string to = "is not defined";
+        size_t pos = 0;
+        while ((pos = ct.find(from, pos)) != std::string::npos) {
+            ct.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+        tokenizer_config["chat_template"] = ct;
     }
     this->chat_tmpl = std::make_unique<minja::chat_template>(
         tokenizer_config["chat_template"],
@@ -643,6 +702,79 @@ StreamResult AutoModel::_shared_think_tool_calling_pasrsed(const std::string con
     }
 
     result.type = current_mode_;
+    return result;
+}
+
+NonStreamResult AutoModel::parse_nstream_content(const std::string response_text) {
+    NonStreamResult result;
+
+    const std::string think_start_tag = "<think>";
+    const std::string think_end_tag = "</think>";
+    const std::string tool_start_tag = "<tool_call>";
+    const std::string tool_end_tag = "</tool_call>";
+
+    size_t think_start_pos = response_text.find(think_start_tag);
+    size_t think_end_pos = response_text.find(think_end_tag);
+    bool is_reasoning = (think_start_pos != std::string::npos && think_end_pos != std::string::npos &&
+                         think_end_pos >= think_start_pos + think_start_tag.length());
+
+    if (is_reasoning) {
+        size_t start = think_start_pos + think_start_tag.length();
+        result.reasoning_content = response_text.substr(start, think_end_pos - start);
+    }
+
+    size_t search_from = 0;
+    while (true) {
+        size_t start_pos = response_text.find(tool_start_tag, search_from);
+        if (start_pos == std::string::npos) break;
+
+        size_t block_content_start = start_pos + tool_start_tag.length();
+        size_t end_pos = response_text.find(tool_end_tag, block_content_start);
+        size_t block_end = (end_pos != std::string::npos) ? end_pos : response_text.length();
+        search_from = (end_pos != std::string::npos) ? end_pos + tool_end_tag.length() : block_end;
+
+        std::string json_str = response_text.substr(block_content_start, block_end - block_content_start);
+
+        std::string name, arguments;
+        try {
+            auto j = nlohmann::json::parse(json_str);
+            if (j.contains("name")) name = j["name"].get<std::string>();
+            if (j.contains("arguments")) {
+                arguments = j["arguments"].is_string()
+                    ? j["arguments"].get<std::string>()
+                    : j["arguments"].dump();
+            }
+        } catch (...) {
+            std::string key_name = "\"name\": \"";
+            size_t ns = json_str.find(key_name);
+            if (ns != std::string::npos) {
+                ns += key_name.length();
+                size_t ne = json_str.find("\"", ns);
+                if (ne != std::string::npos) name = json_str.substr(ns, ne - ns);
+            }
+            std::string key_args = "\"arguments\":";
+            size_t ap = json_str.find(key_args);
+            if (ap != std::string::npos) {
+                size_t bs = json_str.find("{", ap);
+                size_t be = json_str.rfind("}");
+                if (bs != std::string::npos && be != std::string::npos && be > bs)
+                    arguments = json_str.substr(bs, be - bs + 1);
+            }
+        }
+
+        if (!name.empty()) {
+            result.tool_calls_list.emplace_back(name, arguments);
+        }
+    }
+
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
+    } else {
+        size_t content_start = is_reasoning ? think_end_pos + think_end_tag.length() : 0;
+        result.content = response_text.substr(content_start);
+    }
+
     return result;
 }
 

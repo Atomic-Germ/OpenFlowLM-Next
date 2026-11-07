@@ -92,14 +92,19 @@ def test_quant_suffix_must_run_to_end_of_stem():
     assert oflm_add.gguf_quant_of("Model-Q8_0.gguf") == "Q8_0"
 
 
-def test_choose_gguf_prefers_q4_k_m_over_q8_0_and_names_impostors():
+def test_choose_gguf_prefers_the_pools_own_format_then_the_most_precise_source():
+    """The pool is q4_1, so a Q4_1 file is packed near-exactly; anything else is requantized
+    and the source's precision is all that is left. Measured on the same Qwen3.5-4B: Q4_1
+    matched the fp64 reference at cos 0.993 per layer, Q4_K_M at 0.75 -- so Q6_K (which
+    requantizes cleanly) beats Q4_K, and a size-first order is the wrong one."""
     chosen, refused = oflm_add.choose_gguf_file([
-        "M-Q4_0_4_4.gguf",
-        "M-Q8_0.gguf",
+        "M-Q4_0_4_4.gguf",   # an impostor: never reads as Q4_0
         "M-Q4_K_M.gguf",
+        "M-Q6_K.gguf",
         "M-IQ2_M.gguf",
     ])
-    assert chosen == "M-Q4_K_M.gguf"
+    assert chosen == "M-Q6_K.gguf"
+    assert oflm_add.choose_gguf_file(["M-Q4_1.gguf", "M-Q6_K.gguf"])[0] == "M-Q4_1.gguf"
     # The impostor names its full suffix: it must never read as Q4_0.
     assert refused["M-Q4_0_4_4.gguf"].startswith("quant Q4_0_4_4 not supported")
 
@@ -152,8 +157,11 @@ def test_config_model_type_resolves_family():
         {"architectures": ["Qwen3ForCausalLM"]}) == "qwen3"
     assert oflm_add.family_from_config_dict(
         {"architectures": ["GraniteForCausalLM"]}) == "granite"
-    # Vision-language shapes never fold onto a text family.
-    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) is None
+    # A VISION family is its own family, never folded onto the text one it borrows kernels
+    # from (qwen2vl runs on qwen2's set, and the adapter that prepares images is chosen by
+    # the former).
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) == "qwen2vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen3_vl"}) == "qwen3vl"
     # Unknown shapes and garbage yield None, not an error.
     assert oflm_add.family_from_config_dict({"model_type": "mixtral"}) is None
     assert oflm_add.family_from_config_dict({}) is None
@@ -494,9 +502,17 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     q4k.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("n", 0, [8])]))
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_K")
     assert ok, note
-    # Same bytes, wrong claim: refuse rather than pack the wrong layout.
+    # Same bytes, wrong claim: refuse rather than pack the wrong layout. The
+    # name is a HINT, not a contract (llama.cpp mixes types by importance), so
+    # what must hold is that no tensor is of the claimed family.
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_0")
-    assert not ok and "claims Q4_0" in note
+    assert not ok and "Q4_0" in note and "refusing" in note
+    # A file that MIXES types (a Q4_1 body with a Q6_K output) is fine: the
+    # claimed family is present.
+    mixed = tmp_path / "mix.gguf"
+    mixed.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("o", 14, [8, 8])]))
+    ok, note = oflm_add.verify_gguf_choice(str(mixed), "mix.gguf", "Q4_K")
+    assert ok, note
     # A Q4_0_4_4 tensor (type 31) is refused even when the name said Q4_0.
     trap = tmp_path / "t.gguf"
     trap.write_bytes(_gguf_bytes(_llama_kv(), [("w", 31, [8, 8])]))
@@ -532,6 +548,35 @@ def test_extract_tokenizer_from_gguf_round_trips(tmp_path):
     assert (out / "chat_template.jinja").read_text(encoding="utf-8").startswith("hello")
 
 
+def test_gpt2_tokenizer_keeps_the_byte_mapped_space(tmp_path):
+    # A gpt2 (byte-level BPE) GGUF stores its vocab and merges ALREADY
+    # byte-mapped (`\u0120` for the space). extract must NOT re-map them --
+    # that double-mapping turns every space-prefixed token into a nonsense
+    # pair of U+0100+ code points and a control token lands between every word
+    # (the Qwen3.5-4B-DeepThought install regression).
+    kv = [
+        ("general.architecture", (8, "qwen3")),
+        ("tokenizer.ggml.model", (8, "gpt2")),
+        ("tokenizer.ggml.tokens", (9, (8, ["hello", "\u0120world", "\u0120se",
+                                                   "<|im_start|>", "<|im_end|>"]))),
+        ("tokenizer.ggml.merges", (9, (8, ["h e", "\u0120w orld", "\u0120 s", "\u0120s e"]))),
+        ("tokenizer.ggml.token_type", (9, (5, [1, 1, 1, 3, 3]))),
+        ("tokenizer.ggml.bos_token_id", (4, 3)),
+        ("tokenizer.ggml.eos_token_id", (4, 4)),
+        ("tokenizer.chat_template", (8, "hello {{ x }}")),
+    ]
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(_gguf_bytes(kv))
+    oflm_add.extract_tokenizer_from_gguf(gguf, tmp_path)
+    tok = json.loads((tmp_path / "tokenizer.json").read_text(encoding="utf-8"))
+    vocab = tok["model"]["vocab"]
+    assert vocab["hello"] == 0
+    assert vocab["\u0120world"] == 1                    # space kept as \u0120
+    assert vocab["\u0120se"] == 2
+    assert not any("\u0100" in k or "Äł" in k for k in vocab)   # no double-mapped garbage
+    assert tok["model"]["merges"][1] == "\u0120w orld"
+
+
 def test_extract_tokenizer_refuses_mergeless_spm(tmp_path):
     kv = [kv for kv in _llama_kv() if kv[0] != "tokenizer.ggml.merges"]
     gguf = tmp_path / "model.gguf"
@@ -542,3 +587,656 @@ def test_extract_tokenizer_refuses_mergeless_spm(tmp_path):
         assert "no merges" in str(ex)
     else:
         raise AssertionError("mergeless vocab must raise")
+
+
+def test_a_quant_can_be_named_at_the_repo():
+    """`repo:QUANT` picks that file out of a repo that carries one per quant."""
+    assert oflm_add.split_quant_request("mradermacher/Qwen3.5-9B-i1-GGUF:IQ4_NL") == (
+        "mradermacher/Qwen3.5-9B-i1-GGUF", "IQ4_NL")
+    # a URL's port is not a quant request
+    assert oflm_add.split_quant_request("https://example.com:8080/x") == (
+        "https://example.com:8080/x", None)
+    assert oflm_add.split_quant_request("Org/Name") == ("Org/Name", None)
+
+
+def test_the_named_quant_wins_over_the_preference_order():
+    names = ["M-IQ4_XS.gguf", "M-IQ4_NL.gguf", "M-Q5_K_S.gguf", "M-Q4_1.gguf"]
+    # without a request the preference order decides (Q4_1 is byte-exact for the pool)
+    assert oflm_add.choose_gguf_file(names)[0] == "M-Q4_1.gguf"
+    # with one, the exact suffix wins
+    assert oflm_add.choose_gguf_file(names, "IQ4_NL")[0] == "M-IQ4_NL.gguf"
+    assert oflm_add.choose_gguf_file(names, "IQ4_XS")[0] == "M-IQ4_XS.gguf"
+    # a family name takes the first file of that family
+    assert oflm_add.choose_gguf_file(names, "IQ4")[0] in ("M-IQ4_NL.gguf", "M-IQ4_XS.gguf")
+    # a quant the repo does not carry is refused, with what it does carry
+    chosen, refused = oflm_add.choose_gguf_file(names, "Q6_K")
+    assert chosen is None
+    assert "no Q6_K GGUF" in refused["M-Q4_1.gguf"]
+
+
+def test_gguf_repo_without_kernels_fails_directly_instead_of_q4nx_fallback(tmp_path, monkeypatch):
+    """A GGUF repo whose family size has no GGUF-direct open kernels raises a
+    direct error naming build-new-spec.py rather than falling back to model.q4nx."""
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "Llama-3.2-1B-Instruct-GGUF"
+    repo.mkdir()
+    kv = [("general.architecture", (8, "llama"))]
+    gguf = repo / "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+    gguf.write_bytes(_gguf_bytes(kv, [("w", 12, [8, 8]), ("n", 0, [8])]))
+    monkeypatch.setattr(oflm_add, "tree_xclbins", lambda: tmp_path / "no_tree_xclbins")
+    monkeypatch.setattr(oflm_add, "find_system_xclbin_root", lambda: tmp_path / "no_sys_xclbins")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["oflm-add", f"{repo}:Q4_K_M", "--system-list", str(system_list),
+         "--config", str(tmp_path / "user_list.json"),
+         "--models-root", str(tmp_path / "models"),
+         "--xclbin-dir", str(tmp_path / "xclbins"), "--quiet"])
+    try:
+        oflm_add.main()
+    except SystemExit as e:
+        msg = str(e)
+        # The refusal names the real reason: the fixture carries only the arch key, so the
+        # geometry cannot be read at all -- and then there is nothing to match OR build, which
+        # is what it says (build-new-spec.py only adds a size to a family that HAS kernels).
+        assert "no open kernel set can run this model" in msg
+        assert "nothing to build" in msg
+        assert "build-new-spec.py" not in msg
+        assert "model.q4nx" not in msg
+    else:
+        raise AssertionError("missing GGUF kernels must raise SystemExit directly")
+
+
+def test_quant_request_on_repo_without_matching_quant_lists_files(tmp_path, monkeypatch):
+    """Asking for repo:QUANT when that quant is absent lists the available quants and files."""
+    repo = tmp_path / "Some-GGUF"
+    repo.mkdir()
+    (repo / "model-Q4_K_M.gguf").write_bytes(b"x")
+    (repo / "model-Q8_0.gguf").write_bytes(b"x")
+    monkeypatch.setattr("sys.argv", ["oflm-add", f"{repo}:Q4_1", "--quiet"])
+    try:
+        oflm_add.main()
+    except SystemExit as e:
+        msg = str(e)
+        assert "no compatible 'Q4_1' GGUF" in msg
+        assert "Q4_K_M, Q8_0" in msg
+        assert "model-Q4_K_M.gguf, model-Q8_0.gguf" in msg
+        assert "model.q4nx" not in msg
+    else:
+        raise AssertionError("missing requested quant must raise SystemExit")
+
+
+
+# ---- config.json construction: the multimodal wrapper and the missing keys ----
+
+
+def _kernel_set(tmp_path, check, defaults=None):
+    kdir = tmp_path / "Qwen3.5-4B-NPU2" / "open_kernels"
+    kdir.mkdir(parents=True)
+    (kdir / "manifest.json").write_text(json.dumps({
+        "hf_config_check": check,
+        "hf_config_defaults": defaults or {},
+    }), encoding="utf-8")
+    return kdir.parent
+
+
+LAYER_TYPES = ["linear_attention"] * 3 + ["full_attention"]
+
+
+def _tower_config():
+    """The shape empero-ai/Qwen3.8-4B and Qwen/Qwen3.5-4B ship: a VLM wrapper."""
+    return {
+        "model_type": "qwen3_5",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "hidden_size": 2560,
+            "num_hidden_layers": 4,
+            "vocab_size": 248320,
+            "intermediate_size": 9216,
+            "head_dim": 256,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "linear_num_value_heads": 32,
+            "layer_types": list(LAYER_TYPES),
+        },
+        "vision_config": {"depth": 27},
+    }
+
+
+def _check_for(cfg):
+    tower = cfg.get("text_config", cfg)
+    return {k: v for k, v in tower.items() if k != "model_type"}
+
+
+def test_a_multimodal_config_is_flattened_for_the_engines_top_level_checks(tmp_path):
+    """The install used to succeed and the LOAD fail: 'config.json lacks layer_types'."""
+    cfg = _tower_config()
+    kdir = _kernel_set(tmp_path, _check_for(cfg))
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    oflm_add.reconcile_config_json(model, kdir)
+
+    out = json.loads((model / "config.json").read_text(encoding="utf-8"))
+    assert out["layer_types"] == LAYER_TYPES          # lifted out of text_config
+    assert out["hidden_size"] == 2560
+    assert out["text_config"]["layer_types"] == LAYER_TYPES   # the wrapper is kept
+    assert out["vision_config"] == {"depth": 27}
+
+
+def test_a_key_the_config_omits_entirely_comes_from_the_kernel_set(tmp_path):
+    cfg = _tower_config()
+    del cfg["text_config"]["layer_types"]
+    kdir = _kernel_set(tmp_path, _check_for(_tower_config()))
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    filled, conflicting = oflm_add.reconcile_config_json(model, kdir)
+
+    assert filled == ["layer_types"] and conflicting == []
+    out = json.loads((model / "config.json").read_text(encoding="utf-8"))
+    assert out["layer_types"] == LAYER_TYPES
+
+
+def test_a_contradicting_config_is_reported_not_overwritten(tmp_path):
+    """A different model must still be refused at load; add only says so earlier."""
+    cfg = _tower_config()
+    cfg["text_config"]["layer_types"] = ["full_attention"] * 4
+    kdir = _kernel_set(tmp_path, _check_for(_tower_config()))
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    filled, conflicting = oflm_add.reconcile_config_json(model, kdir)
+
+    assert conflicting == ["layer_types"] and filled == []
+    out = json.loads((model / "config.json").read_text(encoding="utf-8"))
+    assert out["text_config"]["layer_types"] == ["full_attention"] * 4
+
+
+def test_a_key_with_a_manifest_default_may_stay_absent(tmp_path):
+    cfg = _tower_config()
+    del cfg["text_config"]["vocab_size"]
+    kdir = _kernel_set(tmp_path, _check_for(_tower_config()), defaults={"vocab_size": 248320})
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    filled, conflicting = oflm_add.reconcile_config_json(model, kdir)
+
+    assert filled == [] and conflicting == []
+    assert "vocab_size" not in json.loads((model / "config.json").read_text())
+
+
+# ---- tokenizer_config: an eos id the engine can read, and a chat template ----
+
+
+def test_eos_falls_back_when_generation_config_exists_but_has_no_id(tmp_path):
+    """Qwen3-4B-Base ships a generation_config.json WITHOUT eos_token_id; the file
+    being found must not suppress the config.json fallback."""
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"model_max_length": 4096, "bos_token": "<|endoftext|>"}))
+    (tmp_path / "generation_config.json").write_text(json.dumps({"do_sample": True}))
+    (tmp_path / "config.json").write_text(json.dumps({"eos_token_id": 151643, "bos_token_id": 151643}))
+
+    oflm_add.normalize_tokenizer_config(tmp_path, str(tmp_path), [])
+
+    tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert tc["eos_token_id"] == [151643]
+    assert tc["bos_token_id"] == 151643
+
+
+def test_chat_template_is_climbed_from_the_chain(tmp_path):
+    """The first repo with a tokenizer_config may have no template; a later one does."""
+    calls = []
+
+    def fake_fetch(repo, fname, dest, modelscope=False, force=False):
+        calls.append(repo)
+        templates = {"first/model": None, "second/model": "{% for m in messages %}{{ m['content'] }}{% endfor %}"}
+        dest.write_text(json.dumps({"chat_template": templates.get(repo)}))
+        return dest
+
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 4096}))
+    orig = oflm_add.fetch_from_repo
+    oflm_add.fetch_from_repo = fake_fetch
+    try:
+        src = oflm_add.fill_chat_template(tmp_path, "first/model", ["second/model"])
+    finally:
+        oflm_add.fetch_from_repo = orig
+
+    assert src == "second/model"
+    assert calls == ["first/model", "second/model"]
+    assert "chat_template" in json.loads((tmp_path / "tokenizer_config.json").read_text())
+
+
+def test_official_repo_id_fills_hf_owner():
+    entry = {"name": "Nanbeige4.1-3B-NPU2",
+             "url": "https://huggingface.co/{hf_owner}/Nanbeige4.1-3B-NPU2"}
+    assert oflm_add.official_repo_id(entry, {"hf_owner": "Atomic-Germ"}) == \
+        "Atomic-Germ/Nanbeige4.1-3B-NPU2"
+    assert oflm_add.official_repo_id({"name": "x", "url": "https://huggingface.co/acme/x"}, {}) == "acme/x"
+
+
+def test_a_set_the_registry_does_not_list_still_names_its_family(tmp_path):
+    """Our own conversion of a model we ship no container for: the manifest's spec
+    says which family the kernels were built for, and that is enough to link."""
+    kdir = tmp_path / "Nanbeige4.1-3B-NPU2" / "open_kernels"
+    kdir.mkdir(parents=True)
+    spec = {"family": "llama3", "hidden": 2560, "intermediate": 10496, "num_layers": 32,
+            "layer_types": ["dense"] * 32, "vocab": 166144, "num_heads": 20, "num_kv_heads": 4,
+            "head_dim": 128, "rotary_dim": 128}
+    (kdir / "manifest.json").write_text(json.dumps({"spec": spec}))
+
+    class _Spec:                       # the model's own spec, same geometry
+        def kernel_hash(self, ignore=()):
+            return "sha256:same"
+
+        def serves(self, model):
+            return None                # same geometry, and the head fits
+
+    model_spec = _Spec()
+    orig = oflm_add._model_spec_class
+    oflm_add._model_spec_class = lambda: type("M", (), {
+        "from_dict": staticmethod(lambda d: _Spec()),
+    })
+    try:
+        fam, name = oflm_add.family_from_kernels({"models": {}}, model_spec, [tmp_path])
+    finally:
+        oflm_add._model_spec_class = orig
+
+    assert (fam, name) == ("llama3", "Nanbeige4.1-3B-NPU2")
+
+
+def test_gguf_kernel_set_with_no_name_is_a_refusal_not_a_crash():
+    """No official match and no geometry match: the caller must get None (and say so),
+    not `Path / None`."""
+    assert oflm_add.gguf_kernel_set(None, ["/nonexistent"]) is None
+
+
+def test_a_token_named_without_an_id_is_resolved_from_the_gguf(tmp_path):
+    """Hy-MT2's tokenizer_config names <|startoftext|> and gives bos_token_id: null,
+    and the string is not in tokenizer.json's vocab to look up."""
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+        "bos_token": "<|startoftext|>", "bos_token_id": None,
+        "eos_token_id": [127960],
+    }))
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"model": {"vocab": {}}}))
+
+    class _G:
+        @staticmethod
+        def read(name, limit_mb=32):
+            return ({"tokenizer.ggml.bos_token_id": 127958}, [])
+
+    orig_inv, orig_tok = oflm_add.read_gguf_inventory, oflm_add.token_id_of
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+    oflm_add.read_gguf_inventory = lambda *a, **k: _G.read(a[0])
+    oflm_add.token_id_of = lambda target, tok: None
+    try:
+        oflm_add.normalize_tokenizer_config(tmp_path, "local", [])
+    finally:
+        oflm_add.read_gguf_inventory, oflm_add.token_id_of = orig_inv, orig_tok
+
+    tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert tc["bos_token_id"] == 127958
+
+
+def test_a_baked_rope_table_makes_rope_scaling_irrelevant(tmp_path):
+    """llama.cpp bakes Llama-3's scaling into rope_freqs.weight; the GGUF's metadata then
+    has no rope_scaling, and the set that serves it is the scaled one."""
+    src = tmp_path / "m.gguf"
+    src.write_bytes(b"GGUF")
+    orig = oflm_add.read_gguf_inventory
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=96: ({"general.architecture": "llama"},
+                                                          [("rope_freqs.weight", 0, [64])])
+    try:
+        assert oflm_add.rope_ignore(str(src)) == ("rope_scaling",)
+    finally:
+        oflm_add.read_gguf_inventory = orig
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=96: ({"general.architecture": "llama"},
+                                                          [("token_embd.weight", 0, [128])])
+    try:
+        assert oflm_add.rope_ignore(str(src)) == ()
+    finally:
+        oflm_add.read_gguf_inventory = orig
+
+
+def test_a_stub_config_is_rebuilt_from_the_gguf(tmp_path):
+    """A gated base leaves {"model_type": "mistral"}; the GGUF names the geometry, and the
+    engine's sampler segfaults without it."""
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "mistral"}))
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+
+    class _Spec:
+        family = "llama3"; hidden = 3072; num_layers = 28; intermediate = 8192
+        vocab = 128256; num_heads = 24; num_kv_heads = 8; head_dim = 128
+        rope_theta = 10000.0; norm_eps = 1e-5
+
+    orig_spec, orig_checkout = oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout
+    oflm_add.spec_from_gguf_source = lambda s: _Spec()
+    oflm_add.open_kernels_checkout = lambda: None
+    try:
+        oflm_add.repair_config_from_gguf(tmp_path)
+    finally:
+        oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout = orig_spec, orig_checkout
+
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert cfg["hidden_size"] == 3072 and cfg["vocab_size"] == 128256
+    assert cfg["model_type"] == "llama"
+
+
+def test_the_two_family_maps_keep_their_own_spellings():
+    """GGUF arch names and HF model_type names are different vocabularies (k2-horizon vs
+    k2_horizon, hunyuan-dense vs hunyuan_v1_dense). Mixing them into one map is how a
+    correct config stops deriving a family."""
+    assert oflm_add.GGUF_ARCH_FAMILIES["k2-horizon"] == "k2"
+    assert oflm_add.family_from_config_dict({"model_type": "k2_horizon"}) == "k2"
+    assert oflm_add.GGUF_ARCH_FAMILIES["hunyuan-dense"] == "hunyuan"
+    assert oflm_add.family_from_config_dict({"model_type": "hunyuan_v1_dense"}) == "hunyuan"
+    # a GGUF arch must not resolve through the config table and vice versa
+    assert "hunyuan_v1_dense" not in oflm_add.GGUF_ARCH_FAMILIES
+
+
+def test_projector_vision_config_writes_the_preprocessing_defaults(tmp_path):
+    """The mmproj names the tower geometry, not the smart_resize/normalize constants.
+    `projector_vision_config` fills those with the Qwen-shared defaults so the install's
+    config.json is self-describing -- the preprocessing reader must not refuse on zeros."""
+    (tmp_path / "mmproj.gguf").write_bytes(b"GGUF")
+    clip = {
+        "general.architecture": "clip",
+        "clip.vision.block_count": 27,
+        "clip.vision.embedding_length": 1152,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.feed_forward_length": 4304,
+        "clip.vision.projection_dim": 2048,
+        "clip.vision.patch_size": 16,
+        "clip.vision.spatial_merge_size": 2,
+    }
+    tensors = [("v.patch_embd.weight", 0, [16, 16, 3, 1152]),
+               ("v.position_embd.weight", 0, [64, 1152])]
+    orig = oflm_add.read_gguf_inventory
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=16: (clip, tensors)
+    try:
+        vc = oflm_add.projector_vision_config(str(tmp_path))
+    finally:
+        oflm_add.read_gguf_inventory = orig
+    assert vc["patch_size"] == 16 and vc["spatial_merge_size"] == 2
+    assert vc["temporal_patch_size"] == 1           # one patch_embed slice
+    assert vc["model_type"] == "qwen3_vl"           # the shared tower
+    assert vc["shortest_edge"] == 65536 and vc["longest_edge"] == 16777216
+    assert abs(vc["rescale_factor"] - 1.0 / 255.0) < 1e-9
+    assert vc["rescale_mean"] == 0.5 and vc["rescale_std"] == 0.5
+
+
+def test_an_i1_repo_takes_its_projector_from_the_sibling():
+    """A mradermacher -i1 repo has no mmproj; the non-i1 repo of the same model does, and
+    the only difference in the id is that marker."""
+    assert oflm_add.projector_sibling("mradermacher/Qwen3-VL-4B-Instruct-i1-GGUF") == \
+        "mradermacher/Qwen3-VL-4B-Instruct-GGUF"
+    assert oflm_add.projector_sibling("mradermacher/gemma-3-4b-it-i1-GGUF") == \
+        "mradermacher/gemma-3-4b-it-GGUF"
+    # nothing to strip, and no repo part
+    assert oflm_add.projector_sibling("Qwen/Qwen3-VL-4B-Instruct-GGUF") == ""
+    assert oflm_add.projector_sibling("Qwen3-VL-4B-Instruct") == ""
+    # "-i1" inside a model name is not the marker
+    assert oflm_add.projector_sibling("someone/foo-i10-GGUF") == ""
+
+
+def test_the_projector_prefers_the_lossless_quant(tmp_path):
+    """The tower is host bf16: BF16/F16 needs no dequant at all, an 8-bit projector is
+    smaller AND slower. Picking by file size would choose the Q8_0."""
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+    seen = {}
+
+    def fake_fetch(repo, fname, dest, modelscope=False, force=False):
+        seen["repo"], seen["fname"] = repo, fname
+        Path(dest).write_bytes(b"GGUF")
+        return Path(dest)
+
+    orig_fetch, orig_list, orig_inv = (oflm_add.fetch_from_repo, oflm_add._projectors_in,
+                                       oflm_add.read_gguf_inventory)
+    oflm_add._projectors_in = lambda repo, ms: (
+        ["mmproj-Q8_0.gguf", "mmproj-f16.gguf", "mmproj-BF16.gguf"] if "sibling" in repo else [])
+    oflm_add.fetch_from_repo = fake_fetch
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=8: (
+        {"general.architecture": "clip", "clip.has_vision_encoder": True,
+         "clip.projector_type": "qwen3vl_merger", "clip.vision.embedding_length": 1024,
+         "clip.vision.block_count": 24}, [])
+    try:
+        got = oflm_add.install_projector(tmp_path, "org/model-i1-sibling", quiet=True)
+    finally:
+        (oflm_add.fetch_from_repo, oflm_add._projectors_in, oflm_add.read_gguf_inventory) = (
+            orig_fetch, orig_list, orig_inv)
+    assert got == "mmproj.gguf"
+    assert seen["repo"] == "org/model-i1-sibling"      # it has its own projector, no sibling climb
+    assert seen["fname"] == "mmproj-BF16.gguf"
+
+
+def test_a_file_that_is_not_a_projector_is_dropped(tmp_path):
+    """A language-model GGUF saved as mmproj.gguf would load as a tower and fail far from
+    the install; it is checked BEFORE it is kept."""
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+
+    def fake_fetch(repo, fname, dest, modelscope=False, force=False):
+        Path(dest).write_bytes(b"GGUF")
+        return Path(dest)
+
+    orig = (oflm_add.fetch_from_repo, oflm_add._projectors_in, oflm_add.read_gguf_inventory)
+    oflm_add._projectors_in = lambda repo, ms: ["mmproj-f16.gguf"]
+    oflm_add.fetch_from_repo = fake_fetch
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=8: ({"general.architecture": "qwen3vl"}, [])
+    try:
+        got = oflm_add.install_projector(tmp_path, "org/model-GGUF", quiet=True)
+    finally:
+        (oflm_add.fetch_from_repo, oflm_add._projectors_in, oflm_add.read_gguf_inventory) = orig
+    assert got == ""
+    assert not (tmp_path / "mmproj.gguf").exists()
+
+
+def test_qwen3vl_is_a_vl_model_on_qwen3_kernels():
+    """The GGUF arch names the model (qwen3vl: the vision adapter); the spec that matches
+    the kernels hashes as qwen3, because the decoder IS qwen3's."""
+    assert oflm_add.GGUF_ARCH_FAMILIES["qwen3vl"] == "qwen3vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen3_vl"}) == "qwen3vl"
+
+
+def test_a_gguf_vl_install_describes_its_tower_from_the_projector(tmp_path):
+    """A GGUF VL model has no vision_config anywhere but the mmproj, and the adapter reads
+    patch size / merge / mean from config.json. Translating the projector back into that
+    block is what makes images preparable at all (patch size 0 otherwise)."""
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_vl",
+                                                      "vocab_size": 151936, "hidden_size": 2560,
+                                                      "num_hidden_layers": 36}))
+    (tmp_path / "model.gguf").write_bytes(b"GGUF")
+    (tmp_path / "mmproj.gguf").write_bytes(b"GGUF")
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": [
+        {"id": 151655, "content": "<|image_pad|>"},
+        {"id": 151652, "content": "<|vision_start|>"},
+        {"id": 151653, "content": "<|vision_end|>"}]}))
+
+    class _Spec:
+        family = "qwen3"; hidden = 2560; num_layers = 36; intermediate = 9728; vocab = 151936
+        num_heads = 32; num_kv_heads = 8; head_dim = 128; rope_theta = 5000000.0; norm_eps = 1e-6
+
+    clip = ({"general.architecture": "clip", "clip.has_vision_encoder": True,
+             "clip.projector_type": "qwen3vl_merger",
+             "clip.vision.block_count": 24, "clip.vision.embedding_length": 1024,
+             "clip.vision.attention.head_count": 16, "clip.vision.feed_forward_length": 4096,
+             "clip.vision.projection_dim": 2560, "clip.vision.patch_size": 16,
+             "clip.vision.spatial_merge_size": 2},
+            [["v.patch_embd.weight", 1, [16, 16, 3, 1024]],
+             ["v.patch_embd.weight.1", 1, [16, 16, 3, 1024]],
+             ["v.position_embd.weight", 0, [1024, 2304]],
+             ["v.deepstack.5.fc1.weight", 1, [4096, 4096]],
+             ["v.deepstack.11.fc1.weight", 1, [4096, 4096]],
+             ["v.deepstack.17.fc1.weight", 1, [4096, 4096]]])
+    mrope = {"general.architecture": "qwen3vl",
+             "qwen3vl.rope.dimension_sections": [24, 20, 20, 0]}
+
+    orig = (oflm_add.read_gguf_inventory, oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout)
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=8: (
+        clip if str(p).endswith("mmproj.gguf") else (mrope, []))
+    oflm_add.spec_from_gguf_source = lambda s: _Spec()
+    oflm_add.open_kernels_checkout = lambda: None
+    try:
+        oflm_add.repair_config_from_gguf(tmp_path)
+    finally:
+        oflm_add.read_gguf_inventory, oflm_add.spec_from_gguf_source, oflm_add.open_kernels_checkout = orig
+
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    vc = cfg["vision_config"]
+    assert vc["depth"] == 24 and vc["hidden_size"] == 1024 and vc["num_heads"] == 16
+    assert vc["patch_size"] == 16 and vc["spatial_merge_size"] == 2 and vc["in_channels"] == 3
+    assert vc["temporal_patch_size"] == 2            # two patch_embd slices
+    assert vc["num_position_embeddings"] == 2304     # the position table's own shape
+    assert vc["deepstack_visual_indexes"] == [5, 11, 17]
+    assert cfg["vision_model_weight"] == "mmproj.gguf"
+    assert cfg["image_token_id"] == 151655 and cfg["vision_start_token_id"] == 151652
+    assert cfg["rope_parameters"]["mrope_section"] == [24, 20, 20]
+    assert cfg["rope_parameters"]["mrope_interleaved"] is True
+
+
+def test_a_vision_checkpoint_is_named_by_its_arch_not_its_kernels():
+    """Qwen2.5-VL runs on the plain Qwen2.5-3B set (same decoder; M-RoPE is config), so the
+    KERNEL family is qwen2. The model is still qwen2vl -- that is what picks the adapter
+    that prepares images -- so the arch has to win over the kernel set."""
+    assert oflm_add.GGUF_ARCH_FAMILIES["qwen2vl"] == "qwen2vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) == "qwen2vl"
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl_text"}) == "qwen2vl"
+    assert oflm_add.GGUF_ARCH_FAMILIES["qwen3vl"] == "qwen3vl"
+
+
+def test_a_bundle_links_the_kernel_set_whose_layout_matches(tmp_path):
+    """A diffusion bundle names its kernels by LAYOUT HASH (the stream specs), not by a
+    model geometry, so the match is exact -- a set built for other resolutions or edits
+    must not be linked."""
+    import json
+
+    good = tmp_path / "xclbins" / "FLUX.2-klein-4B-NPU2" / "open_kernels"
+    bad = tmp_path / "xclbins" / "Other" / "open_kernels"
+    for d, layout in ((good, "e667"), (bad, "c327")):
+        d.mkdir(parents=True)
+        (d / "diffusion_kernels.json").write_text(json.dumps({"layout": layout, "complete": True}))
+    assert oflm_add.find_diffusion_kernels("e667", [tmp_path / "xclbins"]) == good
+    assert oflm_add.find_diffusion_kernels("dead", [tmp_path / "xclbins"]) is None
+    # an incomplete set is not a candidate even when the layout matches
+    (bad / "diffusion_kernels.json").write_text(json.dumps({"layout": "e667", "complete": False}))
+    assert oflm_add.find_diffusion_kernels("e667", [bad.parent, tmp_path / "xclbins"]) == good
+
+
+def test_a_symlinked_bundle_target_is_replaced_not_written_through(tmp_path, monkeypatch):
+    """register-bundle.py left models/<name> as a link to the build directory. Installing
+    with --force THROUGH that link unlinked the source's files one at a time (it ate a
+    LICENSE.md), so the link has to be replaced first."""
+    import argparse
+    import json
+
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "bundle.json").write_text(json.dumps({"layout": "L", "resolutions": {}, "edits": {}}))
+    (build / "LICENSE.md").write_text("apache")
+    (build / "weights.bin").write_bytes(b"w")
+
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "my-klein").symlink_to(build)
+
+    monkeypatch.setattr(oflm_add, "models_root_dir", lambda arg: root)
+    monkeypatch.setattr(oflm_add, "find_system_model_list", lambda: tmp_path / "list.json")
+    (tmp_path / "list.json").write_text(json.dumps({"models": {"flux2-klein": {"4b": {
+        "name": "FLUX.2-klein-4B-NPU2", "details": {"family": "flux2-klein"}}}}}))
+    monkeypatch.setattr(oflm_add, "register", lambda entry, *a, **k: "my-klein:512")
+    monkeypatch.setattr(oflm_add, "log", lambda *a, **k: None)
+
+    args = argparse.Namespace(models_root=None, system_list=None, tag="my-klein:512", name=None,
+                              force=True, dry_run=False, no_xclbin=True, config=None)
+    oflm_add.install_bundle(args, build, "my-klein")
+
+    assert not (root / "my-klein").is_symlink()          # a real directory now
+    assert (root / "my-klein" / "LICENSE.md").read_text() == "apache"
+    assert (build / "LICENSE.md").is_file()              # the SOURCE is untouched
+
+
+def test_a_flux_dit_is_recognised_by_its_tensors():
+    """leejet's converter writes no general.architecture at all, so the arch cannot be the
+    test: FLUX's double/single blocks and its embedders exist in no language-model GGUF."""
+    tensors = [("double_blocks.0.img_attn.qkv.weight", 3, [3072, 9216]),
+               ("single_blocks.0.linear1.weight", 3, [3072, 27648]),
+               ("img_in.weight", 30, [128, 3072])]
+    assert oflm_add.is_diffusion_dit({}, tensors) is True
+    assert oflm_add.is_diffusion_dit({"general.architecture": "flux"}, []) is True
+    # a language model, even a fused-qkv one, is not
+    lm = [("blk.0.attn_qkv.weight", 3, [3072, 9216]), ("token_embd.weight", 3, [3072, 151936])]
+    assert oflm_add.is_diffusion_dit({"general.architecture": "qwen3"}, lm) is False
+
+
+def test_the_dit_quant_preference_is_quality_first():
+    """Q8_0 first: near-lossless and half of BF16's size (measured 0.9946 correlation with the
+    shipped bf16 bundle). The text path's order is about the q4_1 pool law, not image quality."""
+    names = ["flux-2-klein-4b-Q4_0.gguf", "flux-2-klein-4b-Q8_0.gguf", "flux-2-klein-4b-BF16.gguf"]
+    assert oflm_add._pick_dit_gguf(names) == "flux-2-klein-4b-Q8_0.gguf"
+    assert oflm_add._pick_dit_gguf(["x-BF16.gguf"]) == "x-BF16.gguf"
+    assert oflm_add._pick_dit_gguf(["x-Q4_0.gguf"]) == "x-Q4_0.gguf"
+
+
+# ---- identity from the model, never from its name -------------------------------
+#
+# Three adversarial cases from one afternoon: a fine-tune whose name says nothing
+# (HauhauCS/Qwen3-4B-2507-Instruct-Uncensored-...), a repo with no GGUF at all
+# (Atomic-Germ/GRaPE-1.5-TEST-DONTDL), and the same model's GGUF (mradermacher/GRaPE-1.5-i1-GGUF,
+# arch qwen35, name says 1.5). The rules these pin down:
+
+def test_a_base_models_family_refines_the_architecture_but_never_replaces_a_vl_one():
+    """`details.family` is the ENGINE/adapter, and it is finer than a GGUF's arch.
+
+    Qwen3-4B-Instruct-2507's GGUF says arch `qwen3` while the registry calls it `qwen3-it`
+    -- the base model is the more specific statement, so a fine-tune of it is a qwen3-it.
+    A VL model whose README names a text base keeps `qwen3vl`: `qwen3` is not a refinement
+    of it, and installing a vision model as text would lose the tower.
+    """
+    assert oflm_add.family_precedence(
+        "qwen3", "the GGUF architecture", "qwen3-it", "Qwen3-4B-Instruct-2507-NPU2")[0] == "qwen3-it"
+    assert oflm_add.family_precedence(
+        "qwen3vl", "the GGUF architecture", "qwen3", "Qwen3-4B")[0] == "qwen3vl"
+    assert oflm_add.family_precedence(
+        "qwen3", "the GGUF architecture", "qwen3", "Qwen3-4B")[0] == "qwen3"
+    assert oflm_add.family_precedence(
+        None, "", "llama3", "Llama-3-8B")[0] == "llama3"
+    assert oflm_add.family_precedence(None, "", None, "")[0] is None
+
+
+def test_a_vlms_size_comes_from_its_text_tower():
+    """A VLM nests the decoder under text_config; the top level has no hidden_size."""
+    cfg = {"model_type": "qwen3_5", "torch_dtype": "bfloat16",
+           "text_config": {"hidden_size": 2560, "num_hidden_layers": 32,
+                           "intermediate_size": 9216, "vocab_size": 248320}}
+    assert oflm_add.estimate_size_dict(cfg), "a VLM config must yield a size"
+    assert oflm_add.estimate_size_dict({"model_type": "x"}) is None
+
+
+def test_the_size_marker_falls_back_to_the_set_that_serves_it():
+    """When nothing else in the repo says the size, the geometry that matched does."""
+    assert oflm_add.size_from_set_name("Qwen3.5-4B-NPU2") == "4b"
+    assert oflm_add.size_from_set_name("Gemma3-4B-NPU2") == "4b"
+    assert oflm_add.size_from_set_name("GRaPE-1.5-i1-GGUF") in (None, "")
+
+
+def test_a_tensor_count_that_is_not_a_model_is_not_trusted():
+    """A fixture's 72 "parameters" must not become the tag `0b`; the bytes are the clue."""
+    assert oflm_add.model_size_token(gguf_bytes=2.5e9, quant="Q4_K") == "4.4b"
+    assert oflm_add.model_size_token() is None
+
+
+def test_the_unready_list_is_empty_and_its_message_is_usable():
+    """qwen3.5 came off it when its three pack bugs were fixed (the 0.8B answers); the
+    mechanism stays, because a family that emits fluent gibberish must be able to say so."""
+    assert oflm_add.GGUF_DIRECT_UNREADY == {}
+    oflm_add.GGUF_DIRECT_UNREADY["test"] = "the text is wrong; the container is correct"
+    try:
+        # the gate is what turns an entry into a refusal that names the reason
+        assert "test" in oflm_add.GGUF_DIRECT_UNREADY
+    finally:
+        del oflm_add.GGUF_DIRECT_UNREADY["test"]

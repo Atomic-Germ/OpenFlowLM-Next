@@ -188,7 +188,7 @@ The Qwen3.6-MoE model uses the dense recipe with MoE dispatch.
 ## Build Steps
 
 ```bash
-python open_kernels/export_qwen36_kernels.py --spec qwen36-moe
+python utilities/export-kernels.py --specs qwen36-35b-a3b
 ```
 
 ## Verification

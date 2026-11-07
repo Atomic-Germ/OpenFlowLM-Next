@@ -56,7 +56,8 @@ std::string Nanbeige::apply_chat_template(nlohmann::ordered_json& messages, nloh
     minja::chat_template_inputs inputs;
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
-    // inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
     inputs.extra_context = this->extra_context;
     return this->_shared_apply_template(inputs);
 }

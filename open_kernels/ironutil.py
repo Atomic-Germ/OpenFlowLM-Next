@@ -14,6 +14,7 @@ from collections import deque
 from pathlib import Path
 
 from aie.iron import TaskGroup
+from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import config
 
 
@@ -26,6 +27,26 @@ def include_dirs() -> list[str]:
     inc.append(str(root / _detect_arch()))
     inc.append(str(Path(__file__).parent / "include"))      # vecmath.h
     return inc
+
+
+def piece_tap(pool_bytes: int, off: int, band_stride: int, n: int, nbands: int, tile: int):
+    """One K piece of `nbands` consecutive FF-wide down bands.
+
+    The down GEMV reduces over FF, and at a wide FF its activation table does
+    not fit a main core, so the reduction runs in K pieces (recipes/qwen36moe.py
+    down_split). Inside a band, chunk c covers k-tile c / 2 (gemv_q4.h's band
+    law), so a piece is a CONTIGUOUS run of chunks there: `n` bytes at `off`
+    inside each band, the bands `band_stride` apart. Three real DMA dims with a
+    half-chunk inner wrap, so the innermost transfer stays under 4 KB.
+
+    One copy, two designs: the dense recipe (designs/dense/dx.py) and the MoE
+    tail (designs/layer_x/xcommon.py) split the down GEMV the same way, and a
+    second copy of this arithmetic would drift -- the copy that drifts is the
+    one no shipped model exercises.
+    """
+    inner = tile // 2
+    assert n % inner == 0, (n, inner)
+    return TensorAccessPattern((1, pool_bytes), off, [1, nbands, n // inner, inner], [0, band_stride, inner, 1])
 
 
 class Pipeline:

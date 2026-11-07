@@ -36,7 +36,7 @@ void Qwen3::load_model(std::string model_path, json model_info, int default_cont
     this->sampler.reset();
 
     this->enable_think = (model_info["size"] == 600000000)? false : true;
-    this->enable_tool = (model_info["size"] > 1700000000)? true : false;
+    this->enable_tool = true;
 
     sampler_config config;
     config.top_k = 40;
@@ -747,6 +747,8 @@ std::string DeepSeek_r1_0528_8b::apply_chat_template(nlohmann::ordered_json& mes
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -759,7 +761,7 @@ bool DeepSeek_r1_0528_8b::insert(chat_meta_info_t& meta_info, lm_uniform_input_t
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;

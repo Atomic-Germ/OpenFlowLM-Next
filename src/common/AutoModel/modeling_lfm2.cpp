@@ -62,7 +62,8 @@ std::string LFM2::apply_chat_template(nlohmann::ordered_json& messages, nlohmann
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    // inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs, opt);
 }
 
@@ -103,6 +104,31 @@ std::string LFM2::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_i
         return "";
     }
     return this->generate(meta_info, length_limit, os, is_cancelled);
+}
+
+NonStreamResult LFM2::parse_nstream_content(const std::string response_text) {
+    NonStreamResult result;
+    buffer_.clear();
+    is_in_tool_block_ = false;
+    tool_name_.clear();
+    current_mode_ = StreamEventType::CONTENT;
+    StreamResult ev = this->parse_stream_content(response_text);
+    while (true) {
+        if (ev.type == StreamEventType::TOOL_DONE) {
+            result.tool_calls_list.emplace_back(ev.tool_name, ev.tool_args_str);
+        } else if (ev.type == StreamEventType::REASONING) {
+            result.reasoning_content += ev.content;
+        } else if (ev.type == StreamEventType::CONTENT) {
+            result.content += ev.content;
+        }
+        if (buffer_.empty()) break;
+        ev = this->parse_stream_content("");
+    }
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
+    }
+    return result;
 }
 
 StreamResult LFM2::parse_stream_content(const std::string content) {
@@ -281,15 +307,22 @@ LFM2_5_TK::LFM2_5_TK(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_in
 void LFM2_5_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    // model_type == llama
-    this->lm_engine = std::make_unique<lfm2_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
-
-    //free the q4nx
-    this->q4nx.reset();
+    // The engine: the open kernels when a set is installed for this model, the closed DLL
+    // otherwise -- the same contract LFM2 follows. Without this the Thinking family had no
+    // open path at all, so a GGUF install of it took the closed engine and died on
+    // "Failed to open file: <model>/model.safetensors" (there is no safetensors; the
+    // weights are model.gguf). One implementation, two adapters (AutoModel's docstring).
+    auto open_engine = this->_shared_select_open_engine("OFLM_LFM2_ENGINE", "LFM2");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<lfm2_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
@@ -320,7 +353,8 @@ std::string LFM2_5_TK::apply_chat_template(nlohmann::ordered_json& messages, nlo
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    // inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs, opt);
 }
 
@@ -333,8 +367,7 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
-        // templated_text = this->apply_chat_template(input.messages, input.tools);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;
@@ -350,8 +383,12 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
     // hardware
     int restore_idx = -1;
     lfm2_npu *lfm2_engine = dynamic_cast<lfm2_npu*>(this->lm_engine.get());
-
-    if (meta_info.restore_allowed) {
+    // The closed engine keeps its own prefix cache (checkpoint / restore). The OPEN engine
+    // has no such handle -- this cast is null for it -- and _shared_insert drives its cache
+    // itself, so the closed pair is only touched when the closed engine is what is running.
+    // Dereferencing it anyway is what made a GGUF install of this family run its layers and
+    // then never answer: the cast returned null and checkpoint() was called on it.
+    if (lfm2_engine && meta_info.restore_allowed) {
         restore_idx = lfm2_engine->restore();
         this->total_tokens = restore_idx;
         this->token_history = checkpoint_his; // restore the token history to be consistent with the restored KV cache, which is crucial for correct functioning of _shared_insert's prefix-matching logic
@@ -364,7 +401,7 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
     bool success = this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
 
     checkpoint_his = token_history;
-    int checkpoint_idx = lfm2_engine->checkpoint();
+    int checkpoint_idx = lfm2_engine ? lfm2_engine->checkpoint() : -1;
 
     return success;
 }
@@ -476,23 +513,26 @@ std::string LFM2_5_TK::generate_with_prompt(chat_meta_info_t& meta_info, lm_unif
 
 NonStreamResult LFM2_5_TK::parse_nstream_content(const std::string response_text) {
     NonStreamResult result;
-
-    std::string content, reasoning_content;
-
-    std::string think_start_tag = "<think>";
-    std::string think_end_tag = "</think>";
-
-    size_t think_start_pos = response_text.find(think_start_tag);
-    size_t think_end_pos = response_text.find(think_end_tag);
-
-
-    think_start_pos += think_start_tag.length();
-    std::string reasoning_str = response_text.substr(think_start_pos, think_end_pos - think_start_pos);
-    result.reasoning_content = reasoning_str;
-
-    std::string content_str = response_text.substr(think_end_pos + think_end_tag.length());
-    result.content = content_str;
-
+    buffer_.clear();
+    is_in_tool_block_ = false;
+    tool_name_.clear();
+    current_mode_ = StreamEventType::CONTENT;
+    StreamResult ev = this->parse_stream_content(response_text);
+    while (true) {
+        if (ev.type == StreamEventType::TOOL_DONE) {
+            result.tool_calls_list.emplace_back(ev.tool_name, ev.tool_args_str);
+        } else if (ev.type == StreamEventType::REASONING) {
+            result.reasoning_content += ev.content;
+        } else if (ev.type == StreamEventType::CONTENT) {
+            result.content += ev.content;
+        }
+        if (buffer_.empty()) break;
+        ev = this->parse_stream_content("");
+    }
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
+    }
     return result;
 }
 

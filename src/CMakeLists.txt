@@ -327,7 +327,7 @@ if(NOT OFLM_USE_HRX)
     # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
     list(APPEND SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gguf/gguf_file.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
@@ -1106,6 +1106,26 @@ if(OFLM_BUILD_UTILITIES AND NOT WIN32)
     install(DIRECTORY "${_oflm_utilities_src}/q4nx-build/configs/"
         DESTINATION "${OFLM_SHARE_DESTINATION}/utilities/q4nx-build/configs"
         PATTERN "__pycache__" EXCLUDE)
+    # The GGUF -> bundle converter that `oflm add` drives for a diffusion model. It is not a
+    # user tool -- the user runs `oflm add` -- but it has to be IN the package: without it the
+    # installed app cannot repack and says "this build has no converter", which is exactly the
+    # regression that made diffusion installable only from a source checkout. `oflm_add`'s
+    # dit_builder() looks beside the package, i.e. here.
+    install(DIRECTORY "${_oflm_utilities_src}/dit-chain/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/dit-chain"
+        PATTERN "__pycache__" EXCLUDE)
+    # One module the converter imports lives beside it rather than in it: the safetensors
+    # range reader (remote tensor headers/bytes without downloading the file). It is ours --
+    # python3-safetensors reads local files and cannot replace it.
+    install(FILES "${_oflm_utilities_src}/hf_safetensors.py"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/dit-chain")
+    # The converter is Python and imports the pipeline's own modules -- klein_pipeline,
+    # vae_decoder/vae_encoder, and the packers under designs/. Only the .py is needed; the
+    # kernels it drives are the xclbins installed above.
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/open_kernels"
+        FILES_MATCHING PATTERN "*.py"
+        PATTERN "build*" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 
     # One launcher shape for every bundled tool: put the tool's source dir on
     # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
@@ -1408,6 +1428,23 @@ if(OFLM_BUILD_KERNELS AND NOT WIN32)
                 "-j" "${OFLM_KERNEL_JOBS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
         VERBATIM)
+
+    # Kernel-side cleaning. CMake owns the target name `clean` (build outputs), so these are
+    # their own: `clean-kernels` drops the scratch an export leaves (open_kernels/.staging_*,
+    # build/dit-kernels, build/attn-gate), and `distclean-kernels` also drops the exported
+    # sets in src/xclbins, which makes the next build re-export every kernel from the cached
+    # design builds. A leftover this user cannot remove (a root-run staging dir) is reported
+    # with its `sudo rm -rf`, not raised: that is the failure these targets exist to end.
+    add_custom_target(clean-kernels
+        COMMENT "Removing kernel-export scratch"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/clean-kernels.py"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        VERBATIM)
+    add_custom_target(distclean-kernels
+        COMMENT "Removing kernel-export scratch and the exported sets"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/clean-kernels.py" --sets
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        VERBATIM)
 endif()
 
 # ———————————————————————————————————————————————
@@ -1550,6 +1587,28 @@ add_test(NAME OPEN-VISION-IMAGE-READ
          COMMAND png_decode_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-engine/tests/fixtures/png"
                  "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-test/oflm_test/test_files/image")
+
+# OPEN-VISION-VIT-GGUF: the vision tower read from a llama.cpp `mmproj` GGUF, which is
+# what a GGUF model ships instead of vision_weight.q4nx. The test writes its own
+# projector, with values that reveal their position, so every transpose and every
+# split the loader performs is checked -- and so are its refusals. It links no device
+# and no weights, and needs no network.
+add_executable(vit_gguf_test
+    open_qwen36/vision/vit_gguf_test.cpp
+    open_qwen36/vision/vit.cpp
+    open_qwen36/q4nx_file.cpp
+    gguf/gguf_file.cpp)
+target_include_directories(vit_gguf_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(vit_gguf_test PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(MSVC)
+    target_compile_options(vit_gguf_test PRIVATE /EHsc /Zc:__cplusplus)
+    target_compile_definitions(vit_gguf_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME OPEN-VISION-VIT-GGUF COMMAND vit_gguf_test)
 # bench_embed: the pure half of `oflm bench-embed` -- the sweep plan, the stage
 # count, the task-name lookup, the corpus, and the batch slice. NO device, NO
 # weights, NO network. Every assertion there is a way the command could report a
@@ -1707,9 +1766,13 @@ set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
 # database exists; on an RPM-only build host it cannot map Fedora sonames and
 # would fail the package, so the explicit list is the fallback there.
 set(CPACK_DEBIAN_PACKAGE_NAME "openflowlm")
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Atomic-Germ <openflowlm@atomic-germ>")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Atomic-Germ <02-germaine-atomic@icloud.com>")
 set(CPACK_DEBIAN_PACKAGE_SECTION "science")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, libxrt-npu2")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, python3-numpy, python3-ml-dtypes, python3-huggingface-hub, python3-safetensors+torch, libxrt-npu2")
+# The diffusion converter (share/oflm/dit-chain) imports numpy and ml_dtypes. Both are in
+# every distro's repo, and nothing here needs a specific version, so they are declared rather
+# than vendored: dnf/apt resolve them.
+set(CPACK_RPM_PACKAGE_REQUIRES "python3-numpy, python3-ml-dtypes, python3-huggingface-hub, xrt-base, xrt-npu, xrt-plugin-amdxdna, python3-xrt")
 # shlibdeps can only derive libc6/libstdc++6/... on a host with a *populated*
 # Debian package database. An absent or empty dpkg status (typical on Fedora,
 # and the CI image) would silently contribute nothing, leaving the package

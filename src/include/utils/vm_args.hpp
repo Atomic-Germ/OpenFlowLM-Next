@@ -23,9 +23,9 @@ inline void print_help(po::options_description& general) {
     std::cout << std::endl;
     std::cout << "Commands:" << std::endl;
     std::cout << "  run <model_tag>     - Run the model interactively" << std::endl;
-    std::cout << "  serve <model_tag>   - Start the  server" << std::endl;
-    std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
-    std::cout << "  add <repo>          - Install and register a converted Q4NX model" << std::endl;
+    std::cout << "  serve <model_tag>   - Start the server" << std::endl;
+    std::cout << "  pull <model_tag>    - Download curated model files if not present" << std::endl;
+    std::cout << "  add <repo>          - Install and register a model from GGUF or Q4NX repo" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
     std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
@@ -166,6 +166,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Image width and height in pixels (for image command)")
             ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
              "Noise seed, for a reproducible image (for image command; default random)")
+            ("steps", po::value<int>(&parsed_args.image_steps)->default_value(0),
+             "Denoising steps (for image command; default 0 = the model's own count, "
+             "otherwise 1..50 -- a distilled model is built for a few, more is not better)")
             ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
              "Reference image to edit, .png or .jpg: the prompt says what to change (for "
              "image command; the size then defaults to the largest one not above the "

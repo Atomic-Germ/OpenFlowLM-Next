@@ -2,7 +2,7 @@
 
 You can install or request toolchain components
 
-Each time you build a new set of xclbins and libraries, document your process and create a new skill file for the next to build on.
+Each time you build a new kernel set, record what is durable in `open-kernel-families` (or the relevant pipeline skill). Do not create a per-model or per-size skill: a new size is a spec, and the pipeline already runs it.
 
 Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.
@@ -17,7 +17,7 @@ The `oflm-test` tool at `utilities/oflm-test` is capable of running a full test 
 
 The `q4nx-build` tool at `utilities/q4nx-build` should always be in-sync with the expected formats of the models as each gains support, there should be no manual steps left. If unavoidable, the user should always recieve instruction for it.
 
-For each successfully packed model, create or update a skill to ensure the next agent does not need to reproduce research for the next addition.
+For each successfully packed model, update `open-kernel-pipeline` / `open-kernel-families` with anything the next agent would otherwise have to rediscover. The goal is that adding a model needs only two facts: the family has support, and a repo exists with weights.
 
 Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
       system clang/clang++. It can be found in:
@@ -269,9 +269,14 @@ Adding a setting is documented in `src/create_new_model.md`.
     <location>.agents/skills/npu_offload_pipeline.md</location>
   </skill>
   <skill>
-    <name>open-granite-kernels</name>
-    <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
-    <location>.agents/skills/open-granite-kernels/SKILL.md</location>
+    <name>open-kernel-pipeline</name>
+    <description>The one-command path from weights to a running model (geometry -> family -> spec -> kernel set -> link -> pack). Use when adding a model or size, when `oflm add` refuses a geometry, when deciding whether a change is a spec, recipe, or design change, or when rebuilding and shipping kernel sets.</description>
+    <location>.agents/skills/open-kernel-pipeline/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-kernel-families</name>
+    <description>Reference for the open-kernel family recipes and designs (dense, qwen35, qwen36moe, lfm2), their specs and geometry traps. Use when a build in one family fails, when adding a size whose geometry is unusual, or when touching recipes/*.py or designs/dense|layer_x.</description>
+    <location>.agents/skills/open-kernel-families/SKILL.md</location>
   </skill>
   <skill>
     <name>open-wide-deltanet-ab</name>

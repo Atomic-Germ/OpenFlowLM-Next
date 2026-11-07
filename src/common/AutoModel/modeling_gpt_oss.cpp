@@ -62,7 +62,8 @@ std::string GPT_OSS::apply_chat_template(nlohmann::ordered_json& messages, nlohm
     inputs.extra_context["reasoning_effort"] = this->reasoning_effort;
     inputs.extra_context["model_identity"] = this->model_identity;
     inputs.extra_context["role"] = this->role;
-    //inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
 
     return this->_shared_apply_template(inputs);
 }
@@ -78,8 +79,7 @@ bool GPT_OSS::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
         tools = input.tools;
-        templated_text = this->apply_chat_template(input.messages);
-        //templated_text = this->apply_chat_template(input.messages, input.tools);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;
@@ -336,6 +336,32 @@ NonStreamResult GPT_OSS::parse_nstream_content(const std::string response_text) 
     if (f_start != std::string::npos && f_end != std::string::npos) {
         f_start += final_start_tag.size();
         result.content = response_text.substr(f_start, f_end - f_start);
+    }
+
+    // --- Parse tool calls ---
+    const std::string tool_start_tag = "<|start|>assistant<|channel|>commentary to=functions.";
+    const std::string tool_split_tag = "<|message|>";
+    size_t search_from = 0;
+    while (true) {
+        size_t pos_tool = response_text.find(tool_start_tag, search_from);
+        if (pos_tool == std::string::npos) break;
+        size_t body_start = pos_tool + tool_start_tag.size();
+        size_t pos_end = response_text.find(final_end_tag, body_start);
+        size_t body_end = (pos_end != std::string::npos) ? pos_end : response_text.length();
+        search_from = (pos_end != std::string::npos) ? pos_end + final_end_tag.length() : body_end;
+        std::string full_tool_str = response_text.substr(body_start, body_end - body_start);
+        size_t pos_split = full_tool_str.find(tool_split_tag);
+        if (pos_split != std::string::npos) {
+            std::string meta_part = full_tool_str.substr(0, pos_split);
+            size_t name_end = meta_part.find_first_of(" <");
+            std::string name = meta_part.substr(0, name_end);
+            std::string args = full_tool_str.substr(pos_split + tool_split_tag.length());
+            if (!name.empty()) result.tool_calls_list.emplace_back(name, args);
+        }
+    }
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
     }
 
     return result;

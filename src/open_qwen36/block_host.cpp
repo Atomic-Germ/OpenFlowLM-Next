@@ -46,14 +46,26 @@ void rms_vec(const float* x, size_t d, const float* w, double eps, float* out) {
     for (size_t j = 0; j < d; ++j) out[j] = x[j] * r * w[j];
 }
 
-// the partial rotation over the first 2 * half dims, half-split (Qwen's layout)
-void rope(float* x, size_t half, const double* inv_freq, double pos) {
+// the partial rotation over the first 2 * half dims. Half-split pairs (i, i + half) --
+// Qwen's layout, what everything compiled before the llama-family GGUF work did -- unless
+// `il`, which takes the interleaved (2i, 2i + 1) pairs the llama archs' GGUF rotates with.
+void rope(float* x, size_t half, const double* inv_freq, double pos, bool il) {
+    if (!il) {
+        for (size_t i = 0; i < half; ++i) {
+            const double a = pos * inv_freq[i];
+            const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
+            const float x1 = x[i], x2 = x[half + i];
+            x[i] = x1 * c - x2 * s;
+            x[half + i] = x2 * c + x1 * s;
+        }
+        return;
+    }
     for (size_t i = 0; i < half; ++i) {
         const double a = pos * inv_freq[i];
         const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-        const float x1 = x[i], x2 = x[half + i];
-        x[i] = x1 * c - x2 * s;
-        x[half + i] = x2 * c + x1 * s;
+        const float x1 = x[2 * i], x2 = x[2 * i + 1];
+        x[2 * i] = x1 * c - x2 * s;
+        x[2 * i + 1] = x2 * c + x1 * s;
     }
 }
 
@@ -277,7 +289,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     if (g.value_heads % g.key_heads || g.t_real > g.T || g.s_rows < dim || g.lanes < g.value_heads)
         throw std::runtime_error("open_qwen36: deltanet_block: inconsistent geometry");
-    const size_t grp = g.value_heads / g.key_heads, R = g.t_real;
+    const size_t R = g.t_real;
     const float inv_sqrt = 1.0f / std::sqrt(static_cast<float>(dim));
     std::fill(og, og + g.T * vw, 0.f);
 
@@ -390,7 +402,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
         std::vector<float> tv(dim), delta(dim), o(dim), on(dim);
         float* Sh = S + h * g.s_rows * dim;
         for (size_t t = 0; t < R; ++t) {
-            delta_token(dim, Sh, Kk.data() + t * key_w + (h / grp) * dim, Q.data() + t * key_w + (h / grp) * dim,
+            delta_token(dim, Sh, Kk.data() + t * key_w + (h % g.key_heads) * dim, Q.data() + t * key_w + (h % g.key_heads) * dim,
                         V.data() + t * vw + h * dim, decay[t * g.value_heads + h], beta[t * g.value_heads + h],
                         tv.data(), delta.data(), o.data());
             for (size_t j = 0; j < dim; ++j) o[j] *= inv_sqrt;
@@ -420,7 +432,6 @@ void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, cons
         tape.val.size() != tape.t_real * vw || tape.decay.size() != tape.t_real * g.value_heads ||
         tape.beta.size() != tape.t_real * g.value_heads)
         throw std::runtime_error("open_qwen36: deltanet_rollback: the tape does not match the geometry");
-    const size_t grp = g.value_heads / g.key_heads;
 
     if (g.conv_f32)
         std::copy(tape.conv_state0_f32.begin(), tape.conv_state0_f32.end(), static_cast<float*>(history));
@@ -434,7 +445,7 @@ void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, cons
         std::vector<float> tv(dim), delta(dim);
         float* Sh = S + h * g.s_rows * dim;
         for (size_t t = 0; t < k; ++t)
-            delta_token(dim, Sh, tape.key.data() + t * key_w + (h / grp) * dim, nullptr,
+            delta_token(dim, Sh, tape.key.data() + t * key_w + (h % g.key_heads) * dim, nullptr,
                         tape.val.data() + t * vw + h * dim, tape.decay[t * g.value_heads + h],
                         tape.beta[t * g.value_heads + h], tv.data(), delta.data(), nullptr);
     }
@@ -584,12 +595,12 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
         for (size_t h = 0; h < g.nh; ++h) {
             float* dst = Q.data() + t * qw + h * g.hd;
             rms_vec(q + t * qw + h * g.hd, g.hd, qn, g.eps, dst);
-            rope(dst, half, inv_freq, static_cast<double>(p));
+            rope(dst, half, inv_freq, static_cast<double>(p), g.rope_il);
         }
         std::vector<float> kh(kvw);
         for (size_t h = 0; h < g.kvh; ++h) {
             rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
-            rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p));
+            rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p), g.rope_il);
         }
         for (size_t j = 0; j < kvw; ++j) {
             const uint16_t kb = f32_to_bf16(kh[j]), vb = f32_to_bf16(v[t * kvw + j]);
@@ -662,14 +673,14 @@ void attention_prep(const AttnGeom& g, const float* q, const float* k, const flo
             const float* src = q + t * qw + h * g.hd;
             if (qn) rms_vec(src, g.hd, qn, g.eps, dst);
             else std::copy(src, src + g.hd, dst);
-            rope(dst, half, inv_freq, static_cast<double>(p));
+            rope(dst, half, inv_freq, static_cast<double>(p), g.rope_il);
             for (size_t j = 0; j < g.hd; ++j) dst[j] *= scale;
         }
         for (size_t h = 0; h < g.kvh; ++h) {
             const float* src = k + t * kvw + h * g.hd;
             if (kn) rms_vec(src, g.hd, kn, g.eps, kh.data() + h * g.hd);
             else std::copy(src, src + g.hd, kh.data() + h * g.hd);
-            rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p));
+            rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p), g.rope_il);
         }
         for (size_t j = 0; j < kvw; ++j) {
             kv[p * kv_row_elems + j] = f32_to_bf16(kh[j]);
