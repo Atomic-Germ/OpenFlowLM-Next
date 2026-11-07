@@ -1,0 +1,977 @@
+{
+ "tool": "e2e_profile",
+ "version": 2,
+ "scope": "Phase 24 attribution of the current implementation; NOT a published benchmark and NOT model acceptance",
+ "model_acceptance": false,
+ "precision_mode": "paired",
+ "reps": 1,
+ "dispersion_measured": false,
+ "dispersion_note": "reps=1: this pass attributes cost, it does not measure run-to-run spread. Do not quote these as final performance numbers.",
+ "commit": "26c075686b7bdeaa04852bf2d07a5da6c7289406",
+ "fixture": {
+  "source": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/prefill-perf/phase24",
+  "note": "the 128/512/1024 cases are prefixes of the same documented 513-token prompt, so length is the only variable"
+ },
+ "kernels": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/production-v2/kernels-model",
+ "cli": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/prefill-perf/switch-v1/build/open_qwen36_cli",
+ "model": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+ "categories_definition": {
+  "projection_gemm": "part0 (all four projection GEMMs, device-blocked time)",
+  "ffn_and_gemm_host": "gemm_tile + gemm_tr",
+  "deltanet": "dn_conv + dn_rule",
+  "attention": "attn",
+  "norm_elementwise": "prenorm + tail",
+  "state_movement": "state",
+  "sync_bo": "sync",
+  "host_setup": "setup + shared",
+  "moe": "moe_prep + moe_patch + moe_run + moe_read",
+  "qkv_scatter": "qkv_scatter",
+  "residue": "unattributed"
+ },
+ "totals_check": "groups are disjoint engine fields; their sum plus residue and lm_head equals the engine total",
+ "lengths": [
+  128,
+  512,
+  1024,
+  2048
+ ],
+ "data": {
+  "128": {
+   "stage_lines": 1,
+   "totals": {
+    "total": 33945.0,
+    "gemm": 24940.9,
+    "host": 5519.2,
+    "route": 0.0,
+    "lm": 26.9
+   },
+   "fields": {
+    "mid": 699.7,
+    "dn_conv": 321.3,
+    "dn_rule": 242.4,
+    "attn": 136.0,
+    "prenorm": 153.9,
+    "gemm_tile": 3041.5,
+    "gemm_tr": 896.5,
+    "tail": 431.1,
+    "shared": 526.4,
+    "state": 5.0,
+    "sync": 293.5,
+    "setup": 3.0,
+    "moe_prep": 0.0,
+    "moe_patch": 0.0,
+    "moe_run": 0.0,
+    "moe_read": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 3458.1
+   },
+   "dispatch": {
+    "gemm_n14336_k5120": {
+     "calls": 32,
+     "ms": 600.9,
+     "mean": 18.779
+    },
+    "gemm_n14336_k5120_low": {
+     "calls": 32,
+     "ms": 649.4,
+     "mean": 20.295
+    },
+    "gemm_n16384_k5120": {
+     "calls": 96,
+     "ms": 2176.3,
+     "mean": 22.67
+    },
+    "gemm_n16384_k5120_low": {
+     "calls": 96,
+     "ms": 2164.5,
+     "mean": 22.547
+    },
+    "gemm_n34816_k5120": {
+     "calls": 128,
+     "ms": 5465.9,
+     "mean": 42.703
+    },
+    "gemm_n34816_k5120_low": {
+     "calls": 128,
+     "ms": 5815.7,
+     "mean": 45.435
+    },
+    "gemm_n5120_k17408": {
+     "calls": 128,
+     "ms": 2757.1,
+     "mean": 21.54
+    },
+    "gemm_n5120_k17408_low": {
+     "calls": 128,
+     "ms": 2955.6,
+     "mean": 23.091
+    },
+    "gemm_n5120_k6144": {
+     "calls": 128,
+     "ms": 1148.3,
+     "mean": 8.971
+    },
+    "gemm_n5120_k6144_low": {
+     "calls": 128,
+     "ms": 1207.1,
+     "mean": 9.431
+    },
+    "lm": {
+     "calls": 1,
+     "ms": 25.9,
+     "mean": 25.879
+    },
+    "ln": {
+     "calls": 1,
+     "ms": 0.9,
+     "mean": 0.9
+    }
+   },
+   "process_wall_s": 44.26,
+   "returncode": 0,
+   "reps": 1,
+   "categories": {
+    "projection_gemm_device": 24940.9,
+    "gemm_host_tiling": 3041.5,
+    "gemm_host_transpose": 896.5,
+    "deltanet_conv_and_rule": 563.7,
+    "norm_entry": 153.9,
+    "residual_norm_router_host": 431.1,
+    "ffn_activation_host": 526.4,
+    "request_setup": 3.0,
+    "dispatch_sync": 293.5,
+    "qkv_scatter": 0.0,
+    "bo_state": 5.0,
+    "lm_head": 26.9,
+    "attention": 136.0,
+    "unattributed_engine": 2926.7
+   },
+   "dispatch_total_ms": 24967.6,
+   "dispatch_calls": 1026,
+   "tokens_in_run": 128,
+   "dispatch_calls_reps": [
+    1026
+   ],
+   "prompt_tokens": 128,
+   "ttft_s": 44.26,
+   "prompt_tok_per_s": 2.89,
+   "share_pct": {
+    "projection_gemm": 73.47,
+    "ffn_and_gemm_host": 11.6,
+    "deltanet": 1.66,
+    "attention": 0.4,
+    "norm_elementwise": 1.72,
+    "state_movement": 0.01,
+    "sync_bo": 0.86,
+    "host_setup": 1.56,
+    "moe": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 10.19,
+    "lm_head": 0.08
+   },
+   "total_ms": 33945.0,
+   "allocation": {
+    "exclusive": {
+     "projection_gemm_device": 24940.9,
+     "gemm_host_tiling": 3041.5,
+     "gemm_host_transpose": 896.5,
+     "deltanet_conv_and_rule": 563.7,
+     "norm_entry": 153.9,
+     "residual_norm_router_host": 431.1,
+     "ffn_activation_host": 526.4,
+     "request_setup": 3.0,
+     "dispatch_sync": 293.5,
+     "qkv_scatter": 0.0,
+     "bo_state": 5.0,
+     "lm_head": 26.9,
+     "attention": 136.0,
+     "unattributed_engine": 2926.7
+    },
+    "checks": {
+     "wall_ms": 44260.0,
+     "engine_total_ms": 33945.0,
+     "categories_sum_ms": 33945.1,
+     "categories_minus_engine_ms": 0.1,
+     "categories_minus_wall_ms": -10314.9,
+     "within_wall": true,
+     "unattributed_engine_ms": 2926.7,
+     "outside_engine_ms": 10315.0,
+     "part1_identity_delta_ms": 0.0,
+     "total_identity_delta_ms": 0.1,
+     "nested_diagnostics": {
+      "attention_in_mid": 136.0,
+      "moe_in_route": 0.0
+     }
+    },
+    "share_of_wall_pct": {
+     "projection_gemm_device": 56.35,
+     "gemm_host_tiling": 6.87,
+     "gemm_host_transpose": 2.03,
+     "deltanet_conv_and_rule": 1.27,
+     "norm_entry": 0.35,
+     "residual_norm_router_host": 0.97,
+     "ffn_activation_host": 1.19,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.66,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.01,
+     "lm_head": 0.06,
+     "attention": 0.31,
+     "unattributed_engine": 6.61
+    },
+    "share_of_engine_pct": {
+     "projection_gemm_device": 73.47,
+     "gemm_host_tiling": 8.96,
+     "gemm_host_transpose": 2.64,
+     "deltanet_conv_and_rule": 1.66,
+     "norm_entry": 0.45,
+     "residual_norm_router_host": 1.27,
+     "ffn_activation_host": 1.55,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.86,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.01,
+     "lm_head": 0.08,
+     "attention": 0.4,
+     "unattributed_engine": 8.62
+    },
+    "outside_engine_wall_pct": 23.31
+   }
+  },
+  "512": {
+   "stage_lines": 1,
+   "totals": {
+    "total": 69153.4,
+    "gemm": 49830.0,
+    "host": 12272.4,
+    "route": 0.0,
+    "lm": 25.5
+   },
+   "fields": {
+    "mid": 2565.8,
+    "dn_conv": 797.9,
+    "dn_rule": 721.2,
+    "attn": 1046.4,
+    "prenorm": 355.3,
+    "gemm_tile": 5940.2,
+    "gemm_tr": 1882.5,
+    "tail": 935.4,
+    "shared": 1246.1,
+    "state": 5.4,
+    "sync": 586.6,
+    "setup": 6.5,
+    "moe_prep": 0.0,
+    "moe_patch": 0.0,
+    "moe_run": 0.0,
+    "moe_read": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 7025.5
+   },
+   "dispatch": {
+    "gemm_n14336_k5120": {
+     "calls": 64,
+     "ms": 1185.2,
+     "mean": 18.519
+    },
+    "gemm_n14336_k5120_low": {
+     "calls": 64,
+     "ms": 1281.2,
+     "mean": 20.018
+    },
+    "gemm_n16384_k5120": {
+     "calls": 192,
+     "ms": 4172.3,
+     "mean": 21.731
+    },
+    "gemm_n16384_k5120_low": {
+     "calls": 192,
+     "ms": 4342.1,
+     "mean": 22.615
+    },
+    "gemm_n34816_k5120": {
+     "calls": 256,
+     "ms": 10940.1,
+     "mean": 42.735
+    },
+    "gemm_n34816_k5120_low": {
+     "calls": 256,
+     "ms": 11687.7,
+     "mean": 45.655
+    },
+    "gemm_n5120_k17408": {
+     "calls": 256,
+     "ms": 5529.7,
+     "mean": 21.601
+    },
+    "gemm_n5120_k17408_low": {
+     "calls": 256,
+     "ms": 5882.0,
+     "mean": 22.977
+    },
+    "gemm_n5120_k6144": {
+     "calls": 256,
+     "ms": 2318.9,
+     "mean": 9.058
+    },
+    "gemm_n5120_k6144_low": {
+     "calls": 256,
+     "ms": 2490.8,
+     "mean": 9.73
+    },
+    "lm": {
+     "calls": 1,
+     "ms": 25.1,
+     "mean": 25.121
+    },
+    "ln": {
+     "calls": 1,
+     "ms": 0.3,
+     "mean": 0.272
+    }
+   },
+   "process_wall_s": 79.11,
+   "returncode": 0,
+   "reps": 1,
+   "categories": {
+    "projection_gemm_device": 49830.0,
+    "gemm_host_tiling": 5940.2,
+    "gemm_host_transpose": 1882.5,
+    "deltanet_conv_and_rule": 1519.1,
+    "norm_entry": 355.3,
+    "residual_norm_router_host": 935.4,
+    "ffn_activation_host": 1246.1,
+    "request_setup": 6.5,
+    "dispatch_sync": 586.6,
+    "qkv_scatter": 0.0,
+    "bo_state": 5.4,
+    "lm_head": 25.5,
+    "attention": 1046.4,
+    "unattributed_engine": 5774.0
+   },
+   "dispatch_total_ms": 49855.4,
+   "dispatch_calls": 2050,
+   "tokens_in_run": 512,
+   "dispatch_calls_reps": [
+    2050
+   ],
+   "prompt_tokens": 512,
+   "ttft_s": 79.11,
+   "prompt_tok_per_s": 6.47,
+   "share_pct": {
+    "projection_gemm": 72.06,
+    "ffn_and_gemm_host": 11.31,
+    "deltanet": 2.2,
+    "attention": 1.51,
+    "norm_elementwise": 1.87,
+    "state_movement": 0.01,
+    "sync_bo": 0.85,
+    "host_setup": 1.81,
+    "moe": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 10.16,
+    "lm_head": 0.04
+   },
+   "total_ms": 69153.4,
+   "allocation": {
+    "exclusive": {
+     "projection_gemm_device": 49830.0,
+     "gemm_host_tiling": 5940.2,
+     "gemm_host_transpose": 1882.5,
+     "deltanet_conv_and_rule": 1519.1,
+     "norm_entry": 355.3,
+     "residual_norm_router_host": 935.4,
+     "ffn_activation_host": 1246.1,
+     "request_setup": 6.5,
+     "dispatch_sync": 586.6,
+     "qkv_scatter": 0.0,
+     "bo_state": 5.4,
+     "lm_head": 25.5,
+     "attention": 1046.4,
+     "unattributed_engine": 5774.0
+    },
+    "checks": {
+     "wall_ms": 79110.0,
+     "engine_total_ms": 69153.4,
+     "categories_sum_ms": 69153.0,
+     "categories_minus_engine_ms": -0.4,
+     "categories_minus_wall_ms": -9957.0,
+     "within_wall": true,
+     "unattributed_engine_ms": 5774.0,
+     "outside_engine_ms": 9956.6,
+     "part1_identity_delta_ms": -0.1,
+     "total_identity_delta_ms": 0.0,
+     "nested_diagnostics": {
+      "attention_in_mid": 1046.4,
+      "moe_in_route": 0.0
+     }
+    },
+    "share_of_wall_pct": {
+     "projection_gemm_device": 62.99,
+     "gemm_host_tiling": 7.51,
+     "gemm_host_transpose": 2.38,
+     "deltanet_conv_and_rule": 1.92,
+     "norm_entry": 0.45,
+     "residual_norm_router_host": 1.18,
+     "ffn_activation_host": 1.58,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.74,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.01,
+     "lm_head": 0.03,
+     "attention": 1.32,
+     "unattributed_engine": 7.3
+    },
+    "share_of_engine_pct": {
+     "projection_gemm_device": 72.06,
+     "gemm_host_tiling": 8.59,
+     "gemm_host_transpose": 2.72,
+     "deltanet_conv_and_rule": 2.2,
+     "norm_entry": 0.51,
+     "residual_norm_router_host": 1.35,
+     "ffn_activation_host": 1.8,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.85,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.01,
+     "lm_head": 0.04,
+     "attention": 1.51,
+     "unattributed_engine": 8.35
+    },
+    "outside_engine_wall_pct": 12.59
+   }
+  },
+  "1024": {
+   "stage_lines": 1,
+   "totals": {
+    "total": 139793.8,
+    "gemm": 99475.5,
+    "host": 26349.3,
+    "route": 0.0,
+    "lm": 30.5
+   },
+   "fields": {
+    "mid": 6640.0,
+    "dn_conv": 1540.0,
+    "dn_rule": 1490.6,
+    "attn": 3609.0,
+    "prenorm": 700.7,
+    "gemm_tile": 12166.3,
+    "gemm_tr": 3747.3,
+    "tail": 1916.3,
+    "shared": 2470.7,
+    "state": 6.3,
+    "sync": 1165.7,
+    "setup": 13.2,
+    "moe_prep": 0.0,
+    "moe_patch": 0.0,
+    "moe_run": 0.0,
+    "moe_read": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 13938.5
+   },
+   "dispatch": {
+    "gemm_n14336_k5120": {
+     "calls": 128,
+     "ms": 2396.7,
+     "mean": 18.724
+    },
+    "gemm_n14336_k5120_low": {
+     "calls": 128,
+     "ms": 2543.1,
+     "mean": 19.868
+    },
+    "gemm_n16384_k5120": {
+     "calls": 384,
+     "ms": 8243.7,
+     "mean": 21.468
+    },
+    "gemm_n16384_k5120_low": {
+     "calls": 384,
+     "ms": 8659.3,
+     "mean": 22.55
+    },
+    "gemm_n34816_k5120": {
+     "calls": 512,
+     "ms": 21918.8,
+     "mean": 42.81
+    },
+    "gemm_n34816_k5120_low": {
+     "calls": 512,
+     "ms": 23343.9,
+     "mean": 45.594
+    },
+    "gemm_n5120_k17408": {
+     "calls": 512,
+     "ms": 11054.3,
+     "mean": 21.59
+    },
+    "gemm_n5120_k17408_low": {
+     "calls": 512,
+     "ms": 11784.9,
+     "mean": 23.017
+    },
+    "gemm_n5120_k6144": {
+     "calls": 512,
+     "ms": 4623.8,
+     "mean": 9.031
+    },
+    "gemm_n5120_k6144_low": {
+     "calls": 512,
+     "ms": 4907.0,
+     "mean": 9.584
+    },
+    "lm": {
+     "calls": 1,
+     "ms": 25.3,
+     "mean": 25.321
+    },
+    "ln": {
+     "calls": 1,
+     "ms": 5.1,
+     "mean": 5.102
+    }
+   },
+   "process_wall_s": 149.73,
+   "returncode": 0,
+   "reps": 1,
+   "categories": {
+    "projection_gemm_device": 99475.5,
+    "gemm_host_tiling": 12166.3,
+    "gemm_host_transpose": 3747.3,
+    "deltanet_conv_and_rule": 3030.6,
+    "norm_entry": 700.7,
+    "residual_norm_router_host": 1916.3,
+    "ffn_activation_host": 2470.7,
+    "request_setup": 13.2,
+    "dispatch_sync": 1165.7,
+    "qkv_scatter": 0.0,
+    "bo_state": 6.3,
+    "lm_head": 30.5,
+    "attention": 3609.0,
+    "unattributed_engine": 11461.5
+   },
+   "dispatch_total_ms": 99505.9,
+   "dispatch_calls": 4098,
+   "tokens_in_run": 1024,
+   "dispatch_calls_reps": [
+    4098
+   ],
+   "prompt_tokens": 1024,
+   "ttft_s": 149.73,
+   "prompt_tok_per_s": 6.84,
+   "share_pct": {
+    "projection_gemm": 71.16,
+    "ffn_and_gemm_host": 11.38,
+    "deltanet": 2.17,
+    "attention": 2.58,
+    "norm_elementwise": 1.87,
+    "state_movement": 0.0,
+    "sync_bo": 0.83,
+    "host_setup": 1.78,
+    "moe": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 9.97,
+    "lm_head": 0.02
+   },
+   "total_ms": 139793.8,
+   "allocation": {
+    "exclusive": {
+     "projection_gemm_device": 99475.5,
+     "gemm_host_tiling": 12166.3,
+     "gemm_host_transpose": 3747.3,
+     "deltanet_conv_and_rule": 3030.6,
+     "norm_entry": 700.7,
+     "residual_norm_router_host": 1916.3,
+     "ffn_activation_host": 2470.7,
+     "request_setup": 13.2,
+     "dispatch_sync": 1165.7,
+     "qkv_scatter": 0.0,
+     "bo_state": 6.3,
+     "lm_head": 30.5,
+     "attention": 3609.0,
+     "unattributed_engine": 11461.5
+    },
+    "checks": {
+     "wall_ms": 149730.0,
+     "engine_total_ms": 139793.8,
+     "categories_sum_ms": 139793.6,
+     "categories_minus_engine_ms": -0.2,
+     "categories_minus_wall_ms": -9936.4,
+     "within_wall": true,
+     "unattributed_engine_ms": 11461.5,
+     "outside_engine_ms": 9936.2,
+     "part1_identity_delta_ms": 0.2,
+     "total_identity_delta_ms": 0.0,
+     "nested_diagnostics": {
+      "attention_in_mid": 3609.0,
+      "moe_in_route": 0.0
+     }
+    },
+    "share_of_wall_pct": {
+     "projection_gemm_device": 66.44,
+     "gemm_host_tiling": 8.13,
+     "gemm_host_transpose": 2.5,
+     "deltanet_conv_and_rule": 2.02,
+     "norm_entry": 0.47,
+     "residual_norm_router_host": 1.28,
+     "ffn_activation_host": 1.65,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.78,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.0,
+     "lm_head": 0.02,
+     "attention": 2.41,
+     "unattributed_engine": 7.65
+    },
+    "share_of_engine_pct": {
+     "projection_gemm_device": 71.16,
+     "gemm_host_tiling": 8.7,
+     "gemm_host_transpose": 2.68,
+     "deltanet_conv_and_rule": 2.17,
+     "norm_entry": 0.5,
+     "residual_norm_router_host": 1.37,
+     "ffn_activation_host": 1.77,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.83,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.0,
+     "lm_head": 0.02,
+     "attention": 2.58,
+     "unattributed_engine": 8.2
+    },
+    "outside_engine_wall_pct": 6.64
+   }
+  },
+  "2048": {
+   "stage_lines": 1,
+   "totals": {
+    "total": 284432.8,
+    "gemm": 198619.2,
+    "host": 58144.3,
+    "route": 0.0,
+    "lm": 25.6
+   },
+   "fields": {
+    "mid": 19546.0,
+    "dn_conv": 3067.9,
+    "dn_rule": 2876.7,
+    "attn": 13600.6,
+    "prenorm": 1264.9,
+    "gemm_tile": 24124.2,
+    "gemm_tr": 7410.7,
+    "tail": 3423.2,
+    "shared": 4788.6,
+    "state": 8.1,
+    "sync": 2349.1,
+    "setup": 26.3,
+    "moe_prep": 0.0,
+    "moe_patch": 0.0,
+    "moe_run": 0.0,
+    "moe_read": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 27643.7
+   },
+   "dispatch": {
+    "gemm_n14336_k5120": {
+     "calls": 256,
+     "ms": 4758.4,
+     "mean": 18.587
+    },
+    "gemm_n14336_k5120_low": {
+     "calls": 256,
+     "ms": 5101.5,
+     "mean": 19.928
+    },
+    "gemm_n16384_k5120": {
+     "calls": 768,
+     "ms": 16317.3,
+     "mean": 21.246
+    },
+    "gemm_n16384_k5120_low": {
+     "calls": 768,
+     "ms": 17319.4,
+     "mean": 22.551
+    },
+    "gemm_n34816_k5120": {
+     "calls": 1024,
+     "ms": 43763.1,
+     "mean": 42.737
+    },
+    "gemm_n34816_k5120_low": {
+     "calls": 1024,
+     "ms": 46686.1,
+     "mean": 45.592
+    },
+    "gemm_n5120_k17408": {
+     "calls": 1024,
+     "ms": 22041.8,
+     "mean": 21.525
+    },
+    "gemm_n5120_k17408_low": {
+     "calls": 1024,
+     "ms": 23591.7,
+     "mean": 23.039
+    },
+    "gemm_n5120_k6144": {
+     "calls": 1024,
+     "ms": 9184.7,
+     "mean": 8.969
+    },
+    "gemm_n5120_k6144_low": {
+     "calls": 1024,
+     "ms": 9855.1,
+     "mean": 9.624
+    },
+    "lm": {
+     "calls": 1,
+     "ms": 25.2,
+     "mean": 25.17
+    },
+    "ln": {
+     "calls": 1,
+     "ms": 0.4,
+     "mean": 0.358
+    }
+   },
+   "process_wall_s": 294.31,
+   "returncode": 0,
+   "reps": 1,
+   "categories": {
+    "projection_gemm_device": 198619.2,
+    "gemm_host_tiling": 24124.2,
+    "gemm_host_transpose": 7410.7,
+    "deltanet_conv_and_rule": 5944.6,
+    "norm_entry": 1264.9,
+    "residual_norm_router_host": 3423.2,
+    "ffn_activation_host": 4788.6,
+    "request_setup": 26.3,
+    "dispatch_sync": 2349.1,
+    "qkv_scatter": 0.0,
+    "bo_state": 8.1,
+    "lm_head": 25.6,
+    "attention": 13600.6,
+    "unattributed_engine": 22847.0
+   },
+   "dispatch_total_ms": 198644.7,
+   "dispatch_calls": 8194,
+   "tokens_in_run": 2048,
+   "dispatch_calls_reps": [
+    8194
+   ],
+   "prompt_tokens": 2048,
+   "ttft_s": 294.31,
+   "prompt_tok_per_s": 6.96,
+   "share_pct": {
+    "projection_gemm": 69.83,
+    "ffn_and_gemm_host": 11.09,
+    "deltanet": 2.09,
+    "attention": 4.78,
+    "norm_elementwise": 1.65,
+    "state_movement": 0.0,
+    "sync_bo": 0.83,
+    "host_setup": 1.69,
+    "moe": 0.0,
+    "qkv_scatter": 0.0,
+    "residue": 9.72,
+    "lm_head": 0.01
+   },
+   "total_ms": 284432.8,
+   "allocation": {
+    "exclusive": {
+     "projection_gemm_device": 198619.2,
+     "gemm_host_tiling": 24124.2,
+     "gemm_host_transpose": 7410.7,
+     "deltanet_conv_and_rule": 5944.6,
+     "norm_entry": 1264.9,
+     "residual_norm_router_host": 3423.2,
+     "ffn_activation_host": 4788.6,
+     "request_setup": 26.3,
+     "dispatch_sync": 2349.1,
+     "qkv_scatter": 0.0,
+     "bo_state": 8.1,
+     "lm_head": 25.6,
+     "attention": 13600.6,
+     "unattributed_engine": 22847.0
+    },
+    "checks": {
+     "wall_ms": 294310.0,
+     "engine_total_ms": 284432.8,
+     "categories_sum_ms": 284432.1,
+     "categories_minus_engine_ms": -0.7,
+     "categories_minus_wall_ms": -9877.9,
+     "within_wall": true,
+     "unattributed_engine_ms": 22847.0,
+     "outside_engine_ms": 9877.2,
+     "part1_identity_delta_ms": 0.1,
+     "total_identity_delta_ms": 0.0,
+     "nested_diagnostics": {
+      "attention_in_mid": 13600.6,
+      "moe_in_route": 0.0
+     }
+    },
+    "share_of_wall_pct": {
+     "projection_gemm_device": 67.49,
+     "gemm_host_tiling": 8.2,
+     "gemm_host_transpose": 2.52,
+     "deltanet_conv_and_rule": 2.02,
+     "norm_entry": 0.43,
+     "residual_norm_router_host": 1.16,
+     "ffn_activation_host": 1.63,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.8,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.0,
+     "lm_head": 0.01,
+     "attention": 4.62,
+     "unattributed_engine": 7.76
+    },
+    "share_of_engine_pct": {
+     "projection_gemm_device": 69.83,
+     "gemm_host_tiling": 8.48,
+     "gemm_host_transpose": 2.61,
+     "deltanet_conv_and_rule": 2.09,
+     "norm_entry": 0.44,
+     "residual_norm_router_host": 1.2,
+     "ffn_activation_host": 1.68,
+     "request_setup": 0.01,
+     "dispatch_sync": 0.83,
+     "qkv_scatter": 0.0,
+     "bo_state": 0.0,
+     "lm_head": 0.01,
+     "attention": 4.78,
+     "unattributed_engine": 8.03
+    },
+    "outside_engine_wall_pct": 3.36
+   }
+  }
+ },
+ "scaling": {
+  "projection_gemm_device": {
+   "per_length_ms": {
+    "128": 24940.9,
+    "512": 49830.0,
+    "1024": 99475.5,
+    "2048": 198619.2
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "gemm_host_tiling": {
+   "per_length_ms": {
+    "128": 3041.5,
+    "512": 5940.2,
+    "1024": 12166.3,
+    "2048": 24124.2
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "gemm_host_transpose": {
+   "per_length_ms": {
+    "128": 896.5,
+    "512": 1882.5,
+    "1024": 3747.3,
+    "2048": 7410.7
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "deltanet_conv_and_rule": {
+   "per_length_ms": {
+    "128": 563.7,
+    "512": 1519.1,
+    "1024": 3030.6,
+    "2048": 5944.6
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "norm_entry": {
+   "per_length_ms": {
+    "128": 153.9,
+    "512": 355.3,
+    "1024": 700.7,
+    "2048": 1264.9
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "residual_norm_router_host": {
+   "per_length_ms": {
+    "128": 431.1,
+    "512": 935.4,
+    "1024": 1916.3,
+    "2048": 3423.2
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "ffn_activation_host": {
+   "per_length_ms": {
+    "128": 526.4,
+    "512": 1246.1,
+    "1024": 2470.7,
+    "2048": 4788.6
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "request_setup": {
+   "per_length_ms": {
+    "128": 3.0,
+    "512": 6.5,
+    "1024": 13.2,
+    "2048": 26.3
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "dispatch_sync": {
+   "per_length_ms": {
+    "128": 293.5,
+    "512": 586.6,
+    "1024": 1165.7,
+    "2048": 2349.1
+   },
+   "scaling_vs_length": "O(T)"
+  },
+  "qkv_scatter": {
+   "per_length_ms": {
+    "128": 0.0,
+    "512": 0.0,
+    "1024": 0.0,
+    "2048": 0.0
+   },
+   "scaling_vs_length": "unknown"
+  },
+  "bo_state": {
+   "per_length_ms": {
+    "128": 5.0,
+    "512": 5.4,
+    "1024": 6.3,
+    "2048": 8.1
+   },
+   "scaling_vs_length": "constant/fixed overhead"
+  },
+  "lm_head": {
+   "per_length_ms": {
+    "128": 26.9,
+    "512": 25.5,
+    "1024": 30.5,
+    "2048": 25.6
+   },
+   "scaling_vs_length": "constant/fixed overhead"
+  },
+  "attention": {
+   "per_length_ms": {
+    "128": 136.0,
+    "512": 1046.4,
+    "1024": 3609.0,
+    "2048": 13600.6
+   },
+   "scaling_vs_length": "approximately O(T^2)"
+  },
+  "unattributed_engine": {
+   "per_length_ms": {
+    "128": 2926.7,
+    "512": 5774.0,
+    "1024": 11461.5,
+    "2048": 22847.0
+   },
+   "scaling_vs_length": "O(T)"
+  }
+ },
+ "accounting_model": "total = part0 + part1 + route + lm_head + residue; part1 = prenorm + gemm_tile + gemm_tr + tail + setup + sync + qkv_scatter + mid; mid = dn_conv + dn_rule + attn; residue >= shared + state (both are measured outside part1, so both sit inside residue and must not be counted twice). route nests attn on the dxB route and moe_* on an MoE route."
+}

@@ -6,17 +6,23 @@
 /// \note This is a source file for the Gemma4_12B class (text-only interface).
 
 #include "AutoModel/modeling_gemma4_12b.hpp"
+#include "config/settings_resolver.hpp"
 #include "AutoModel/gemma4_tool_parser.hpp"
+#include "config/settings_resolver.hpp"
 #include "metrices.hpp"
+#include "config/settings_resolver.hpp"
 #include "error_measure.hpp"
+#include "config/settings_resolver.hpp"
 #include <cassert>
+#include "config/settings_resolver.hpp"
 
 /************              Gemma4_12B family            **************/
 Gemma4_12B::Gemma4_12B(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4_12B") {}
 
 void Gemma4_12B::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
 
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     this->q4nx = std::make_unique<Q4NX>(this->model_path);
     this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);

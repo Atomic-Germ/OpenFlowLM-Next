@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -48,6 +49,8 @@ constexpr uint64_t Q4K_POOL_FNV1A = 0xb02083912551d9d3ull;
 // container into a 3072-wide pool (OPEN-PACK-CHUNK-FUSE).
 // specs/open-engine/tests/test_chunk_fuse.py asserts this number on the same bytes.
 constexpr uint64_t FUSE_POOL_FNV1A = 0x21f7e3b732137cb2ull;
+// test_prefill_bfp16.py asserts the same hash of the glu halves (OPEN-PREFILL-BFP16-FFN)
+constexpr uint64_t BFP16_GLU_FNV1A = 0xe608fa0b59e37843ull;
 
 int failures = 0;
 
@@ -865,6 +868,50 @@ int main() {
         check(g8 == 0xa1e333116f424dafull && g4 == 0x7018cee99915f0b9ull, "bf16_gemm: byte-identical to the NumPy packer");
     }
 
+    // ---- bfp16_gemm (OPEN-PREFILL-BFP16): the q4_1 chunks twice, a [128, 1536] tensor at row 256 of a 1024-row weight
+    {
+        const size_t R = 128, K = 1536, N_TOTAL = 1024;
+        std::vector<uint8_t> two(out.begin(), out.begin() + 12 * 5120);
+        two.insert(two.end(), out.begin(), out.begin() + 12 * 5120);
+        std::vector<uint8_t> dst(N_TOTAL * K / 8 * open_qwen36::BFP16_BLOCK_BYTES, 0);
+        open_qwen36::pools::bfp16_gemm_pack(two.data(), R, K, 256, N_TOTAL, dst.data());
+        const uint64_t gb = fnv1a(dst.data(), dst.size());
+        std::printf("      bfp16_gemm fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gb));
+        check(gb == 0xb7aece12e88c13afull, "bfp16_gemm: byte-identical to the NumPy packer");
+        // OPEN-PREFILL-BFP16-FFN: the same chunks four times as a [512, 1536] gate and up, halves of a 1024-row glu weight
+        std::vector<uint8_t> four;
+        for (int i = 0; i < 4; ++i) four.insert(four.end(), two.begin(), two.end());
+        std::vector<uint8_t> glu(N_TOTAL * K / 8 * open_qwen36::BFP16_BLOCK_BYTES, 0);
+        open_qwen36::pools::bfp16_gemm_pack(four.data(), 512, K, 0, N_TOTAL, glu.data(), "gate");
+        open_qwen36::pools::bfp16_gemm_pack(four.data(), 512, K, 0, N_TOTAL, glu.data(), "up");
+        const uint64_t gg = fnv1a(glu.data(), glu.size());
+        std::printf("      bfp16_gemm glu fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gg));
+        check(gg == BFP16_GLU_FNV1A, "bfp16_gemm glu: byte-identical to the NumPy packer");
+    }
+
+    // ---- bfp16_dit: 24 shared chunks at q4_1 as a [128, 1536] projection, dit_gemm's B (OPEN-PREFILL-GEMM8)
+    {
+        const size_t C24 = 24, R = 128, K = 1536, NCOL = K / 256;
+        std::vector<uint8_t> s24 = q8_vector(C24), q24(C24 * 5120), b(R * K * 9 / 8);
+        requant_q4_1_chunks(s24.data(), C24, q24.data());
+        open_qwen36::pools::bfp16_dit_pack(q24.data(), R, K, b.data());
+        bool within = true;
+        for (size_t n = 0; n < R && within; ++n)
+            for (size_t k = 0; k < K && within; ++k) {
+                const uint8_t* blk = b.data() + ((n / 128) * (K / 64) + k / 64) * 9216 +
+                                     ((((n % 128) / 8) * 8 + (k % 64) / 8) * 8 + n % 8) * 9;
+                const double scale = std::ldexp(1.0, static_cast<int>(blk[0]) - 127) / 64.0;
+                const double got = static_cast<int8_t>(blk[1 + k % 8]) * scale;
+                const double want = q4_read(q24.data() + ((n / 32) * NCOL + k / 256) * 5120, static_cast<unsigned>(n % 32),
+                                            static_cast<unsigned>((k % 256) / 32), static_cast<unsigned>(k % 32));
+                within = std::abs(got - want) <= scale;
+            }
+        check(within, "bfp16_dit: every value decodes within one mantissa step of its q4_1 reading, at W^T's place");
+        const uint64_t g = fnv1a(b.data(), b.size());
+        std::printf("      bfp16_dit fnv1a = 0x%016llx\n", static_cast<unsigned long long>(g));
+        check(g == 0xf9c5bb308b534125ull, "bfp16_dit: byte-identical to dit_gemm's pack_b");
+    }
+
     // ---- transpose: [32, 64] of 2-byte values
     std::vector<uint8_t> t_src(32 * 64 * 2), t_dst(32 * 64 * 2);
     for (size_t i = 0; i < t_src.size(); ++i) t_src[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
@@ -903,6 +950,13 @@ int main() {
             src[2 * i + 1] = value >> 8;
         }
         auto path = write_container("oflm_banked_ab", {{"ab", hidden * 2, &src, "BF16", hidden}});
+        // Q4nxFile memory-maps the file with an open handle on Windows
+        // (FILE_SHARE_READ only), so it must be destroyed BEFORE the file is
+        // unlinked: std::filesystem::remove(path) (throwing overload) fails
+        // with a sharing violation while the mapping lives, and the uncaught
+        // filesystem_error aborts the test (0xC0000409). POSIX unlink tolerates
+        // open handles, which is why upstream CI never saw this.
+        {
         open_qwen36::Q4nxFile file(path);
         open_qwen36::PackOp op;
         op.op = "transpose_banked";
@@ -940,7 +994,8 @@ int main() {
         } catch (const std::exception& e) {
             check(false, std::string("transpose_banked: ") + e.what());
         }
-        std::error_code ec;   // the mapping is still open, and Windows will not delete a mapped file
+        }  // Q4nxFile destroyed here: handle released before unlink (Windows)
+        std::error_code ec;
         std::filesystem::remove(path, ec);
     }
 

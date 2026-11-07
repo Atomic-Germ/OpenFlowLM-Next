@@ -106,3 +106,10 @@ q8 `ssm_out_proj` narrows to q4_1 (5120 is not in `MIXED_CORE_FITS`).
 Speed, a quiet box, a 300-token prompt: prefill 50 ms/token on the route (386 one token at a
 time, 7.8x), decode 419-450 ms/token. Check `Get-Counter '\Processor(_Total)\% Processor Time'`
 first: under another CPU-bound job the same decode read 594-815 ms/token.
+
+## Shared normalization compile regression
+
+For the fused/streamed/grouped RMSNorm BF16 output paths, use
+[open-norm-bf16-validation](../open-norm-bf16-validation/SKILL.md). It covers
+the FP32-vector conversion and per-group inverse RMS selection with actual
+Peano compilation and standalone NPU references, plus the 5120-wide split control.

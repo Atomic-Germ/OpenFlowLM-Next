@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "open_qwen36/manifest.hpp"
 
+using open_qwen36::AttnFa;
 using open_qwen36::Manifest;
 using open_qwen36::PackOp;
 using nlohmann::json;
@@ -70,6 +72,89 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::printf("FAIL  load: %s\n", e.what());
         return 1;
+    }
+    // Cache and output precision are one ABI. Test the parser independently of XRT.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_kv_dtype"] = "bfloat16_pair";
+        j["layout"]["attn_output_dtype"] = "float32";
+        const size_t row = m.kv_row * 2;
+        j["layout"]["kv_row"] = row;
+        j["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row;
+        try {
+            auto pair = Manifest::parse(j, "paired cache");
+            check(pair.attn_kv_pair && pair.kv_row == row, "paired KV ABI accepted");
+        } catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 4; ++bad) {
+            auto broken = j;
+            if (bad == 0) broken["layout"]["attn_output_dtype"] = "bfloat16";
+            if (bad == 1) broken["layout"]["attn_kv_dtype"] = "float16";
+            if (bad == 2) broken["layout"]["kv_row"] = row / 2;
+            if (bad == 3) broken["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row / 2;
+            try { Manifest::parse(broken, "bad paired cache"); check(false, "bad paired ABI accepted"); }
+            catch (const std::runtime_error&) { check(true, "bad paired ABI refused"); }
+        }
+    }
+    // Entry norm dtype is explicit; the parser must not silently accept a typo.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_entry_dtype"] = "float32";
+        try { Manifest::parse(j, "FP32 entry"); check(true, "FP32 entry accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        j["layout"]["attn_entry_dtype"] = "float16";
+        try { Manifest::parse(j, "bad entry dtype"); check(false, "bad entry dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad entry dtype refused"); }
+    }
+    // An explicit post-output region must fit the declared linear scratch BO.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt = j["layer_types"]["linear_attention"];
+        const uint64_t offset = (lt["buffers"]["act"].get<uint64_t>() + 4095) / 4096 * 4096;
+        lt["buffers"]["act"] = offset + 24576;
+        lt["post_output"] = {{"dtype", "float32"}, {"offset", offset}, {"bytes", 24576}};
+        try { Manifest::parse(j, "FP32 post"); check(true, "FP32 post accepted"); }
+        catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 6; ++bad) {
+            auto broken = j;
+            auto& t = broken["layer_types"]["linear_attention"];
+            if (bad == 0) t["post_output"]["dtype"] = "float16";
+            if (bad == 1) t["post_output"]["offset"] = offset + 1;
+            if (bad == 2) t["post_output"]["bytes"] = 0;
+            if (bad == 3) t["buffers"]["act"] = offset + 24575;
+            if (bad == 4) t["post_output"]["offset"] = UINT64_MAX - 4095;
+            if (bad == 5) t["buffers"]["state"] = {{"kind", "kv"}, {"row", 4096}};
+            try { Manifest::parse(broken, "bad post output"); check(false, "bad post ABI accepted"); }
+            catch (const std::exception&) { check(true, "bad post ABI refused"); }
+        }
+    }
+    // Linear entry/history dtypes are an explicit ABI, not optional hints.
+    for (const char* field : {"linear_entry_dtype", "linear_conv_dtype"}) {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"][field] = "float16";
+        try { Manifest::parse(j, "bad linear dtype"); check(false, "bad linear dtype accepted"); }
+        catch (const std::runtime_error&) { check(true, "bad linear dtype refused"); }
+    }
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        auto& lt=j["layer_types"]["linear_attention"];
+        if (lt.contains("gemm_block")) {
+            auto& gb=lt["gemm_block"];
+            const auto old_off=gb["state_s_off"].get<uint64_t>();
+            j["layout"]["linear_entry_dtype"]="float32";
+            j["layout"]["linear_conv_dtype"]="float32";
+            gb["conv_dtype"]="float32"; gb["state_s_off"]=2*old_off;
+            lt["buffers"]["state"]["bytes"]=lt["buffers"]["state"]["bytes"].get<uint64_t>()+old_off;
+            try { auto m=Manifest::parse(j,"FP32 linear state"); check(m.linear_conv_f32,"FP32 state accepted"); }
+            catch (const std::exception& e) { check(false,e.what()); }
+            for(int bad=0;bad<3;++bad) {
+                auto b=j; auto& t=b["layer_types"]["linear_attention"];
+                if(bad==0) t["gemm_block"].erase("conv_dtype");
+                if(bad==1) t["gemm_block"]["state_s_off"]=old_off;
+                if(bad==2) t["buffers"]["state"]["bytes"]=1;
+                try { Manifest::parse(b,"bad FP32 state"); check(false,"incompatible linear state accepted"); }
+                catch(const std::runtime_error&) { check(true,"incompatible linear state refused"); }
+            }
+        }
     }
     // ---- what the recipe wrote for the 27B
     // Only exercise the new pack-op schema; this synthetic manifest is not a
@@ -141,6 +226,81 @@ int main(int argc, char** argv) {
         check(top, "attn_apply: the padded window never reads past the position's own row");
         check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
     }
+    {
+        // OPEN-ATTN-KVSLICE: five window fills compiled for 4 rows of 192 words, the new row's drain and the record
+        std::vector<uint32_t> w(4, 0);
+        auto bd = [&](uint32_t reg, uint32_t len) {
+            std::vector<uint32_t> op(12, 0);
+            op[0] = 1; op[2] = reg; op[4] = len;
+            w.insert(w.end(), op.begin(), op.end());
+        };
+        auto patch = [&](uint32_t reg, uint32_t arg, uint32_t off) {
+            std::vector<uint32_t> op(12, 0);
+            op[0] = 0x81; op[6] = reg; op[8] = arg; op[10] = off;
+            w.insert(w.end(), op.begin(), op.end());
+        };
+        const uint32_t offs[5] = {0, 128, 384, 512, 640};
+        bd(0x100, 512); patch(0x104, 3, 2048);
+        for (int c = 0; c < 5; ++c) { bd(0x200 + 0x20 * c, 768); patch(0x204 + 0x20 * c, 3, offs[c]); }
+        patch(0x300, 5, 1024u | 0x80000000u);
+        stream_patch::AttnGeometry g;
+        g.kvslice = 4;
+        auto tab = stream_patch::attn_table(w, "kvslice test", g);
+        size_t lens = 0, bases = 0;
+        for (const auto& p : tab) { lens += p.kind == 0 && p.row_words == 192; bases += p.kind == 3; }
+        check(tab.size() == 12 && lens == 5 && bases == 5, "attn_table kvslice: five window fills of 192 words a row");
+        bool ok = true;
+        for (uint64_t pos : {0ull, 1ull, 3ull, 4ull, 5ull, 1023ull, 2048ull}) {
+            std::vector<uint32_t> iw = w;
+            stream_patch::attn_apply(iw.data(), tab, pos, g);
+            const uint64_t nf = pos ? pos : 1, pad = 4 * ((nf + 3) / 4);
+            for (const auto& p : tab) {
+                const uint64_t want = p.kind == 0 ? pad * 192 : p.kind == 1 ? pos * 2048 : p.kind == 2 ? (pos * 1024) | 0x80000000u : p.base;
+                ok = ok && iw[p.word] == static_cast<uint32_t>(want);
+            }
+        }
+        check(ok, "attn_apply kvslice: each fill streams nf padded to whole blocks from its own offset, the row and record as before");
+        bool refused_plain = false;
+        try { stream_patch::attn_table(w, "kvslice test", stream_patch::AttnGeometry{}); }
+        catch (const std::runtime_error& e) { refused_plain = std::string(e.what()).find("unexpected kv transfer") != std::string::npos; }
+        check(refused_plain, "attn_table: per-core fills without the manifest's kvslice are refused");
+        // the L-row stream (attnrows, L = 4): the joined KV drain at one row, four records at rows 1..4, the five fills
+        std::vector<uint32_t> r(4, 0);
+        std::swap(w, r);
+        bd(0x100, 2048); patch(0x104, 3, 2048);
+        for (uint32_t j = 1; j <= 4; ++j) patch(0x300 + j, 5, (j * 1024) | 0x80000000u);
+        for (int c = 0; c < 5; ++c) { bd(0x200 + 0x20 * c, 768); patch(0x204 + 0x20 * c, 3, offs[c]); }
+        std::swap(w, r);
+        auto rt = stream_patch::attn_rows_table(r, "kvslice rows", 4, g);
+        bool rok = rt.size() == 4 + 1 + 10;
+        for (uint64_t pos0 : {0ull, 1ull, 5ull, 1022ull, 2044ull}) {
+            std::vector<uint32_t> iw = r;
+            stream_patch::attn_rows_apply(iw.data(), rt, pos0, g);
+            const uint64_t pad = 4 * ((pos0 + 4 + 3) / 4);
+            for (const auto& p : rt) {
+                const uint64_t pos = pos0 + p.row;
+                const uint64_t want = p.kind == 0 ? pad * 192 : p.kind == 1 ? pos * 2048 : p.kind == 2 ? (pos * 1024) | 0x80000000u : p.base;
+                rok = rok && iw[p.word] == static_cast<uint32_t>(want);
+            }
+        }
+        check(rok, "attn_rows_apply kvslice: the shared window of pos0 + L rows padded to whole blocks, every fill from its own offset");
+    }
+    refused_manifest(argv[1], "kvslice 4 needs the attnpos or attnrows patch table, rb 1", "kvslice beside a blocked walk refused",
+                     [](json& j) { j["kernels"]["ax0"]["kvslice"] = 4; });
+    refused_manifest(argv[1], "kvslice 3", "kvslice of 3 rows refused",
+                     [](json& j) { j["kernels"]["ax0"]["rb"] = 1; j["kernels"]["ax0"]["kvslice"] = 3; });
+    {
+        json j;
+        std::ifstream(argv[1]) >> j;
+        j["kernels"]["ax0"]["rb"] = 1;
+        j["kernels"]["ax0"]["kvslice"] = 4;
+        check(Manifest::parse(j, "kvslice").kernels.at("ax0").kvslice == 4 && m.kernels.at("ax0").kvslice == 0,
+              "manifest: kvslice read on an attnpos kernel, absent means 0");
+        j["kernels"]["ax0"]["kvslice"] = 8;
+        check(Manifest::parse(j, "kvslice8").kernels.at("ax0").kvslice == 8, "manifest: kvslice 8 (OPEN-ATTN-BLOCK8) is read");
+    }
+    refused_manifest(argv[1], "kvslice 6", "kvslice of 6 rows refused",
+                     [](json& j) { j["kernels"]["ax0"]["rb"] = 1; j["kernels"]["ax0"]["kvslice"] = 6; });
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
     check(lin.consts_bytes == 11882496 && lin.act_bytes == 190464 && lin.state_kind == "linear" && lin.state_bytes == 2342912, "linear layer buffers");
@@ -248,12 +408,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 4}"));
+    json j = json::parse(std::string("{\"manifest_version\": 8}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 4 is refused");
+        check(false, "manifest_version 8 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 4") != std::string::npos, std::string("manifest_version 4 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 8") != std::string::npos, std::string("manifest_version 8 is refused: ") + e.what());
     }
     // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
     auto bf16_weight = [](json& j, int version, bool mixed) {
@@ -276,6 +436,81 @@ int main(int argc, char** argv) {
         try { Manifest::parse(g, "q8 gemm"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
         check(ok, "a version 3 manifest with a bf16_gemm weight loads");
     }
+    // OPEN-PREFILL-BFP16: the bfp16 pack op and step format need version 4
+    auto bfp16_weight = [](json& j, int version, const char* fmt) {
+        j["manifest_version"] = version;
+        json op = {{"op", "bfp16_gemm"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
+                   {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}, {"row0", 0}, {"n_total", 4096}};
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"] = {{"from", "pack"}, {"pack", json::array({op})}};
+        if (*fmt) {
+            auto& st = j["layer_types"]["linear_attention"]["gemm_block"]["program"][1];
+            st["fmt"] = fmt;
+            if (std::string(fmt) == "bfp16") st["n_pad"] = 4096;
+        }
+    };
+    refused_manifest(argv[1], "needs version 5", "a bfp16_gemm weight in a version 4 manifest is refused at load",
+                     [&](json& j) { bfp16_weight(j, 4, ""); });
+    refused_manifest(argv[1], "fmt 'int4'", "an unknown step format is refused at load", [&](json& j) { bfp16_weight(j, 5, "int4"); });
+    {
+        std::ifstream f(argv[1]);
+        json g = json::parse(f);
+        bfp16_weight(g, 5, "bfp16");
+        bool ok = true;
+        try {
+            Manifest m4 = Manifest::parse(g, "bfp16");
+            ok = m4.layer_types.at("linear_attention").gemm_block.program[1].fmt == "bfp16" &&
+                 m4.layer_types.at("linear_attention").gemm_block.program[1].n_pad == 4096;
+        } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
+        check(ok, "a version 5 manifest with a bfp16 step and a bfp16_gemm weight loads");
+    }
+    // OPEN-PREFILL-BFP16-FFN: a dense route of 4 steps, gate|up through the glu epilogue and down reading its H
+    auto glu_route = [](json& j, int version, bool down_reads_h) {
+        j["manifest_version"] = version;
+        json& gb = j["layer_types"]["dense"]["gemm_block"];
+        auto half = [](const char* t, const char* h) {
+            return json{{"op", "bfp16_gemm"}, {"tensor", t}, {"nch", 380}, {"in_dim", 2560}, {"dst", 0}, {"row0", 0},
+                        {"n_total", 19456}, {"glu", h}};
+        };
+        gb["weights"]["ggu_w"] = {{"from", "pack"},
+                                  {"pack", json::array({half("model.layers.{l}.mlp.gate_proj.weight", "gate"),
+                                                        half("model.layers.{l}.mlp.up_proj.weight", "up")})}};
+        j["globals"]["gbfp_h"] = 1024;
+        json p = gb["program"];
+        for (auto& s : p) s["fmt"] = "bfp16", s["n_pad"] = 1024;
+        p[2] = {{"op", "run"}, {"kernel", "gemm_n9728_k2560"}, {"args", {"ggu_w", "gemm_x_k2560", "gbfp_h"}}, {"fmt", "bfp16"},
+                {"n_pad", 19456}, {"epi", "glu"}};
+        p[4]["args"][1] = down_reads_h ? "gbfp_h" : "gemm_x_k9728";
+        p[4]["a"] = "h";
+        gb["program"] = json::array({p[0], p[1], p[2], p[4]});
+    };
+    refused_manifest(argv[2], "needs manifest_version 6", "a glu route in a version 5 manifest is refused at load",
+                     [&](json& j) { glu_route(j, 5, true); });
+    refused_manifest(argv[2], "or 4 with gate|up's glu H as down's x", "a 4-step route whose down does not read the H is refused",
+                     [&](json& j) { glu_route(j, 6, false); });
+    {
+        std::ifstream f(argv[2]);
+        json g = json::parse(f);
+        glu_route(g, 6, true);
+        bool ok = true;
+        try {
+            Manifest m5 = Manifest::parse(g, "glu");
+            const auto& gb = m5.layer_types.at("dense").gemm_block;
+            ok = gb.program.size() == 4 && gb.program[2].epi == "glu" && gb.program[3].a_from == "h" &&
+                 gb.weights.at("ggu_w").pack[1].glu == "up";
+        } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
+        check(ok, "a version 6 manifest with a glu gate|up and a down from H loads");
+    }
+    // OPEN-PREFILL-GEMM8: the dit_gemm weight op needs version 4
+    auto dit_weight = [](json& j, int version) {
+        j["manifest_version"] = version;
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"] = {
+            {"from", "pack"},
+            {"pack", json::array({{{"op", "bfp16_dit"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
+                                   {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}}})}};
+    };
+    // the 9-bit layout is read only by a dense dit route; a linear route would run it through the q4 / bf16 GEMM
+    refused_manifest(argv[1], "only a dense route", "a bfp16_dit weight on a linear route is refused at load",
+                     [&](json& j) { dit_weight(j, 4); });
     // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
     auto with_lean = [](json& j) {
         j["kernels"]["gemm_lean"] = {{"context", "gemm"}, {"insts", "gemm_lean/insts.bin"}};
@@ -296,14 +531,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = Manifest::parse(g, "lean");  // Manifest is move-only since #180 (its gguf view)
+        Manifest fast = Manifest::parse(g, "fast route");
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = Manifest::parse(g, "lean");
+        Manifest lean = Manifest::parse(g, "lean route");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -416,7 +651,9 @@ int main(int argc, char** argv) {
             // dx / ln / lm plus the block prefill route's four: the attention dispatch's own
             // xclbin ("dxa"), the ONE context every projection shape streams over ("gemm"), and
             // the attention products' two ("ag_s", "ag_pv": 8 and 4 columns wide at head dim 128)
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") &&
+                  d.contexts.size() == 7 && d.contexts.count("ag_s") && d.contexts.count("ag_pv"),
+                  "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
@@ -456,6 +693,59 @@ int main(int argc, char** argv) {
                 const Manifest r = Manifest::parse(rj, "edited");
                 check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "k2 shape: prep rope (no q/k norm) parses");
             }
+            {
+                // OPEN-PREFILL-ATTN-FA: a dense attn_fa, a stream per 256 rows of window on one context
+                std::ifstream ff(argv[2]);
+                json fj = json::parse(ff);
+                json fa = {{"hd", 64}, {"l_max", 1024}, {"q_head", 4096 * 9}, {"qsplit", true}, {"kernels", json::object()}};
+                for (int L = 256; L <= 1024; L += 256) {
+                    const std::string k = "af" + std::to_string(L);
+                    fj["kernels"][k] = {{"context", "af"}, {"insts", k + "/insts.bin"}};
+                    fa["kernels"][std::to_string(L)] = k;
+                }
+                fj["contexts"]["af"] = "af256/final.xclbin";
+                fj["layer_types"]["dense"]["gemm_block"]["attn_fa"] = fa;
+                const Manifest fm = Manifest::parse(fj, "attn_fa");
+                const AttnFa& f = fm.layer_types.at("dense").gemm_block.attn_fa;
+                check(f.present() && f.hd == 64 && f.l_max == 1024 && f.q_head == 4096 * 9 && f.qsplit &&
+                          f.kernels.size() == 4 && f.kernels.at(768) == "af768",
+                      "attn_fa: four windows of 256 rows, Q hi / lo, head dim 64");
+                auto refused_fa = [&](const char* what, const char* label, const std::function<void(json&)>& edit) {
+                    json e = fj;
+                    edit(e["layer_types"]["dense"]["gemm_block"]["attn_fa"]);
+                    bool threw = false;
+                    try { Manifest::parse(e, "attn_fa edited"); } catch (const std::exception& x) { threw = std::string(x.what()).find(what) != std::string::npos; }
+                    check(threw, label);
+                };
+                refused_fa("has no stream for a window of 512", "attn_fa: a missing window is refused",
+                           [](json& a) { a["kernels"].erase("512"); });
+                refused_fa("wants hd 64", "attn_fa: a head dim the design does not build is refused", [](json& a) { a["hd"] = 128; });
+                refused_fa("is not the record plus Q hi", "attn_fa: a Q layout that is not the design's is refused",
+                           [](json& a) { a["qsplit"] = false; });
+                // OPEN-PREFILL-GLUE-PREP: a prep stream on the same context, manifest_version 7
+                {
+                    json pj = fj;
+                    pj["manifest_version"] = 7;
+                    pj["kernels"]["afp"] = {{"context", "af"}, {"insts", "afp/insts.bin"}};
+                    pj["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"] = {{"kernel", "afp"}, {"n_pad", 4096}};
+                    const Manifest pm = Manifest::parse(pj, "attn_fa prep");
+                    const AttnFa& pf = pm.layer_types.at("dense").gemm_block.attn_fa;
+                    check(pf.has_prep() && pf.prep_kernel == "afp" && pf.prep_npad == 4096, "attn_fa: a prep stream parses");
+                    auto refused_prep = [&](const char* what, const char* label, const std::function<void(json&)>& edit) {
+                        json e = pj;
+                        edit(e);
+                        bool threw = false;
+                        try { Manifest::parse(e, "attn_fa prep edited"); } catch (const std::exception& x) { threw = std::string(x.what()).find(what) != std::string::npos; }
+                        check(threw, label);
+                    };
+                    refused_prep("needs manifest_version 7", "attn_fa prep: a version 6 manifest is refused",
+                                 [](json& e) { e["manifest_version"] = 6; });
+                    refused_prep("unknown kernel", "attn_fa prep: an unknown stream is refused",
+                                 [](json& e) { e["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"]["kernel"] = "nope"; });
+                    refused_prep("whole number of 1024", "attn_fa prep: a width that is not a whole number of 1024 columns is refused",
+                                 [](json& e) { e["layer_types"]["dense"]["gemm_block"]["attn_fa"]["prep"]["n_pad"] = 3584; });
+                }
+            }
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
@@ -474,6 +764,56 @@ int main(int argc, char** argv) {
                              [](json& j) {
                                  j["manifest_version"] = 2;
                                  j["layer_types"]["dense"]["gemm_block"]["program"][0]["split"] = true;
+                             });
+            // OPEN-PREFILL-GEMM8: the fixture's route made an 8-bit one at t 1024, the q4 route kept as lean
+            auto with_dit = [](json& j) {
+                j["manifest_version"] = 4;
+                json& lt = j["layer_types"]["dense"];
+                json q4 = lt["gemm_block"], d = q4;
+                d["t"] = 1024;
+                d["gemm"] = "dit";
+                for (auto& [name, w] : d["weights"].items())
+                    w = {{"from", "pack"}, {"pack", json::array({{{"op", "bfp16_dit"}, {"tensor", "model.layers.{l}.mlp.up_proj.weight"},
+                                                                  {"nch", 4}, {"in_dim", 256}, {"dst", 0}}})}};
+                for (auto& s : d["program"]) s["args"] = {"g8" + s["args"][0].get<std::string>().substr(1), "g8_a", "g8_c"};
+                json w8 = json::object();
+                for (auto& [name, w] : d["weights"].items()) w8["g8" + name.substr(1)] = w;
+                d["weights"] = w8;
+                j["globals"]["g8_a"] = 4096;
+                j["globals"]["g8_c"] = 4096;
+                lt["gemm_block"] = d;
+                lt["gemm_block_variants"]["lean"] = q4;
+            };
+            {
+                std::ifstream f(argv[2]);
+                json g = json::parse(f);
+                with_dit(g);
+                Manifest fast = Manifest::parse(g, "dit"), lean = Manifest::parse(g, "dit");
+                fast.select_prefill_route("");
+                lean.select_prefill_route("lean");
+                const auto& fg = fast.layer_types.at("dense").gemm_block;
+                const auto& lg = lean.layer_types.at("dense").gemm_block;
+                check(fg.gemm == "dit" && fg.t == 1024 && lg.gemm == "q4" && lg.t == 256 &&
+                          fast.globals.count("g8_a") && !lean.globals.count("g8_a"),
+                      "qwen3: an 8-bit route at t 1024 parses beside a q4 lean at 256; each mode keeps its own route and globals");
+            }
+            refused_manifest(argv[2], "needs version 4", "qwen3: a bfp16_dit weight in a version 3 manifest is refused at load",
+                             [&](json& j) { with_dit(j); j["manifest_version"] = 3; });
+            refused_manifest(argv[2], "only a dense route", "qwen3: a bfp16_dit weight on a q4 dense route is refused",
+                             [&](json& j) { with_dit(j); j["layer_types"]["dense"]["gemm_block"].erase("gemm"); });
+            refused_manifest(argv[2], "needs the attention products", "qwen3: an 8-bit route without the products' prep is refused",
+                             [&](json& j) { with_dit(j); j["layer_types"]["dense"]["gemm_block"]["attn_block"].erase("prep"); });
+            refused_manifest(argv[2], "is not packed by bfp16_dit", "qwen3: an 8-bit step reading the q4 pool is refused",
+                             [&](json& j) {
+                                 with_dit(j);
+                                 j["layer_types"]["dense"]["gemm_block"]["weights"]["g8o_w"] = {{"from", "pool"}, {"ops", {3}}};
+                             });
+            refused_manifest(argv[2], "at t 512", "qwen3: a q4 lean variant at another t than a q4 route is still refused",
+                             [&](json& j) {
+                                 json& lt = j["layer_types"]["dense"];
+                                 json v = lt["gemm_block"];
+                                 v["t"] = 512;
+                                 lt["gemm_block_variants"]["lean"] = v;
                              });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
@@ -681,7 +1021,7 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a split out projection parses: ") + e.what());
             }
         }
-        refused_manifest(argv[5], "std_perm or bf16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
+        refused_manifest(argv[5], "std_perm, bf16_gemm, bfp16_dit or bfp16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);
                              json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];
@@ -808,14 +1148,20 @@ int main(int argc, char** argv) {
             check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
                   "host attention: " + f.family + " is refused by name");
             if (f.family == "qwen3") {
-                Manifest k = f;
-                k.family = "k2";
+                // Manifest owns its optional alternate route with unique_ptr.
+                // Reload independent fixtures rather than copying that ownership.
+                auto k2_fixture = [&]() {
+                    Manifest k = Manifest::load(argv[i]);
+                    k.family = "k2";
+                    return k;
+                };
+                Manifest k = k2_fixture();
                 check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
-                Manifest half = k;
+                Manifest half = k2_fixture();
                 half.rotary_dim = half.rotary_dim / 2;
                 check(half.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with a partial rotation is refused on geometry");
-                Manifest odd = k;
+                Manifest odd = k2_fixture();
                 const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
                 odd.hf_config_check["head_dim"] = hd;
                 odd.rotary_dim = hd;
@@ -826,7 +1172,7 @@ int main(int argc, char** argv) {
                 }
                 check(odd.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with an odd head_dim is refused on geometry");
-                Manifest wide = k;
+                Manifest wide = k2_fixture();
                 wide.layer_types.begin()->second.gemm_block.qw += 1;
                 check(wide.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");

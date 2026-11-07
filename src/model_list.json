@@ -1432,5 +1432,121 @@
                 "footprint": 12.7
             }
         }
-    }
+    },
+    "settings_schema": {
+        "settings": [
+            {
+                "category": "performance",
+                "cli_flag": "--prefill-mode",
+                "default": "fast",
+                "delivery": "env_var",
+                "description": "Memory/speed trade-off for prefill",
+                "env_var": "OFLM_OPEN_PREFILL_MODE",
+                "key": "prefill_mode",
+                "options": [
+                    {
+                        "description": "Default prefill, higher memory",
+                        "value": "fast"
+                    },
+                    {
+                        "description": "Lower memory, ~15% slower",
+                        "value": "lean"
+                    }
+                ],
+                "reload_required": true,
+                "scope": "per_model",
+                "type": "enum"
+            },
+            {
+                "category": "performance",
+                "cli_flag": "--pmode",
+                "default": "performance",
+                "delivery": "direct",
+                "description": "NPU power mode",
+                "key": "pmode",
+                "options": [
+                    {
+                        "description": "Let the driver decide",
+                        "value": "default"
+                    },
+                    {
+                        "description": "Lower power, reduced performance",
+                        "value": "powersaver"
+                    },
+                    {
+                        "description": "Balance of power and performance",
+                        "value": "balanced"
+                    },
+                    {
+                        "description": "Maximum performance (oflm default)",
+                        "value": "performance"
+                    },
+                    {
+                        "description": "Maximum clocks, highest power",
+                        "value": "turbo"
+                    }
+                ],
+                "reload_required": false,
+                "scope": "global",
+                "type": "enum"
+            },
+            {
+                "category": "memory",
+                "cli_flag": "--ctx-len",
+                "default": "",
+                "delivery": "direct",
+                "description": "Context window length (overrides model default)",
+                "key": "ctx_len",
+                "min": 512,
+                "presets": [
+                    2048,
+                    4096,
+                    8192,
+                    16384,
+                    32768
+                ],
+                "registry_key": "default_context_length",
+                "reload_required": true,
+                "scope": "per_model",
+                "type": "int"
+            },
+            {
+                "category": "memory",
+                "cli_flag": "--prefill-chunk-len",
+                "default": "",
+                "delivery": "direct",
+                "description": "Maximum prefill chunk length (overrides model default)",
+                "key": "prefill_chunk_len",
+                "min": 512,
+                "presets": [
+                    1024,
+                    2048,
+                    4096,
+                    8192
+                ],
+                "registry_key": "max_prefill_len",
+                "reload_required": true,
+                "scope": "per_model",
+                "type": "int"
+            },
+            {
+                "category": "generation",
+                "default": "",
+                "delivery": "api_field",
+                "description": "Enable reasoning/thinking mode by default",
+                "key": "think",
+                "registry_key": "details.think",
+                "reload_required": false,
+                "scope": "per_model",
+                "type": "bool"
+            }
+        ],
+        "version": 1
+    },
+    "defaults": {
+        "pmode": "performance",
+        "prefill_mode": "fast"
+    },
+    "defaults_version": "44282d7cccfdbfd4",
+    "version": 1
 }

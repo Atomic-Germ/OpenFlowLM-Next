@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Run the settings-registry CI check the way CI runs it.
+#
+# CI merges the pull request with its target branch, regenerates the settings
+# registry, and fails if the generated files differ from the committed ones.
+# The interesting part is the merge: a branch that adds an OFLM_* variable, and
+# a target branch that adds one while your branch is open, both break the
+# check -- and the second one has nothing to do with your change.
+#
+# This script does the merge in a scratch worktree, so your working tree is
+# left alone.
+#
+# Usage:  utilities/check-settings-ci.sh [target-branch]
+#         utilities/check-settings-ci.sh origin/main
+#
+# The target branch defaults to origin/main. It is fetched over the remote's
+# URL, so it works whether the remote is SSH or HTTPS.
+
+set -uo pipefail
+exec 2>&1
+
+TARGET="${1:-origin/main}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# Only a MODIFIED tracked file blocks: an untracked one is not part of the
+# branch, and CI never sees it.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "check-settings-ci: the working tree has changes; commit or stash them first."
+  git status --short --untracked-files=no
+  exit 2
+fi
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+echo "check-settings-ci: branch $BRANCH, target $TARGET"
+
+# ---- fetch the target branch over a remote's own URL ----------------------
+# SSH is not always usable (no key, no agent); the URL works with whatever
+# credentials git already has. The upstream is tried first: a pull request is
+# merged with the upstream's branch, not with the fork's.
+name="$(basename "$TARGET")"
+fetched=0
+for remote in origin "$(git config --get "branch.$BRANCH.remote" 2>/dev/null)"; do
+  [ -n "$remote" ] || continue
+  url="$(git config --get "remote.$remote.url" 2>/dev/null)" || continue
+  [ -n "$url" ] || continue
+  if timeout 300 git fetch --quiet "$url" "+refs/heads/$name:refs/remotes/ci-check/$name" 2>/dev/null; then
+    echo "check-settings-ci: fetched $name from $remote"
+    fetched=1
+    break
+  fi
+done
+if [ "$fetched" = "1" ]; then
+  TARGET="refs/remotes/ci-check/$name"
+else
+  echo "check-settings-ci: could not fetch $name; using the local copy of $TARGET"
+fi
+
+BASE="${TARGET#refs/remotes/}"
+if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+  echo "check-settings-ci: $TARGET is not known locally; fetch it or pass another branch."
+  exit 2
+fi
+
+# ---- the merge, in a scratch worktree -------------------------------------
+WORK="$(mktemp -d)"
+SCRATCH="$WORK/merge"
+cleanup() {
+  git worktree remove --force "$SCRATCH" >/dev/null 2>&1
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+git worktree add --detach "$SCRATCH" HEAD >/dev/null 2>&1 || {
+  echo "check-settings-ci: could not create the scratch worktree"
+  exit 2
+}
+
+echo "check-settings-ci: merging $BASE into the branch"
+if ! git -C "$SCRATCH" merge --no-edit "$BASE" >/dev/null 2>&1; then
+  echo
+  echo "check-settings-ci: the merge CONFLICTS."
+  echo "  Merge $BASE into your branch and settle it -- CI merges it too, and a"
+  echo "  conflict there is a conflict in the PR."
+  echo "  The files that clash are:"
+  git -C "$SCRATCH" merge --no-edit "$BASE" 2>&1 | grep -E "CONFLICT|conflict" | head -10
+  exit 1
+fi
+
+# ---- the check CI runs ----------------------------------------------------
+# The generate-settings target runs two scripts; call them directly rather
+# than configuring a whole second build tree (which would need the XRT paths
+# and the version cache variables a preset carries).
+echo "check-settings-ci: regenerating the settings registry"
+if ! python3 "$SCRATCH/utilities/scan-settings.py" --source-dir "$SCRATCH/src" \
+        > "$WORK/scan.json" 2>"$WORK/scan.err"; then
+  echo
+  echo "check-settings-ci: the scanner FAILED on the merged tree."
+  head -20 "$WORK/scan.err"
+  exit 1
+fi
+
+if ! python3 "$SCRATCH/utilities/generate-registry.py" \
+        --settings "$SCRATCH/src/config/settings.json" \
+        --scan-output "$WORK/scan.json" \
+        --output "$SCRATCH/src/config/settings_registry_generated.hpp" \
+        --source-dir "$SCRATCH/src" 2>"$WORK/gen.err"; then
+  echo
+  echo "check-settings-ci: the generator FAILED on the merged tree."
+  cat "$WORK/gen.err"
+  echo "  Every CLI flag and every OFLM_* variable the code reads must be a"
+  echo "  setting in src/config/settings.json, or be listed in"
+  echo "  NON_SETTING_ENV_VARS / NON_SETTING_FLAGS in utilities/generate-registry.py"
+  echo "  with a reason."
+  exit 1
+fi
+
+# The generated files must match the committed ones.
+if ! git -C "$SCRATCH" diff --exit-code -- src/config/settings.json \
+                                      src/config/settings_registry_generated.hpp >/dev/null; then
+  echo
+  echo "check-settings-ci: the generated files differ from the committed ones."
+  echo "  The merged tree produces a different registry -- copy the result over:"
+  echo "    cp $SCRATCH/src/config/settings.json \\"
+  echo "       $SCRATCH/src/config/settings_registry_generated.hpp src/config/"
+  echo "  and commit it."
+  git -C "$SCRATCH" diff --stat -- src/config/settings.json \
+                                    src/config/settings_registry_generated.hpp
+  exit 1
+fi
+
+echo
+echo "check-settings-ci: OK -- the merged tree regenerates the committed registry."

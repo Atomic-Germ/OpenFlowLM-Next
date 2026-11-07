@@ -14,6 +14,8 @@
 #include <chrono>
 #include "utils/utils.hpp"
 #include "nlohmann/json.hpp"
+#include "install_record.hpp"
+#include "atomic_replace.hpp"
 #include "picosha2.h" 
 #include "sha1.hpp"
 #ifdef _WIN32
@@ -26,33 +28,11 @@ namespace download_utils {
 /// \param file_path The path to the file.
 /// \return A string representing the hex digest of the hash, or an empty string on error.
 std::string calculate_file_sha256(const std::string& file_path) {
-    std::ifstream file(file_path, std::ios::binary);
-    if (!file.is_open()) {
-        return ""; 
-    }
-
-    std::vector<unsigned char> hash(picosha2::k_digest_size);
-    picosha2::hash256(file, hash.begin(), hash.end());
-    return picosha2::bytes_to_hex_string(hash.begin(), hash.end());
+    return pull::file_oid(file_path, true);
 }
 
 std::string calculate_git_blob_oid(const std::string& file_path) {
-    std::ifstream file(file_path, std::ios::binary);
-    if (!file.is_open()) {
-        return "";
-    }
-    file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::ostringstream oss;
-    oss << "blob " << size << '\0';  // Git blob header
-    oss << file.rdbuf();             
-
-    std::string blob_data = oss.str();
-    SHA1 sha1;
-    sha1.update(blob_data);
-    return sha1.final();
+    return pull::file_oid(file_path, false);
 }
 
 // Global variable to track if progress bar was shown
@@ -97,7 +77,11 @@ size_t write_data_to_string(void* ptr, size_t size, size_t nmemb, std::string* u
 /// \param ultotal the total upload size
 /// \param ulnow the current upload size
 /// \return the progress
-int progress_callback(void* clientp, double dltotal, double dlnow, double ultotal, double ulnow) {
+// CURLOPT_XFERINFOFUNCTION's callback. The older CURLOPT_PROGRESSFUNCTION
+// took doubles and is deprecated since libcurl 7.32; this one takes
+// curl_off_t, which is what curl actually counts in bytes.
+int progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
+                      curl_off_t ultotal, curl_off_t ulnow) {
     if (dltotal > 0) {
         using Clock = std::chrono::steady_clock;
         static Clock::time_point last_print_time = Clock::now();
@@ -105,12 +89,12 @@ int progress_callback(void* clientp, double dltotal, double dlnow, double ultota
         auto now = Clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print_time);
 
-        double percentage = (dlnow / dltotal) * 100.0;
+        double percentage = (static_cast<double>(dlnow) / static_cast<double>(dltotal)) * 100.0;
 
         if (elapsed.count() >= 1000) {
             utils::enable_ansi_on_windows_once();
 
-            double percentage = (dlnow / dltotal) * 100.0;
+            double percentage = (static_cast<double>(dlnow) / static_cast<double>(dltotal)) * 100.0;
             double mb_now = dlnow / 1024.0 / 1024.0;
             double mb_total = dltotal / 1024.0 / 1024.0;
 
@@ -145,10 +129,12 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     // Create directory if it doesn't exist
     std::filesystem::path path(local_path);
     std::filesystem::create_directories(path.parent_path());
+    // PULL-ATOMIC: the file this replaces stays in place until the new one is whole
+    const std::string part_path = local_path + ".part";
 
-    FILE* fp = fopen(local_path.c_str(), "wb");
+    FILE* fp = fopen(part_path.c_str(), "wb");
     if (!fp) {
-        std::cerr << "Failed to open file for writing: " << local_path << std::endl;
+        std::cerr << "Failed to open file for writing: " << part_path << std::endl;
         curl_easy_cleanup(curl);
         return false;
     }
@@ -168,7 +154,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     // Set progress callback if provided
     if (progress_cb) {
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progress_callback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
     }
 
     CURLcode res = curl_easy_perform(curl);
@@ -184,7 +170,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
 
     if (res != CURLE_OK) {
         std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
-        std::filesystem::remove(local_path); // Remove partial download
+        std::filesystem::remove(part_path); // Remove partial download
         return false;
     }
 
@@ -194,7 +180,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     // model directory full of 29-byte error pages.
     if (http_code < 200 || http_code >= 300) {
         std::cerr << "HTTP " << http_code << " for " << url << std::endl;
-        std::filesystem::remove(local_path);
+        std::filesystem::remove(part_path);
         return false;
     }
 
@@ -212,13 +198,19 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     // block a pull or burn all retries on an unfixable comparison.
     if (!remote_oid.empty()) {
         header_print("OFLM", "Checking Hash...");
-        std::string local_oid = is_lfs ? calculate_file_sha256(local_path) : calculate_git_blob_oid(local_path);
+        std::string local_oid = is_lfs ? calculate_file_sha256(part_path) : calculate_git_blob_oid(part_path);
         if (local_oid != remote_oid) {
             header_print("WARN", "Hash mismatch (expected " << remote_oid << ", have " << local_oid
                                                             << "); continuing");
         }
     }
 
+    std::error_code ec = pull::replace_file_atomically(part_path, local_path);
+    if (ec) {
+        std::cerr << "Cannot replace " << local_path << ": " << ec.message() << std::endl;
+        std::filesystem::remove(part_path, ec);
+        return false;
+    }
 
     header_print("OFLM", "Download completed: " << local_path);
     return true;
@@ -287,18 +279,6 @@ FILE* open_part_file(const std::filesystem::path& path, bool append) {
     return _wfopen(path.c_str(), append ? L"ab" : L"wb");
 #else
     return fopen(path.c_str(), append ? "ab" : "wb");
-#endif
-}
-
-bool promote_atomically(const std::filesystem::path& part,
-                        const std::filesystem::path& destination) {
-#ifdef _WIN32
-    return MoveFileExW(part.c_str(), destination.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-#else
-    std::error_code error;
-    std::filesystem::rename(part, destination, error);
-    return !error;
 #endif
 }
 
@@ -445,7 +425,7 @@ bool download_from_hf_cache(const std::string& url, const std::string& local_pat
         std::filesystem::remove(part, ec);
         return false;
     }
-    if (!promote_atomically(part, dest)) { std::filesystem::remove(part, ec); return false; }
+    if (pull::replace_file_atomically(part, dest)) { std::filesystem::remove(part, ec); return false; }
     header_print("OFLM", "Using cached file from the local HF cache: " << local_path);
     return true;
 }
@@ -509,7 +489,7 @@ bool download_file_atomic(const DownloadRequest& request,
         }
         if (progress_cb) {
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-            curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progress_callback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
         }
 
         const CURLcode result = curl_easy_perform(curl);
@@ -533,7 +513,7 @@ bool download_file_atomic(const DownloadRequest& request,
         return false;
     }
 
-    if (!promote_atomically(part, request.destination)) {
+    if (pull::replace_file_atomically(part, request.destination)) {
         std::cerr << "Failed to atomically promote: " << request.destination << std::endl;
         return false;
     }
@@ -664,4 +644,4 @@ CurlInitializer::~CurlInitializer() {
     cleanup_curl();
 }
 
-} // namespace download_utils 
+} // namespace download_utils

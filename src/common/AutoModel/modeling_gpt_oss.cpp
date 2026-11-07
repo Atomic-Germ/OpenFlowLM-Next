@@ -5,6 +5,7 @@
 /// \version 0.9.24
 /// \note This is a source file for the gpt-oss class
 #include "AutoModel/modeling_gpt_oss.hpp"   
+#include "config/settings_resolver.hpp"
 
 
 // harmony always reasons, so unlike the base default this one starts on
@@ -14,7 +15,8 @@ GPT_OSS::GPT_OSS(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, 
 
 void GPT_OSS::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->model_path = model_path;
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // The engine: the open kernels when a set is installed for this model, the closed
     // DLL otherwise (AutoModel::_shared_select_open_engine).

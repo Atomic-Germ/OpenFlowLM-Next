@@ -369,6 +369,10 @@ safetensors_index(const std::string& path) {
 | `HOME` env var not set in container | HF cache path defaults to `./.cache/huggingface` | Set `HF_HOME` or `HOME` env var |
 | `cannot read *.insts` | Symlinks to blob storage (broken) | Recompile xclbins with `matmul_whole_array.py`, copy real files |
 | NPU not used despite xclbins present | `OFLM_USE_OPEN_EMBEDDING_NPU` not defined | Add `target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)` in CMake |
+| The result is sometimes right, sometimes garbage | the ERT instruction buffer was written to the host mapping but never flushed to the device | `bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE)` after writing the instruction stream, before the first launch |
+| Only some rows of the output are wrong | the output buffer was not zeroed before the launch; the kernel does not write every row of a padded output | zero the rows you read back and `bo_c.sync(XCL_BO_SYNC_BO_TO_DEVICE)` |
+| Every context creation fails with `DRM_IOCTL_AMDXDNA_GET_INFO IOCTL failed (err=-22)`, `xrt-smi` shows `Topology: N/A` | the device's hardware-context budget was exhausted and a failed creation wedged the AIE partition | the device needs `rmmod amdxdna` (root) or a reboot. Prevent it: create contexts lazily, keep a device-wide reference-counted pool, and refuse to exceed the budget (16 on `aie2p`) |
+| The device works in one program and not in another | the context budget is per *device*, not per program | share one pool; two programs in one process compete for the same contexts |
 
 ---
 
@@ -388,9 +392,20 @@ Broken symlinks cause silent "cannot read" errors. Always copy real files.
 - `--n-aie-cols 4` (16 cores: 4 rows × 4 cols)
 
 ### M Value Selection
-M must be divisible by `m * n_aie_rows = 64 * 4 = 256`.
+M must be divisible by **512**, not 256. The mm kernel tiles M in units of
+`m * n_aie_rows = 64 * 4 = 256`, but the design's C tiler uses
+`tile_group_repeats = (2, ...)` in dimension 0, so the C tensor must split into an
+*even* number of 256-row units. A design with M=256 fails to compile with
+`allow_partial=False but tensor does not divide evenly into tile groups in
+dimension 0`.
+
 For max_position_embeddings=2048: compile M=512 and M=2048.
 Engine selects smallest m_pad >= actual M at runtime.
+
+The full set of shape constraints:
+- `M % 512 == 0` (see above)
+- `K % 64 == 0` (the mm kernel tiles K in units of 64)
+- `N % (tile_n * n_aie_cols) == 0` (tile_n=32, n_aie_cols=4: `N % 128 == 0`)
 
 ---
 

@@ -6,6 +6,7 @@
 /// \note This is a source file for the gemma3 class
 
 #include "AutoModel/modeling_gemma3_text.hpp"
+#include "config/settings_resolver.hpp"
 
 
 /************              Gemma3_Text_Only family            **************/
@@ -13,7 +14,8 @@ Gemma3_Text_Only::Gemma3_Text_Only(oflm_rt::device* npu_device_inst) : AutoModel
 
 void Gemma3_Text_Only::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
 
-    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // A Gemma 3 text model, so the same choice as Gemma3: the open kernels when
     // installed for this model, the closed gemma_text_npu DLL otherwise

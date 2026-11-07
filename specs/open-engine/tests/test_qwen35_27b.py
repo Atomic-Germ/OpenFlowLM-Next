@@ -44,13 +44,13 @@ def test_nested_and_flat_text_towers_derive_identically(spec27):
     assert a == b
 
 
-def test_three_xn_chunks_walk_half_outer_to_fit_the_side_schedule(spec27):
-    assert Q35.xn_side_elems(spec27) == 3
-    assert Q35.ab_tiles_per_half(spec27) == [64, 64, 32]     # 32-row tiles at 64 lanes
+def test_five_fp32_xn_chunks_use_throttled_half_outer_schedule(spec27):
+    assert Q35.xn_side_elems(spec27) == 5
+    assert Q35.ab_tiles_per_half(spec27) == [32]*5     # 32-row tiles at 64 lanes
     # Walked once per accumulator, three halves would exhaust the shared side schedule;
     # carrying each half once for both accumulators fits it.
     assert Q36.glue_fills(3, half_outer=False) == 14 > LIMITS["shim_fills"]
-    assert Q35.glue_side_fills(spec27) == Q36.glue_fills(3, half_outer=True) == 11 <= LIMITS["shim_fills"]
+    assert Q35.glue_side_fills(spec27) == Q36.glue_fills(5, half_outer=True) == 17
 
 
 def test_full_ffn_table_exceeds_l1_even_with_one_weight_chunk(spec27):

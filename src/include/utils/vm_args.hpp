@@ -38,6 +38,15 @@ inline void print_help(po::options_description& general) {
     std::cout << "  validate            - Validate the NPU stack" << std::endl;
     std::cout << std::endl;
     std::cout << general << std::endl;
+    std::cout << "Environment variables (paths oflm reads and writes):" << std::endl;
+    std::cout << "  OFLM_CONFIG_PATH      the model registry (model_list.json) to read" << std::endl;
+    std::cout << "  OFLM_MODELINFO_PATH   the model info file (model_info.json)" << std::endl;
+    std::cout << "  OFLM_XCLBIN_PATH      the directory that holds the xclbins/ tree" << std::endl;
+    std::cout << "  OFLM_MODEL_PATH       the directory that holds the models/ tree" << std::endl;
+    std::cout << "                        (the models are in $OFLM_MODEL_PATH/models)" << std::endl;
+    std::cout << "  OFLM_SETTINGS_PATH    your settings.json, the one oflm writes" << std::endl;
+    std::cout << "  'oflm config show' prints where each of them points right now." << std::endl;
+    std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
     std::cout << "\toflm run llama3.2:1b" << std::endl;
     std::cout << "\toflm run llama3.2:1b --asr 1" << std::endl;
@@ -119,8 +128,17 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prefill-chunk-len,pcl", po::value<int>(&parsed_args.prefill_chunk_len)->default_value(-1),
              "Set prefill chunk length")
             ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
-             "fast (default) or lean: lean uses less memory and processes prompts more slowly, "
-             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill)")
+             "fast (default), lean or bfp16: lean uses less memory and processes prompts more slowly, "
+             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill); "
+             "bfp16 runs the dense prefill on bfp16 operands with the attention, RoPE and cache write on the NPU "
+             "(Granite 4.2 3B: about 3x faster prefill, +1.7 GiB)")
+            ("prefill-precision", po::value<std::string>(&parsed_args.prefill_precision)->default_value(""),
+             "Products per prefill projection on the open engine's block route: paired (default, the exact "
+             "four-term sum), three_term (omits only W_lo X_lo, ~2^-18 of the projection), weight_high "
+             "(drops the BF16 weight residual; measured to fail the logit gate), or single")
+            ("speculative", po::bool_switch(&parsed_args.speculative),
+             "Use the model's draft (Uno) pass for a lossless greedy speedup; "
+             "needs a model that ships one")
             ("img-pre-resize,r", po::value<int>(&parsed_args.img_pre_resize)->default_value(2),
              "Pre-resize the image, 0: original size, 1: height = 480, 2: height = 720, 3: height = 1080, 4: height = 1440, 5: height = 2160, 6: height = 2880, 7: height = 3240, 8: height = 4320")
             ("socket,s", po::value<size_t>(&parsed_args.max_socket_connections)->default_value(10),
@@ -151,7 +169,12 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
              "Reference image to edit, .png or .jpg: the prompt says what to change (for "
              "image command; the size then defaults to the largest one not above the "
-             "reference's shorter side)");
+             "reference's shorter side")
+            ("config-key", po::value<std::string>(&parsed_args.config_key)->default_value(std::string()), "Setting key for config set/unset")
+            ("config-value", po::value<std::string>(&parsed_args.config_value)->default_value(std::string()), "Setting value for config set")
+            ("config-model", po::value<std::string>(&parsed_args.config_model)->default_value(std::string()), "Model tag for per-model config operations")
+            ("accept-shipped", po::bool_switch(&parsed_args.config_accept_shipped)->default_value(false), "config review: remove all redundant overrides")
+            ("keep-all", po::bool_switch(&parsed_args.config_keep_all)->default_value(false), "config review: keep all overrides, just update version");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
@@ -215,8 +238,32 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     std::cerr << "Error: --prefill-mode is only supported with the run, serve and bench commands!" << std::endl;
                     return false;
                 }
-                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean") {
-                    std::cerr << "Error: --prefill-mode is fast or lean, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean" &&
+                    parsed_args.prefill_mode != "bfp16") {
+                    std::cerr << "Error: --prefill-mode is fast, lean or bfp16, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                    return false;
+                }
+            }
+
+            // Same reasoning as --prefill-mode above: this picks the arithmetic of the
+            // block route the open engine loads, so only the commands that load one.
+            if (!vm["prefill-precision"].defaulted()) {
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --prefill-precision is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+                const std::string& pp = parsed_args.prefill_precision;
+                if (pp != "paired" && pp != "three_term" && pp != "weight_high" && pp != "single") {
+                    std::cerr << "Error: --prefill-precision is paired, three_term, weight_high or single, not '" << pp << "'" << std::endl;
+                    return false;
+                }
+            }
+
+            if (!vm["speculative"].defaulted()) {
+                // The draft pass runs when a model loads, and only these
+                // commands load one.
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --speculative is only supported with the run, serve and bench commands!" << std::endl;
                     return false;
                 }
             }
@@ -247,6 +294,17 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 }
             }
             parsed_args.image_size_given = !vm["size"].defaulted();
+
+            // Config-specific options: only valid with config command
+            if (parsed_args.command != "config") {
+                for (const char* opt : {"config-key", "config-value", "config-model", "accept-shipped", "keep-all"}) {
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: --" << opt << " is only supported with"
+                                     " the config command!" << std::endl;
+                        return false;
+                    }
+                }
+            }
 
             // Serve-only options, refused by every other command. This used to
             // sit below the early exits that follow, so `version`, `port`,
@@ -293,6 +351,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // check further down. Exact equality above also means a prefix like
             // "bench-embed" never matches "bench" by accident.
             if (parsed_args.command == "validate") {
+                return true;
+            }
+            if (parsed_args.command == "config") {
                 return true;
             }
         } else {

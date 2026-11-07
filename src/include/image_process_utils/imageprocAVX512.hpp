@@ -11,6 +11,20 @@
 #include <intrin.h>
 #endif
 
+// A function that returns or takes a __m512 has a different ABI depending on
+// whether AVX512F is enabled, and this header is included by translation
+// units built with -mavx2 only (the NPU host may have no AVX-512 at all --
+// the AVX-512 paths here are chosen at run time by has_avx512f()). Marking
+// the functions with the target attribute compiles them with AVX512F while
+// leaving the rest of the translation unit on AVX2, and the ABI stays
+// consistent because every function that touches a __m512 carries the
+// attribute. Without it the compiler warns on every one of them (-Wpsabi).
+#if defined(__GNUC__) && !defined(__clang__)
+#define OFLM_AVX512_TARGET __attribute__((target("avx512f")))
+#else
+#define OFLM_AVX512_TARGET
+#endif
+
 namespace imgproc {
 namespace avx512 {
 
@@ -39,7 +53,7 @@ namespace avx512 {
     //    is clamped to [0,255] as a safety measure.
     //
     // This is an approximation (not fully IEEE-754 accurate for all cases).
-    inline __m512 _mm512_exp_ps_corrected(__m512 x) {
+    inline OFLM_AVX512_TARGET __m512 _mm512_exp_ps_corrected(__m512 x) {
         // clamp x to a reasonable range to avoid overflow/underflow
         const __m512 max_val = _mm512_set1_ps(88.0f);
         const __m512 min_val = _mm512_set1_ps(-88.0f);
@@ -101,7 +115,7 @@ namespace avx512 {
     }
 
     // Vectorized gaussian function for 16 floats using AVX-512 exp approximation
-    inline __m512 gaussian_avx512(__m512 x, __m512 sigma) {
+    inline OFLM_AVX512_TARGET __m512 gaussian_avx512(__m512 x, __m512 sigma) {
         const __m512 one = _mm512_set1_ps(1.0f);
         const __m512 two = _mm512_set1_ps(2.0f);
         const __m512 zero = _mm512_setzero_ps();
@@ -125,7 +139,7 @@ namespace avx512 {
     }
 
     // Fast conversion from uint8 to float with normalization
-    inline void convert_uint8_to_float_avx512(const uint8_t* src, float* dst, size_t count) {
+    inline OFLM_AVX512_TARGET void convert_uint8_to_float_avx512(const uint8_t* src, float* dst, size_t count) {
         const size_t simd_count = count & ~15; // Process in chunks of 16
         
         for (size_t i = 0; i < simd_count; i += 16) {
@@ -149,7 +163,7 @@ namespace avx512 {
     }
 
     // Fast conversion from float to uint8 with clamping
-    inline void convert_float_to_uint8_avx512(const float* src, uint8_t* dst, size_t count) {
+    inline OFLM_AVX512_TARGET void convert_float_to_uint8_avx512(const float* src, uint8_t* dst, size_t count) {
         const __m512 zero = _mm512_setzero_ps();
         const __m512 max_val = _mm512_set1_ps(255.0f);
         const size_t simd_count = count & ~15; // Process in chunks of 16
@@ -184,7 +198,7 @@ namespace avx512 {
 
 
     // Vectorized bicubic kernel computation for 16 floats
-    inline __m512 bicubic_kernel_avx512(__m512 x) {
+    inline OFLM_AVX512_TARGET __m512 bicubic_kernel_avx512(__m512 x) {
         const __m512 a = _mm512_set1_ps(-0.5f);
         const __m512 one = _mm512_set1_ps(1.0f);
         const __m512 two = _mm512_set1_ps(2.0f);
@@ -229,21 +243,21 @@ namespace avx512 {
 
 
     // AVX-512 optimized bicubic resize for a single plane
-    std::vector<float> resize_bicubic_plane_avx512(
+    OFLM_AVX512_TARGET std::vector<float> resize_bicubic_plane_avx512(
         const std::vector<float>& src,
         int src_w, int src_h,
         int dst_w, int dst_h,
         bool antialias);
 
     // AVX-512 optimized main RGB planar entry point
-    std::vector<uint8_t> resize_bicubic_antialias_rgb_planar_avx512(
+    OFLM_AVX512_TARGET std::vector<uint8_t> resize_bicubic_antialias_rgb_planar_avx512(
         const uint8_t* src,
         int src_w, int src_h,
         int dst_w, int dst_h,
         bool antialias);
 
     // AVX-512 optimized rescale and normalize function
-    void rescale_and_normalize_avx512(
+    OFLM_AVX512_TARGET void rescale_and_normalize_avx512(
         const uint8_t *image_src,
         float *output_buffer,
         int image_width, int image_height, int image_channels,
@@ -255,7 +269,7 @@ namespace avx512 {
     );
 
     // AVX-512 optimized rescale and normalize function (per-channel mean/std)
-    void rescale_and_normalize_avx512(
+    OFLM_AVX512_TARGET void rescale_and_normalize_avx512(
         const uint8_t *image_src,
         float *output_buffer,
         int image_width, int image_height, int image_channels,
