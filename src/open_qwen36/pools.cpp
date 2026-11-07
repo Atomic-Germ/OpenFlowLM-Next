@@ -1109,21 +1109,12 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                             const uint8_t* blk = rp + (base_col / 32 + b) * q8blk;
                             uint16_t d16;
                             std::memcpy(&d16, blk, 2);
-                            // widen fp16 -> bf16 via RNE (the converter's cast)
-                            const float dval = [&](){ uint32_t u = d16; u = (u & 0x7FFFu) << 13; // approximate
-                                // use proper fp16->f32 then bf16_rne
-                                float f; uint32_t fu;
-                                // fp16 to f32
-                                uint32_t sign = (d16 & 0x8000u) << 16;
-                                uint32_t exp = (d16 >> 10) & 0x1Fu;
-                                uint32_t mant = d16 & 0x3FFu;
-                                if (exp == 0) { if (mant) { exp = 1; while (!(mant & 0x400u)) { mant <<= 1; exp--; } mant &= 0x3FFu; } }
-                                else if (exp == 31) { exp = 255; }
-                                else exp += 112;
-                                fu = sign | (exp << 23) | (mant << 13);
-                                memcpy(&f, &fu, 4);
-                                return f;
-                            }();
+                            // Widen fp16 -> f32 exactly, then RNE to bf16 (the converter's cast). A
+                            // hand-rolled widening here lost subnormal scales: it never added the
+                            // exponent bias on that branch, and the unsigned exponent wrapped, so a
+                            // subnormal d became inf / NaN / ~1e38. A pure Q8_0 head quantized from
+                            // BF16 has them wherever a block's amax < 127 * 2^-14.
+                            const float dval = fp16_to_f32(d16);
                             uint16_t scale = bf16_rne(dval);
                             std::memcpy(dst + op.dst + k * CH8 + 2 * (b * 32 + rr), &scale, 2);
                             for (unsigned i = 0; i < 32; ++i) {

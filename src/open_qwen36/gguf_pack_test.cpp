@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "gguf/gguf_file.hpp"
@@ -603,6 +605,57 @@ int main() {
             }
         }
         std::printf("ok    pack_norm f32 -> bf16 (RNE)\n");
+    }
+
+    // ---- lmhead_q8 from a raw GGUF Q8_0 head: 128-row bands, K tiles, then four 32-row
+    // quarters; each fp16 scale widened exactly and rounded to bf16, codes copied. The second
+    // pass gives every block a subnormal scale (exponent 0, mantissa 1..1023), which a pure
+    // Q8_0 head quantized from BF16 has wherever a block's amax < 127 * 2^-14.
+    {
+        const Blocks head = make_blocks(256, 512, "Q8_0", rng);
+        Blocks sub = head;
+        for (size_t b = 0; b < sub.bytes.size() / 34; ++b) {
+            const uint16_t h = static_cast<uint16_t>(1 + (b * 37) % 0x3FF);
+            std::memcpy(sub.bytes.data() + b * 34, &h, 2);
+        }
+        PackOp h;
+        h.op = "lmhead_q8";
+        h.tensor = "model.embed_tokens.weight";
+        h.in_dim = 512;
+        h.chunk_bytes = 8704;
+        for (const auto& [label, src] : {std::pair<const char*, const Blocks*>{"normal", &head},
+                                         std::pair<const char*, const Blocks*>{"subnormal", &sub}}) {
+            GgufFile q8(write_gguf_tensors(dir, std::string("test-q8-head-") + label + ".gguf",
+                                           {{"token_embd.weight", {512, 256}, 8, src->bytes}}));
+            std::vector<uint8_t> hp(16 * 8704, 0);
+            pools::apply(h, q8, 0, hp.data(), hp.size(), 6144);
+            size_t bad_scale = 0, bad_code = 0;
+            for (size_t band = 0; band < 2; ++band)
+                for (size_t kt = 0; kt < 2; ++kt)
+                    for (size_t quarter = 0; quarter < 4; ++quarter)
+                        for (size_t row = 0; row < 32; ++row)
+                            for (size_t kb = 0; kb < 8; ++kb) {
+                                const size_t logical = band * 128 + quarter * 32 + row;
+                                const uint8_t* raw = src->bytes.data() + (logical * 16 + kt * 8 + kb) * 34;
+                                uint16_t half;
+                                std::memcpy(&half, raw, 2);
+                                const float value = fp16_to_f32(half);
+                                uint32_t bits;
+                                std::memcpy(&bits, &value, 4);
+                                const uint16_t want = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+                                const uint8_t* chunk = hp.data() + ((band * 2 + kt) * 4 + quarter) * 8704;
+                                uint16_t got;
+                                std::memcpy(&got, chunk + 2 * (kb * 32 + row), 2);
+                                bad_scale += got != want;
+                                for (size_t k = 0; k < 32; ++k) {
+                                    const size_t off = (row / 16) * 4096 + kb * 512 + k * 16 + row % 16;
+                                    bad_code += chunk[512 + off] != raw[2 + k];
+                                }
+                            }
+            std::printf("%s lmhead_q8 GGUF Q8_0, %s fp16 scales (%zu scales, %zu codes differ)\n",
+                        bad_scale || bad_code ? "FAIL" : "ok   ", label, bad_scale, bad_code);
+            if (bad_scale || bad_code) return 1;
+        }
     }
 
     // ---- embed_row (Q8_0, bit-exact)
