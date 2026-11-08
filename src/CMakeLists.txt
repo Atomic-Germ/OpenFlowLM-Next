@@ -1586,6 +1586,46 @@ endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# bench_submit_test: the pure half of `oflm bench --submit` -- the anonymous
+# install id, the persisted survey consent, and the submission-URL policy.
+# Like bench_embed_test, it reads no device and writes no network; the consent
+# file is pointed at a tmp path via OFLM_BENCH_CONSENT_PATH.
+# common/utils.cpp provides utils::get_models_directory() used by
+# bench_submit::consent_file_path(); without it the link fails with
+# "undefined symbol: utils::get_models_directory[abi:cxx11]()".
+add_executable(bench_submit_test src/bench_submit_test.cpp common/utils.cpp)
+target_include_directories(bench_submit_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/server")
+if(OFLM_USE_HRX)
+    target_compile_definitions(bench_submit_test PRIVATE OFLM_USE_HRX=1)
+    target_link_libraries(bench_submit_test PRIVATE hrx::hrx)
+elseif(XRT_INCLUDE_DIRS)
+    target_include_directories(bench_submit_test PRIVATE ${XRT_INCLUDE_DIRS})
+elseif(XRT_INCLUDE_DIR)
+    target_include_directories(bench_submit_test PRIVATE ${XRT_INCLUDE_DIR})
+endif()
+# bench_submit.hpp -> utils/utils.hpp pulls device_runtime headers (same
+# reason benchmark_embed_test needs them); libcurl is the transport.
+# common/utils.cpp needs the same path defines the oflm target gets, else
+# CMAKE_INSTALL_PREFIX / CMAKE_XCLBIN_PREFIX are undeclared there.
+target_link_libraries(bench_submit_test PRIVATE CURL::libcurl)
+target_compile_definitions(bench_submit_test PRIVATE
+    DISABLE_ABI_CHECK=1
+    CMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
+    CMAKE_XCLBIN_PREFIX="${CMAKE_XCLBIN_PREFIX}"
+    __OFLM_VERSION__=\"${OFLM_VERSION}\"
+    __NPU_VERSION__=\"${NPU_VERSION}\")
+if(MSVC)
+    target_compile_options(bench_submit_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(bench_submit_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
+endif()
+add_test(NAME bench_submit
+         COMMAND bench_submit_test)
+
 # src/test holds two kinds of tests. The per-model NPU ones need a device and
 # the prebuilt engine libraries, so they are built standalone and are NOT added
 # here. The host-only ones (device registry, npu_platform helpers, downloader

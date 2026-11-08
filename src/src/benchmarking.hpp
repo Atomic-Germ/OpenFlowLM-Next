@@ -117,7 +117,7 @@ inline std::string get_cpu_name() {
 #endif
 }
 
-inline void write_bench_csv(const BenchmarkResults_t& results, const std::string& model_tag, const std::string& output_dir = ".") {
+inline std::string write_bench_csv(const BenchmarkResults_t& results, const std::string& model_tag, const std::string& output_dir = ".") {
     std::string safe_tag = sanitize_model_tag_for_filename(model_tag);
     std::string date_stamp = get_date_yyyymmdd();
     std::string cpu_name = sanitize_model_tag_for_filename(get_cpu_name());
@@ -134,7 +134,7 @@ inline void write_bench_csv(const BenchmarkResults_t& results, const std::string
     std::ofstream out(filename, std::ios::out | std::ios::trunc);
     if (!out.is_open()) {
         header_print_r("ERROR", "Failed to open output file: " + filename);
-        return;
+        return std::string();
     }
 
     out << "context_length_k,ttft_avg_s,ttft_std_s,ttft_min_s,ttft_max_s,prefill_avg_toks_per_s,prefill_std_toks_per_s,prefill_min_toks_per_s,prefill_max_toks_per_s,decoding_avg_toks_per_s,decoding_std_toks_per_s,decoding_min_toks_per_s,decoding_max_toks_per_s\n";
@@ -191,6 +191,7 @@ inline void write_bench_csv(const BenchmarkResults_t& results, const std::string
         out << "\n";
     }
     out.close();
+    return filename;
 }
 
 inline void print_result(const BenchmarkResults_t& results) {
@@ -246,7 +247,7 @@ inline void print_result(const BenchmarkResults_t& results) {
     std::cout << "\n";
 }
 
-inline BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_config_file, model_list& availble_models, int iterations){
+inline BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_config_file, model_list& availble_models, int iterations, std::string* csv_path_out = nullptr){
     BenchmarkResults_t results;
     json bench_config;
     // this is used for our benchmarking, not for public use.
@@ -355,7 +356,8 @@ inline BenchmarkResults_t run_benchmarks(std::string model_tag, std::string benc
     auto_chat_engine.reset();
 
     print_result(results);
-    write_bench_csv(results, new_tag, ".");
+    std::string csv_path = write_bench_csv(results, new_tag, ".");
+    if (csv_path_out) *csv_path_out = csv_path;
     return results;
 }
 

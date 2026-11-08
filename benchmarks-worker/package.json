@@ -1,0 +1,11 @@
+{
+  "name": "oflm-bench-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes wrangler@latest dev --local",
+    "deploy": "npx --yes wrangler@latest deploy",
+    "test": "node --test test/"
+  }
+}

@@ -112,3 +112,9 @@ TestGGUF/
 *.gguf
 .claude/plans/
 compose.override.yaml
+
+# Cloudflare / community-benchmarks local state (never commit secrets or DBs)
+.wrangler/
+.dev.vars
+node_modules/
+benchmarks-worker/.wrangler/

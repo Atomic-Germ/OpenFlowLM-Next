@@ -1,0 +1,24 @@
+/* Community benchmarks — leaderboard (left mockup) + detail (right mockup) */
+.cb-wrap { font-family: "Space Grotesk", sans-serif; }
+.cb-tabs { display:flex; gap:24px; border-bottom:1px solid #1f2937; margin:16px 0; }
+.cb-tab { padding:8px 4px; color:#9ca3af; border-bottom:2px solid transparent; cursor:pointer; font-size:14px; background:none; border-top:none; border-left:none; border-right:none; }
+.cb-tab.active { color:#f9fafb; border-bottom-color:#3b82f6; }
+.cb-filters { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:12px 0; }
+.cb-filters label { display:block; font-size:12px; color:#9ca3af; margin-bottom:4px; }
+.cb-filters select, .cb-filters input { width:100%; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:6px; padding:8px; }
+.cb-table { width:100%; border-collapse:collapse; font-size:13px; }
+.cb-table th { text-align:left; color:#9ca3af; padding:8px; border-bottom:1px solid #1f2937; }
+.cb-table td { padding:8px; border-bottom:1px solid #16202e; color:#d1d5db; }
+.cb-table tr { cursor:pointer; } .cb-table tr:hover td { background:#0f172a; }
+.cb-badge { font-size:11px; padding:2px 6px; border-radius:4px; background:#1e3a5f; color:#93c5fd; }
+.cb-badge.Embedding { background:#3b0764; color:#c4b5fd; } .cb-badge.Audio { background:#064e3b; color:#6ee7b7; }
+.cb-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
+.cb-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:12px; }
+.cb-metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+.cb-metric { background:#0f172a; border:1px solid #1f2937; border-radius:12px; padding:16px; }
+.cb-metric b { font-size:32px; display:block; }
+.cb-validated { color:#16a34a; font-size:12px; border:1px solid #16a34a; border-radius:999px; padding:2px 8px; }
+.cb-form input, .cb-form select, .cb-form textarea { width:100%; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:6px; padding:8px; margin:4px 0 12px; }
+.cb-form button { background:#2563eb; color:#fff; border:none; border-radius:8px; padding:10px 16px; cursor:pointer; }
+.cb-note { font-size:12px; color:#9ca3af; }
+@media (max-width:800px){ .cb-filters,.cb-metrics{grid-template-columns:1fr 1fr;} }

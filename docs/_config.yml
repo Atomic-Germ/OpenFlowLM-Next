@@ -2,6 +2,9 @@ title: "OpenFlowLM"
 description: "The leading LLM inference runtime for parallel NPU architectures"
 url: "https://openflowlm.com"
 baseurl: ""
+# Community-benchmarks Worker API base. "/api" = same-origin Pages proxy;
+# set to "https://oflm-bench.<account>.workers.dev" for the direct Worker.
+cb_api: "/api"
 
 markdown: kramdown
 highlighter: rouge
@@ -45,6 +48,8 @@ nav_links:
         url: "/models/"
       - label: Benchmarks
         url: "/benchmarks/"
+      - label: Community
+        url: "/benchmarks/community/"
       # - label: Demos
       #   url: "/demos/"
   - label: Docs

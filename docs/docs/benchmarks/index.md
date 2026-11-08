@@ -64,6 +64,26 @@ oflm bench llama3.2:1b -i utilities/bench-configs/bench-8k.json
 oflm bench-embed bge-base:en-v1.5 --max-batch 128 --bench-iterations 3
 ```
 
+## 📬 Submitting your own numbers
+
+```shell
+oflm bench llama3.2:1b --submit
+oflm bench-embed bge-base:en-v1.5 --submit
+```
+
+`--submit` uploads the CSV to the community leaderboard and then prints the
+benchmark id (`#000xyz`), which appears at `/benchmarks/community/detail/?id=000xyz`.
+
+The **first** `--submit` on a machine creates `bench_consent.json` in the
+oflm directory (`~/.config/oflm` on Linux, `~/.oflm` on Windows) holding an
+opaque install uuid and asks once whether the hardware survey (CPU model, RAM,
+OS, NPU presence) may be sent with the numbers. The uuid tags results to the
+install/machine in a broader sense — the server keeps only its hash, so the
+survey counts distinct machines without identifying anyone. The choice is
+remembered, so later runs never prompt again; override it per run with
+`--submit-consent yes|no`, or point the uploader at a self-hosted backend with
+`OFLM_BENCH_SUBMIT_URL` / `--submit-url`.
+
 > ⚠️ **NPU power mode is worth about 2x, and neither engine reports which one it
 > ran in.** `utilities/bench-pair` exists for this: it interleaves the
 > configurations you are comparing so drift cannot favour one of them, and

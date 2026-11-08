@@ -94,7 +94,7 @@ inline double bench_now_s() {
                std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-inline void write_embed_bench_csv(const EmbedBenchResults_t& results,
+inline std::string write_embed_bench_csv(const EmbedBenchResults_t& results,
                                   const std::string& model_tag,
                                   const std::string& output_dir = ".") {
     // "bench_embed_", not "bench_": the LLM benchmark writes
@@ -114,7 +114,7 @@ inline void write_embed_bench_csv(const EmbedBenchResults_t& results,
     std::ofstream out(filename, std::ios::out | std::ios::trunc);
     if (!out.is_open()) {
         header_print_r("ERROR", "Failed to open output file: " + filename);
-        return;
+        return std::string();
     }
 
     // Provenance first. Two runs of one model differing only in --prompt-name,
@@ -170,6 +170,7 @@ inline void write_embed_bench_csv(const EmbedBenchResults_t& results,
     }
     out.close();
     header_print("OFLM", "Wrote " + filename);
+    return filename;
 }
 
 inline void print_embed_result(const EmbedBenchResults_t& results,
@@ -268,7 +269,8 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
                                                 int max_batch,
                                                 const std::string& prompt_name,
                                                 bool preemption,
-                                                bool modelscope) {
+                                                bool modelscope,
+                                                std::string* csv_path_out = nullptr) {
     EmbedBenchResults_t results;
 
     nlohmann::json cfg;
@@ -473,7 +475,8 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
     engine.reset();
 
     print_embed_result(results, resolved_tag);
-    write_embed_bench_csv(results, resolved_tag, ".");
+    std::string csv_path = write_embed_bench_csv(results, resolved_tag, ".");
+    if (csv_path_out) *csv_path_out = csv_path;
     return results;
 }
 

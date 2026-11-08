@@ -28,6 +28,7 @@ NON_SETTING_FLAGS = {
     "--json", "--keep-all", "--max-batch", "--out", "--port",
     "--prompt", "--prompt-name", "--q-len", "--quiet", "--seed",
     "--size", "--socket", "--preemption", "--img-pre-resize",
+    "--submit", "--submit-url", "--submit-consent",
 }
 NON_SETTING_ENV_VARS = {
     # install layout / paths
@@ -97,6 +98,13 @@ NON_SETTING_ENV_VARS = {
     # Development policy override for choosing lookup, Uno, or plain on a
     # speculative cycle. OFLM_SPECULATIVE is the registered user setting.
     "OFLM_SPEC_MODE",
+    # Community-benchmark submission (bench --submit). Deployment override +
+    # test knobs, not user settings: the API URL must be able to point at a
+    # self-hosted Worker without registering a setting, the consent path is a
+    # test seam (OFLM_BENCH_CONSENT_PATH = tmp file in unit tests), and
+    # OFLM_BENCH_SUBMIT_CONSENT is the non-interactive consent override.
+    "OFLM_BENCH_SUBMIT_URL", "OFLM_BENCH_CONSENT_PATH",
+    "OFLM_BENCH_SUBMIT_CONSENT", "OFLM_BENCH_ALLOW_INSECURE_URL",
 }
 
 def generate_cpp_header(settings):

@@ -35,6 +35,15 @@ struct program_args_t {
     std::string input_file_name = "";
     int iterations = 2;
 
+    // for bench / bench-embed --submit: upload the CSV + (opt-in) hardware
+    // survey to the community leaderboard. --submit-url is a base URL override
+    // (tests / self-hosted); empty means $OFLM_BENCH_SUBMIT_URL or the built-in
+    // default. --submit-consent is yes|no for this run (overrides the stored
+    // first-run choice in bench_consent.json).
+    bool bench_submit = false;
+    std::string bench_submit_url = "";
+    std::string bench_submit_consent = "";
+
     // for bench-embed: the largest batch the sweep reaches. The sweep doubles
     // 1, 2, 4 ... max_batch, so this picks the number of stages as well as the
     // last one -- one run gives a curve, not a point.

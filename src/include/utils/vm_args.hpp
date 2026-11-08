@@ -68,6 +68,8 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
     std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
+    std::cout << "\toflm bench granite:3b --submit" << std::endl;
+    std::cout << "\toflm bench-embed bge-base:en-v1.5 --submit" << std::endl;
     std::cout << "\toflm bench-embed bge-base:en-v1.5" << std::endl;
     std::cout << "\toflm bench-embed nomic-embed-text:v1.5 --max-batch 32 --prompt-name document" << std::endl;
     std::cout << "\toflm image flux2-klein:4b \"a red fox in fresh snow\" -o fox.png" << std::endl;
@@ -151,6 +153,17 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Enable preemption")
             ("prompt,i", po::value<std::string>(&parsed_args.input_file_name)->default_value(""),
              "Direct file input")
+            ("submit", po::bool_switch(&parsed_args.bench_submit),
+             "After bench / bench-embed, upload the result (and, if you opt in, "
+             "the hardware survey) to the community benchmarks. "
+             "First run asks once and stores the choice in bench_consent.json "
+             "(~/.config/oflm on Linux, ~/.oflm on Windows)")
+            ("submit-url", po::value<std::string>(&parsed_args.bench_submit_url)->default_value(""),
+             "Community benchmarks API base URL (for bench --submit; "
+             "default $OFLM_BENCH_SUBMIT_URL or https://oflm-bench.openflowlm.org)")
+            ("submit-consent", po::value<std::string>(&parsed_args.bench_submit_consent)->default_value(""),
+             "Hardware-survey consent for --submit: yes | no "
+             "(overrides the stored first-run choice; empty = use stored choice)")
             ("bench-iterations", po::value<int>(&parsed_args.iterations)->default_value(2),
              "Iterations for bench and bench-embed")
             ("max-batch", po::value<int>(&parsed_args.max_batch)->default_value(128),
@@ -265,6 +278,16 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
                     std::cerr << "Error: --speculative is only supported with the run, serve and bench commands!" << std::endl;
                     return false;
+                }
+            }
+
+            if (parsed_args.command != "bench" && parsed_args.command != "bench-embed") {
+                for (const char* opt : {"submit", "submit-url", "submit-consent"}) {
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: --" << opt << " is only supported with"
+                                     " the bench and bench-embed commands!" << std::endl;
+                        return false;
+                    }
                 }
             }
 
@@ -383,6 +406,13 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 return false;
             }
             //if(parsed_args.model_tag == "")
+        }
+
+        if (!parsed_args.bench_submit_consent.empty() &&
+            parsed_args.bench_submit_consent != "yes" && parsed_args.bench_submit_consent != "no") {
+            std::cerr << "Error: --submit-consent is yes or no, not '"
+                      << parsed_args.bench_submit_consent << "'" << std::endl;
+            return false;
         }
 
         if (parsed_args.command == "bench-embed" &&

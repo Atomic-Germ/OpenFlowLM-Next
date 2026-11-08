@@ -39,6 +39,7 @@
 #include <boost/program_options.hpp>
 #include "benchmarking.hpp"
 #include "benchmark_embed.hpp"
+#include "bench_submit.hpp"
 #include "image_command.hpp"
 
 #ifndef _WIN32
@@ -767,16 +768,61 @@ int main(int argc, char* argv[]) {
         }
 
         if (parsed_args.command == "bench") {
-            benchmarking::BenchmarkResults_t results = benchmarking::run_benchmarks(parsed_args.model_tag, parsed_args.input_file_name, availble_models, parsed_args.iterations);
+            std::string csv_path;
+            // --submit does its consent prompt BEFORE the (long) sweep, so the
+            // user answers first and the bench still runs even if upload fails.
+            bench_submit::BenchProfile profile;
+            if (parsed_args.bench_submit) {
+                profile = bench_submit::load_profile();
+                bench_submit::resolve_consent(profile, parsed_args.bench_submit_consent);
+            }
+            benchmarking::BenchmarkResults_t results = benchmarking::run_benchmarks(parsed_args.model_tag, parsed_args.input_file_name, availble_models, parsed_args.iterations, &csv_path);
+            (void)results;
+            if (parsed_args.bench_submit) {
+                try {
+                    auto [resolved_tag, model_info] = availble_models.get_model_info(parsed_args.model_tag);
+                    bench_submit::submit(bench_submit::submit_base_url(parsed_args.bench_submit_url), profile,
+                                         resolved_tag, "LLM", "NPU (XDNA2)",
+                                         bench_submit::quantization_of(model_info),
+                                         bench_submit::read_file(csv_path), parsed_args.iterations);
+                } catch (const std::exception& e) {
+                    header_print_r("WARN", std::string("benchmark submission failed: ") + e.what());
+                }
+            }
         }
         else if (parsed_args.command == "bench-embed") {
             // The embedding sibling of bench. Separate because not one of
             // TTFT, prefill or decode exists for an encoder, and the axis
             // that costs is the batch rather than the context length.
-            benchmarking::run_embed_benchmarks(
+            std::string csv_path;
+            bench_submit::BenchProfile profile;
+            if (parsed_args.bench_submit) {
+                profile = bench_submit::load_profile();
+                bench_submit::resolve_consent(profile, parsed_args.bench_submit_consent);
+            }
+            benchmarking::EmbedBenchResults_t results = benchmarking::run_embed_benchmarks(
                 parsed_args.model_tag, parsed_args.input_file_name, availble_models,
                 downloader, parsed_args.iterations, parsed_args.max_batch,
-                parsed_args.prompt_name, parsed_args.preemption, parsed_args.modelscope);
+                parsed_args.prompt_name, parsed_args.preemption, parsed_args.modelscope, &csv_path);
+            if (parsed_args.bench_submit) {
+                try {
+                    auto [resolved_tag, model_info] = availble_models.get_model_info(parsed_args.model_tag);
+                    nlohmann::json config;
+                    config["prompt_name"] = parsed_args.prompt_name;
+                    config["max_batch"] = parsed_args.max_batch;
+                    config["iterations"] = results.iterations;
+                    config["corpus_texts"] = results.corpus_texts;
+                    config["task"] = results.task_name;
+                    // Embedding numbers are batch-sweep numbers (batch, texts/s,
+                    // tokens/s, batched-vs-looped), not prefill/decode tok/s.
+                    bench_submit::submit(bench_submit::submit_base_url(parsed_args.bench_submit_url), profile,
+                                         resolved_tag, "Embedding", "NPU (XDNA2)",
+                                         bench_submit::quantization_of(model_info),
+                                         bench_submit::read_file(csv_path), results.iterations, config);
+                } catch (const std::exception& e) {
+                    header_print_r("WARN", std::string("benchmark submission failed: ") + e.what());
+                }
+            }
         }
         else if (parsed_args.command == "image") {
             return image_command::run(parsed_args, availble_models, downloader);

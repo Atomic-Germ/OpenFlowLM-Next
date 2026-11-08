@@ -1,0 +1,16 @@
+# OpenFlowLM community-benchmarks API — Cloudflare Worker + D1 (free tier).
+# Setup: `npx wrangler login`, then `npx wrangler d1 create oflm-bench`,
+# `npx wrangler d1 migrations apply oflm-bench --local --file schema.sql` (local)
+# and without --local for prod. Keep TOKEN_SECRET + SUBMIT_BEARER out of git:
+# `npx wrangler secret put TOKEN_SECRET` / `SUBMIT_BEARER`.
+name = "oflm-bench"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "oflm-bench"
+database_id = "local-dev-placeholder"
+
+[vars]
+TOKEN_TTL_S = "600"
