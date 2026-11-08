@@ -258,15 +258,15 @@ def _moe_layout(spec: ModelSpec, max_ctx: int) -> Q.Layout:
     a.add("res", Q.roundup((n - 1) * C.ROWS_PC * 4 + C.CALL_BYTES, Q.ELEM))
     a.add("xm", Q.ELEM)
     a.add("rout", C.CALL_BYTES)
-    a.add("hp", Q.ELEM)
+    a.add("hp", Q.roundup(n * C.HID_PC * 4, Q.ELEM))
     kv.update(AA_XN=a.off["xn"], AA_QG=a.off["qg"], AA_KVN=a.off["kvn"], AA_OG=a.off["og"], AA_OUT=a.off["out"],
               AA_RES=a.off["res"], AA_XM=a.off["xm"], AA_ROUT=a.off["rout"], AA_HP=a.off["hp"], AA_BYTES=a.n)
     kv.update(POOL_DOWN=0, POOL_SHARE_UP=0, POOL_SHARE_GATE=0, POOL_SHARE_DOWN=0,
               POOL_QKV=0, POOL_Z=0, POOL_Q=0, POOL_K=0, POOL_V=0, POOL_GATE=0, POOL_O=0)
     p = Q._Alloc()
     p.add("experts_upgate", E * 2 * C.STRIPES_PER_PROJ * C.STRIPE)
-    down_off = p.off["experts_upgate"]
     p.add("experts_down", E * C.UP_BYTES)
+    down_off = p.off["experts_down"]
     proj0 = p.n
     kv.update(POOL_DOWN=down_off)
     q = Q._Alloc(); q.n = proj0
@@ -367,11 +367,41 @@ class Lfm2moeRecipe:
     layout: Lfm2moeLayout
     common: Q.Common
     max_ctx: int = 4096
+    linear: Q.Linear | None = None
+    attn: Q.Attn | None = None
+    ffn: Q.Ffn | None = None
+    kind: str = "moe"
+    q8: frozenset = frozenset()
+    ln_split: bool = False
+
+
+def attn(spec: ModelSpec) -> Q.Attn | None:
+    """The ax geometry: GQA 32/8, hd 64, full RoPE, no gate, single-core fast path."""
+    if FULL not in spec.layer_types and FULL_DENSE not in spec.layer_types:
+        return None
+    n = N_CORES
+    qw, kvw, hd = spec.attn_q_width, spec.attn_kv_width, spec.head_dim
+    e_a = kvw * 2
+    hpe, hpo = e_a // (hd * 4), e_a // (hd * 2)
+    from .attnknobs import knobs as attn_knobs
+    A = attn_knobs(spec, spec.num_heads, hpo)
+    return Q.Attn(
+        NH=spec.num_heads, KVH=spec.num_kv_heads, HD=hd, ROT=spec.rotary_dim,
+        Q_PC=qw // Q.BAND_ROWS // n, KV_PC=kvw // Q.BAND_ROWS // n, O_PC=spec.hidden // Q.BAND_ROWS // n,
+        QW=qw, KVW=kvw, O_K=qw, QKV_K=spec.hidden,
+        META_BYTES=2 * hd * 2, HEAD_BYTES=hd * 4,
+        E_A=e_a, HPE=hpe, HPO=hpo,
+        Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
+        OG_AOUT_ELEMS=spec.num_heads // hpo,
+        OG_ELEMS=Q.roundup(qw * 2, Q.ELEM) // Q.ELEM, KV_PAIR=False,
+        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
+    )
 
 
 def recipe(spec: ModelSpec, max_ctx: int = 4096) -> Lfm2moeRecipe:
     _check(spec)
-    return Lfm2moeRecipe(spec=spec, layout=layout(spec, max_ctx), common=common(spec), max_ctx=max_ctx)
+    return Lfm2moeRecipe(spec=spec, layout=layout(spec, max_ctx), common=common(spec),
+                         max_ctx=max_ctx, linear=None, attn=attn(spec))
 
 
 def pack_plan(spec: ModelSpec) -> dict:
@@ -593,7 +623,7 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q.Q8_CHUNK,
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
         "rope_inv_freq": spec.rope_inv_freq(),
-        "rout_idx_off": Q.ROUT_IDX_OFF,
+        "rout_idx_off": spec.num_experts * 4,
         "moe": {"experts": spec.num_experts, "topk": spec.experts_per_tok,
                 "stripe": C.STRIPE, "up_bytes": C.UP_BYTES, "down_core": C.DOWN_PER_CORE * C.DOWN_BAND,
                 "pool_down": L.POOL_DOWN, "share_up": 0, "share_gate": 0, "share_down": 0,

@@ -82,11 +82,7 @@ NOT_AUTOMATED = {
                   "family's whole-layer runs",
     "gemv_q8": "no per-K fixture (the OPEN-QUANT-Q8 procedure validates it against a converted "
                "container's own q8 values)",
-    "gemv_q4_prep_f32": "validated through the whole-layer MoE block only (K is fixed at 512)",
     "deltanet": "designs/deltanet/make_test.py reads a captured state, not a geometry: no per-shape run",
-    "short_conv": "no fixture; (3, 2048) came from an oflm serve run (OPEN-SHORT-CONV-KERNEL)",
-    "router": "no per-geometry fixture",
-    "moe": "no per-geometry fixture (whole-layer MoE block only)",
 }
 
 
@@ -311,7 +307,105 @@ def gate_lm_head_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> N
     print(f"   PASS lm_head_q4 K={k}")
 
 
-GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln, "lm_head_q4": gate_lm_head_q4}
+def gate_router(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
+    """Run designs/router at (experts, topk) and add the point.
+
+    Sigmoid/bias vs softmax comes from the family: lfm2moe needs sigmoid with
+    bias; everyone else takes the shipped softmax. Shape (E, topk) comes from
+    the catalogue point itself, never a hard-coded list.
+    """
+    experts = int(kw["experts"])
+    topk = int(kw["topk"])
+    sigmoid = 1 if spec.family == "lfm2moe" else 0
+    bias = 1 if spec.family == "lfm2moe" else 0
+    tag = f"e{experts}t{topk}s{sigmoid}b{bias}"
+    d = DESIGNS / "router"
+    cc_before = set(d.glob("*.cc"))
+    e = dict(env, ROUTER_E=str(experts), ROUTER_TOPK=str(topk),
+             ROUTER_SIGMOID=str(sigmoid), ROUTER_BIAS=str(bias))
+    cmd_fixture = [py, d / "make_test.py"]
+    cmd_build = [py, ROOT / "open_kernels" / "build_design.py", d / "router.py", d / f"build_{tag}"]
+    if dry:
+        print(f"   would run: {' '.join(map(str, cmd_fixture))}")
+        print(f"   would build: {' '.join(map(str, cmd_build))}")
+        print(f"   would add:  router experts={experts}, topk={topk}")
+        return
+    _run(cmd_fixture, env=e, cwd=d)
+    _run(cmd_build, env=e)
+    _run([harness, d / "run.cfg"], env=e, cwd=d, quiet=True)
+    _run([py, d / "compare.py"], env=e, cwd=d)
+    for param in _values_params("router", kw):
+        _add_param("router", param, kw[param], note)
+    for f in ("xm.bin", "w.bin", "bias.bin", "ref_out.bin", "y_out.bin", "run.cfg"):
+        (d / f).unlink(missing_ok=True)
+    print(f"   PASS router experts={experts} topk={topk}")
+
+
+def gate_short_conv(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
+    """Run the short-conv element at SC_W=512 (the production element width) and
+    add the (taps, width) point. The element arithmetic (newest-last window) is
+    width-independent; a full hidden of `width` is width//SC_W such slices (cx/sx)."""
+    taps = int(kw["taps"])
+    width = int(kw["width"])
+    tag = f"t{taps}w{width}"
+    d = DESIGNS / "short_conv"
+    e = dict(env, SC_W="512", SC_TAPS=str(taps))
+    cmd_fixture = [py, d / "make_test_sc.py"]
+    cmd_build = [py, ROOT / "open_kernels" / "build_design.py", d / "sc.py", d / f"build_{tag}"]
+    if dry:
+        print(f"   would run: {' '.join(map(str, cmd_fixture))}")
+        print(f"   would build: {' '.join(map(str, cmd_build))}")
+        print(f"   would add:  short_conv taps={taps}, width={width}")
+        return
+    _run(cmd_fixture, env=e, cwd=d)
+    _run(cmd_build, env=e)
+    _run([harness, d / "run_sc.cfg"], env=e, cwd=d, quiet=True)
+    _run([py, d / "compare_sc.py"], env=e, cwd=d)
+    _add_param("short_conv", "taps", taps, note)
+    _add_param("short_conv", "width", width, note)
+    for f in ("bcus.bin", "w.bin", "ref_y.bin", "ref_ns.bin", "y_y.bin", "y_ns.bin", "run_sc.cfg"):
+        (d / f).unlink(missing_ok=True)
+    print(f"   PASS short_conv taps={taps} width={width} (element SC_W=512)")
+
+
+def gate_moe(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
+    """Whole-layer MoE gate (mx at this spec): proves moe (ff,E,topk,shared,hidden)
+    and gemv_q4_prep_f32 K together -- the prep K is the same padded ff the block
+    streams, so one PASS adds both points. Builds mx at the spec's geometry and
+    runs the synthetic block fixture (make_test_mx.py)."""
+    ff = int(kw["ff"])
+    tag = f"ff{ff}e{kw['experts']}t{kw['topk']}"
+    d = DESIGNS / "layer_x"
+    # mx reads the spec from OPEN_KERNELS_SPEC; point it at this spec file.
+    spec_path = kw.get("_spec_path")
+    e = dict(env, MX_KIND="full")
+    # The caller (gate_points) passes no spec path in kw; derive from spec via
+    # the caller's file -- stored on the spec object by main().
+    sp = getattr(spec, "_path", None)
+    if sp:
+        e["OPEN_KERNELS_SPEC"] = str(sp)
+    cmd_build = [py, ROOT / "open_kernels" / "build_design.py", d / "mx.py", d / f"build_mx_full_{tag}"]
+    cmd_fixture = [py, d / "make_test_mx.py"]
+    if dry:
+        print(f"   would run: {' '.join(map(str, cmd_fixture))}")
+        print(f"   would build: {' '.join(map(str, cmd_build))}")
+        print(f"   would add:  moe {kw}, gemv_q4_prep_f32 K={ff}")
+        return
+    _run([py, d / "gen_kernels.py"], env=e)
+    _run(cmd_fixture, env=e, cwd=d)
+    _run(cmd_build, env=e)
+    _run([harness, d / "run_mx.cfg"], env=e, cwd=d, quiet=True)
+    _run([py, d / "compare_mx.py"], env=e, cwd=d)
+    _add_param("moe", "ff", int(kw["ff"]), note)
+    _add_param("moe", "experts", int(kw["experts"]), note)
+    _add_param("moe", "topk", int(kw["topk"]), note)
+    _add_param("moe", "shared_expert", bool(kw["shared_expert"]), note)
+    _add_param("moe", "hidden", int(kw["hidden"]), note)
+    _add_param("gemv_q4_prep_f32", "K", ff, note)
+    print(f"   PASS moe ff={ff} E={kw['experts']} topk={kw['topk']} (+ prep_f32 K={ff})")
+
+
+GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln, "lm_head_q4": gate_lm_head_q4, "router": gate_router, "short_conv": gate_short_conv, "moe": gate_moe}
 
 
 def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
@@ -340,6 +434,7 @@ def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
         if fn is None:
             raise GateError(f"op-gate: {op} {kw} has no automated gate: "
                             f"{NOT_AUTOMATED.get(op, 'no fixture for this op')}")
+        spec._path = spec_path  # moe gate: mx reads OPEN_KERNELS_SPEC from here
         note = f"{spec_path.stem} (utilities/op-gate.py: the {op} fixture at this geometry)"
         print(f"-- gate {op} {kw}", flush=True)
         fn(spec, kw, py, env, harness, note, dry)

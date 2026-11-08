@@ -268,7 +268,7 @@ void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, floa
 }}
 }}
 ''',
-        "gemv_q4_gup.cc": (gemv_hdr + f'''// MoE up (band 0) / gate (band 1): 64-row K={hid} bands, half {sub} of {C.HALVES_PER_CORE} per core (wide-FF).
+        "gemv_q4_gup.cc": (gemv_hdr + f'''// MoE up (band 0) / gate (band 1): 64-row K={hid} bands, one of {C.HALVES_PER_CORE} halves per core (wide-FF, sub is the half).
 extern "C" {{
 void gemv_q4_gup(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
                  int32_t group, int32_t band, int32_t sub) {{
@@ -310,7 +310,16 @@ extern "C" {{
 GEMV_Q4_PREP_BLOCKS_ENTRY({kw}, {nb}, {nb})
 }}
 ''',
-        "gemv_q4_prep_h.cc": f'''// the expert hidden h (f32[{ff}], assembled in DDR from the cores' parts) -> bf16 -> its table
+        "gemv_q4_prep_h.cc": (gemv_hdr + f'''// h element i (f32, wide-FF split): blocks [32i, min(32i+32, {ff//32}))
+#include "gemv_q4.h"
+extern "C" {{
+void gemv_q4_prep_h(const float *__restrict hf, uint8_t *__restrict tab, int32_t idx) {{
+  const unsigned total = (unsigned){ff} / 32, b0 = 32u * (unsigned)idx;
+  const unsigned nb = (b0 + 32u <= total) ? 32u : total - b0;
+  gemv_q4_prep_f32_blocks(hf, tab + {C.H_TAB_OFF}, (unsigned){ff}, b0, nb);
+}}
+}}
+''' if C.HALVES_PER_CORE > 1 else gemv_hdr + f'''// the expert hidden h (f32[{ff}], assembled in DDR from the cores' parts) -> bf16 -> its table
 // at tab + {C.H_TAB_OFF} (past xm's K={hid} table).
 #include "gemv_q4.h"
 
@@ -319,10 +328,10 @@ void gemv_q4_prep_h(const float *__restrict hf, uint8_t *__restrict tab) {{
   gemv_q4_prep_f32(hf, tab + {C.H_TAB_OFF}, {ff});
 }}
 }}
-''',
+'''),
         # ---- MoE
         "moe_hdr2.cc": f'''// The MoE header, three 10 KB w-stream elements per core (mode 0, 1, 2):
-//   0: [router output f32[{Q.ELEM // 4}] | junk]  -> rw = floats {Q.ROUT_IDX_OFF // 4}..{Q.ROUT_IDX_OFF // 4 + 31} (w[e] at 8 + e)
+//   0: [router output f32[{Q.ELEM // 4}] | junk]  -> rw = floats {R.spec.num_experts}..{R.spec.num_experts + 31} (w[e] at 8 + e, idx padded to 8)
 //   1: [sgw bf16[{hid}] | junk]           -> rw[0] = sigmoid(xm . sgw), xm = the act element
 //   2: [xres slice f32[{C.ROWS_PC}] | junk]      -> xr (this core's {C.ROWS_PC} residual rows)
 #include "vecmath.h"
@@ -333,7 +342,7 @@ void moe_hdr2(const uint8_t *__restrict e, const bfloat16 *__restrict xm, float 
   float *__restrict rw = ms;
   float *__restrict xr = ms + {C.MS_XR};
   if (mode == 0) {{
-    aie::store_v(rw, aie::load_v<32>((const float *)(e + {Q.ROUT_IDX_OFF})));
+    aie::store_v(rw, aie::load_v<32>((const float *)(e + {R.spec.num_experts * 4})));
   }} else if (mode == 1) {{
     const bfloat16 *__restrict sgw = (const bfloat16 *)e;
     accf32 d = aie::zeros<accfloat, 32>();
@@ -352,7 +361,19 @@ void moe_hdr2(const uint8_t *__restrict e, const bfloat16 *__restrict xm, float 
 }}
 }}
 ''',
-        "moe_silu32.cc": f'''// h part = silu(g) * u for this core's {C.HID_PC} rows (ms: u @{C.MS_U}, g @{C.MS_G}), emitted as f32 (one 256 B y
+        "moe_silu32.cc": (f'''// h part (sub) = silu(g) * u for this core's 64-row half #sub of {C.HID_PC} (wide-FF).
+#include "vecmath.h"
+extern "C" {{
+void moe_silu32(const float *__restrict ms, float *__restrict h, int32_t sub) {{
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  const float *__restrict u = ms + {C.MS_U} + 64 * sub;
+  const float *__restrict g = ms + {C.MS_G} + 64 * sub;
+#pragma clang loop unroll(disable)
+  for (unsigned j = 0; j < 64; j += 32)
+    aie::store_v(h + j, fmul32(vsiluN<32>(aie::load_v<32>(g + j)), aie::load_v<32>(u + j)));
+}}
+}}
+''' if C.HALVES_PER_CORE > 1 else f'''// h part = silu(g) * u for this core's {C.HID_PC} rows (ms: u @{C.MS_U}, g @{C.MS_G}), emitted as f32 (one 256 B y
 // element); the bf16 rounding happens in the consumer's table prep.
 #include "vecmath.h"
 
@@ -366,7 +387,7 @@ void moe_silu32(const float *__restrict ms, float *__restrict h) {{
     aie::store_v(h + j, fmul32(vsiluN<32>(aie::load_v<32>(g + j)), aie::load_v<32>(u + j)));
 }}
 }}
-''',
+'''),
         "moe_accfin.cc": f'''// slot < {ne}:  acc = (slot == 0 ? 0 : acc) + w[slot] * yd     (the routed weight, rw[8 + slot])
 // slot == {ne}: acc = xres + acc + sigmoid(xm . sgw) * yd        (the shared expert, rw[0]) = the block output
 // slot < 0:  acc = xres + acc                                    (the same close for a stream whose

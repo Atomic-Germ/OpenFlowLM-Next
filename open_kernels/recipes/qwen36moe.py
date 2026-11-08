@@ -1632,7 +1632,7 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
         "rope_inv_freq": spec.rope_inv_freq(),
-        "rout_idx_off": ROUT_IDX_OFF,
+        "rout_idx_off": spec.num_experts * 4,
         "moe": {"experts": spec.num_experts, "topk": spec.experts_per_tok,
                 "stripe": C.STRIPE, "up_bytes": C.UP_BYTES, "down_core": C.DOWN_PER_CORE * C.DOWN_BAND,
                 "pool_down": L.POOL_DOWN, "share_up": L.POOL_SHARE_UP, "share_gate": L.POOL_SHARE_GATE,

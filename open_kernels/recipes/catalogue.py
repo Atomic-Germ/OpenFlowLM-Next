@@ -164,7 +164,7 @@ class Template:
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
              {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
-                          10752, 11264, 12288, 14336, 15360, 10496, 11008),
+                          10752, 11264, 12288, 14336, 15360, 10496, 11008, 11776),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
@@ -177,7 +177,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                  # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
-              "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)  # Nanbeige4.1-3B (designs/gemv_q4 fixture, K=10496 PASS)  # qwen25-3b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)
+              "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)  # Nanbeige4.1-3B (designs/gemv_q4 fixture, K=10496 PASS)  # qwen25-3b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # lfm2moe-24b-a2b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)
              note="a new K needs gemv_q4/make_test.py + compare.py at that K first"),
     Template("gemv_q8", "designs/gemv_q4/gemv_q8.h",
              {"K": values(2048, 4096),           # 2048: the 35B's qkv / z / q / k / v / gate;
@@ -190,7 +190,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "the OPEN-QUANT-Q8 procedure (the 8-layer slice against the container's own q8 values) "
                   "at that K first"),
     Template("gemv_q4_prep_f32", "designs/gemv_q4/gemv_tab.h",
-             {"K": values(512)},                 # the expert hidden h (moe_experts' law)
+             {"K": values(512, 1536)},                 # the expert hidden h (moe_experts' law)  # LFM2-MoE 24B (utilities/op-gate.py: the whole-layer MoE fixture at this geometry)
              note="validated through the whole-layer MoE block only"),
     Template("attn", "designs/attn/attn.h",
              {"rope_theta": any_positive()},
@@ -254,10 +254,10 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  keys=("width", "groups"),
                  defaults={"groups": 1}),),),
     Template("router", "designs/router/router.h",
-             {"experts": values(256), "topk": values(8)}),
+             {"experts": values(256, 64, 32), "topk": values(8, 4)}),  # LFM2-MoE 24B (utilities/op-gate.py: the router fixture at this geometry)  # LFM2-MoE 8B (utilities/op-gate.py: the router fixture at this geometry)  # LFM2-MoE (utilities/op-gate.py: the router fixture at this geometry)
     Template("moe", "designs/layer_x/moe_*.cc",
-             {"ff": values(512), "experts": values(256), "topk": values(8), "shared_expert": values(True),
-              "hidden": values(2048), "n_cores": values(8)}),
+             {"ff": values(512, 1536), "experts": values(256, 64), "topk": values(8, 4), "shared_expert": values(True, False),
+              "hidden": values(2048), "n_cores": values(8)}),  # LFM2-MoE 24B (utilities/op-gate.py: the whole-layer MoE fixture at this geometry)  # LFM2-MoE 24B (utilities/op-gate.py: the whole-layer MoE fixture at this geometry)  # LFM2-MoE (utilities/op-gate.py: the whole-layer MoE fixture at this geometry)  # LFM2-MoE no shared expert (utilities/op-gate.py: the whole-layer MoE fixture at this geometry)
     Template("lm_head_q8", "designs/lm_head_q8/lm_head_q8.h",
              {"K": values(1024, 2048, 2560, 4096, 5120), "vocab": multiple_of(128)},
              note="K is LMHEAD_K, a compile-time knob of the kernel and of the pool's supertile "

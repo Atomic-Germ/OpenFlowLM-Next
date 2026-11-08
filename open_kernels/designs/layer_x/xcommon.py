@@ -275,10 +275,16 @@ def kernels(inc, t):
                                      arg_types=[x, tab], include_dirs=inc, compile_flags=OS)
     k["prep4096a"] = ef(f"gemv_q4_prep_k{KWIDE}_b0n{nb}", [x, tab])
     k["prep4096b"] = ef(f"gemv_q4_prep_k{KWIDE}_b{nb}n{nb}", [x, tab])
-    k["prepf"] = ef("gemv_q4_prep_h", [x, tab])                     # h (f32[FF] in the element) -> tab + H_TAB_OFF
+    if getattr(C, "HALVES_PER_CORE", 1) > 1:
+        k["prepf"] = ef("gemv_q4_prep_h", [x, tab, i32])            # wide: h element idx
+    else:
+        k["prepf"] = ef("gemv_q4_prep_h", [x, tab])                     # h (f32[FF] in the element) -> tab + H_TAB_OFF
     # MoE
     k["hdr"] = ef("moe_hdr2", [e, x, ms, i32])
-    k["silu"] = ef("moe_silu32", [ms, y])
+    if getattr(C, "HALVES_PER_CORE", 1) > 1:
+        k["silu"] = ef("moe_silu32", [ms, y, i32])
+    else:
+        k["silu"] = ef("moe_silu32", [ms, y])
     k["accfin"] = ef("moe_accfin", [ms, i32])
     k["out"] = ef("moe_out", [ms, y, i32])
     # DeltaNet
@@ -526,12 +532,23 @@ def moe_body(win, ain, yout, B, K, nx=NX):
                     we = win.acquire(1)
                     K["gup"](we, tab, ms, g, b)
                     win.release(1)
-        he = yout.acquire(1)
-        K["silu"](ms, he)                         # this core's rows of the hidden, f32, to DDR
-        yout.release(1)
-        hh = ain.acquire(1)
-        K["prepf"](hh, tab)                       # the whole h back, -> its table (tab + H_TAB_OFF)
-        ain.release(1)
+        if hpe > 1:
+            for h in range_(hpe):
+                he = yout.acquire(1)
+                K["silu"](ms, he, h)
+                yout.release(1)
+            h_elems = (C.FF * 4 + ELEM - 1) // ELEM
+            for _i in range_(h_elems):
+                hh = ain.acquire(1)
+                K["prepf"](hh, tab, _i)
+                ain.release(1)
+        else:
+            he = yout.acquire(1)
+            K["silu"](ms, he)                         # this core's rows of the hidden, f32, to DDR
+            yout.release(1)
+            hh = ain.acquire(1)
+            K["prepf"](hh, tab)                       # the whole h back, -> its table (tab + H_TAB_OFF)
+            ain.release(1)
         for j in range_(C.DOWN_ELEMS):            # the core's ROWS_PC down rows: DOWN_ELEMS elements either way
             we = win.acquire(1)
             K["gdown"](we, tab, ms, j, e)
@@ -577,7 +594,8 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_HP + c * HID_PC * 4, HID_PC * 4))
         pipe_y.finish(*y_conss)                           # the hidden parts are in DDR
-        pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, ELEM))
+        h_elems = (C.FF * 4 + ELEM - 1) // ELEM if getattr(C, "HALVES_PER_CORE", 1) > 1 else 1
+        pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, h_elems * ELEM))
         for c in range(N_CORES):
             if e < NE:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_DOWN + e * UP_BYTES + c * DOWN_PER_CORE * DOWN_BAND,

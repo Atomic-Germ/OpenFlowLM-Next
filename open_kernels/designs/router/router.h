@@ -2,7 +2,9 @@
 // MoE router on one core: logits = xm @ W (W bf16 [2048][E], streamed as 4 KB
 // elements of rows), p = softmax(logits) or sigmoid(logits) with expert-bias
 // selection, top-k with renormalised weights.
-//   out (4 KB): [p fp32[E] @0][idx int32[topk] @E*4 B][w fp32[topk] @E*4+topk*4 B][pad]
+//   out (4 KB): [p fp32[E] @0][idx int32[8] @E*4 B (first topk used, rest 0)][w fp32[topk] @E*4+32 B][pad]
+//   w is always at +8 floats past idx so moe_hdr2's `rw[8 + slot]` (and the driver's
+//   `moe2_apply`) is topk-independent; a topk < 8 pads idx with 0.
 // The healthy default (ROUTER_SIGMOID=0, ROUTER_BIAS=0, E=256, topk 8) is the shipped
 // softmax router. LFM2-MoE compiles with -DROUTER_SIGMOID=1 -DROUTER_BIAS=1
 // -DROUTER_E=64/32 -DROUTER_TOPK=4 (sigmoid scores, biased selection, unbiased
@@ -99,10 +101,11 @@ static inline void router_fin_impl(const float *__restrict acc, const float *__r
   // top-k by the selection scores (p, or p + bias); the weights renormalise the
   // UNBIASED p over the winners (norm_topk_prob), then scale by 1.0.
   int32_t *idx = (int32_t *)(out + kE);
-  float *w = out + kE + kTopk;
+  float *w = out + kE + 8;   // +8 always: idx is padded to 8 slots for moe_hdr2 / the driver
   uint32_t taken[kE / 32];
   for (unsigned i = 0; i < kE / 32; ++i) taken[i] = 0;
   float wsum = 0.f;
+  for (unsigned k = kTopk; k < 8; ++k) idx[k] = 0;
   for (unsigned k = 0; k < kTopk; ++k) {
     float best = 0.f;
     int bi = -1;
