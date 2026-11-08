@@ -11,8 +11,9 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, Worker, WorkerRuntimeBarrier
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, Worker
 from aie.iron.controlflow import range_
+from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import Tile
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern
@@ -24,6 +25,7 @@ sys.path.insert(0, str(DESIGNS.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
+from recipes.attnknobs import TREE8_STACK, dxl_kvslice, kv_slices, t8_split_flags, tree8, tree8_flags  # noqa: E402
 from recipes import dxl as DXR  # noqa: E402
 from recipes.dxl import JMAX, NF, Z_ROW, job_table, jobs  # noqa: E402
 
@@ -34,7 +36,9 @@ L0, G = R.layout, R.geo                     # dx's layout: pool / consts / kv / 
 NL_ROWS = int(os.environ.get("DXL_L", 4))
 X = DXR.layout(SPEC, NL_ROWS)
 DRAFT = os.environ.get("DXL_DRAFT") == "1"    # which instruction stream: the cores and tables are the same
-TABLE_INTS = -(-2 * (1 + JMAX * NF) // 16) * 16
+HEAD = os.environ.get("DXL_HEAD") == "1"      # the head (final norm, logits) as tile jobs on the layer's cores (OPEN-DXL-HEAD)
+assert not (HEAD and DRAFT)
+TABLE_INTS = -(-(2 * (1 + JMAX * NF) + 1 + DXR.HEAD_JMAX * NF) // 16) * 16
 LR = X.L
 HID, FF, N_CORES = G.HID, G.FF, G.N_CORES
 QW, KVW = G.QW, G.KVW
@@ -55,9 +59,20 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():
-    if _k not in ("ATTN_RB", "ATTN_FAST"):
+    if _k not in ("ATTN_RB", "ATTN_FAST", "ATTN_TREE8", "ATTN_KVSLICE", "ATTN_DXL_KVSLICE"):
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+T8 = tree8(SPEC, G.NHL, G.RB, G.HD)           # the same bit-identical score tree as dx (OPEN-ATTN-SCORE-TREE)
+if T8:
+    ATTN_FLAGS.extend(tree8_flags(int(os.environ.get("DXL_T8_UNROLL", 1))) + t8_split_flags())
+KVSL = dxl_kvslice(SPEC, ACORES, RB, G.QKVB, G.WINDOW) > 0   # core c of every group on one slice stream (OPEN-ATTN-KVSLICE)
+if KVSL:
+    KVS, KVB = kv_slices(G.NH, G.KVH, ACORES)
+    KW_COLS = [3, 4, 5, 6, 7]                  # lni, w0..w7, x and ain fill columns 0..2 twice and 3..7 once
+    assert ACORES <= len(KW_COLS), f"dxl KVSLICE: {ACORES} window streams, free shim MM2S columns {KW_COLS}"
+    ATTN_FLAGS.append(f"-DATTN_KVS={KVS}")
+    E_W = RB * 2 * KVS * G.HD * 2
+ASTACK = TREE8_STACK if T8 else 0x1800
 # Every DDR-bound stream leaves the compute rows through row 2's south ports, 4 a column. A group's core 0 drains
 # its own KV row; where og, KV, y and ln outflows overrun them (Granite's 5 cores a group: 33), group 0's core 0
 # packs all L rows from the prologues it otherwise skips.
@@ -68,11 +83,22 @@ N_OG = NHL // OGH
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 if SPEC.norm_groups != 1:
     LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")
-GL_FLAGS = OS + [f"-DDXL_L={LR}", f"-DDXL_JMAX={JMAX}"]
+GL_FLAGS = OS + [f"-DDXL_L={LR}", f"-DDXL_JMAX={JMAX}", f"-DDXL_TABS={X.TABS}", f"-DDXL_TABK={X.TAB_K}"]
 if os.environ.get("LX_NULL_GEMV") == "1":    # probe only (attnknobs.PROBE_VARS keeps it out of shipped keys)
     GL_FLAGS.append("-DGEMV_NULL")
-NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"     # probes: the stream and fifos unchanged, the arithmetic gone
+if os.environ.get("DXL_NULL_OUT") == "1":
+    GL_FLAGS.append("-DDXL_NULL_OUT")
+NPREP_F = DXR.FIELDS.index("NPREP")
+REP_F = DXR.FIELDS.index("REP")
+HP = DXR.head_plan(SPEC, LR)
+assert HP or not HEAD, "DXL_HEAD: this spec has no head on the layer's cores"
+NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"    # probes: the stream and fifos unchanged, the arithmetic gone
 NULL_LN = os.environ.get("DXL_NULL_LN") == "1"
+# a deeper weight fifo prefetches through the activation prep; only where L1 holds the extra chunks
+W_DEPTH = int(os.environ.get("DXL_WDEPTH", 4 if DXR._main_l1(LR, X.YB, X.BP, G.KV_PC, X.TAB_K, X.TABS) + 2 * CHUNK <= DXR.L1_BUDGET else 2))
+WRING = int(os.environ.get("DXL_WRING", 0))     # memtile weight ring depth (dx's OPEN-DECODE-STREAM); 0: shim straight to the core
+# fewer accumulator spills in the tile loop (154 -> 140 bundles a k-block); scheduling only, no arithmetic
+GEMV_SCHED = ["-mllvm", "-aie-aggressive-realloc", "-mllvm", "-aie-gpr-realloc"]
 
 
 def bt(total, off, n):
@@ -89,7 +115,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     elem = np.ndarray[(CHUNK,), np.dtype[np.uint8]]
     x_ty = np.ndarray[(DXR.XE // 2,), np.dtype[bfloat16]]
     y_ty = np.ndarray[(YE,), np.dtype[np.float32]]
-    tab_ty = np.ndarray[(LR * DXR.tab_bytes(X.TAB_K),), np.dtype[np.uint8]]
+    tab_ty = np.ndarray[(DXR.tab_alloc(LR, X.TAB_K, X.TABS),), np.dtype[np.uint8]]
     acc_ty = np.ndarray[((YB + BP) * YE,), np.dtype[np.float32]]
     u8_ln = np.ndarray[(ELN,), np.dtype[np.uint8]]
     u8_a = np.ndarray[(E_A,), np.dtype[np.uint8]]
@@ -127,11 +153,13 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     def ef(sym, src, args, flags=OS):
         return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
 
+    f_mode = ef("dxl_mode", HERE / "dxl_mode.cc", [x_ty, rtp_ty], OS)
+    f_lncount = ef("dxl_lncount", HERE / "dxl_lncount.cc", [u8_ln, rtp_ty], OS + [f"-DDXL_L={LR}"])
     f_njobs = ef("dxl_njobs", HERE / "dxl_njobs.cc", [table_ty, rtp_ty, q4_ty], GL_FLAGS)
     f_job = ef("dxl_job", HERE / "dxl_job.cc", [table_ty, rtp_ty, i32, jp_ty], GL_FLAGS)
-    f_prep = ef("dxl_prep_job", HERE / "dxl_prep_job.cc", [x_ty, tab_ty, i32, jp_ty], GL_FLAGS)
+    f_prep = ef("dxl_prep_slot", HERE / "dxl_prep_slot.cc", [x_ty, tab_ty, i32, i32, jp_ty], GL_FLAGS)
     f_gemv = ef("dxl_gemv_job", HERE / "dxl_gemv_job.cc",
-                [elem, tab_ty, acc_ty, jp_ty, i32, i32, i32], GL_FLAGS)
+                [elem, tab_ty, acc_ty, jp_ty, i32, i32, i32], GL_FLAGS + GEMV_SCHED)
     f_out = ef("dxl_out_job", HERE / "dxl_out_job.cc", [acc_ty, y_ty, jp_ty, i32], GL_FLAGS)
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
@@ -143,23 +171,41 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a, brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
+    if KVSL:                                            # the window from the core's slice stream: blocks, tail, the rest skipped
+        u8_w = np.ndarray[(E_W,), np.dtype[np.uint8]]
+        f_step = ef("attn_tailw", ATTN / "attn_tailw.cc", [u8_w, fq, foacc, fml, pb_ty, i32], ATTN_FLAGS)
+    else:
+        f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
     f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
-    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
-                  ATTN_FLAGS) if RB > 1 else None)
+    if KVSL:
+        f_stepb = ef("attn_stepw", ATTN / "attn_stepw.cc", [u8_w, fq, foacc, fml, pb_ty, i32], ATTN_FLAGS)
+    else:
+        f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
+                      ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
-    f_skip = ef("dxl_attn_skip", HERE / "dxl_attn_skip.cc", [pb_ty, i32], OS)
+    f_skip = (ef("dxl_attn_skipw", HERE / "dxl_attn_skipw.cc", [pb_ty, i32], OS + [f"-DDXL_RB={RB}"]) if KVSL else
+              ef("dxl_attn_skip", HERE / "dxl_attn_skip.cc", [pb_ty, i32], OS))
     f_kvpack = ef("dxl_kvpack", HERE / "dxl_kvpack.cc", [brow, brow, kvrow_ty], OS + [f"-DDXL_KVW={KVW}"])
     f_kvrow = (ef("dxl_kvpack_row", HERE / "dxl_kvpack_row.cc", [brow, brow, kvrows_ty, pb_ty, i32],
                   OS + [f"-DDXL_KVW={KVW}"]) if KV_ONE else None)
     f_count = ef("dxl_attn_count", HERE / "dxl_attn_count.cc", [pb_ty, i32], OS)
 
-    of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+    if WRING:
+        assert WRING <= 24, "dxl: a memtile ring deeper than 24 does not fit one BD pool"
+        of_wm = [ObjectFifo(elem, name=f"wm{c}", depth=WRING) for c in range(N_CORES)]
+        of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
+        for c in range(N_CORES):
+            ObjectFifoLink(of_wm[c].cons(channel=0), [of_w[c].prod(channel=1)], Tile(c, 1), [], [0])
+        w_src = of_wm
+    else:
+        of_w = [ObjectFifo(elem, name=f"w{c}", depth=W_DEPTH) for c in range(N_CORES)]
+        w_src = of_w
     of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)
-    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))
+    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 1 + NPTAB + 1) if KVSL else max(4, 2 * RB + 2, 1 + NPTAB + 1))
+    of_kw = [ObjectFifo(u8_w, name=f"kw{c}", depth=2) for c in range(ACORES)] if KVSL else []
     # row g's group writes its new KV row at slot g, so one drain puts all L rows in the cache
     of_kv = ObjectFifo(kvrows_ty, name="kvj", depth=1)
     kv_parts = None if KV_ONE else of_kv.prod().join([g * 2 * KVW for g in range(LR)], tile=Tile(1, 1),
@@ -172,34 +218,39 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
 
     tables = np.zeros(TABLE_INTS, np.int32)
     tables[:2 * (1 + JMAX * NF)] = job_table(SPEC, LR).reshape(-1)
-    rtps = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(16, np.int32), use_write_rtp=True)
+    tables[2 * (1 + JMAX * NF):2 * (1 + JMAX * NF) + 1 + DXR.HEAD_JMAX * NF] = DXR.head_table(SPEC, LR)
+    rtps = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(16, np.int32))
             for c in range(N_CORES)]
-    barriers = [WorkerRuntimeBarrier() for _ in range(N_CORES)]
 
-    def main_body(win, xin, yout, tab, acc, table, rtp, nj, jp, barrier, fnj, fjob, fprep, fgemv, fout):
-        # rtp[0] holds the mode before the barrier opens; nothing releases it, so each dispatch waits for its own stream
-        barrier.wait_for_value(1)
+    def main_body(win, xin, yout, tab, acc, table, rtp, nj, jp, fmode, fnj, fjob, fprep, fgemv, fout):
+        xm = xin.acquire(1)                               # the mode element opens every dispatch
+        fmode(xm, rtp)
+        xin.release(1)
         fnj(table, rtp, nj)
         for j in range_(nj[0]):
             fjob(table, rtp, j, jp)                       # jp = the job's row; jp[0..3] its loop counts
-            for s in range_(jp[0]):
-                for tok in range_(LR):
-                    xe = xin.acquire(1)
-                    if not NULL_PREP:
-                        fprep(xe, tab, tok, jp)
-                    xin.release(1)
-                for b in range_(jp[1]):
-                    for c in range_(jp[2]):
-                        we = win.acquire(1)
-                        fgemv(we, tab, acc, jp, b, c, s)
-                        win.release(1)
-            for b in range_(jp[3]):
-                ye = yout.acquire(1)
-                fout(acc, ye, jp, b)
-                yout.release(1)
+            for _rep in range_(jp[REP_F]):                # the head's tiles repeat one row
+                for s in range_(jp[0]):
+                    for tok in range_(jp[NPREP_F]):           # 0: the tables of this activation are already in tab
+                        xe = xin.acquire(1)
+                        if not NULL_PREP:
+                            fprep(xe, tab, tok, s, jp)
+                        xin.release(1)
+                    for b in range_(jp[1]):
+                        for c in range_(jp[2]):
+                            we = win.acquire(1)
+                            fgemv(we, tab, acc, jp, b, c, s)
+                            win.release(1)
+                for b in range_(jp[3]):
+                    ye = yout.acquire(1)
+                    fout(acc, ye, jp, b)
+                    yout.release(1)
 
-    def ln_body(ain, aout, f_nr, f_lny, f_lnx):
-        for _ in range_(LR):                                     # entry norm, per row: [x0 x1 lnw] -> xn
+    def ln_body(ain, aout, f_nr, f_lny, f_lnx, f_cnt, cnt):
+        e = ain.acquire(1)                                       # the mode element opens the ln stream too
+        f_cnt(e, cnt)
+        ain.release(1)
+        for _ in range_(LR):                                     # entry norm, per row: [x0 x1 lnw] -> xn; with lnw = normw, the head's
             e = ain.acquire(3)
             o = aout.acquire(1)
             if not NULL_LN:
@@ -221,9 +272,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             aout.release(1)
             ain.release(5)
 
-        for _ in range_(LR):                                     # res = x + out; xm = norm(res)
-            add_norm()
-        for _ in range_(LR):                                     # xres = res + out2 (xn is junk)
+        for _ in range_(cnt[0]):                                 # 2 L, or 0 for the head: res = x + out; xm = norm(res), then xres = res + out2
             add_norm()
 
     PRO = 1 + NPTAB + G.Q_AIN_ELEMS + 2 * G.K_AIN_ELEMS          # one row's prologue elements on ain
@@ -231,7 +280,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
 
     def _attn(g, ain, kvout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
               f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, f_skip, f_kvpack, f_count, h0,
-              kvall=None):
+              kvall=None, kw=None):
         def skip_prologues(rows):
             f_count(pb, rows * PRO)
             for _ in range_(pb[7]):
@@ -284,7 +333,19 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             skip_prologues(LR - 1 - g)
         f_skip(pb, LR - g)
         f_init(oacc, ml)
-        if RB > 1:
+        if kw is not None:                                       # KVSLICE: this core's slice, whole RB-row elements
+            for _ in range_(pb[4]):
+                e = kw.acquire(1)
+                f_stepb(e, qs, oacc, ml, pb, h0)
+                kw.release(1)
+            for _ in range_(pb[6]):
+                e = kw.acquire(1)
+                f_step(e, qs, oacc, ml, pb, h0)
+                kw.release(1)
+            for _ in range_(pb[3]):                              # the elements past this group's position
+                kw.acquire(1)
+                kw.release(1)
+        elif RB > 1:
             for _ in range_(pb[4]):
                 e = ain.acquire(2 * RB)
                 args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
@@ -299,9 +360,10 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                 e = ain.acquire(2)
                 f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
                 ain.release(2)
-        for _ in range_(pb[6]):                                  # the window's rows past this group's position
-            ain.acquire(2)
-            ain.release(2)
+        if kw is None:
+            for _ in range_(pb[6]):                              # the window's rows past this group's position
+                ain.acquire(2)
+                ain.release(2)
         f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
         o = ogout.acquire(1)
         f_fin(oacc, ml, o, 0)
@@ -318,23 +380,26 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
         packs_all = KV_ONE and kv_core(g, c)
 
         def body(ain, *rest):
+            kw = rest[0] if KVSL else None
+            rest = rest[1:] if KVSL else rest
             kvout = rest[0] if kv_core(g, c) else None
             rest = rest[1:] if kv_core(g, c) else rest
             ogout, bufs = rest[0], rest[1:11]
             fns = list(rest[11:len(rest) - (8 if packs_all else 0)])
             if RB <= 1:
                 fns.insert(8, None)
-            _attn(g, ain, kvout, ogout, *bufs, *fns, h0, kvall=tuple(rest[-8:]) if packs_all else None)
+            _attn(g, ain, kvout, ogout, *bufs, *fns, h0, kvall=tuple(rest[-8:]) if packs_all else None, kw=kw)
         return body
 
-    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx],
+    workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx, f_lncount,
+                                        Buffer(rtp_ty, name="lncnt")],
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(acc_ty, name=f"acc{c}"),
                                                   Buffer(table_ty, name=f"jobs{c}", initial_value=tables),
                                                   rtps[c], Buffer(q4_ty, name=f"nj{c}"), Buffer(jp_ty, name=f"jp{c}"),
-                                                  barriers[c], f_njobs, f_job, f_prep, f_gemv, f_out],
+                                                  f_mode, f_njobs, f_job, f_prep, f_gemv, f_out],
                               tile=Tile(c, 2), stack_size=0x1800))
 
     def abufs(g, c):
@@ -356,17 +421,49 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             kvall = ([Buffer(bhd, name="qn_kv"), Buffer(bhd, name="kn_kv"), Buffer(fcs, name="cs_kv"),
                       Buffer(pb_ty, name="pb_kv"), Buffer(brow, name="kout_kv"), Buffer(brow, name="vout_kv"),
                       Buffer(pb_ty, name="cnt_kv"), f_kvrow] if (KV_ONE and kv_core(g, c)) else [])
-            workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + outs + abufs(g, c) + afns + kvall,
-                                  tile=att_tiles[g][c], stack_size=0x1800))
+            kwc = [of_kw[c].cons()] if KVSL else []
+            workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + kwc + outs + abufs(g, c) + afns + kvall,
+                                  tile=att_tiles[g][c], stack_size=ASTACK))
 
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_lora, lni, lno, w_prods, x_prod, y_conss,
-                 ain_p, kv_c, og_cs):
+                 ain_p, kv_c, og_cs, *kw):
+        kw_ps = kw[0] if kw else None
         AB, XF = X.AD_BYTES, X.XRES_FLOATS
-        for c in range(N_CORES):
-            rtps[c][0] = 1 if DRAFT else 0
-        for c in range(N_CORES):
-            barriers[c].set(1)
         pw, py, px, pl = Pipeline(3), Pipeline(3), Pipeline(3), Pipeline(3)
+        if HEAD:
+            # a_pool is the head pool, a_consts the final norm's weight, a_kv (an InOut slot, as dx's head uses) the logits
+            # [L][vocab], a_act the normed rows, a_ptab the layer act (the mode element)
+            VOC = HP.out_floats // LR
+            HB = DXR.head_act_bytes(SPEC, LR)
+            KSH, SH = X.KS_H, HP.rows[0]["S"]
+            sb = HP.rows[0]["CPS"] * CHUNK
+
+            def tile(t):
+                for c in range(N_CORES):
+                    pw.fill(w_prods[c], a_pool, tap(L0.LMHEAD_POOL_BYTES, (c * HP.nb + t * HP.bt) * HP.bb,
+                                                    [SH, HP.bt, sb // 2048, 2048], [sb, HP.bb, 2048, 1]))
+                    py.drain(y_conss[c], a_kv, tap(LR * VOC * 4, (c * HP.nb + t * HP.bt) * 256, [1, HP.bt, LR, 256],
+                                                   [0, 256, VOC * 4, 1]))
+
+            px.fill(x_prod, a_ptab, bt(AB, X.AD_MODE + 2 * DXR.XE, DXR.XE))
+            pl.fill(lni, a_ptab, bt(AB, X.AD_MODE + 2 * DXR.XE, ELN))   # the ln core's too: no add-norms
+            for j in range(LR):                                  # the final norm, per row
+                pl.fill(lni, c_xres, bt(XF, j * HID, HID))
+                pl.fill(lni, a_consts, bt(ELN, 0, ELN))
+                pl.drain(lno, a_act, bt(HB, j * HID * 2, ELN))
+            for t in range(min(3, HP.nt)):                       # the first tiles' weights stream under the norm
+                tile(t)
+            pl.finish()
+            px.fill(x_prod, a_act, tap(HB, 0, [1, SH, LR, DXR.XE], [0, KSH * 2, HID * 2, 1]))
+            for t in range(3, HP.nt):
+                tile(t)
+            pw.finish()
+            py.finish()
+            px.finish()
+            return
+        px.fill(x_prod, a_act, bt(AB, X.AD_MODE + (1 if DRAFT else 0) * DXR.XE, DXR.XE))
+        # the ln core's too (2 L add-norms); ELN bytes from the mode element stay inside act, ending at most in junk
+        pl.fill(lni, a_act, bt(AB, X.AD_MODE + (1 if DRAFT else 0) * DXR.XE, ELN))
         stage = {}
         for job in jobs(SPEC, LR, DRAFT):
             stage.setdefault(job.stage, []).append(job)
@@ -411,7 +508,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                     zwait = False
                 if job not in early:
                     y_drain(job)
-                x_fill(job)
+                if not job.reuse:
+                    x_fill(job)
                 if job not in early:
                     w_fill(job)
 
@@ -443,7 +541,12 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             pa_in.fill(ain_p, a_act, bt(AB, X.AD_K + j * X.KV_ROW_ACT, KVW * 4))
             pa_in.fill(ain_p, a_act, bt(AB, X.AD_V + j * X.KV_ROW_ACT, KVW * 4))
         pk.finish()                                              # the window reads the rows this drain writes
-        pa_in.fill(ain_p, a_kv, bt(L0.KV_BYTES, 0, L0.KV_ROW))                              # attnrows window
+        if kw_ps:                                                # each core index's slice, compiled for one block (attnrows, kvslice)
+            for c in range(ACORES):
+                pa_in.fill(kw_ps[c], a_kv, tap(L0.KV_BYTES, KVB[c] * G.HD * 2, [1, RB, 2, KVS * G.HD * 2],
+                                               [0, L0.KV_ROW, L0.KV_ROW // 2, 1]))
+        else:
+            pa_in.fill(ain_p, a_kv, bt(L0.KV_BYTES, 0, L0.KV_ROW))                          # attnrows window
         e = early("o")                                           # o's first weights stream under the attention
         pa_out.finish()
         pa_in.finish()
@@ -475,13 +578,19 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
         pw.finish()
         px.finish()
 
-    rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty, lora_ty,
+    u8 = np.dtype[np.uint8]
+    io_ty = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty, lora_ty]
+    if HEAD:                                                    # the image stays the layer's: only the stream and its buffers differ
+        io_ty = [np.ndarray[(L0.LMHEAD_POOL_BYTES,), u8], xres_ty, np.ndarray[(ELN,), u8], np.ndarray[(HP.out_floats * 4,), u8],
+                 np.ndarray[(DXR.head_act_bytes(SPEC, LR),), u8], np.ndarray[(X.AD_BYTES,), u8], np.ndarray[(2 * ELN,), u8]]
+    rt = Runtime(sequence, [*io_ty,
                             of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                            [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                            [w_src[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_ain.prod(tile=Tile(2, 0)), of_kv.cons(tile=Tile(1, 0)),
-                            [of_og[g].cons(tile=Tile(2 + g, 0)) for g in range(LR)]])
+                            [of_og[g].cons(tile=Tile(2 + g, 0)) for g in range(LR)]]
+                 + ([[of_kw[c].prod(tile=Tile(KW_COLS[c], 0)) for c in range(ACORES)]] if KVSL else []))
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
@@ -493,5 +602,5 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + [(LN / "ln.h").read_bytes(), (LN / "ln_y.cc").read_bytes(), (LN / "ln_xn.cc").read_bytes(),
                    (LINL / "ln_nr.cc").read_bytes(), (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(),
                    (DESIGNS.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode(), str(LR).encode(),
-                   str(DRAFT).encode(), repr(GL_FLAGS).encode()])
+                   str(DRAFT).encode(), str(HEAD).encode(), repr(GL_FLAGS).encode(), repr(GEMV_SCHED).encode(), str(W_DEPTH).encode(), str(WRING).encode()])
 SPECIALIZE = {"srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

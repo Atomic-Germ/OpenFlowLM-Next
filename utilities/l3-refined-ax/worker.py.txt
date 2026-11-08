@@ -1,0 +1,22 @@
+    def private_fn(name, args):
+        return ExternalFunction(name, source_file=str(Path(__file__).parent / 'generated' / (name + '.cc')),
+                                arg_types=args, include_dirs=inc, compile_flags=X.OS)
+    prep_pair = private_fn('refine_prep', [t['x'], t['tab'], np.int32])
+    gy_low = private_fn('refine_low', [t['elem'], t['tab'], t['y'], np.int32, np.int32, np.int32])
+    sum_pair = private_fn('refine_sum', [t['y'], t['y']])
+
+    def refined_bands(win, xin, yout, B, K, low_y, prep_pair, gy_low, sum_pair):
+        tab = B['tab']
+        for i in X.range_(XN_ELEMS):
+            xe = xin.acquire(1)
+            prep_pair(xe, tab, i)
+            xin.release(1)
+        for _ in X.range_(2 * Q_PC + 2 * KV_PC):
+            ye = yout.acquire(1)
+            for g in X.band_range(X.n_groups(HID)):
+                we = win.acquire(1)
+                K["gy"](we, tab, ye, g, X.per_band(HID), 2)
+                gy_low(we, tab, low_y, g, X.per_band(HID), 2)
+                win.release(1)
+            sum_pair(ye, low_y)
+            yout.release(1)

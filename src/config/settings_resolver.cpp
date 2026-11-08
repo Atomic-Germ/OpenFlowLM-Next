@@ -49,6 +49,14 @@ static std::optional<std::string> get_cli_flag_value(const program_args_t& args,
         if (!args.prefill_mode.empty()) return args.prefill_mode;
         return std::nullopt;
     }
+    if (flag == "--prefill-precision") {
+        // Same sentinel as --prefill-mode: the empty string is "not supplied", and
+        // the parser refuses anything outside paired|weight_high|single. `paired`
+        // is the default, so an explicit `--prefill-precision paired` still has to
+        // win over a saved `weight_high` -- it cannot be read as "not supplied".
+        if (!args.prefill_precision.empty()) return args.prefill_precision;
+        return std::nullopt;
+    }
     if (flag == "--pmode") {
         // Default is "performance" — only return if user changed it
         if (!args.power_mode.empty() && args.power_mode != "performance") return args.power_mode;

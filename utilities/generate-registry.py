@@ -42,13 +42,51 @@ NON_SETTING_ENV_VARS = {
     "OFLM_KERNELS_DIR", "OFLM_OPEN_KERNELS_DIR", "OFLM_DIFFUSION_KERNELS_DIR",
     "OFLM_WHISPER_KERNELS_DIR",
     # debug / engineering knobs (not for the settings UI)
+    #
+    # OFLM_OPEN_PREFILL_ROUTE prints which prefill route `Engine::prefill` actually took,
+    # per request: the sequential path, the layer-major prompt path, or the block loop
+    # with its block and tail counts. Phase 27 needed the route *asserted* rather than
+    # inferred from elapsed time -- the block loop and a short sequential prompt overlap
+    # in wall time, so a timing cannot prove which one ran. Default off.
+    #
+    # OFLM_OPEN_BLOCK_FAIL_INJECT makes the block route fail on purpose, so the 27.11
+    # rewind-then-fallback handler can be exercised on hardware instead of being argued
+    # about: "before" fails the first block before it writes anything, "after" fails the
+    # second block after the first has already moved the caches, and "unrecoverable" also
+    # makes the rewind itself fail, to prove the handler throws instead of continuing on
+    # dirty state. It must never become a setting -- it exists to break a request.
+    #
+    # OFLM_OPEN_BLOCK_FAIL_AT=2 arms it for the SECOND prefill of the process. Without it
+    # the injector can only ever reach the reset branch, because a fresh prompt starts at
+    # position 0 and therefore takes no snapshot; the snapshot branch -- the one that has
+    # to undo a block that already ran -- is only reachable from a prompt that starts at
+    # position != 0. Like the injector, it exists to break a request and is never a
+    # setting.
+    # OFLM_CTX_TRACE prints, per request, the prompt token count, `total_tokens`, MAX_L and
+    # the engine's own position at the three points where a budget decision is made: after
+    # prefill, before the think preamble, and before the generation loop. It exists because
+    # the CLI and serve disagreed about the largest usable prompt and reading the source was
+    # not enough to say which one was right -- the trace showed Qwen3_5VL::generate stepping
+    # a think preamble the shared path does not. Off unless set; never a setting.
+    "OFLM_CTX_TRACE",
     "OFLM_DECODE_AUTO_THRESHOLD", "OFLM_DET_ROUTE", "OFLM_GRANITE_ENGINE",
-    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
-    "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN",
+    "OFLM_OPEN_ATTN_BLOCK", "OFLM_OPEN_ATTN_FA", "OFLM_OPEN_BLOCK_FAIL_AT", "OFLM_OPEN_BLOCK_FAIL_INJECT",
+    "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
+    # Per-layer accounting and its sequential-step budget are measurement-only diagnostics.
+    "OFLM_OPEN_PROFILE", "OFLM_OPEN_PROFILE_STEPS",
+    # Granite prefill/dispatch A/B switches; these force experimental paths
+    # for kernel parity and timing checks, rather than model preferences.
+    "OFLM_OPEN_FUSED_NORM", "OFLM_OPEN_PREFILL_PREP", "OFLM_OPEN_RUN_REUSE",
+    "OFLM_OPEN_GEMM_BLOCK", "OFLM_OPEN_GEMM_BLOCK_MIN", "OFLM_OPEN_PREFILL_ROUTE",
     "OFLM_OPEN_HOST_ATTN", "OFLM_OPEN_HOST_ATTN_DECODE",
     "OFLM_OPEN_LAYER_MAJOR", "OFLM_OPEN_MOE_BATCH",
     "OFLM_OPEN_MOE_BATCH_LOG", "OFLM_OPEN_MOE_REDISPATCH",
     "OFLM_OPEN_OMP_PASSIVE", "OFLM_OPEN_OMP_THREADS",
+    # Phase 23 attribution only: name projection roles that run an experimental
+    # arithmetic, and which one. Not settings -- they exist so a closed decision can be
+    # re-measured, they default to empty (the frozen `paired` route), and they are read
+    # by the standalone open_qwen36_cli rather than by the shipped oflm CLI.
+    "OFLM_OPEN_PREFILL_ROLES", "OFLM_OPEN_PREFILL_ROLE_MODE",
     "OFLM_OPEN_QUIET", "OFLM_OPEN_READ_FENCE",
     "OFLM_OPEN_ROUTE_SENTINEL", "OFLM_OPEN_SPIN_US",
     "OFLM_OPEN_STAGE_MAJOR", "OFLM_OPEN_STEP_TRACE",
@@ -56,12 +94,9 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_TIMEOUT_RETRY_MS", "OFLM_ROUTE_CHECK",
     "OFLM_WHISPER_DUMP_MEL", "OFLM_WHISPER_ENGINE",
     "OFLM_WHISPER_PROTOCOL",
-    # The Uno draft pass (K2-Horizon): a presence switch, read as "== 1", that
-    # turns on a pass the MODEL has to ship (its lora_file). It is a feature
-    # flag for a draft path still under development, not a preference about how
-    # to run a model, so it stays out of the settings UI. It becomes a
-    # per-model setting when the drafter settles.
-    "OFLM_SPECULATIVE",
+    # Development policy override for choosing lookup, Uno, or plain on a
+    # speculative cycle. OFLM_SPECULATIVE is the registered user setting.
+    "OFLM_SPEC_MODE",
 }
 
 def generate_cpp_header(settings):

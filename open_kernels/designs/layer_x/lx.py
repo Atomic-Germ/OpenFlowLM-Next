@@ -54,6 +54,7 @@ from layout import (A_BYTES, A_O, A_OG, A_OUT, A_QKV, A_RES, A_VEC, A_XM, A_XN, 
                     STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES, R, SPEC)
 import xcommon as X  # noqa: E402
 import xlayer as XL  # noqa: E402
+import linear_fp32 as LF
 
 D = R.linear
 if D is None:
@@ -104,9 +105,9 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         tab = B["tab"]
         if DENSE:
             # ONE stream: qkv | z, DeltaNet, the out projection, then the dense FFN tail.
-            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, QKV_PC + Z_PC, "linear")
+            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, QKV_PC + Z_PC, "linear", fp32=D.XN_F32)
             X.dn_body(win, yout, B, K)
-            X.prep_bands(win, xin, yout, B, K, OUT_K, OG_ELEMS, OUT_PC, "linear_out")
+            X.prep_bands(win, xin, yout, B, K, OUT_K, OG_ELEMS, OUT_PC, "linear_out", fp32=D.POST_F32)
             X.ffn_body(win, xin, yout, B, K)
             return
         # part 0: qkv | z against xn, then this core's DeltaNet heads
@@ -124,7 +125,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         # part 1: the MoE block
         X.moe_body(win, xin, yout, B, K)
 
-    workers = ([XL.ln_worker(of_lni, of_lno, tl, L)] + XL.main_workers(main_body, of_w, of_x, of_y, t, K)
+    workers = ([XL.ln_worker(of_lni, of_lno, tl, L, entry_fp32=D.XN_F32)] + XL.main_workers(main_body, of_w, of_x, of_y, t, K)
                + XL.glue_post_workers(of_side, of_gact, of_gout, of_pin, of_pout, g, GK, Tile(2, 3)))
 
     bt = X.bt
@@ -140,7 +141,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
         lni.fill(a_consts, tap=bt(C_BYTES, C_LNW, ELN), wait=True, group=tg_ln)
-        lno.drain(a_act, tap=bt(A_BYTES, A_XN, ELN), wait=True, group=tg_ln)
+        lno.drain(a_act, tap=bt(A_BYTES, A_XN, HID * (4 if D.XN_F32 else 2)), wait=True, group=tg_ln)
         # 2. qkv | z GEMV: weights now, x after the norm
         pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
         for c in range(N_CORES):
@@ -174,15 +175,19 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_CONV, GLUE_SIDE_BYTES - SIDE_CONV))
         py.finish()                                      # qkv, z are in DDR
         # 3. glue: conv state updated in place, DeltaNet records -> act[A_VEC]
-        pipe = Pipeline(3)
-        for tt in range(NT):
-            pipe.drain(gout_c, a_state, rows3(tt))
-            if tt >= KEY_TILES:
-                pipe.drain(gout_c, a_act, bt(A_BYTES, A_VEC + (tt - KEY_TILES) * D.HEADS_PER_TILE * D.RECORD_BYTES,
-                                             D.HEADS_PER_TILE * D.RECORD_BYTES))
-            pipe.fill(gact_p, a_act, bt(A_BYTES, A_QKV + tt * TILE * 4, TILE * 4))
-            pipe.fill(gact_p, a_state, rows3(tt))
-        pipe.finish()                                    # the records are in DDR
+        if D.CONV_F32:
+            LF.history_sequence(XL, pipe_factory=Pipeline, a_state=a_state, a_act=a_act,
+                                gact_p=gact_p, gout_c=gout_c, state_bytes=STATE_BYTES, act_bytes=A_BYTES)
+        else:
+            pipe = Pipeline(3)
+            for tt in range(NT):
+                pipe.drain(gout_c, a_state, rows3(tt))
+                if tt >= KEY_TILES:
+                    pipe.drain(gout_c, a_act, bt(A_BYTES, A_VEC + (tt - KEY_TILES) * D.HEADS_PER_TILE * D.RECORD_BYTES,
+                                                 D.HEADS_PER_TILE * D.RECORD_BYTES))
+                pipe.fill(gact_p, a_act, bt(A_BYTES, A_QKV + tt * TILE * 4, TILE * 4))
+                pipe.fill(gact_p, a_state, rows3(tt))
+            pipe.finish()                                    # the records are in DDR
         ps.finish()
         # 4. DeltaNet on the main cores: S in place, o -> act[A_O]
         X.dn_sequence(pw, py, a_state, a_act, w_prods, y_conss, A_BYTES, A_VEC, A_O, STATE_BYTES, STATE_S_OFF,
@@ -192,7 +197,8 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         pipe = Pipeline(3)
         pipe.fill(pin_p, a_consts, bt(C_BYTES, C_NW, ELEM))
         for g in range(NG):
-            pipe.drain(pout_c, a_act, bt(A_BYTES, A_OG + g * G * 2, G * 2))
+            pipe.drain(pout_c, a_act, bt(A_BYTES, A_OG + g * G * (4 if D.POST_F32 else 2),
+                                       G * (4 if D.POST_F32 else 2)))
             pipe.fill(pin_p, a_act, bt(A_BYTES, A_O + g * G * 4, G * 4))
             pipe.fill(pin_p, a_act, bt(A_BYTES, A_Z + g * G * 4, G * 4))
         pipe.finish()                                    # og is in DDR

@@ -13,6 +13,7 @@ same way they drive the closed DLL. Below the seam it is:
 | [pools.cpp](pools.cpp) | interprets the manifest's packing plan: each layer's weights into the byte order the kernels stream, straight into resident device buffers (the same plan `open_kernels/recipes/pack.py` runs in NumPy) |
 | [core.cpp](core.cpp) | device, contexts, kernels, 21 GB of resident pools, per-layer state; runs the manifest's program per layer, one `step()` per token |
 | [engine.cpp](engine.cpp) | the `causal_lm` adapter: forward / prefill / checkpoint / restore / KV accessors |
+| [spec_lookup.hpp](spec_lookup.hpp) | OPEN-SPEC-LOOKUP: prompt-lookup drafts, and each cycle's choice of a lookup verify, a Uno cycle or a plain step (`cli --spec`, served greedy requests with `OFLM_SPECULATIVE=1`) |
 | [cli.cpp](cli.cpp), [chat.py](chat.py) | drive the engine without the app (ids in, tokens out; `chat.py` tokenizes) |
 | [manifest_test.cpp](manifest_test.cpp) | the OPEN-MANIFEST unit test (no XRT): parses the checked-in fixture, checks the model refusals |
 | `../xclbins/<model>/open_kernels/` | `manifest.json` + the six kernels (`lx0 lx1 ax0 ax1 ln lm_head_q8`), **built, not checked in** — see below |
@@ -635,3 +636,32 @@ OpenAI-style chat completions:
 The same prompt twice in one server session gives the same answer (state reset
 through the app's checkpoint/restore path). Prompt cache, sampler, chat
 template, tool parsing — all the app's, unchanged.
+
+## Paired prefill runtime (manifest version 4)
+
+The shared Core accepts `gemm_block.low_kernels`, mapping each high GEMM name
+to its `<high>_low` companion. Low descriptors must declare
+`weight_component: "bf16_residual"`, a separate context/stream, and no patch.
+The validated wide dense Qwen3.5 roles require all four projections, FP32
+convolution history, paired KV, and unchanged norm/activation geometry.
+Incompatible or incomplete declarations fail during manifest parsing.
+
+Each projection evaluates `(W_hi X_hi + W_hi X_lo) +
+(W_lo X_hi + W_lo X_lo)` with host-owned intermediate outputs. The shared
+implementation is compiled into both `oflm` and `open_qwen36_cli`. Stage-major
+raw dispatch is disabled for these routes; layer-major and block-major retain
+the validated block-at-a-time arithmetic. Legacy manifests use one dispatch.
+
+This runtime support requires an exported version-4 kernel bundle to activate.
+Rebuilding the executable alone does not upgrade old kernels or manifests.
+The normal qwen35 recipe now exports the five low-weight companions (46 sets)
+for validated dense Q4 H5120/FF17408 models. Use `--model-dir` with the ordinary
+exporter to retain the model's exact vocabulary metadata; weights do not need
+repacking. Export paths remain relative to the bundle.
+
+The shared CLI with this bundle reproduces 44 retained logit files exactly
+across both hybrid schedules, and passes 42 independent CPU logit comparisons
+for a 64-layer, 20-token prompt plus continuation. Integrated all-layer,
+long-prefix and reset checks remain separate gates. The local FP32 DeltaNet
+post-output experiment is also a separate change. See
+[the export/smoke workflow](../../utilities/prefill-production/README.md).
