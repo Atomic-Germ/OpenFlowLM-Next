@@ -118,3 +118,5 @@ compose.override.yaml
 .dev.vars
 node_modules/
 benchmarks-worker/.wrangler/
+benchmarks-worker/*.bak
+*.swp
