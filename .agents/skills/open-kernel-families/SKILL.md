@@ -271,4 +271,25 @@ Traps already paid for (do not rediscover next time):
   remaining string after the `blk.` rewrite. `shared_expert_gate` is deliberately not packed (no
   shared expert; the sgw element stays zero, the hdr sigmoid on it is unused).
 - Attention is GQA 32/8, head_dim 64, full RoPE, q/k RMSNorm pre-RoPE, ATTN_GATE=0 (fin_ng path).
-  Do not re-add the gate region to `w_regions`/`y_regions` for this family.
+  Do not re-add the gate region to `w_regions`/`y_regions` for this family. The no-gate
+  `full_sequence` in `xlayer.py` must skip the v-stage fill (q/k/v are regions 0/1/2 already
+  filled by the first loop) and read `o` from region 3, not 4.
+- Whole-layer designs: `sx.py` (conv+MoE, 2 parts) and `ax.py` no-gate (2 parts). A short-conv
+  core kernel (`short_conv_step`) MUST be passed as a Worker `fn_arg`, not captured by closure:
+  as a closure it goes through `ExternalFunction.__call__`'s numpy dtype validation, where the
+  fifo's MLIR-typed element (`F32Type`) never equals `np.float32` and every build fails
+  `Argument 0: expected (512,)/<class 'numpy.float32'>, got (512,)/f32`. cx.py passes it as a
+  fn_arg for the same reason. Also: `TaskGroup` must be imported in sx, and every created group
+  finished (`tg_o` was left unclosed).
+- `GEN_KERNELS` is one path, so a family reusing two design trees (layer_x + dense for the
+  leading dense layers) uses a wrapper (`designs/lfm2moe/gen_kernels.py`) that generates both;
+  the dense side gets a shim carrying `dense.geometry(spec)` since dense's gen reads only
+  `R.geo`/`R.spec`. The `lfm2` recipe guard was widened to accept `lfm2moe` specs *with* dense
+  layers (cx.py/dx.py reuse); its build dir must be distinct (`..._lfm2moe`) or the build key
+  collides with lfm2's same-geometry set.
+- Router bias pack: the `put` cap must be the exact `E*4` (the GGUF tensor is F32[E]); a cap of
+  the padded ELEM slot (4096) fails in `pack_norm` ("is X B of f32, the slot holds Y B of
+  bf16"). The consts blob is zero-memset before packing, so the slot's tail stays zero.
+- `make_test_mx.py` top-k picks must be `< E` (the [3,11,23,41] list breaks for E=32) and the
+  run cfg's build dir must come from `MX_BUILD_DIR` (op-gate passes its geometry-tagged dir;
+  a hard-coded `build_mx_full_lfm` silently ran the 24B xclbin against 8B buffers).
