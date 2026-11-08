@@ -6,6 +6,7 @@ This guide will help you get started with OpenFlowLM on Linux, including setup f
 - Ubuntu 24.04 LTS
 - Ubuntu 25.10
 - Ubuntu 26.04
+- Fedora 44
 - Arch Linux
 - Other (Generic Linux)
 
@@ -128,9 +129,129 @@ In short: if 1.1 firmware breaks probing on stock 6.19, do not keep forcing the 
 
 ---
 
+### Fedora 44
+
+The stock Fedora kernel carries the `amdxdna` driver (in-tree since 6.17), so
+only the userspace side needs installing.
+
+#### 1. Install XRT and the NPU plugin
+
+Fedora's own repositories have no XRT. The third-party COPR
+[`darrencocco/ryzen-ai-npu`](https://copr.fedorainfracloud.org/coprs/darrencocco/ryzen-ai-npu/)
+packages it as `xrt-base`, the name the OpenFlowLM `.rpm` depends on:
+
+```sh
+sudo dnf copr enable darrencocco/ryzen-ai-npu
+sudo dnf install --allowerasing xrt-base xrt-plugin-amdxdna
+```
+
+`--allowerasing` is there because `xrt-base` requires the `ocl-icd` OpenCL
+loader, and a default Fedora install has the other one, `OpenCL-ICD-Loader`,
+which conflicts with it. Both provide the same `libOpenCL.so.1` and read the
+same `/etc/OpenCL/vendors/`, so dnf swapping one for the other loses nothing;
+check that the transaction removes nothing else. The COPR also has
+`amdxdna-kmod`, which you don't need with the in-tree driver.
+
+#### 2. Raise the memlock limit
+
+XRT locks the NPU's buffers into memory, and the default limit is 8 MB. With
+it, everything that touches the NPU fails, `xrt-smi examine` included:
+
+```text
+mmap(addr=..., len=67108864, ...) failed (err=-11): Resource temporarily unavailable
+```
+
+```sh
+printf '*    soft    memlock    unlimited\n*    hard    memlock    unlimited\n' \
+  | sudo tee /etc/security/limits.d/99-npu-memlock.conf
+```
+
+Log out and back in, then run `ulimit -l` in a new terminal. If it still says
+`8192`, the terminal was started by systemd's user manager, which applies its
+own default; raise that too and log in again:
+
+```sh
+sudo mkdir -p /etc/systemd/user.conf.d
+printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' \
+  | sudo tee /etc/systemd/user.conf.d/99-npu-memlock.conf
+```
+
+#### 3. Confirm XRT sees the NPU
+
+```sh
+xrt-smi examine
+```
+
+The device table should list the NPU (`NPU Strix`, `NPU Strix Halo`,
+`NPU Krackan`).
+
+---
+
 ### Build System
 
 For the full build system with CMake presets, see [docs/BUILD.md](BUILD.md).
+
+#### Before the first build
+
+Set up the NPU runtime for your distribution first (above). A from-source
+build then needs three more things.
+
+**The submodules.** The tokenizer library is a git submodule. Clone with
+`--recursive`, or in a checkout made without it:
+
+```sh
+git submodule update --init --recursive
+```
+
+Without it, the configure stops with `third_party/tokenizers-cpp does not
+contain a CMakeLists.txt file`.
+
+**The development packages.**
+
+Fedora 44:
+
+```sh
+sudo dnf install gcc-c++ cmake ninja-build mold ccache git cargo rust patchelf uv \
+    boost-devel libcurl-devel fftw-devel ffmpeg-free-devel \
+    readline-devel ncurses-devel libdrm-devel xrt-base-devel
+```
+
+`xrt-base-devel` comes from the COPR above. `uv` is optional; the kernel build
+uses it, when it is there, to set up its Python venv. `ffmpeg-free-devel` is
+enough to build; RPM Fusion's `ffmpeg-devel` adds the codecs Fedora leaves
+out.
+
+Ubuntu / Debian (the list the Docker builder installs on Ubuntu 26.04, with
+XRT from the PPA above):
+
+```sh
+sudo apt install build-essential cmake ninja-build mold ccache pkg-config git \
+    curl wget doxygen python3 python3-dev python3-pip python3-venv cargo rustc \
+    clang lld patchelf rpm dpkg-dev file fakeroot uuid-dev \
+    libboost-all-dev libcurl4-openssl-dev libfftw3-dev libreadline-dev \
+    libncurses-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+    libswresample-dev libssl-dev zlib1g-dev libdrm-dev libudev-dev \
+    libxrt2 libxrt-npu2 libxrt-dev libxrt-utils libxrt-utils-npu python3-xrt
+```
+
+`libdrm-dev` / `libdrm-devel` is easy to miss: the configure does not check for
+it, and the build stops partway with `fatal error: libdrm/drm.h: No such file
+or directory`.
+
+**A compiler that matches the system libraries.** Use GCC, or Clang with
+GCC's C++ library (libstdc++). The distribution's Boost and XRT are built
+against libstdc++, and a compiler that uses LLVM's libc++ instead (`zig c++`,
+or a Clang set up that way) won't link against them. CMake keeps the first
+compiler it found, so after installing or switching compilers, configure from
+scratch:
+
+```sh
+CC=gcc CXX=g++ cmake --fresh --preset linux-default
+```
+
+**The NPU, at build time.** The embedding-model (BERT) kernel sets are built on
+the device, so the build host needs the NPU working and the memlock limit
+raised, as for running `oflm`.
 
 **Quick build:**
 ```sh
