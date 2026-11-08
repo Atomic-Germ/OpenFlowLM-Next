@@ -707,9 +707,14 @@ def full_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_pro
     tg_ln.finish()                                            # xn is in DDR
     tg_x = TaskGroup()
     x_prod.fill(a_act, tap=bt(act_t, AA_XN, ELEM), wait=True, group=tg_x)
-    for c in range(N_CORES):
-        pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[3]))
-        py.drain(y_conss[c], a_act, bt(act_t, *y_regions(c)[3]))
+    if not SPEC.attn_gate:
+        # q, k and v already filled above (regions 0, 1, 2) -- nothing for the
+        # v stage; go straight to the attention pre-fills.
+        pass
+    else:
+        for c in range(N_CORES):
+            pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[3]))
+            py.drain(y_conss[c], a_act, bt(act_t, *y_regions(c)[3]))
     pa_out, pa_in = Pipeline(3), Pipeline(3)
     pa_out.drain(aout_c, a_kv, bt(kv_t, KV_ROW, KV_ROW))        # the new row [k' | v'] -> row pos (attnpos)
     pa_out.drain(aout_c, a_act, bt(act_t, AA_OG, NHL * HD * 2))
@@ -730,8 +735,9 @@ def full_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_pro
     if SPEC.attn_gate:
         pa_in.fill(ain_p, a_act, bt(act_t, AA_QG + QW * 4, QW * 4))
     for c in range(N_CORES):
-        pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[4]))
-        py.drain(y_conss[c], a_act, bt(act_t, *y_regions(c)[4]))
+        idx_o = 3 if not SPEC.attn_gate else 4
+        pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[idx_o]))
+        py.drain(y_conss[c], a_act, bt(act_t, *y_regions(c)[idx_o]))
     tg_ln2 = TaskGroup()
     lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
     lni.fill(a_consts, tap=bt(consts_t, CA_POSTLN, ELEM), wait=True, group=tg_ln2)

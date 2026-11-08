@@ -40,7 +40,7 @@ from .dense import attn_flags  # noqa: F401  (the same list the dense design bui
 from .catalogue import OpRangeError, check_buffer_args, require
 from .qwen36moe import (CHUNK, ELEM, MB, mixed_check, proj_op, q4_chunks, quant_check,
                         require_gemv, role_bytes, roundup)
-from .spec import FULL, SHORT_CONV, ModelSpec
+from .spec import FULL, FULL_DENSE, SHORT_CONV, SHORT_CONV_DENSE, ModelSpec
 
 # The attention layers ARE dense layers (designs/dense/dx.py runs them unchanged), so the
 # chunk geometry a design reads off the family module is the dense one.
@@ -90,21 +90,23 @@ def _check(spec: ModelSpec) -> None:
     one refuses outright ("every layer must be a dense layer with an FFN"). The projection
     checks below are the same ones, asked about the layers that have those projections."""
     n = D.cores_for(spec)
-    if spec.family != "lfm2":
+    if spec.family not in ("lfm2", "lfm2moe"):
         raise OpRangeError(f"lfm2 recipe on a {spec.family!r} spec")
-    bad = sorted(set(spec.layer_types) - {SHORT_CONV, FULL})
+    if spec.family == "lfm2moe" and not ({"short_conv_dense", "full_attention_dense"} & set(spec.layer_types)):
+        raise OpRangeError("lfm2 recipe on an lfm2moe spec without dense layers")
+    bad = sorted(set(spec.layer_types) - {SHORT_CONV, FULL, SHORT_CONV_DENSE, FULL_DENSE})
     if bad:
         raise OpRangeError(f"lfm2: layer types {bad} are neither short_conv nor full_attention")
-    if SHORT_CONV not in spec.layer_types:
+    if SHORT_CONV not in spec.layer_types and SHORT_CONV_DENSE not in spec.layer_types:
         raise OpRangeError("lfm2: no short_conv layer in layer_types; this is the dense recipe's model")
-    if FULL not in spec.layer_types:
+    if FULL not in spec.layer_types and FULL_DENSE not in spec.layer_types:
         raise OpRangeError("lfm2: no full_attention layer in layer_types")
     if spec.conv_kernel != TAPS:
         raise OpRangeError(f"lfm2: conv_kernel {spec.conv_kernel} is not {TAPS}; the conv core "
                            f"holds taps - 1 rows of state and the design is built for {TAPS}")
     if spec.activation != "silu":
         raise OpRangeError(f"lfm2: activation {spec.activation!r}, not silu")
-    if spec.attn_gate or spec.has_linear or spec.has_dense or spec.intermediate == 0:
+    if spec.attn_gate or spec.has_linear or spec.intermediate == 0:
         raise OpRangeError("lfm2: expected a short_conv + full_attention hybrid with an FFN on "
                            "every layer, no attention gate and no DeltaNet layer")
     quant_check(spec, "lfm2")

@@ -22,9 +22,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, Program, Runtime, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 
@@ -63,7 +64,7 @@ def sx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     state_ty = np.ndarray[(STATE_BYTES,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(AD_BYTES,), np.dtype[np.uint8]]
     fsc = np.ndarray[(SCW,), np.dtype[np.float32]]
-    bsc = np.ndarray[(SCW,), np.dtype[np.uint8]]
+    bsc = np.ndarray[(SCW,), np.dtype[bfloat16]]
 
     inc = include_dirs() + [str(GEMV), str(SC), str(X.LN), str(X.RT), str(HERE.parent / "moe_experts")]
     K = X.kernels(inc, t)
@@ -94,7 +95,7 @@ def sx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         xin.release(1)
         X.moe_body(win, xin, yout, B, K)
 
-    def sc_body(scin, scw, scy, scst):
+    def sc_body(scin, scw, scy, scst, f_sc):
         for _ in range_(HID // SCW):
             w = scw.acquire(TAPS)
             e = scin.acquire(5)
@@ -107,7 +108,7 @@ def sx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             scw.release(TAPS)
 
     workers = ([XL.ln_worker(of_lni, of_lno, tl, L)] + XL.main_workers(main_body, of_w, of_x, of_y, t, K)
-               + [Worker(sc_body, fn_args=[of_scin.cons(), of_scw.cons(), of_scy.prod(), of_scst.prod()],
+               + [Worker(sc_body, fn_args=[of_scin.cons(), of_scw.cons(), of_scy.prod(), of_scst.prod(), f_sc],
                          tile=Tile(2, 3), stack_size=0x1800)])
 
     def sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
@@ -160,6 +161,7 @@ def sx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SC_OUT + c * SC_PC * BB_HID, SC_PC * BB_HID))
             py.drain(y_conss[c], a_act, bt(AD_BYTES, AA_OUT + c * SC_PC * YB, SC_PC * YB))
+        tg_o.finish()
         targ = [c for c in range(N_CORES)]
         # 5. residual + norm + router (the full-sequence tail)
         tg_ln2 = TaskGroup()

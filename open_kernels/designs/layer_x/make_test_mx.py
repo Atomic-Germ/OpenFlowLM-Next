@@ -60,7 +60,9 @@ def main() -> int:
     xm = (rng.standard_normal(HID) * 0.5).astype(np.float32).astype(bfloat16)
     xres = (rng.standard_normal(HID) * 0.5).astype(np.float32)
     # router: choose topk distinct experts deterministically
-    idx = [3, 11, 23, 41][:TOPK] if TOPK <= 4 else list(range(TOPK))
+    idx = [e for e in [3, 11, 23, 41] if e < E][:TOPK] if TOPK <= 4 else list(range(min(TOPK, E)))
+    idx += list(range(min(idx[-1] + 1 if idx else 0, E)))
+    idx = idx[:TOPK]
     w = np.array([1.0 / TOPK] * TOPK, np.float64)
     # Reference block output
     acc = np.zeros(HID, np.float64)
@@ -89,11 +91,12 @@ def main() -> int:
     (HERE / "act_mx.bin").write_bytes(act.tobytes())
     (HERE / "xres_mx.bin").write_bytes(xres.tobytes())
     (HERE / "ref_mx.bin").write_bytes(ref.astype(np.float32).tobytes())
+    bd = os.environ.get("MX_BUILD_DIR", "build_mx_full_lfm")
     cfg = [
         "device",
         f"moegeom {E} {TOPK} {S} {C.UP_BYTES} {C.DOWN_PER_CORE * C.DOWN_BAND} {POOL_DOWN} {POOL_DOWN + E * C.UP_BYTES} {POOL_DOWN + E * C.UP_BYTES} {POOL_DOWN + E * C.UP_BYTES}",
-        "xclbin X build_mx_full_lfm/final.xclbin",
-        "kernelx mx X build_mx_full_lfm/insts.bin",
+        f"xclbin X {bd}/final.xclbin",
+        f"kernelx mx X {bd}/insts.bin",
         f"buf pool {POOL_BYTES} pool_mx.bin",
         f"buf xres {HID*4} xres_mx.bin",
         f"buf consts {CA_BYTES} consts_mx.bin",

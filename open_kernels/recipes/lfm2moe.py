@@ -643,7 +643,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
         b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
     if SHORT_CONV_DENSE in spec.layer_types:
         b["short_conv"] = {"design": "short_conv/cx.py",
-                           "build_dir": f"short_conv/build_h{spec.hidden}_t{TAPS}",
+                           "build_dir": f"short_conv/build_h{spec.hidden}_t{TAPS}_lfm2moe",
                            "env": {"SC_HID": str(spec.hidden), "SC_TAPS": str(TAPS)}}
     if FULL_DENSE in spec.layer_types:
         b["dx"] = {"design": "dense/dx.py", "build_dir": f"dense/build_h{spec.hidden}",
@@ -655,8 +655,10 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     return b
 
 
-GEN_KERNELS = "designs/layer_x/gen_kernels.py"
+GEN_KERNELS = "designs/lfm2moe/gen_kernels.py"
 KERNEL_SOURCES = list(Q.KERNEL_SOURCES) + [
-    "designs/short_conv/cx.py", "designs/short_conv/*.cc", "designs/short_conv/*.h",
+    "designs/short_conv/cx.py", "designs/short_conv/*.cc", "designs/short_conv/*.h", "designs/short_conv/*.py",
+    "designs/dense/*.py", "designs/dense/*.h",
     "designs/router/*.cc", "designs/router/*.h", "designs/router/*.py",
+    "designs/lfm2moe/*.py",
 ]

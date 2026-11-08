@@ -378,7 +378,7 @@ def gate_moe(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
     d = DESIGNS / "layer_x"
     # mx reads the spec from OPEN_KERNELS_SPEC; point it at this spec file.
     spec_path = kw.get("_spec_path")
-    e = dict(env, MX_KIND="full")
+    e = dict(env, MX_KIND="full", MX_BUILD_DIR=f"build_mx_full_{tag}")
     # The caller (gate_points) passes no spec path in kw; derive from spec via
     # the caller's file -- stored on the spec object by main().
     sp = getattr(spec, "_path", None)
@@ -434,7 +434,7 @@ def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
         if fn is None:
             raise GateError(f"op-gate: {op} {kw} has no automated gate: "
                             f"{NOT_AUTOMATED.get(op, 'no fixture for this op')}")
-        spec._path = spec_path  # moe gate: mx reads OPEN_KERNELS_SPEC from here
+        object.__setattr__(spec, "_path", spec_path)  # frozen spec; moe gate: mx reads OPEN_KERNELS_SPEC from here
         note = f"{spec_path.stem} (utilities/op-gate.py: the {op} fixture at this geometry)"
         print(f"-- gate {op} {kw}", flush=True)
         fn(spec, kw, py, env, harness, note, dry)
