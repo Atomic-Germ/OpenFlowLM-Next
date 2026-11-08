@@ -305,7 +305,7 @@ applies (`--only`, `--check`, `-j`), so that script takes them too.
 | Component | Requirements |
 |---|---|
 | **Open kernels** | ironvenv (mlir-aie + Peano), XRT on PATH, NPU not required |
-| **Open NPUE** | ironvenv, XRT with pyxrt, NPU present |
+| **Open NPUE** | ironvenv, XRT with pyxrt, NPU present, memlock limit raised |
 
 ---
 
@@ -448,8 +448,10 @@ kernel lookup fails.
 ### Linux
 
 [`linux-getting-started.md`](linux-getting-started.md) has the rest: the
-`apt install` line for the development packages this build needs, and the
-driver and XRT setup.
+driver and XRT setup for each distribution, and
+[what a from-source build needs](linux-getting-started.md#before-the-first-build)
+on top of it -- the submodules, the development packages for Fedora and
+Ubuntu, and a compiler that matches the system libraries.
 
 Other presets in the repository-root `CMakePresets.json`: `linux-portable`.
 Two more exist only in `src/CMakePresets.json`: `linux-snap` and
@@ -558,6 +560,42 @@ cmake --build --preset linux-debug
 ---
 
 ## Common Issues
+
+### "third_party/tokenizers-cpp does not contain a CMakeLists.txt file"
+
+The submodules were never checked out (a clone without `--recursive`):
+
+```bash
+git submodule update --init --recursive
+```
+
+### "Could not find a package configuration file provided by "Boost""
+
+The development packages are missing. The full list for Fedora and Ubuntu is in
+[linux-getting-started.md](linux-getting-started.md#before-the-first-build).
+`Package 'xrt' not found` on the line before it means the same for XRT's
+headers (`xrt-base-devel` on Fedora, `libxrt-dev` on Ubuntu).
+
+### "fatal error: libdrm/drm.h: No such file or directory"
+
+Install `libdrm-devel` (Fedora) or `libdrm-dev` (Ubuntu). The configure does
+not check for it, so it only shows up once the build is compiling.
+
+### Undefined references to `std::__1::...` when linking
+
+The compiler uses LLVM's libc++ (`zig c++`, or a Clang set up that way), while
+the system Boost and XRT were built against GCC's libstdc++. Install GCC and
+configure from scratch -- CMake otherwise keeps the compiler it found first:
+
+```bash
+CC=gcc CXX=g++ cmake --fresh --preset linux-default
+```
+
+### "mmap(...) failed (err=-11): Resource temporarily unavailable"
+
+The memlock limit is too low for XRT to lock the NPU's buffers (the default is
+8 MB). It breaks `xrt-smi`, `oflm` and the BERT kernel export alike; see the
+memlock step in [linux-getting-started.md](linux-getting-started.md).
 
 ### "Kernel not loaded"
 
