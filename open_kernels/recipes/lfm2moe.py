@@ -456,7 +456,7 @@ def pack_plan(spec: ModelSpec) -> dict:
                 {"op": "put", "tensor": pre + "self_attn.q_norm.weight", "dst": L.CA_META, "cap": hd * 2},
                 {"op": "put", "tensor": pre + "self_attn.k_norm.weight", "dst": L.CA_META + hd * 2, "cap": hd * 2},
                 router_op(L.CA_RW),
-                {"op": "put", "tensor": pre + "exp_probs_b.bias", "dst": L.CA_BIAS, "cap": L.BIAS_BYTES},
+                {"op": "put", "tensor": pre + "exp_probs_b.bias", "dst": L.CA_BIAS, "cap": E * 4},
             ],
         }
         # conv MoE: same experts + router, with the short-conv mixer in the pool
@@ -474,7 +474,7 @@ def pack_plan(spec: ModelSpec) -> dict:
                 {"op": "transpose", "tensor": pre + "shortconv.conv.weight", "dst": L.CD_CONV,
                  "rows": hid, "cols": TAPS, "elem": 2},
                 router_op(L.CA_RW),
-                {"op": "put", "tensor": pre + "exp_probs_b.bias", "dst": L.CA_BIAS, "cap": L.BIAS_BYTES},
+                {"op": "put", "tensor": pre + "exp_probs_b.bias", "dst": L.CA_BIAS, "cap": E * 4},
             ],
         }
     # -- the dense tails (the leading layers): dense silu FFN on the mixers, no
