@@ -19,7 +19,7 @@ classifiers = [
 dependencies = [
     "annotated-types==0.8.0",
     "anyio==4.14.2",
-    "certifi==2026.7.22",
+    "certifi==2026.10.18",
     "distro==1.9.0",
     "h11==0.16.0",
     "jiter==0.16.0",
