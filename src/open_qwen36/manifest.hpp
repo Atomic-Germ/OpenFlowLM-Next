@@ -60,6 +60,7 @@ struct PackOp {
     uint64_t row0 = 0, n_total = 0;                                     ///< bfp16_gemm: this tensor's first row in the stacked
                                                                         ///< weight, and the weight's padded row count
     std::string glu;                                                    ///< bfp16_gemm: "gate" | "up" half of OPEN-PREFILL-BFP16-FFN's gate|up
+    uint64_t src_rows = 0;                                              ///< expert_stripes[_gguf] / expert_down_gguf: the source rows (the pool's padded rows are zero-filled)
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed

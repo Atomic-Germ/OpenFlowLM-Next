@@ -268,7 +268,14 @@ void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, floa
 }}
 }}
 ''',
-        "gemv_q4_gup.cc": gemv_hdr + f'''// MoE up (band 0) / gate (band 1): 64-row K={hid} bands (the routed stripe halves through the
+        "gemv_q4_gup.cc": (gemv_hdr + f'''// MoE up (band 0) / gate (band 1): 64-row K={hid} bands, half {sub} of {C.HALVES_PER_CORE} per core (wide-FF).
+extern "C" {{
+void gemv_q4_gup(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
+                 int32_t group, int32_t band, int32_t sub) {{
+  gemv_q4_pool_group_rt(t, tab, (unsigned)group, ms + {C.MS_U} + {C.HID_PC} * band + 64 * sub, {pb_hid}, 2);
+}}
+}}
+''' if C.HALVES_PER_CORE > 1 else gemv_hdr + f'''// MoE up (band 0) / gate (band 1): 64-row K={hid} bands (the routed stripe halves through the
 // strided tap, the shared expert's band as it lies) into ms[{C.MS_U} + {C.HID_PC} band ..].
 extern "C" {{
 void gemv_q4_gup(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
@@ -276,7 +283,7 @@ void gemv_q4_gup(const uint8_t *__restrict t, const uint8_t *__restrict tab, flo
   gemv_q4_pool_group_rt(t, tab, (unsigned)group, ms + {C.MS_U} + {C.HID_PC} * band, {pb_hid}, 2);
 }}
 }}
-''',
+'''),
         "gemv_q4_gdown.cc": gemv_hdr + f'''// MoE down, element j of {C.DOWN_ELEMS}, into ms[{C.MS_YD} ..] (the core's {C.ROWS_PC} rows) against h's table at tab + {C.H_TAB_OFF}:
 // routed slots: {C.DOWN_PER_CORE} 128-row RS=4 bands of {g_down} elements; the shared expert: {C.ROWS_PC // 64} 64-row RS=2 bands of {g_sdown}.
 extern "C" {{

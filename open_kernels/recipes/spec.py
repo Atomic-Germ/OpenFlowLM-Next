@@ -18,7 +18,9 @@ from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
 SHORT_CONV = "short_conv"                             # LFM2: a short depthwise causal conv INSTEAD of attention
-LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a dense layer with sliding-window attention
+SHORT_CONV_DENSE = "short_conv_dense"                 # LFM2-MoE: conv mixer + dense FFN (the leading dense layers)
+FULL_DENSE = "full_attention_dense"                   # LFM2-MoE: attention mixer + dense FFN (dense inside the attention tail)
+LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV, SHORT_CONV_DENSE, FULL_DENSE)   # dense_local: a dense layer with sliding-window attention
 # Adding a member here is free: `layer_types` is one field and no shipped spec uses the new
 # value, so no hash moves. Adding a dataclass FIELD is not - spec_hash() covers every field.
 
@@ -102,6 +104,7 @@ class ModelSpec:
     # and hashes exactly as the pre-field specs did while it is 1 (to_dict below), the same way
     # canonical_quant keeps a no-q8 model hashing as the bare string.
     norm_groups: int = 1
+    dense_lead: int = 0             # LFM2-MoE: the first N layers carry a dense FFN instead of the routed experts; 0 is every other family
     # the weight format: the string every role is at ("q4_1"), or a role -> format map
     # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
     quant: str | dict = DEFAULT_QUANT
@@ -143,7 +146,15 @@ class ModelSpec:
 
     @property
     def has_short_conv(self) -> bool:
-        return SHORT_CONV in self.layer_types
+        return SHORT_CONV in self.layer_types or SHORT_CONV_DENSE in self.layer_types
+
+    @property
+    def has_full_dense(self) -> bool:
+        return FULL_DENSE in self.layer_types
+
+    @property
+    def has_short_conv_dense(self) -> bool:
+        return SHORT_CONV_DENSE in self.layer_types
 
     # ---- the weight format, per role
     @property
@@ -265,6 +276,8 @@ class ModelSpec:
         d["quant"] = self.canonical_quant()
         if d["norm_groups"] == 1:
             del d["norm_groups"]   # what every shipped spec serialised before the field existed
+        if d["dense_lead"] == 0:
+            del d["dense_lead"]   # the same: only LFM2-MoE serialises a non-zero leading dense count
         return d
 
     def to_json(self) -> str:
@@ -293,6 +306,9 @@ class ModelSpec:
             raise SpecError(f"layer_types has {len(kw['layer_types'])} entries, num_layers is {kw['num_layers']}")
         if kw.get("norm_groups", 1) not in NORM_GROUPS:
             raise SpecError(f"norm_groups {kw['norm_groups']!r}: only 1 (a single RMS), 2 or 4 (K2's groups) exist")
+        dl = int(kw.get("dense_lead", 0))
+        if dl < 0 or dl > kw["num_layers"]:
+            raise SpecError(f"dense_lead {dl} is not within 0..{kw['num_layers']}")
         return cls(**kw)
 
     @classmethod
@@ -791,6 +807,160 @@ def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
                # what config.json publishes, for the manifest's hf_config_check (the
                # kernels run the adjusted width; `extra` is not hashed)
                "published_intermediate": _lfm2_published_ff(cfg)},
+    )
+
+
+_LFM2MOE_DENSE_OF = {SHORT_CONV: SHORT_CONV_DENSE, FULL: FULL_DENSE}
+
+
+def _lfm2moe_layer_types(base: tuple[str, ...], dense_lead: int) -> tuple[str, ...]:
+    """LFM2-MoE FFN split on the mixer list: the first `dense_lead` layers carry a dense
+    FFN instead of the routed experts, so their layer type is the dense variant of their
+    mixer. The driver and the pack plan dispatch on the resulting type, exactly as they
+    do on the two mixers."""
+    if dense_lead < 0 or dense_lead > len(base):
+        raise SpecError(f"lfm2moe: num_dense_layers {dense_lead} is not within 0..{len(base)}")
+    out = list(base)
+    for i in range(dense_lead):
+        lt = out[i]
+        dense = _LFM2MOE_DENSE_OF.get(lt)
+        if dense is None:
+            raise SpecError(f"lfm2moe: layer {i} ({lt}) is not a mixer with a dense FFN variant")
+        out[i] = dense
+    return tuple(out)
+
+
+def _lfm2moe_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """LFM2-MoE (LFM2.5-24B-A2B / LFM2.5-8B-A1B): LFM2's short-conv / full-attention
+    hybrid with the routed experts on every layer past `num_dense_layers`.
+
+    The mixer is LFM2's (`layer_types` "conv" / "full_attention"); the attention layers
+    are the same GQA with per-head q/k RMSNorm, full RoPE and no gate; the short-conv
+    layers are LFM2's `B * u -> conv -> C * conv`. The router is logits.sigmoid, and with
+    `use_expert_bias` the selection adds the per-expert bias (`exp_probs_b`) while the
+    weights renormalise over the top-k unbiased scores, times `routed_scaling_factor`,
+    with `norm_topk_prob` renormalisation (transformers' Lfm2MoeTopKRouter). The router
+    knobs are family constants, not spec fields; the kernels bake them.
+
+    The leading `num_dense_layers` layers carry the dense silu FFN (`intermediate_size`)
+    instead of the experts (`moe_intermediate_size`), with no shared expert anywhere.
+    `conv_dim` rides on `hidden` and `conv_kernel`, as in `_lfm2_hf`.
+    """
+    n = _need(cfg, "num_hidden_layers")
+    hidden = _need(cfg, "hidden_size")
+    heads = _need(cfg, "num_attention_heads")
+    hd = cfg.get("head_dim") or (hidden // heads if hidden % heads == 0 else None)
+    if hd is None:
+        raise SpecError(f"lfm2moe: no head_dim in config.json and hidden_size {hidden} is not a "
+                        f"multiple of num_attention_heads {heads}")
+    for key in ("conv_dim", "conv_dim_out"):
+        w = cfg.get(key, hidden)
+        if w != hidden:
+            raise SpecError(f"lfm2moe: {key} {w} is not hidden_size {hidden}; the short conv is "
+                            f"hidden-wide on every LFM2 that ships and ModelSpec has no "
+                            f"separate conv width")
+    if cfg.get("conv_bias"):
+        raise SpecError("lfm2moe: conv_bias is set; the short-conv block this recipe implements "
+                        "has no bias (no LFM2 container ships one)")
+    dense_lead = int(cfg.get("num_dense_layers", 0))
+    vocab = _need(cfg, "vocab_size")
+    rope = cfg.get("rope_parameters", {})
+    theta = rope.get("rope_theta", cfg.get("rope_theta"))
+    if theta is None:
+        raise SpecError("config.json lacks 'rope_theta' (top level or rope_parameters)")
+    return ModelSpec(
+        family="lfm2moe",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=_lfm2moe_layer_types(_lfm2_layer_types(cfg, n), dense_lead),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(theta),
+        qk_norm=True,
+        attn_gate=False,
+        conv_kernel=int(cfg.get("conv_L_cache", 3)),
+        intermediate=_need(cfg, "intermediate_size"),
+        moe_intermediate=_need(cfg, "moe_intermediate_size"),
+        num_experts=_need(cfg, "num_experts"),
+        experts_per_tok=_need(cfg, "num_experts_per_tok"),
+        shared_expert_intermediate=0,
+        norm_eps=float(cfg.get("norm_eps", cfg.get("rms_norm_eps", 1e-5))),
+        dense_lead=dense_lead,
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config",
+               "expert_gating_func": cfg.get("expert_gating_func", 2),
+               "routed_scaling_factor": cfg.get("routed_scaling_factor", 1.0),
+               "norm_topk_prob": cfg.get("norm_topk_prob", True),
+               "use_expert_bias": cfg.get("use_expert_bias", True)},
+    )
+
+
+def _lfm2moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """arch `lfm2moe` (llama.cpp's name). `attention.head_count_kv` is a per-layer array
+    (0 on a short-conv layer, the GQA count on an attention one), which is also how the
+    mixers are read; `leading_dense_block_count` is `num_dense_layers`, and
+    `expert_gating_func` 2 is the sigmoid router. The dense width is
+    `feed_forward_length`, the expert width `expert_feed_forward_length`."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = _spec_layers(md, a, k("block_count"))
+    hidden = k("embedding_length")
+    heads = k("attention.head_count")
+    kv_arr = k("attention.head_count_kv")
+    if isinstance(kv_arr, (int, float)):
+        kv_arr = [kv_arr] * n
+    if len(kv_arr) != n:
+        raise SpecError(f"{a}.attention.head_count_kv has {len(kv_arr)} entries for {n} blocks")
+    kv_heads = max((int(v) for v in kv_arr), default=0)
+    if kv_heads == 0:
+        raise SpecError(f"{a}.attention.head_count_kv is zero on every layer")
+    if hidden % heads:
+        raise SpecError(f"{a}: embedding_length {hidden} is not a multiple of attention.head_count {heads}")
+    hd = hidden // heads
+    dense_lead = int(md.get(f"{a}.leading_dense_block_count", 0))
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    base = tuple(FULL if int(v) else SHORT_CONV for v in kv_arr)
+    gating = md.get(f"{a}.expert_gating_func", 2)
+    return ModelSpec(
+        family="lfm2moe",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=_lfm2moe_layer_types(base, dense_lead),
+        vocab=int(vocab),
+        real_vocab=int(vocab),
+        num_heads=int(heads),
+        num_kv_heads=int(kv_heads),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(k("rope.freq_base")),
+        qk_norm=True,
+        attn_gate=False,
+        conv_kernel=int(md.get(f"{a}.shortconv.l_cache", 3)),
+        intermediate=k("feed_forward_length"),
+        moe_intermediate=k("expert_feed_forward_length"),
+        num_experts=k("expert_count"),
+        experts_per_tok=k("expert_used_count"),
+        shared_expert_intermediate=0,
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-5)),
+        dense_lead=dense_lead,
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf",
+               "expert_gating_func": gating,
+               "routed_scaling_factor": 1.0,
+               "norm_topk_prob": True,
+               "use_expert_bias": True},
     )
 
 
@@ -1660,7 +1830,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
-               "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
+               "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf, "lfm2_moe": _lfm2moe_hf,
                "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf,
                  # Qwen3-VL: the same decoder as qwen3, and its GGUF carries the same
@@ -1675,7 +1845,8 @@ GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qw
                  # M-RoPE sections live in config.json, so the spec hashes as plain qwen2.
                  "qwen2": _qwen2_gguf, "qwen2vl": _qwen2_gguf, "llama": _llama3_gguf,
                  "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
-                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
+                 "lfm2moe": _lfm2moe_gguf,
+                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
@@ -1684,7 +1855,7 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
-              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss", _k2_hf: "k2"}
+              _lfm2_hf: "lfm2", _lfm2moe_hf: "lfm2moe", _lfm2moe_gguf: "lfm2moe", _gptoss_hf: "gptoss", _k2_hf: "k2"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1721,6 +1892,12 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
 ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
                         "shortconv.in_proj.weight": "linear",
                         "shortconv.out_proj.weight": "linear_out"}
+# LFM2-MoE: LFM2's conv block and attention block plus the routed experts and the
+# leading dense FFN, with no shared expert. The short-conv projections reuse the
+# linear / linear_out roles, as in lfm2; the experts reuse the experts role.
+ROLE_TENSORS["lfm2moe"] = {**_ATTN_HF, **_FFN_HF, **_MOE_HF,
+                         "shortconv.in_proj.weight": "linear",
+                         "shortconv.out_proj.weight": "linear_out"}
 for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 # GPT-OSS's routed experts, under the names q4nx-build writes them

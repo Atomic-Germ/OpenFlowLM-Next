@@ -908,11 +908,14 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const size_t ncol = op.in_dim / 256, nchs = S / ch;
         std::vector<size_t> tp(nchs);
         for (size_t c = 0; c < nchs; ++c) tp[c] = ncol * (c % 4) + c / 4;
+        const uint64_t src_stripes_c = op.src_rows ? (op.src_rows / 128) : ns;
         std::vector<uint8_t> utmp, gtmp;
         for (uint64_t e = 0; e < E; ++e) {
             for (uint64_t k = 0; k < ns; ++k) {
-                const uint8_t* us = q4_source(m, un, (ns * e + k) * nchs, nchs, ch, utmp);
-                const uint8_t* gs = q4_source(m, gn, (ns * e + k) * nchs, nchs, ch, gtmp);
+                uint8_t* udz = dst + op.dst + (2 * ns * e + 2 * k) * S;
+                if (k >= src_stripes_c) { std::memset(udz, 0, S); std::memset(udz + S, 0, S); continue; }
+                const uint8_t* us = q4_source(m, un, (src_stripes_c * e + k) * nchs, nchs, ch, utmp);
+                const uint8_t* gs = q4_source(m, gn, (src_stripes_c * e + k) * nchs, nchs, ch, gtmp);
                 uint8_t* ud = dst + op.dst + (2 * ns * e + 2 * k) * S;
                 uint8_t* gd = ud + S;
                 for (size_t c = 0; c < nchs; ++c) {
@@ -958,12 +961,15 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // one expert's rows: the stripes cover `ns` x 128 rows, and the file's chunk
         // raster is (rows / 32) x ncol chunks, expert-major.
         const size_t rows_per = ns * 128;
+        const size_t src_per = op.src_rows ? (size_t)op.src_rows : rows_per;
+        const size_t src_stripes = src_per / 128;
         const size_t rows = rows_per * E;
+        const size_t src_rows = src_per * E;
         for (const auto* t : {&tu, &tg}) {
             if (t->dims.size() < 3)
                 fail("expert_stripes_gguf: an expert tensor is [in, n, experts], this one has " +
                      std::to_string(t->dims.size()) + " dim(s)");
-            if (t->dims[0] != op.in_dim || t->dims[1] != rows_per || t->dims[2] != E)
+            if (t->dims[0] != op.in_dim || t->dims[1] != src_per || t->dims[2] != E)
                 fail("expert_stripes_gguf " + un + ": tensor is [" + std::to_string(t->dims[0]) + ", " +
                      std::to_string(t->dims[1]) + ", " + std::to_string(t->dims[2]) + "], the plan packs [" +
                      std::to_string(op.in_dim) + ", " + std::to_string(rows_per) + ", " + std::to_string(E) + "]");
@@ -979,12 +985,13 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             for (uint64_t k = 0; k < ns; ++k) {
                 uint8_t* ud = dst + op.dst + (2 * ns * e + 2 * k) * S;
                 uint8_t* gd = ud + S;
+                if (k >= src_stripes) { std::memset(ud, 0, S); std::memset(gd, 0, S); continue; }
                 for (size_t c = 0; c < nchs; ++c) {
                     const size_t fc = k * nchs + tp[c];
-                    const size_t row0 = e * rows_per + 32 * (fc / ncol);
+                    const size_t row0 = e * src_per + 32 * (fc / ncol);
                     const size_t blk0 = (fc % ncol) * 8;
-                    gguf_chunk(g, un, tu, row0, blk0, rows, op.in_dim, ch, 1.0, rd, ud + c * ch);
-                    gguf_chunk(g, gn, tg, row0, blk0, rows, op.in_dim, ch, 1.0, rd, gd + c * ch);
+                    gguf_chunk(g, un, tu, row0, blk0, src_rows, op.in_dim, ch, 1.0, rd, ud + c * ch);
+                    gguf_chunk(g, gn, tg, row0, blk0, src_rows, op.in_dim, ch, 1.0, rd, gd + c * ch);
                 }
             }
         }
@@ -1009,20 +1016,35 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             fail("expert_down_gguf " + name + ": in_dim=" + std::to_string(in_dim) +
                  " is not a whole number of 256-column k-tiles");
         if (B % ch) fail("expert_down_gguf " + name + ": " + std::to_string(B) + " B is not whole chunks");
-        const size_t ncol = in_dim / 256, nchs = B / ch;
-        if (nchs * 32 != rows_per * ncol)
+        const size_t ncol_src = in_dim / 256, nchs = B / ch;
+        const size_t ncol_pad = (rows_per ? (nchs * 32 / rows_per) : ncol_src);
+        if (ncol_pad < ncol_src || (ncol_pad * 256 % 256))
+            fail("expert_down_gguf " + name + ": destination is narrower than the tensor");
+        const bool pad = (ncol_pad != ncol_src);
+        if (!pad && nchs * 32 != rows_per * ncol_src)
             fail("expert_down_gguf " + name + ": " + std::to_string(B) + " B is " + std::to_string(nchs) +
                  " chunks, the tensor's [" + std::to_string(in_dim) + ", " + std::to_string(rows_per) +
-                 "] is " + std::to_string(rows_per * ncol / 32));
+                 "] is " + std::to_string(rows_per * ncol_src / 32));
         std::vector<float> rd;
         for (uint64_t e = 0; e < E; ++e) {
             uint8_t* dd = dst + op.dst + e * B;
             for (size_t c = 0; c < nchs; ++c) {
                 const size_t rt = 4 * (c / 8) + (c % 4), cg = (c / 4) % 2;
-                const size_t fc = 2 * rt + cg;
-                const size_t row0 = e * rows_per + 32 * (fc / ncol);
-                const size_t blk0 = (fc % ncol) * 8;
-                gguf_chunk(g, name, t, row0, blk0, rows_per * E, in_dim, ch, 1.0, rd, dd + c * ch);
+                const size_t fc_pad = 2 * rt + cg;
+                if (pad) {
+                    const size_t row = fc_pad / ncol_pad;
+                    const size_t k_pad = fc_pad % ncol_pad;
+                    if (k_pad >= ncol_src) { std::memset(dd + c * ch, 0, ch); continue; }
+                    const size_t fc = row * ncol_src + k_pad;
+                    const size_t row0 = e * rows_per + 32 * (fc / ncol_src);
+                    const size_t blk0 = (fc % ncol_src) * 8;
+                    gguf_chunk(g, name, t, row0, blk0, rows_per * E, in_dim, ch, 1.0, rd, dd + c * ch);
+                } else {
+                    const size_t fc = fc_pad;
+                    const size_t row0 = e * rows_per + 32 * (fc / ncol_src);
+                    const size_t blk0 = (fc % ncol_src) * 8;
+                    gguf_chunk(g, name, t, row0, blk0, rows_per * E, in_dim, ch, 1.0, rd, dd + c * ch);
+                }
             }
         }
     } else if (op.op == "put") {

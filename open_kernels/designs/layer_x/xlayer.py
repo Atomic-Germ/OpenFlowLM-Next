@@ -43,7 +43,7 @@ from ironutil import Pipeline
 from layout import (A_BYTES, A_O, A_OG, A_OUT, A_QKV, A_RES, A_ROUT, A_VEC, A_XM, A_XN, A_Z,  # noqa: E402
                     AA_BYTES, AA_KVN, AA_OG, AA_OUT, AA_QG, AA_RES, AA_ROUT, AA_XM, AA_XN,
                     C_BYTES, C_LNW, C_NW, C_POSTLN, C_RW, C_SIDE, C_WOUT,
-                    CA_BYTES, CA_LNW, CA_META, CA_POSTLN, CA_RW, GLUE_SIDE_BYTES, KV_BYTES, KV_ROW,
+                    CA_BYTES, CA_BIAS, CA_LNW, CA_META, CA_POSTLN, CA_RW, GLUE_SIDE_BYTES, KV_BYTES, KV_ROW,
                     POOL_BYTES, POOL_GATE, POOL_K, POOL_O, POOL_Q, POOL_QKV, POOL_V, POOL_Z,
                     PTAB_BYTES, PTAB_ROW, STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES, R, SPEC)
 import xcommon as X  # noqa: E402
@@ -378,6 +378,8 @@ def linear_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods,
     tg_ln.finish()
     tg_r = TaskGroup()
     lni.fill(a_consts, tap=bt(consts_t, C_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
+    if SPEC.family == "lfm2moe":
+        lni.fill(a_consts, tap=bt(consts_t, CA_BIAS, ELEM), wait=True, group=tg_r)
     lno.drain(a_act, tap=bt(act_t, A_ROUT, ELEM), wait=True, group=tg_r)
     tg_r.finish()
     pw.finish()
@@ -390,7 +392,7 @@ if A is not None:
     NH, KVH, HD = A.NH, A.KVH, A.HD
     QW, KVW = A.QW, A.KVW
     from recipes.attnknobs import probe_env  # noqa: E402
-    ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={A.ROT}", "-DATTN_GATE=1",
+    ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={A.ROT}", f"-DATTN_GATE={1 if SPEC.attn_gate else 0}",
                   f"-DATTN_VEXP={A.VEXP}", f"-DATTN_NHL={A.NHL}"]
     if A.KV_PAIR:
         ATTN_FLAGS.append("-DATTN_KV_PAIR=1")
@@ -457,8 +459,12 @@ def attn_kernels(inc, a):
     # The peeled last block: RB - 1 fifo rows and the new position's k'/v' from core scratch.
     f_stepbn = (af("attn_stepb_new", [u8_1k] * (2 * (RB - 1)) + [b512, b512, fq, foacc, fml, pb_ty] + h0_arg)
                 if BLOCK else None)
-    f_fin = (af("attn_pair_fin", [foacc, fml, u8_1k, b512, np.int32]) if A.KV_PAIR else
-             af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32]))
+    if not SPEC.attn_gate:
+        f_fin = af("attn_fin_ng", [foacc, fml, b512, np.int32])
+    elif A.KV_PAIR:
+        f_fin = af("attn_pair_fin", [foacc, fml, u8_1k, b512, np.int32])
+    else:
+        f_fin = af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32])
     return ([f_meta, f_q, f_k, f_v, f_init, f_fin, f_stepb, f_stepbn] if BLOCK else
             [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else []))
 
@@ -499,12 +505,18 @@ def _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
         fs(e[0], e[1], e[2], e[3], qs, oacc, ml, pb, c * NHL)
         ain.release(4)
     fsn(kout, vout, qs, oacc, ml, c * NHL)
-    for _ in range(c * N_OG): ain.acquire(1); ain.release(1)
-    for hp in range_(N_OG):
-        g = ain.acquire(1); o = ogout.acquire(1)
-        ff(oacc, ml, g, o, hp)
-        ogout.release(1); ain.release(1)
-    for _ in range((ACORES - 1 - c) * N_OG): ain.acquire(1); ain.release(1)
+    if not SPEC.attn_gate:
+        for hp in range_(N_OG):
+            o = ogout.acquire(1)
+            ff(oacc, ml, o, hp)
+            ogout.release(1)
+    else:
+        for _ in range(c * N_OG): ain.acquire(1); ain.release(1)
+        for hp in range_(N_OG):
+            g = ain.acquire(1); o = ogout.acquire(1)
+            ff(oacc, ml, g, o, hp)
+            ogout.release(1); ain.release(1)
+        for _ in range((ACORES - 1 - c) * N_OG): ain.acquire(1); ain.release(1)
 
 
 def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
@@ -572,21 +584,27 @@ def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
             fs(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else fs(e[0], e[1], qs, oacc, ml, pb)
             ain.release(2)
         fsn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else fsn(kout, vout, qs, oacc, ml)
-    # The gate arrives for EVERY og element on the broadcast stream (two elements per
-    # og element, in head order), so each core consumes all of them and computes only
-    # its own N_OG. The pass-through counts are Python constants: nothing to trace.
-    for _ in range(c * N_OG):
-        ain.acquire(2)
-        ain.release(2)
-    for hp in range_(N_OG):
-        g = ain.acquire(2)
-        o = ogout.acquire(1)
-        ff(oacc, ml, g[0], g[1], o, hp)
-        ogout.release(1)
-        ain.release(2)
-    for _ in range((ACORES - 1 - c) * N_OG):
-        ain.acquire(2)
-        ain.release(2)
+    if not SPEC.attn_gate:
+        for hp in range_(N_OG):
+            o = ogout.acquire(1)
+            ff(oacc, ml, o, hp)
+            ogout.release(1)
+    else:
+        # The gate arrives for EVERY og element on the broadcast stream (two elements per
+        # og element, in head order), so each core consumes all of them and computes only
+        # its own N_OG. The pass-through counts are Python constants: nothing to trace.
+        for _ in range(c * N_OG):
+            ain.acquire(2)
+            ain.release(2)
+        for hp in range_(N_OG):
+            g = ain.acquire(2)
+            o = ogout.acquire(1)
+            ff(oacc, ml, g[0], g[1], o, hp)
+            ogout.release(1)
+            ain.release(2)
+        for _ in range((ACORES - 1 - c) * N_OG):
+            ain.acquire(2)
+            ain.release(2)
 
 
 # Three shapes of worker body, not one with defaulted arguments: a family that does
@@ -650,7 +668,11 @@ def w_regions(c):
     """A main core's pool regions of the full layer: q, gate, k, v, o."""
     Q_PC, KV_PC, O_PC = A.Q_PC, A.KV_PC, A.O_PC
     BB_HID, BB_O = X.role_band_bytes("attn", HID), X.role_band_bytes("attn", A.O_K)
-    return [(POOL_Q + c * Q_PC * BB_HID, Q_PC * BB_HID), (POOL_GATE + c * Q_PC * BB_HID, Q_PC * BB_HID),
+    if SPEC.attn_gate:
+        return [(POOL_Q + c * Q_PC * BB_HID, Q_PC * BB_HID), (POOL_GATE + c * Q_PC * BB_HID, Q_PC * BB_HID),
+                (POOL_K + c * KV_PC * BB_HID, KV_PC * BB_HID), (POOL_V + c * KV_PC * BB_HID, KV_PC * BB_HID),
+                (POOL_O + c * O_PC * BB_O, O_PC * BB_O)]
+    return [(POOL_Q + c * Q_PC * BB_HID, Q_PC * BB_HID),
             (POOL_K + c * KV_PC * BB_HID, KV_PC * BB_HID), (POOL_V + c * KV_PC * BB_HID, KV_PC * BB_HID),
             (POOL_O + c * O_PC * BB_O, O_PC * BB_O)]
 
@@ -659,7 +681,11 @@ def y_regions(c):
     """... and its act regions: q, gate, k, v, out."""
     Q_PC, KV_PC, O_PC = A.Q_PC, A.KV_PC, A.O_PC
     qb, kb = Q_PC * YB, KV_PC * YB
-    return [(AA_QG + c * qb, qb), (AA_QG + QW * 4 + c * qb, qb),
+    if SPEC.attn_gate:
+        return [(AA_QG + c * qb, qb), (AA_QG + QW * 4 + c * qb, qb),
+                (AA_KVN + c * kb, kb), (AA_KVN + KVW * 4 + c * kb, kb),
+                (AA_OUT + c * O_PC * YB, O_PC * YB)]
+    return [(AA_QG + c * qb, qb),
             (AA_KVN + c * kb, kb), (AA_KVN + KVW * 4 + c * kb, kb),
             (AA_OUT + c * O_PC * YB, O_PC * YB)]
 
@@ -701,7 +727,8 @@ def full_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_pro
     pa_in.fill(ain_p, a_act, bt(act_t, AA_KVN, KVW * 4))
     pa_in.fill(ain_p, a_act, bt(act_t, AA_KVN + KVW * 4, KVW * 4))
     pa_in.fill(ain_p, a_kv, bt(kv_t, 0, KV_ROW))                 # the window: rows [0, nf) (attnpos)
-    pa_in.fill(ain_p, a_act, bt(act_t, AA_QG + QW * 4, QW * 4))
+    if SPEC.attn_gate:
+        pa_in.fill(ain_p, a_act, bt(act_t, AA_QG + QW * 4, QW * 4))
     for c in range(N_CORES):
         pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[4]))
         py.drain(y_conss[c], a_act, bt(act_t, *y_regions(c)[4]))
@@ -716,6 +743,8 @@ def full_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_pro
     lni.fill(a_act, tap=bt(act_t, AA_OUT, HID * 4), wait=True, group=tg_ln2)
     tg_r = TaskGroup()
     lni.fill(a_consts, tap=bt(consts_t, CA_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
+    if SPEC.family == "lfm2moe":
+        lni.fill(a_consts, tap=bt(consts_t, CA_BIAS, ELEM), wait=True, group=tg_r)
     lno.drain(a_act, tap=bt(act_t, AA_ROUT, ELEM), wait=True, group=tg_r)
     tg_ln2.finish()
     tg_r.finish()

@@ -239,3 +239,36 @@ The text arch is `qwen35`; the vision tower is Qwen3-VL's
 (`clip.projector_type: qwen3vl_merger`, wrapper
 `Qwen3_5ForConditionalGeneration`). The open engine has no vision path, so an
 image request routes to the closed engine; a text-only install works.
+
+### LFM2-MoE (`lfm2moe`)
+
+One family serves LFM2.5-24B-A2B (40 layers, 64 experts, top-4, moe 1536, dense 11776) and
+LFM2.5-8B-A1B (24 layers, 32 experts, top-4, moe 1792 -> padded 2048, dense 7168). Mixers are
+short-conv (`SHORT_CONV`) and full attention (`FULL`), no gate, no DeltaNet, no window, no sinks.
+FFN is dense on the first `dense_lead` layers (`SHORT_CONV_DENSE` / `FULL_DENSE`, encoded in
+`layer_types` so the pack plan dispatches per type) and routed MoE after.
+
+Traps already paid for (do not rediscover next time):
+- The router is logits.sigmoid, not softmax. Selection is on `p + exp_probs_b.bias`, weights are
+  the unbiased `p` renormalised over top-k (`norm_topk_prob`) times `routed_scaling_factor` (1.0).
+  `designs/router/router.h` takes ROUTER_E / ROUTER_TOPK / ROUTER_SIGMOID / ROUTER_BIAS /
+  ROUTER_NORM macros; the default E=256/topk8/softmax keeps every existing build identical.
+  The bias is a 4 KB element after the router W in consts (`CA_BIAS`), read by `router_fin_bias`.
+  `rout_idx_off` is `E*4` (was 1024 at E=256): `moe_hdr2` and `Core::route` only read idx and `w`.
+- Expert width is wide: 1536 is 12 stripes over 8 cores (spp > n), 1792 padded to 2048 is 16.
+  `qwen36moe.common` refuses it (OPEN-MOE-WIDE-FF). The law here is whole 64-row halves per core:
+  `HALVES_PER_CORE = padded_ff // (64 * 8)`, padded with zero chunks to a multiple of 512.
+  Ms layout (`HID_PC`, `MS_FLOATS`) and `tab` (hidden + expert hidden tables) are sized for it.
+  `gen_kernels.py` emits a 3-arg `gup(..., sub)` for the wide case; `moe_body`/`moe_sequence`
+  index halves as `glob = c*hpe + h`. The pack ops take `src_rows` and zero-fill padded stripes
+  (up) and padded k-tiles (down); `expert_down_gguf` infers the pad from `B` vs the tensor.
+- GGUF arch `lfm2moe` writes `attention.head_count_kv` as a per-layer array (0 on conv layers);
+  the Python spec takes the max as `num_kv_heads` and derives mixers from it. The C++ `derive_config`
+  does the same and emits `layer_types` with the dense prefix, `num_dense_layers`, and the
+  nested `rope_parameters`. `hf_config_check` carries `num_dense_layers`, `moe_intermediate_size`,
+  `intermediate_size`, `norm_eps` and the nested rope; `hf_config_defaults` supplies the latter two.
+- Tensor names: gguf_name needs no new dots -- shortconv and `exp_probs_b.bias` already map by
+  remaining string after the `blk.` rewrite. `shared_expert_gate` is deliberately not packed (no
+  shared expert; the sgw element stays zero, the hdr sigmoid on it is unused).
+- Attention is GQA 32/8, head_dim 64, full RoPE, q/k RMSNorm pre-RoPE, ATTN_GATE=0 (fin_ng path).
+  Do not re-add the gate region to `w_regions`/`y_regions` for this family.

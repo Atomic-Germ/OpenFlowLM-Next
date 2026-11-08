@@ -62,6 +62,7 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.cols = j.value("cols", 0ull);
     p.elem = j.value("elem", 0ull);
     p.dst_rows = j.value("dst_rows", 0ull);
+    p.src_rows = j.value("src_rows", 0ull);
     p.split = j.value("split", "");
     p.via = j.value("via", "");
     p.fold = j.value("fold", 1.0);

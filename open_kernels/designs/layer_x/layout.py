@@ -60,6 +60,7 @@ C_BYTES = _L.C_BYTES
 GLUE_SIDE_BYTES = _L.GLUE_SIDE_BYTES
 SIDE_ALPHA, SIDE_BETA, SIDE_SMALL, SIDE_CONV = _L.SIDE_ALPHA, _L.SIDE_BETA, _L.SIDE_SMALL, _L.SIDE_CONV
 CA_LNW, CA_POSTLN, CA_META, CA_RW, CA_SGW = _L.CA_LNW, _L.CA_POSTLN, _L.CA_META, _L.CA_RW, _L.CA_SGW
+CA_BIAS = getattr(_L, "CA_BIAS", 0)
 CA_BYTES = _L.CA_BYTES
 
 A_XN, A_QKV, A_Z, A_VEC, A_O, A_OG, A_OUT = _L.A_XN, _L.A_QKV, _L.A_Z, _L.A_VEC, _L.A_O, _L.A_OG, _L.A_OUT
@@ -89,6 +90,12 @@ POOL_Q, POOL_K, POOL_V, POOL_GATE, POOL_O = _L.POOL_Q, _L.POOL_K, _L.POOL_V, _L.
 POOL_DOWN, POOL_SHARE_UP, POOL_SHARE_GATE, POOL_SHARE_DOWN = (_L.POOL_DOWN, _L.POOL_SHARE_UP, _L.POOL_SHARE_GATE,
                                                               _L.POOL_SHARE_DOWN)
 POOL_BYTES = _L.POOL_BYTES
+# LFM2-MoE short-conv mixer pool (0 for other families)
+POOL_SC_B = getattr(_L, "POOL_SC_B", 0); POOL_SC_C = getattr(_L, "POOL_SC_C", 0); POOL_SC_U = getattr(_L, "POOL_SC_U", 0); POOL_SC_OUT = getattr(_L, "POOL_SC_OUT", 0)
+POOL_SC_UP = getattr(_L, "POOL_SC_UP", 0); POOL_SC_GATE = getattr(_L, "POOL_SC_GATE", 0); POOL_SC_DOWN = getattr(_L, "POOL_SC_DOWN", 0)
+CD_CONV = getattr(_L, "CD_CONV", 0); CD_BYTES = getattr(_L, "CD_BYTES", CA_BYTES)
+AD_B = getattr(_L, "AD_B", 0); AD_C = getattr(_L, "AD_C", 0); AD_U = getattr(_L, "AD_U", 0); AD_Y = getattr(_L, "AD_Y", 0); AD_BYTES = getattr(_L, "AD_BYTES", AA_BYTES)
+AA_XN = getattr(_L, "AA_XN", A_XN)  # attention act aliases used by sx
 
 # the KV cache and the position record table (the driver reads them from manifest.json)
 KV_ROW, PTAB_ROW, MAX_CTX = _L.KV_ROW, _L.PTAB_ROW, _L.MAX_CTX

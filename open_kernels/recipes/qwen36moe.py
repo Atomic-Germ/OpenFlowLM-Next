@@ -353,6 +353,7 @@ class Layout:
     A_H: int = 0; A_OUT2: int = 0; AA_H: int = 0; AA_OUT2: int = 0
     # ... and the second down piece's output when the down GEMV is split along K (`down_split`)
     A_OUT2B: int = 0; AA_OUT2B: int = 0
+    CA_BIAS: int = 0;   # LFM2-MoE router bias element (default 0 keeps existing builds)
 
     def constants(self) -> dict[str, int]:
         return dict(self.__dict__)
@@ -373,6 +374,7 @@ class Common:
     W_ELEMS: int
     DN_ROWS: int; DN_SLICES: int; DN_HEADS_PC: int; DN_DIM: int
     DN_PAD: int = 0                      # DN_SLICES * DN_ROWS: the padded S row count (dnx.h's kPad)
+    HALVES_PER_CORE: int = 1             # the wide-FF twin's whole 64-row halves per core (lfm2moe)
 
 
 @dataclass(frozen=True)

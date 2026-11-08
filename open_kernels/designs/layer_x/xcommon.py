@@ -265,7 +265,10 @@ def kernels(inc, t):
     # GEMVs (runtime group / band law): projections into a y element; MoE up/gate and down into ms
     if NEED_Q4_GY:
         k["gy"] = ef("gemv_q4_gy", [e, tab, y, i32, i32, i32])      # (t, tab, ye, group, per_band, rs)
-    k["gup"] = ef("gemv_q4_gup", [e, tab, ms, i32, i32], GUP_OS)    # (t, tab, ms, group, band)  u | g
+    if getattr(C, "HALVES_PER_CORE", 1) > 1:
+        k["gup"] = ef("gemv_q4_gup", [e, tab, ms, i32, i32, i32], GUP_OS)  # (t, tab, ms, group, band, sub)  wide-FF
+    else:
+        k["gup"] = ef("gemv_q4_gup", [e, tab, ms, i32, i32], GUP_OS)    # (t, tab, ms, group, band)  u | g
     k["gdown"] = ef("gemv_q4_gdown", [e, tab, ms, i32, i32])        # (t, tab, ms, j, slot)      routed / shared law
     # activation tables: x (one element, K = HID) and the two-element og (K = KWIDE)
     k["prep2048"] = ExternalFunction(f"gemv_q4_prep_k{HID}", source_file=str(_gemv_prep_entry(HID)),
@@ -506,12 +509,23 @@ def moe_body(win, ain, yout, B, K, nx=NX):
         K["hdr"](we, xm, ms, mode)
         win.release(1)
     ain.release(1)
+    hpe = getattr(C, "HALVES_PER_CORE", 1)
     for e in range_(nx):                          # NE routed slots, then the shared expert
-        for b in range_(2):                       # u then g, HID_PC rows each, UP_ELEMS elements per band
-            for g in range_(C.UP_ELEMS):
-                we = win.acquire(1)
-                K["gup"](we, tab, ms, g, b)
-                win.release(1)
+        if hpe > 1:
+            # wide-FF: one core owns hpe whole 64-row halves (HID_PC = hpe * 64);
+            # sub selects the half inside the core's slice
+            for h in range_(hpe):
+                for b in range_(2):
+                    for g in range_(C.UP_ELEMS):
+                        we = win.acquire(1)
+                        K["gup"](we, tab, ms, g, b, h)
+                        win.release(1)
+        else:
+            for b in range_(2):                   # u then g, HID_PC rows each, UP_ELEMS elements per band
+                for g in range_(C.UP_ELEMS):
+                    we = win.acquire(1)
+                    K["gup"](we, tab, ms, g, b)
+                    win.release(1)
         he = yout.acquire(1)
         K["silu"](ms, he)                         # this core's rows of the hidden, f32, to DDR
         yout.release(1)
@@ -536,7 +550,9 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
     """Host sequence of the MoE block (one instruction-stream part). Routed slot j's fills carry
     placeholder pool offsets (expert j); moeroute2 rewrites them from the router output.
     nx must match the body's: NE drops the shared expert's fills with its slot."""
-    spp, cps = C.STRIPES_PER_PROJ, C.CORES_PER_STRIPE
+    spp = C.STRIPES_PER_PROJ
+    cps = C.CORES_PER_STRIPE
+    hpe = getattr(C, "HALVES_PER_CORE", 1)
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, ELEM))
     for c in range(N_CORES):
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_ROUT, CALL_BYTES))
@@ -544,7 +560,15 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_RES + c * ROWS_PC * 4, CALL_BYTES))
     for e in range(nx):
         for c in range(N_CORES):
-            if e < NE:
+            if e < NE and hpe > 1:
+                for h in range(hpe):
+                    glob = c * hpe + h
+                    s = glob // 2
+                    sub = glob % 2
+                    up = (2 * spp * e + 2 * s) * STRIPE + sub * PAIR
+                    pipe_w.fill(w_prods[c], a_pool, half_tap(up))
+                    pipe_w.fill(w_prods[c], a_pool, half_tap(up + STRIPE))
+            elif e < NE:
                 up = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
                 pipe_w.fill(w_prods[c], a_pool, half_tap(up))
                 pipe_w.fill(w_prods[c], a_pool, half_tap(up + STRIPE))
@@ -644,9 +668,19 @@ def ln_types():
     (8 KB at HID 4096) and splits the outputs one per call, as designs/dense/dx.py does."""
     if KIND == "dense":
         return dict(u8_ln=np.ndarray[(ELN,), np.dtype[np.uint8]])
-    return dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
+    d = dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
                 racc=np.ndarray[(SPEC.num_experts,), np.dtype[np.float32]])
+    return d
 
+
+# Router knobs: the shipped softmax (E=256, topk 8) is the macros' default, so
+# existing builds see exactly the flags they saw before. LFM2-MoE compiles the
+# same header with sigmoid scores, bias selection and its own E / topk.
+def router_flags():
+    if SPEC.family == "lfm2moe":
+        return [f"-DROUTER_E={SPEC.num_experts}", f"-DROUTER_TOPK={SPEC.experts_per_tok}",
+                "-DROUTER_SIGMOID=1", "-DROUTER_BIAS=1"]
+    return []
 
 def ln_kernels(inc, t):
     if KIND == "dense" and LN_SPLIT:
@@ -679,9 +713,13 @@ def ln_kernels(inc, t):
     k = {}
     k["ln_nr"] = ExternalFunction("ln_nr", source_file=str(LINL / "ln_nr.cc"), arg_types=[u] * 4, include_dirs=inc)
     k["ln"] = ExternalFunction("ln_fn", source_file=str(LN / "ln.cc"), arg_types=[u] * 8, include_dirs=inc)
-    k["rcopy"] = ExternalFunction("router_copy_x", source_file=str(RT / "router_copy.cc"), arg_types=[u, t["xb"]], include_dirs=inc)
-    k["racc"] = ExternalFunction("router_acc", source_file=str(RT / "router.cc"), arg_types=[u, t["xb"], t["racc"], np.int32], include_dirs=inc)
-    k["rfin"] = ExternalFunction("router_fin", source_file=str(RT / "router_fin.cc"), arg_types=[t["racc"], u], include_dirs=inc)
+    rf = router_flags()
+    k["rcopy"] = ExternalFunction("router_copy_x", source_file=str(RT / "router_copy.cc"), arg_types=[u, t["xb"]], include_dirs=inc, compile_flags=rf)
+    k["racc"] = ExternalFunction("router_acc", source_file=str(RT / "router.cc"), arg_types=[u, t["xb"], t["racc"], np.int32], include_dirs=inc, compile_flags=rf)
+    if SPEC.family == "lfm2moe":
+        k["rfin"] = ExternalFunction("router_fin_bias", source_file=str(RT / "router_fin.cc"), arg_types=[t["racc"], u, u], include_dirs=inc, compile_flags=rf)
+    else:
+        k["rfin"] = ExternalFunction("router_fin", source_file=str(RT / "router_fin.cc"), arg_types=[t["racc"], u], include_dirs=inc, compile_flags=rf)
     return k
 
 
@@ -829,7 +867,12 @@ def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf):
         f_ra(e, xs, acc, rb)
         ain.release(1)
     o = aout.acquire(1)
-    f_rf(acc, o)
+    if SPEC.family == "lfm2moe":
+        be = ain.acquire(1)
+        f_rf(acc, be, o)
+        ain.release(1)
+    else:
+        f_rf(acc, o)
     aout.release(1)
 
 

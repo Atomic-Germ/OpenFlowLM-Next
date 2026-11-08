@@ -107,13 +107,16 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         tab = B["tab"]
         if DENSE:
             # ONE stream: q | gate | k | v, the o projection, then the dense FFN tail.
-            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, 2 * Q_PC + 2 * KV_PC, "attn", fp32=D.XN_F32)
+            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, (2 * Q_PC if SPEC.attn_gate else Q_PC) + 2 * KV_PC, "attn", fp32=D.XN_F32)
             X.prep_bands(win, xin, yout, B, K, O_K, OG_ELEMS, O_PC, "attn", fp32=D.KV_PAIR)
             X.ffn_body(win, xin, yout, B, K)
             return
         xe = xin.acquire(1)                                     # xn
         K["prep2048"](xe, tab)
-        X.role_gemv_bands(win, yout, B, K, "attn", 2 * Q_PC + 2 * KV_PC, HID)   # q | gate | k | v
+        if SPEC.attn_gate:
+            X.role_gemv_bands(win, yout, B, K, "attn", 2 * Q_PC + 2 * KV_PC, HID)   # q | gate | k | v
+        else:
+            X.role_gemv_bands(win, yout, B, K, "attn", Q_PC + 2 * KV_PC, HID)   # q | k | v (no gate)
         xin.release(1)
         oe = xin.acquire(2)                                     # og, K = QW
         K["prep4096a"](oe[0], tab)

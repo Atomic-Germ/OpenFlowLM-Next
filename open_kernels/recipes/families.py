@@ -19,6 +19,9 @@ def family_module(name: str) -> ModuleType:
     if name == "lfm2":
         from . import lfm2
         return lfm2
+    if name == "lfm2moe":
+        from . import lfm2moe
+        return lfm2moe
     if name in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2"):
         from . import dense
         return dense
@@ -33,7 +36,7 @@ def for_spec(spec: ModelSpec) -> ModuleType:
 
 
 FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2",
-            "lfm2", "k2")
+            "lfm2", "lfm2moe", "k2")
 
 # Families whose ModelSpec derives but whose kernels do not exist. Naming the gap here is
 # the point: routing such a model to the nearest recipe would emit kernels that drop a whole

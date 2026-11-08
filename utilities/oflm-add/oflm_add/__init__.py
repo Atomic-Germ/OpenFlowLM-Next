@@ -526,6 +526,7 @@ FAMILY_ALIASES = [
     ("nanbeige4", "nanbeige"),
     ("nanbeige", "nanbeige"),
     ("gpt-oss", "gpt-oss"),
+    ("lfm2moe", "lfm2moe"),
     ("lfm2.5", "lfm2.5-tk"),
     ("lfm2", "lfm2"),
     ("phi4", "phi4"),
@@ -563,6 +564,7 @@ GGUF_ARCH_FAMILIES = {
     "qwen35": "qwen3.5",
     "qwen3next": "qwen3.5",
     "qwen35moe": "qwen3.6-moe",
+    "lfm2moe": "lfm2moe",
     "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
     "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
     "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
@@ -590,6 +592,7 @@ CONFIG_MODEL_FAMILIES = {
     "hunyuan_v1_dense": "hunyuan",
     "k2_horizon": "k2",
     "lfm2": "lfm2",
+    "lfm2_moe": "lfm2moe",
     "gpt_oss": "gpt-oss",
     # Qwen3.5 / 3.8's own model_type (the tag is still qwen3.5)
     "qwen3_5": "qwen3.5",

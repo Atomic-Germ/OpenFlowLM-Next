@@ -178,7 +178,31 @@ nlohmann::json derive_config(const GgufFile& g) {
     else
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
     c["num_attention_heads"] = u("attention.head_count");
-    c["num_key_value_heads"] = u("attention.head_count_kv");
+    // LFM2-MoE: attention.head_count_kv is a per-layer array (0 on a short-conv layer)
+    if (arch == "lfm2moe") {
+        const std::string arr = g.kv_str(arch + ".attention.head_count_kv");
+        std::vector<int> kv;
+        std::string cur;
+        for (size_t i = 0; i <= arr.size(); ++i) {
+            if (i == arr.size() || arr[i] == ',') { kv.push_back(std::stoi(cur)); cur.clear(); }
+            else cur += arr[i];
+        }
+        int kmax = 0; for (int v : kv) kmax = std::max(kmax, v);
+        c["num_key_value_heads"] = kmax;
+        int nb = (int)u("block_count");
+        int dl = g.kv_has(arch + ".leading_dense_block_count") ? (int)u("leading_dense_block_count") : 0;
+        nlohmann::json lt = nlohmann::json::array();
+        for (int i = 0; i < nb; ++i) {
+            bool full = (i < (int)kv.size() && kv[i] > 0);
+            std::string base = full ? "full_attention" : "short_conv";
+            if (i < dl) base = full ? "full_attention_dense" : "short_conv_dense";
+            lt.push_back(base);
+        }
+        c["layer_types"] = lt;
+        c["num_dense_layers"] = dl;
+    } else {
+        c["num_key_value_heads"] = u("attention.head_count_kv");
+    }
     // A dense arch has feed_forward_length; a MoE has expert_feed_forward_length and no
     // dense FFN at all. Requiring the dense key refused Qwen3.6-35B-A3B at load ("no
     // metadata key qwen35moe.feed_forward_length") although the install was complete.
