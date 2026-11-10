@@ -496,7 +496,7 @@ oflm_env_report() {
     cat <<EOF
 
   project   $OFLM_ROOT
-  XRT       ${XILINX_XRT:-not found}${XRT_ROOT:+ (root $XRT_ROOT)}
+  XRT       ${XILINX_XRT:-$(oflm_env_c="$(command -v xrt-smi)" && echo "system install (${oflm_env_c%/*})" || echo "not found")}${XRT_ROOT:+ (root $XRT_ROOT)}
   ROCm      ${ROCM_PATH:-not found}${ROCM_VERSION:+ (version $ROCM_VERSION)}
   mlir-aie  ${MLIR_AIE_INSTALL_DIR:-not found}
   Peano     ${PEANO_INSTALL_DIR:-not found}
