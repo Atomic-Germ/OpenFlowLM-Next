@@ -393,7 +393,14 @@ if A is not None:
     QW, KVW = A.QW, A.KVW
     from recipes.attnknobs import probe_env  # noqa: E402
     ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={A.ROT}", f"-DATTN_GATE={1 if SPEC.attn_gate else 0}",
+                  f"-DATTN_QKNORM={1 if getattr(SPEC, 'qk_norm', False) else 0}",
+                  f"-DATTN_QKNORM_POST={1 if getattr(SPEC, 'qk_norm_post', False) else 0}",
+                  f"-DATTN_EPS={getattr(SPEC, 'norm_eps', 1e-6):g}f",
                   f"-DATTN_VEXP={A.VEXP}", f"-DATTN_NHL={A.NHL}"]
+    if getattr(SPEC, "attn_qkv_bias", False):
+        ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
+    if getattr(SPEC, "rope_interleaved", False):
+        ATTN_FLAGS.append("-DATTN_ROPE_IL=1")
     if A.KV_PAIR:
         ATTN_FLAGS.append("-DATTN_KV_PAIR=1")
     if A.RB > 1:                                           # attn.h defaults it to 1; adding the flag
@@ -470,7 +477,7 @@ def attn_kernels(inc, a):
 
 
 def attn_fifos(a):
-    of_ain = ObjectFifo(a["u8_1k"], name="ain", depth=max(4, 2 * RB + 2))   # a block is acquired at once
+    of_ain = ObjectFifo(a["u8_1k"], name="ain", depth=max(4, 2 * RB + 2, A.Q_AIN_ELEMS))
     of_aout = ObjectFifo(a["b512"], name="aout", depth=2)
     # Attention over ACORES cores: heads are independent, so each core owns NHL of them
     # and drains its own og element(s) -- the pattern dx.py uses.
@@ -484,8 +491,10 @@ def _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
     e = ain.acquire(2)
     fm(e[0], e[1], qn, kn, cs, pb)
     ain.release(2)
+    _qe = ain.acquire(A.Q_AIN_ELEMS)
     for h in range_(A.Q_AIN_ELEMS):
-        e = ain.acquire(1); fq(e, qn, cs, qs, h); ain.release(1)
+        fq(_qe[h], qn, cs, qs, h)
+    ain.release(A.Q_AIN_ELEMS)
     for h in range_(A.K_AIN_ELEMS):
         e = ain.acquire(1); fk(e, kn, cs, tmp, kout, h); ain.release(1)
     for h in range_(A.K_AIN_ELEMS):

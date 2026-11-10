@@ -115,6 +115,9 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
         case SupportedModelFamily::lfm2_5_tk:
             auto_chat_engine = std::make_unique<LFM2_5_TK>(npu_device_inst);
             break;
+        case SupportedModelFamily::lfm2moe:
+            auto_chat_engine = std::make_unique<LFM2MoE>(npu_device_inst);
+            break;
         case SupportedModelFamily::nanbeige:
             auto_chat_engine = std::make_unique<Nanbeige>(npu_device_inst);
             break;

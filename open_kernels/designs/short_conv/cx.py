@@ -49,11 +49,14 @@ DENSE = HERE.parent / "dense"
 sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
-from recipes import lfm2 as QR  # noqa: E402
 from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes, per_band  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
+if SPEC.family == "lfm2moe":
+    from recipes import lfm2moe as QR  # noqa: E402
+else:
+    from recipes import lfm2 as QR  # noqa: E402
 R = QR.recipe(SPEC)
 L, G = R.layout, R.geo
 DL = L.dense

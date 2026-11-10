@@ -333,10 +333,16 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> Lfm2moeLayout:
     # Dense layout for the leading layers (dx.py's geometry with the FFN width ff and
     # the no-gate attention). Its pool is sized from its own layout(); we need only
     # its const/act sizes and outputs, not its pool.
+    # Dense sublayout and geometry for the cx (short_conv_dense) lead layers.
+    # cx.py consumes R.layout.dense (CD_LNW/POSTLN/ELN, AD_XN/OUT/RES/XM/H/OUT2)
+    # and R.geo (UP_PC/DOWN_PC/XN_ELEMS/XM_ELEMS/H_ELEMS). The dense family's
+    # layout gives the act/const sublayout; lfm2's recipe gives the geo. B/C/U/Y
+    # are appended after the dense act base (d_act) in the merged buffer.
     try:
         DL = D.layout(spec, max_ctx)
         d_consts, d_act = DL.CD_BYTES, DL.AD_BYTES
     except Exception:
+        DL = None
         d_consts, d_act = Q.ELEM * 4, Q.ELEM * 4
     pool_bytes = max(base, Q.roundup(off, Q.MB))
     # Consts: the MoE attention consts + router bias + conv taps, over the largest
@@ -351,7 +357,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> Lfm2moeLayout:
         ad_off += size
     ad_bytes = Q.roundup(ad_off, Q.ELEM)
     return Lfm2moeLayout(
-        moe=L, dense=None,
+        moe=L, dense=DL,
         POOL_SC_B=p["b"], POOL_SC_C=p["c"], POOL_SC_U=p["u"], POOL_SC_OUT=p["out"],
         POOL_SC_UP=p["up"], POOL_SC_GATE=p["gate"], POOL_SC_DOWN=p["down"],
         POOL_BYTES=pool_bytes, CD_CONV=cd_conv, CD_BYTES=cd_bytes,
@@ -373,6 +379,7 @@ class Lfm2moeRecipe:
     kind: str = "moe"
     q8: frozenset = frozenset()
     ln_split: bool = False
+    geo: object = None  # dense geo for cx/dx (short_conv_dense lead layers)
 
 
 def attn(spec: ModelSpec) -> Q.Attn | None:
@@ -400,8 +407,14 @@ def attn(spec: ModelSpec) -> Q.Attn | None:
 
 def recipe(spec: ModelSpec, max_ctx: int = 4096) -> Lfm2moeRecipe:
     _check(spec)
+    # cx.py (short_conv_dense lead) needs R.geo with UP_PC/DOWN_PC/XN_ELEMS/XM_ELEMS/H_ELEMS.
+    try:
+        from . import lfm2 as _lfm2
+        geo = _lfm2.recipe(spec).geo
+    except Exception:
+        geo = None
     return Lfm2moeRecipe(spec=spec, layout=layout(spec, max_ctx), common=common(spec),
-                         max_ctx=max_ctx, linear=None, attn=attn(spec))
+                         max_ctx=max_ctx, linear=None, attn=attn(spec), geo=geo)
 
 
 def pack_plan(spec: ModelSpec) -> dict:
@@ -556,7 +569,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
             "program": [{"op": "run", "kernel": "sx0", "args": args},
-                        {"op": "moeroute2", "kernel": "sx1", "act_off": L.A_ROUT},
+                        {"op": "moeroute2", "kernel": "sx1", "act_off": L.AA_ROUT},
                         {"op": "run", "kernel": "sx1", "args": args}],
         }
     if FULL in spec.layer_types:

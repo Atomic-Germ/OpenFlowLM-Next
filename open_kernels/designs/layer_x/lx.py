@@ -117,11 +117,15 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         xin.release(1)
         X.dn_body(win, yout, B, K)
         # (still part 0) out against og (two 4 KB elements, K = VW)
-        oe = xin.acquire(2)
-        K["prep4096a"](oe[0], tab)
-        K["prep4096b"](oe[1], tab)
+        if OG_ELEMS == 1:
+            oe = xin.acquire(1)
+            K["prep4096a"](oe, tab)
+        else:
+            oe = xin.acquire(2)
+            K["prep4096a"](oe[0], tab)
+            K["prep4096b"](oe[1], tab)
         X.role_gemv_bands(win, yout, B, K, "linear_out", OUT_PC, OUT_K)
-        xin.release(2)
+        xin.release(OG_ELEMS)
         # part 1: the MoE block
         X.moe_body(win, xin, yout, B, K)
 

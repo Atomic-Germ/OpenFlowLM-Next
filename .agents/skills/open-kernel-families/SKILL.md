@@ -287,9 +287,39 @@ Traps already paid for (do not rediscover next time):
   `R.geo`/`R.spec`. The `lfm2` recipe guard was widened to accept `lfm2moe` specs *with* dense
   layers (cx.py/dx.py reuse); its build dir must be distinct (`..._lfm2moe`) or the build key
   collides with lfm2's same-geometry set.
+- `designs/short_conv/cx.py` (dense-lead `short_conv_dense`) must resolve its recipe by
+  `SPEC.family` (`lfm2moe` → `recipes.lfm2moe`, else `lfm2`). The `lfm2` recipe rejects/has
+  wrong layout for `lfm2moe`; building cx against it compiles pool taps at lfm2 offsets
+  (`POOL_SC_B=0`) while the manifest/pool packs lfm2moe projections at `POOL_SC_B=251658240+`,
+  so cx reads zeroed pool and produces wrong output (symptom: layer 0 cos ~0.45 vs ref, no
+  NaNs; poisoning pool offset 0 → NaNs confirms). `recipes.lfm2moe` must expose the dense
+  sublayout cx consumes (`L.dense` with `CD_LNW/POSTLN/ELN`, `AD_XN/OUT/RES/XM/H/OUT2`) and
+  `R.geo` (`UP_PC/DOWN_PC/XN_ELEMS/XM_ELEMS/H_ELEMS`). After rebuilding short_conv, sync the
+  rebuilt `short_conv/` (and manifest) into the *installed* model's `open_kernels/` (e.g.
+  `~/.config/oflm/models/<tag>/open_kernels/`) — `oflm serve` loads kernels from the installed
+  model dir, not `src/xclbins/`, so a stale installed cx silently keeps the old offsets. Also
+  clear `designs/short_conv/build_h*_lfm2moe*` and staging short_conv dirs when recipe/design
+  changes, as the build key may not invalidate.
 - Router bias pack: the `put` cap must be the exact `E*4` (the GGUF tensor is F32[E]); a cap of
   the padded ELEM slot (4096) fails in `pack_norm` ("is X B of f32, the slot holds Y B of
   bf16"). The consts blob is zero-memset before packing, so the slot's tail stays zero.
 - `make_test_mx.py` top-k picks must be `< E` (the [3,11,23,41] list breaks for E=32) and the
   run cfg's build dir must come from `MX_BUILD_DIR` (op-gate passes its geometry-tagged dir;
   a hard-coded `build_mx_full_lfm` silently ran the 24B xclbin against 8B buffers).
+
+- **layer_x full-attention q fill vs ain ObjectFifo depth (q-head scramble / ERT timeout).**
+  `full_sequence` in `xlayer.py` (ax/lx/ux full-attention path) streams `q` (NH*HD f32) into
+  the attention core via `ain` (u8 1 KB elements). A single bulk DMA of `Q_AIN_ELEMS` elements
+  (e.g. 8 for 32×64 q = 8192 B) into a depth-4 `ain` ObjectFifo can overrun the ring buffer
+  without per-element flow control, **scrambling q head delivery** (AA_QG in DDR correct, `k'`
+  correct, og/routing wrong with chaotic per-head mapping; e.g. LFM2.5-8B-A1B L2). Symptom is
+  wrong attention/routing, not NaN/timeout. Fix: make `ain` depth cover the q burst
+  (`max(..., A.Q_AIN_ELEMS, 2*A.K_AIN_ELEMS)`), keep one bulk fill of q, and have the worker
+  **block-acquire** all q elements (`ain.acquire(Q_AIN_ELEMS)` / loop `fq(_qe[h],...)` /
+  `ain.release(Q_AIN_ELEMS)`) so DMA/consumer granularity match. Do **not** split q into
+  multiple host `Pipeline.fill` calls to the same `ain` producer or change depth without
+  matching acquire granularity — those variants caused `ERT state 8` timeouts in testing.
+  `xlayer` ATTN compile flags must include `ATTN_QKNORM`/`ATTN_QKNORM_POST`/`ATTN_EPS` (and
+  BIAS/ROPE_IL when applicable) from the spec, matching `recipes/dense.attn_flags` behavior;
+  missing flags are incorrect for families like LFM2 with `qk_norm`. Rebuild affected `ax*`
+  (and any design using `full_sequence`/`attn_fifos`) after changing this.

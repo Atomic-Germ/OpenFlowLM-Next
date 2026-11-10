@@ -50,6 +50,40 @@ void LFM2::load_model(std::string model_path, json model_info, int default_conte
     }
 }
 
+/************              LFM2-MoE family            **************/
+LFM2MoE::LFM2MoE(oflm_rt::device* npu_device_inst) : LFM2(npu_device_inst) {}
+
+void LFM2MoE::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
+    this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
+                             oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
+
+    // The open kernels are the only engine for this family: there is no closed
+    // MoE lib, and a GGUF install has no closed path at all by construction.
+    auto open_engine = this->_shared_select_open_engine("OFLM_LFM2MOE_ENGINE", "LFM2-MoE");
+    if (!open_engine) {
+        throw std::runtime_error("LFM2-MoE has no closed engine; the open kernel set "
+                                 "is required (install with `oflm add`, which builds or "
+                                 "links the serving set for this geometry)");
+    }
+    this->lm_engine = std::move(open_engine);
+    this->lm_engine->clear_context();
+    auto tokenizer_config = this->_shared_setup_tokenizer(model_path);
+    (void)tokenizer_config;
+    this->tokenizer->is_doubled_encoded = true;
+    this->sampler.reset();
+
+    sampler_config config;
+    config.top_p = 0.95;
+    config.top_k = 10;
+    config.min_p = 0.1;
+    config.temperature = 0.3;
+
+    this->set_sampler(config);
+    for (size_t i = 0; i < PROFILER_TYPE_NUM; i++) {
+        this->profiler_list[i].reset();
+    }
+}
+
 void LFM2::setup_tokenizer(std::string model_path) {
     auto tokenizer_config = this->_shared_setup_tokenizer(model_path);
     this->tokenizer->is_doubled_encoded = true;

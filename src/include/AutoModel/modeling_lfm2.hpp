@@ -36,6 +36,17 @@ public:
     StreamResult parse_stream_content(const std::string content) override;
 };
 
+// LFM2-MoE (LFM2.5-24B-A2B / LFM2.5-8B-A1B): the same short-conv / full-attention
+// hybrid as LFM2 with routed experts. The tokenizer, chat template and tool-call
+// parsing are LFM2's (identical <|tool_call_start|> markers and GPT2-style BPE),
+// so only the engine load differs: the open kernels (sx/ax + MoE) are the only
+// engine -- there is no closed lfm2_npu path for this family.
+class LFM2MoE : public LFM2 {
+public:
+    LFM2MoE(oflm_rt::device* npu_device_inst);
+    void load_model(std::string model_path, json model_info, int default_context_length = -1, bool enable_preemption = false) override;
+};
+
 class LFM2_5_TK : public AutoModel {
 private:
     int think_start_id = 64400;

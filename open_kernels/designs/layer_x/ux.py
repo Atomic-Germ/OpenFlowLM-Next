@@ -204,11 +204,15 @@ def ux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *,
         X.gemv_bands(win, yout, tab, K["gy"], nbands, X.n_groups(HID), X.per_band(HID), 2)
         xin.release(1)
         X.dn_body(win, yout, B, K, nheads)
-        oe = xin.acquire(2)                                 # og, K = OUT_K (= O_K)
-        K["prep4096a"](oe[0], tab)
-        K["prep4096b"](oe[1], tab)
+        if OG_ELEMS == 1:
+            oe = xin.acquire(1)
+            K["prep4096a"](oe, tab)
+        else:
+            oe = xin.acquire(2)
+            K["prep4096a"](oe[0], tab)
+            K["prep4096b"](oe[1], tab)
         X.role_gemv_bands(win, yout, B, K, "linear_out", OUT_PC, OUT_K)
-        xin.release(2)
+        xin.release(OG_ELEMS)
         X.moe_body(win, xin, yout, B, K)
 
     workers = ([XL.ln_worker(of_lni, of_lno, tl, L)]

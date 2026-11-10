@@ -131,14 +131,30 @@ WHISPER_AUX = ["config.json", "tokenizer.json", "tokenizer_config.json",
 # The quant must run to the end of the stem: 'Q4_0_4_4' is a different
 # tensor layout (ik_llama matmul shuffles), not Q4_0, and matching only a
 # prefix once installed exactly that as Q4_0 pools (silent garbage).
-GGUF_QUANT_RE = re.compile(r"[.\-_ ](I?Q[0-9](?:_[A-Za-z0-9]+)*)\.gguf$", re.IGNORECASE)
+# Plain float formats (F16/BF16/F32, and the FP16/FP32 spellings repos use)
+# are whole-file formats rather than named Q families, but they are explicitly
+# supported sources (NPUE_GGUF_PREFERENCE) and must be selectable by name.
+GGUF_QUANT_RE = re.compile(
+    r"[.\-_ ]((?:I?Q[0-9](?:_[A-Za-z0-9]+)*|F16|BF16|F32|FP16|FP32))\.gguf$",
+    re.IGNORECASE,
+)
+_FLOAT_QUANT_CANON = {"FP16": "F16", "FP32": "F32"}
+
+
+def _canon_quant_token(token):
+    """Fold a quant token to the canonical family spelling used in preferences."""
+    if not token:
+        return None
+    up = token.upper()
+    return _FLOAT_QUANT_CANON.get(up, up)
+
 
 def gguf_quant_suffix(name):
     """The raw trailing quant-ish token of a GGUF file name, e.g.
     'Model-Q4_K_M.gguf' -> 'Q4_K_M', 'Model-Q4_0_4_4.gguf' -> 'Q4_0_4_4'
     (None when the stem ends in nothing quant-like)."""
     m = GGUF_QUANT_RE.search(name)
-    return m.group(1) if m else None
+    return _canon_quant_token(m.group(1)) if m else None
 
 def gguf_quant_family(suffix, preference=None):
     """A raw suffix folded to its tensor family, or None when unknown.
@@ -151,7 +167,7 @@ def gguf_quant_family(suffix, preference=None):
     accepts the plain F16/F32/BF16 files those repos ship)."""
     if not suffix:
         return None
-    q = suffix.upper()
+    q = _canon_quant_token(suffix)
     for fam in (preference or GGUF_QUANT_PREFERENCE):
         if q == fam:
             return fam
@@ -159,11 +175,18 @@ def gguf_quant_family(suffix, preference=None):
             return fam
     return None
 
-def gguf_quant_of(name):
+def gguf_quant_of(name, preference=None):
     """The quant family in a llama.cpp-style weight file name, e.g.
     'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked or
-    unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
-    return gguf_quant_family(gguf_quant_suffix(name))
+    unknown -- 'Q4_0_4_4' is NOT 'Q4_0').
+
+    Float formats (F16/BF16/F32) are recognized as their own families even
+    when the default chat-pool preference does not list them, because some
+    install paths (e.g. NPU embeddings) accept them explicitly."""
+    suffix = gguf_quant_suffix(name)
+    if suffix in ("F16", "BF16", "F32"):
+        return suffix
+    return gguf_quant_family(suffix, preference)
 
 def split_quant_request(repo_arg: str):
     """`repo:QUANT` -- name the quant to take from a GGUF repo.
@@ -1763,8 +1786,28 @@ def reconcile_config_json(target, kernel_dir):
             if got is None:
                 cfg[key] = list(want)
                 filled.append(key)
-            elif list(got) != list(want):
-                conflicting.append(key)
+            else:
+                # Normalize GGUF/HF-native conv naming to the kernel set's canonical
+                # form (short_conv / short_conv_dense) so a config rebuilt from GGUF
+                # metadata validates against the set it was linked to. "conv" in a
+                # GGUF layer_types means a short-conv mixer; the first num_dense_layers
+                # conv slots are the dense-lead (short_conv_dense), the rest MoE
+                # (short_conv). Only rewrite when the normalized form matches want --
+                # a genuinely different architecture stays conflicting.
+                norm = list(got)
+                if "conv" in norm and "short_conv" not in "".join(str(x) for x in norm):
+                    nd = int(cfg.get("num_dense_layers") or 0)
+                    ci = 0
+                    for i, t in enumerate(norm):
+                        if t == "conv":
+                            norm[i] = "short_conv_dense" if ci < nd else "short_conv"
+                            ci += 1
+                if list(norm) == list(want):
+                    if list(got) != list(want):
+                        cfg[key] = list(want)
+                        filled.append(key)
+                elif list(got) != list(want):
+                    conflicting.append(key)
             continue
         if key in cfg:
             got = cfg[key]
@@ -2528,19 +2571,27 @@ def register(
         # Collision check: shipped registry -- on the FINAL destination tag,
         # and unconditionally. Checking only when --name was absent let
         # `--name qwen3.8:27b` write a user entry that shadows the shipped
-        # one through the merged overlay. Exception: the NPU-embedding flow
+        # one through the merged overlay. Exceptions: the NPU-embedding flow
         # deliberately re-installs the official design under its shipped tag
-        # (the engine routes by that exact tag); a same-design re-install
-        # is not a takeover of the name.
+        # (the engine routes by that exact tag), and a supported Whisper GGUF
+        # install may reuse its corresponding official shipped Whisper tag.
         shipped_entry = (system_registry.get("models", {})
                          .get(model_type, {}).get(size))
         if shipped_entry is not None:
+            shipped_details = shipped_entry.get("details") or {}
             same_npue_design = (
                 entry.get("npue_design_family")
                 and shipped_entry.get("npue_design_family")
                 and entry["npue_design_family"] == shipped_entry["npue_design_family"]
             )
-            if not same_npue_design:
+            same_whisper = (
+                shipped_details.get("family") in WHISPER_FAMILIES
+                and shipped_entry.get("asr")
+                and (entry.get("details") or {}).get("family") == shipped_details.get("family")
+                and (entry.get("name") == shipped_entry.get("name")
+                     or (entry.get("asr") and str(entry.get("name", "")).lower().endswith(".gguf")))
+            )
+            if not same_npue_design and not same_whisper:
                 raise SystemExit(
                     f"Model {final_tag} already exists in the shipped registry. "
                     f"Use --name to install under a different name."
@@ -3851,7 +3902,7 @@ def main():
     gguf_pref = NPUE_GGUF_PREFERENCE if npue_gguf else GGUF_QUANT_PREFERENCE
     gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want,
                                                preference=gguf_pref)
-    if gguf_name is None and local_dir and "model.gguf" in gguf_names and not gguf_want:
+    if gguf_name is None and "model.gguf" in gguf_names and not gguf_want:
         gguf_name = "model.gguf"
         gguf_refused.pop("model.gguf", None)
     if gguf_want and gguf_name is None:
@@ -3939,6 +3990,10 @@ def main():
     # registry ties that base to a family. Then the base chain (the README's
     # base model), then the content (the GGUF header's architecture, the
     # config's model_type), and last the name.
+    #
+    # Geometry detection and kernel discovery are independent of family inference:
+    # --family overrides the model family metadata but must not disable kernel
+    # selection or automatic builds for an otherwise compatible install.
     content_families = []
     # The roots the open kernel sets live in. The SHIPPED tree first: when several sets
     # serve one geometry, the one the app ships is the stable answer, and a per-model
@@ -3951,35 +4006,35 @@ def main():
     geom_dir = None                     # the set whose GEOMETRY this model needs
     geom_set = None                     # ... and its directory name (a label from here on)
     geom_notes = []                     # why the sets that do not serve it do not
+    # THE FILE FIRST. For a GGUF install the weight file is the model: its metadata
+    # names the architecture, the widths, the rope law and the head, and llama.cpp
+    # already baked the conversion's choices into it. A config.json in the repo (or
+    # in its base model's repo) is a HINT for what the GGUF does not carry --
+    # tokenizer, chat template, vision tower -- never the source of the geometry.
+    # Peeking it first is what made a translategemma GGUF "a different geometry"
+    # from the Gemma 3 4B set it matches exactly: the repo's config has no
+    # rope_scaling, while the GGUF's metadata says factor 8.0, which is what runs.
+    if gguf_mode and gguf_source is not None:
+        spec = spec_from_gguf_source(gguf_source)
+    if spec is None:
+        spec = spec_from_config_dict(get_peeked_config())
+    # WHAT THE MODEL IS comes first: a vision tower is a property of the checkpoint, not
+    # of the kernels it borrows. Qwen2.5-VL runs on the plain Qwen2.5-3B set (same
+    # decoder, and the M-RoPE lives in config.json), so the kernel family is `qwen2`
+    # while the model is `qwen2vl` -- and the adapter that prepares images is picked by
+    # the latter. For a text model the two agree, so this only changes VL installs.
+    content_fam, content_where = None, ""
+    if gguf_mode and gguf_source is not None:
+        content_fam = family_from_gguf_arch(gguf_source)
+        content_where = "the GGUF architecture"
+    if content_fam is None:
+        # No GGUF (or an arch the map does not know): the config's model_type is the
+        # file's own statement about itself, and for a VLM it names the wrapper.
+        content_fam = family_from_config_dict(get_peeked_config())
+        content_where = "config.json model_type"
+    geom_dir, geom_set, geom_notes = scan_kernel_sets(
+        spec, kernel_roots, source=gguf_source, need_gguf=gguf_mode)
     if args.family is None:
-        # THE FILE FIRST. For a GGUF install the weight file is the model: its metadata
-        # names the architecture, the widths, the rope law and the head, and llama.cpp
-        # already baked the conversion's choices into it. A config.json in the repo (or
-        # in its base model's repo) is a HINT for what the GGUF does not carry --
-        # tokenizer, chat template, vision tower -- never the source of the geometry.
-        # Peeking it first is what made a translategemma GGUF "a different geometry"
-        # from the Gemma 3 4B set it matches exactly: the repo's config has no
-        # rope_scaling, while the GGUF's metadata says factor 8.0, which is what runs.
-        if gguf_mode and gguf_source is not None:
-            spec = spec_from_gguf_source(gguf_source)
-        if spec is None:
-            spec = spec_from_config_dict(get_peeked_config())
-        # WHAT THE MODEL IS comes first: a vision tower is a property of the checkpoint, not
-        # of the kernels it borrows. Qwen2.5-VL runs on the plain Qwen2.5-3B set (same
-        # decoder, and the M-RoPE lives in config.json), so the kernel family is `qwen2`
-        # while the model is `qwen2vl` -- and the adapter that prepares images is picked by
-        # the latter. For a text model the two agree, so this only changes VL installs.
-        content_fam, content_where = None, ""
-        if gguf_mode and gguf_source is not None:
-            content_fam = family_from_gguf_arch(gguf_source)
-            content_where = "the GGUF architecture"
-        if content_fam is None:
-            # No GGUF (or an arch the map does not know): the config's model_type is the
-            # file's own statement about itself, and for a VLM it names the wrapper.
-            content_fam = family_from_config_dict(get_peeked_config())
-            content_where = "config.json model_type"
-        geom_dir, geom_set, geom_notes = scan_kernel_sets(
-            spec, kernel_roots, source=gguf_source, need_gguf=gguf_mode)
         # The SET names the kernels, never the model. `details.family` is the engine /
         # adapter that runs a MODEL -- qwen3, qwen3-it, qwen3-tk, qwen3vl are four
         # different entries for four different Qwen3 4B containers -- while a kernel
