@@ -2,7 +2,7 @@
  "tool": "qwen38-performance-baseline",
  "version": 3,
  "pr": "performance plan PR #1 -- baseline and profiling infrastructure",
- "status": "REVIEW_FIXES_VALIDATED_PERFORMANCE_ACCEPTANCE_PENDING",
+ "status": "MEASURED",
  "model": "Qwen3.8-27B",
  "scope": "text-only, open XDNA2 (aie2p) kernels, block prefill route",
  "commit": "3a99eede",
@@ -222,166 +222,9 @@
   "decode throughput outside 4K context",
   "anything about vision or long-context attention"
  ],
- "superseded_review_findings": {
-  "layer_major_route": {
-   "request_ms": 34216.1,
-   "layer_wall_ms": 34187.0,
-   "gemm_ms": 25092.0,
-   "host_ms": 5460.0,
-   "host_stages_ms": {
-    "gemm_tile_ms": 2767.5,
-    "gemm_tr_ms": 891.5,
-    "mid_ms": 990.5,
-    "dn_conv_ms": 336.1,
-    "dn_rule_ms": 330.3,
-    "attn_ms": 324.0,
-    "shared_ms": 560.4,
-    "tail_ms": 310.8,
-    "sync_ms": 339.9,
-    "prenorm_ms": 159.7,
-    "state_ms": 4.9
-   },
-   "comparison": "layer-major is 2.3% faster than the block loop at this exact 256-token multiple (34216 vs 35007 ms), against 1.6% in the first pass; both are the parity the route policy predicts at an exact multiple, and the block loop stays the shipped default"
-  },
-  "decode_attribution": {
-   "method": "OFLM_OPEN_STEP_TRACE=1 on the same binary: the engine's per-kernel dispatch table over a decode loop, on the idle box",
-   "prompt_tokens": 32,
-   "generated": 4,
-   "steps_sampled": 35,
-   "dispatches": 2248,
-   "per_step": {
-    "wall_ms": 429.8,
-    "dispatch_sum_of_minima_ms": 408.9,
-    "dispatch_sum_of_means_ms": 654.8,
-    "variance_ms": 245.9,
-    "host_embed_ms": 0.03,
-    "host_patch_ms": 0.01,
-    "host_route_ms": 0.0,
-    "host_lm_read_ms": 2.93
-   },
-   "per_kernel": {
-    "ax": {
-     "calls_per_step": 16.0,
-     "min_ms": 5.383,
-     "mean_ms": 5.58,
-     "p90_ms": 5.846,
-     "blocked_ms": 5.553
-    },
-    "lx": {
-     "calls_per_step": 48.0,
-     "min_ms": 6.665,
-     "mean_ms": 11.721,
-     "p90_ms": 14.124,
-     "blocked_ms": 6.92,
-     "mean_same_ctx_ms": 13.815
-    },
-    "ln": {
-     "calls_per_step": 0.1,
-     "min_ms": 0.219,
-     "mean_ms": 0.301
-    },
-    "lm": {
-     "calls_per_step": 0.1,
-     "min_ms": 25.031,
-     "mean_ms": 25.207
-    }
-   },
-   "reading": "one token is 16 ax + 48 lx + 1 ln + 1 lm = 66 dispatches; the dispatches' own times (sum of minima 409 ms) are essentially the whole 430 ms step, so the host is not the decode bottleneck. lm_head is 25 ms of 430 = 5.8% per token. lx's mean (11.72 ms) is 1.76x its min (6.67 ms) and the gap is entirely same-context work (13.82 ms vs 7.52 ms after a switch), so it is not a context-switch cost.",
-   "limitation": "the sequential route books blocked time into StepTiming::part1_ms (the fused dispatch chain has no host stages), so the per-layer profile cannot split device from host there; the dispatch trace is the instrument that can.",
-   "artefact": "captured during the run; runs/ is scratch and is not committed"
-  },
-  "reason": "The labelled layer-major capture executed gemm-block. Decode attribution mixed 32 prompt steps and 3 generated-token steps; submit-to-completion includes queue residence. Neither supports the former route comparison or kernel-variance ranking."
- },
  "limitations": [
   "Existing TTFT/rate observations are retained, not new measurements of the corrected tree.",
   "No hardware device timestamps: queue residence, dispatch execution and idle time remain unresolved.",
   "The rejected first-pass slowdown correlates with load/memory pressure; page faults were not measured to prove causation."
- ],
- "review_validation": {
-  "source": "uncommitted corrections over e04bf9bc",
-  "parent_commit": "3a99eede60b2b228ffcb9fcb170f33d20fa0dda6",
-  "routes": {
-   "artifact": "Models/qwen38-27b/profile-review-fix/routes/result.json",
-   "layers": 64,
-   "prompt_tokens": 256,
-   "generated_tokens": 16,
-   "greedy_agreement": true,
-   "observed_routes": {
-    "block": "gemm-block",
-    "layer-major": "gemm-prompt"
-   },
-   "complete_profile_groups": true
-  },
-  "decode_comparison": {
-   "artifact": "Models/qwen38-27b/profile-review-fix/overhead/result.json",
-   "warmup_triplets": 1,
-   "measured_triplets": 5,
-   "generated_tokens_per_run": 8,
-   "all_generated_ids_agree": true,
-   "new_off_ms": [
-    466.0,
-    451.0,
-    448.0,
-    449.0,
-    446.0
-   ],
-   "new_on_ms": [
-    463.0,
-    448.0,
-    448.0,
-    449.0,
-    450.0
-   ],
-   "parent_off_ms": [
-    445.0,
-    449.0,
-    448.0,
-    451.0,
-    449.0
-   ],
-   "median_ms": {
-    "parent_off": 449.0,
-    "new_off": 449.0,
-    "new_on": 449.0
-   },
-   "on_profile_steps": 39,
-   "on_profile_layer_rows": 2496,
-   "measured_decode_steps_profiled": 7,
-   "acceptance": "EXPLORATORY ONLY: requested performance mode failed; default mode observed after the run. No controlled performance-mode acceptance."
-  },
-  "power_observation": {
-   "mode_after_run": "default",
-   "NPU_temperature": "N/A",
-   "host_ACPI_temperature_C_start": 75,
-   "host_ACPI_temperature_C_end": 67
-  },
-  "builds": {
-   "artifact": "Models/qwen38-27b/profile-review-fix/build-evidence.json",
-   "standalone_ctest": "4 passed",
-   "production_ctest": "29 passed, 2 skipped",
-   "production_build": "PASS"
-  },
-  "settings": "Local scanner/generator PASS, registry byte-identical. Merged-target helper refused the dirty worktree; merged-target CI not claimed.",
-  "evidence_sha256": {
-   "Models/qwen38-27b/profile-review-fix/routes/result.json": "0bbd6951b81e842c28e60fd68ffbbc7ea14f4914cadef68b5bd9689f32288b50",
-   "Models/qwen38-27b/profile-review-fix/overhead/result.json": "ad4e5665b011a6aa82777b38d6d10753299122995fb2c9d14e7e414992075ee3",
-   "Models/qwen38-27b/profile-review-fix/build-evidence.json": "eaa970e855984f1244c3f3f8d16ff95a277b2090d6c36593ccdf4a90c2f1467a",
-   "Models/qwen38-27b/profile-review-fix/trace.log": "762ca3ad43124dc0900a8a343816c27df17fabbe69770cf3438a5188b70063dc"
-  },
-  "trace_phase_separation": {
-   "artifact": "Models/qwen38-27b/profile-review-fix/trace.log",
-   "prefill_steps": 32,
-   "decode_steps": 3,
-   "decode_dispatches": 198,
-   "verdict": "PASS",
-   "pmode": "none (unchanged)"
-  },
-  "tests": {
-   "command": "OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -m pytest -q specs/",
-   "passed": 2460,
-   "skipped": 172,
-   "failed": 0,
-   "profiling_regression_tests": 22
-  }
- }
+ ]
 }

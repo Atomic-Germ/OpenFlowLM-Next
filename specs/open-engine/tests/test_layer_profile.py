@@ -109,8 +109,42 @@ def test_jsonl_parser_requires_request_group_order(tmp_path, what):
         P.read_jsonl(path)
 
 
+def _braced(text: str, open_at: int) -> str:
+    """`text` from `open_at` (which must be a `{`) through its matching close.
+
+    The profiling tests compile the real methods out of `core.cpp`, which means cutting a
+    function out of it. Cutting at a NEIGHBOURING line (`... the next '\nxrt::hw_context&'`)
+    breaks on a reformat that changes no behaviour, so the cut is by brace depth instead:
+    the same extraction survives a reindent, a moved neighbour and a new function inserted
+    between.
+    """
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[open_at:i + 1]
+    raise AssertionError('unbalanced braces in core.cpp')
+
+
+def _function(text: str, signature: str) -> str:
+    """The whole definition of `signature` (from its first character through the closing
+    brace of its body), found by name and extracted by brace depth."""
+    at = text.index(signature)
+    return text[at:text.index('{', at)] + _braced(text, text.index('{', at))
+
+
+def _call_hook(text: str, needle: str) -> str:
+    """The `if (...)` statement containing `needle`, with its body."""
+    at = text.index(needle)
+    start = text.rindex('if (', 0, at)
+    return text[start:text.index('{', start)] + _braced(text, text.index('{', start))
+
+
 def test_actual_cpp_profile_methods_and_step_label(tmp_path):
-    """Compile the real profiling methods without XRT or model weights."""
+    """Compile the real profiling methods and validate the JSONL they write."""
     compiler = shutil.which('c++')
     if not compiler:
         pytest.skip('C++ compiler unavailable')
@@ -118,9 +152,16 @@ def test_actual_cpp_profile_methods_and_step_label(tmp_path):
     header = (ROOT / 'src/open_qwen36/core.hpp').read_text()
     structs = '\n'.join(re.search(r'struct ' + name + r' \{.*?\n\};', header, re.S)[0]
                         for name in ('StepTiming', 'LayerTiming'))
-    methods = source[source.index('static LayerTiming diff_timing('):source.index('\nxrt::hw_context& Core::context(')]
-    start = source.index('    if (profile_ && profile_steps_left_ > 0)')
-    step_hook = source[start:source.index('\n    }', start) + 6]
+    # Each method by name, each body by brace depth -- see _function/_braced.
+    methods = '\n'.join(_function(source, sig) for sig in (
+        'static LayerTiming diff_timing(',
+        'void Core::profile_begin(',
+        'void Core::profile_layer(',
+        'void Core::profile_switch(',
+        'void Core::profile_close(',
+        'void Core::profile_end(',
+    ))
+    step_hook = _call_hook(source, 'profile_steps_left_ > 0')
     code = r'''
 #include <chrono>
 #include <cstdio>

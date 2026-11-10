@@ -45,6 +45,21 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import oracle as O  # noqa: E402
 
+
+def lock_exclusive(handle):
+    """Hold the NPU lock on `handle` for the duration of the `with`.
+
+    `fcntl` is POSIX-only. The drivers in this folder run on Linux, but the module is also
+    imported on Windows by the spec suite, so the import is optional and a platform without
+    it simply runs without the inter-process lock rather than failing to import.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return __import__('contextlib').nullcontext(handle)
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
 # The columns a layer row carries, in the order the report prints them.
 # `wall_ms` is the layer's own steady-clock duration, taken at the module boundaries: it is
 # the column that answers "which layer costs what", and the only one StepTiming cannot
@@ -190,9 +205,7 @@ def run(ids: list[int], route: str, *, layers: int, max_ctx: int, max_tokens: in
         if route == 'block':
             cmd.append('--block-major')
     t0 = time.monotonic()
-    with O.LOCK.open('a') as handle:
-        import fcntl
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with lock_exclusive(O.LOCK.open('a')):
         try:
             proc = subprocess.run(cmd, cwd=str(O.ROOT), env=env, capture_output=True,
                                   text=True, timeout=timeout)
