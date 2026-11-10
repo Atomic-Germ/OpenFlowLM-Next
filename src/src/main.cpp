@@ -17,7 +17,7 @@
 #include "config/config_cmd.hpp"
 #include "config/config_store.hpp"
 #include "config/settings_resolver.hpp"
-#include "open_qwen36/core.hpp"   // reexec_with_passive
+#include "open_qwen36/omp_policy.hpp"
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -537,13 +537,6 @@ int main(int argc, char* argv[]) {
     preload_bundled_libraries();
 #endif
 
-#ifndef _WIN32
-    // libgomp fixes its wait policy when the library loads, so an in-process setenv cannot
-    // apply it -- and the spinning workers cost 16% of a prefill block on this box. Re-exec
-    // once with the variable in the environment; nothing has touched the device yet.
-    if (open_qwen36::reexec_with_passive(argv)) return 0;
-#endif
-
     // `add` owns a richer, repository-oriented option set than the runtime
     // commands. Hand its arguments through unchanged before the common Boost
     // parser can reject them; the bundled utility remains the single source of
@@ -626,6 +619,21 @@ int main(int argc, char* argv[]) {
         effective_cfg.merged = nlohmann::json::parse(config_file);
     }
     model_list availble_models(effective_cfg.merged, models_dir);
+
+#if defined(__linux__) && !defined(OFLM_USE_HRX)
+    // Qwen3.8's measured block-prefill policy must reach libgomp before its first
+    // parallel region. Other models keep their own OpenMP behavior, including Whisper.
+    if ((parsed_args.command == "run" || parsed_args.command == "serve" || parsed_args.command == "bench") &&
+        parsed_args.model_tag != "model-faker" && availble_models.is_model_supported(parsed_args.model_tag)) {
+        const auto [tag, info] = availble_models.get_model_info(parsed_args.model_tag);
+        (void)tag;
+        if (info.contains("details") && info["details"].contains("family") && info.contains("name") &&
+            open_qwen36::qwen38_model(info["details"]["family"].get<std::string>().c_str(),
+                                      info["name"].get<std::string>().c_str())) {
+            if (open_qwen36::reexec_with_passive(argv)) return 0;
+        }
+    }
+#endif
 
     // Extract parsed values
     bool got_power_mode = (parsed_args.power_mode != "performance"); // Check if user explicitly set power mode

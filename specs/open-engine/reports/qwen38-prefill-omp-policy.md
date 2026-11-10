@@ -1,136 +1,176 @@
-# Qwen3.8-27B prefill: the OpenMP wait policy was never applied (PR #2)
+# Qwen3.8-27B: apply the OpenMP wait policy before runtime initialization
 
-**Verdict: 15% off prefill TTFT, bit-exact output.** One cause, found by measuring rather
-than by guessing, and it is a bug that had been shipping quietly.
+Linux libgomp reads its environment before application static constructors.
+Setting `OMP_WAIT_POLICY` from the old constructor therefore changed the value
+printed by the engine without applying that default at runtime initialization.
+PR #2 moves the Linux default to an early self-exec, before model/device access.
 
----
+## Implementation and compatibility
 
-## 1. What PR #1 pointed at, and why it was wrong
+- The backend-independent helper is `src/open_qwen36/omp_policy.cpp`; the app
+  does not include the XRT-only `core.hpp` just to reach it. HRX builds compile
+  the helper but do not select this optimization.
+- The shipped app selects the policy only for a registry entry with family
+  `qwen3.5` and a `Qwen3.8-` model name, for `run`, `serve` and `bench`. Other
+  models, including Whisper, retain their existing OpenMP behavior. The
+  standalone CLI calls the helper directly for controlled engine measurements.
+- The Linux constructor leaves the environment untouched. An explicit
+  `OMP_WAIT_POLICY`, including `ACTIVE`, takes precedence and skips re-exec.
+- Otherwise startup sets `PASSIVE` and re-execs the same binary with its original
+  arguments. `OFLM_OPEN_OMP_PASSIVE=0` opts out; `OFLM_OPEN_OMP_REEXEC` is a
+  diagnostic guard. Successful exec does not return or change the process ID.
+- Failed environment setup or exec prints a diagnostic. A failed exec restores
+  the previously absent policy/guard instead of reporting an unapplied policy.
+- Windows retains its delay-loaded vcomp initialization; the POSIX header is
+  guarded. A host test covers that branch, not a native MSVC build.
+- Kernel arithmetic, weights, ABI, routing thresholds and state layouts are
+  unchanged. The selected policy is process-wide only for the Qwen3.8 command.
 
-PR #1's per-layer profile attributed **3 047 ms** of a 35.0 s prefill block to `gemm_tile_ms`,
-i.e. `host::tile_x` — 49.5% of all host time. That made "rewrite the tiling loop" the obvious
-PR #2.
+Executable tests compile and run the production helper and its test driver.
+They cover explicit policies, opt-out, the guard, arguments, one re-exec, model
+selection, an injected exec failure and the XRT-free HRX dependency boundary.
+The benchmark runner imports its POSIX lock only in hardware modes, so its pure
+summary/parser tests skip rather than fail where that capability is absent.
 
-Measuring the function itself, before rewriting it
-([`tile-x-bench.cpp`](../../../utilities/prefill-block/tile-x-bench.cpp)), killed that plan:
+## Measurement method
 
-| path | qkv\|z (K=5120) | down (K=17408) |
-|---|---|---|
-| shipped scalar loop → host memory | 0.055 ms | 0.21 ms |
-| shipped scalar loop → mapped XRT BO | 0.10 ms | 0.35 ms |
-| AVX2 rewrite → host memory | 0.055 ms | 0.21 ms |
+The repeatable driver is `utilities/prefill-block/omp_policy.py`. Its modes share
+existing profile provenance, CLI, server and state-comparison helpers.
 
-A 256-token block makes 256 calls, so at those rates tiling costs **~30 ms**, not 3 047 ms —
-two orders of magnitude apart. And the loop is already at memory bandwidth: the AVX2 rewrite
-gives **nothing**, because the compiler vectorises `f32_to_bf16` (three integer ops) fine.
+The full-model benchmark compares the retained pre-PR binary from `7f227b15`
+with the corrected implementation in `8ba65ae9`. It excludes one warm-up pair,
+then runs five measured pairs with alternating order, a fixed 256-token prompt
+and 16 generated tokens. Profiling is disabled. Engine prompt-ingestion time
+excludes model loading; decode time excludes prefill. This is not a measurement
+of HTTP time to first streamed token.
 
-So the profile was not measuring the tiling. It was measuring the tiling *plus 100×*.
+The runner retains both binary hashes, model/kernel hashes, commands, complete
+logs, generated token IDs, per-run host conditions, observed NPU power mode and
+peak process RSS. `--pmode none` deliberately retains the observed `default`
+mode; it does not claim successful performance-mode configuration. Available
+ACPI temperatures are recorded separately from the unavailable NPU temperature.
 
-## 2. The actual cause
+Host: AMD Ryzen AI 9 365 / NPU Strix, 20 OpenMP threads, Linux 7.0.0-38-generic,
+glibc 2.43, CPU governor `powersave`. Both arms use the same 19,844,633,616-byte
+Q4NX model and existing paired-prefill kernel export. SHA-256 identities:
 
-`gemm_tile_ms`'s window starts before `tile_x` and ends after it. What else lands inside it:
-`tile_x` is a `#pragma omp parallel for`, and the box's own notes (in `core.cpp`, from the
-2582-token work) record that **a spinning OpenMP worker throttles the NPU** through the shared
-package power budget. When the workers spin, the host stage in front of every dispatch costs
-several times what the work costs.
+| Artifact | SHA-256 |
+|---|---|
+| Before CLI | `c3bb978b16be18622ad030a00369f0752775d3af849cdd7c3c7a06665ef12b87` |
+| After CLI | `7613619055503a5fe8578eee948a292c6972f381dd17377041ed0c7afd031c28` |
+| Model | `1f78e62b723f66ad540e8a35a5cb31de67e2eae48c3a58e226873eefa10b349a9` |
+| Kernel manifest | `744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee` |
 
-The engine already knew this and tries to fix it:
+Acceptance requires five faster prefill pairs with identical output IDs, and
+median decode time and peak process RSS increases no greater than 3%. With five
+wins, the one-sided paired sign-test probability under no improvement is 1/32.
+This performance criterion does not alter any numerical oracle threshold.
 
-```cpp
-struct OmpWaitPolicy { OmpWaitPolicy() { ... setenv("OMP_WAIT_POLICY", "PASSIVE", 0); } };
-const OmpWaitPolicy g_omp_wait_policy;
+## Validation results
+
+The five measured full-model pairs passed on 2026-11-06:
+
+| Metric | Before median (range) | After median (range) | Median change |
+|---|---:|---:|---:|
+| 256-token engine prefill | 34.581 s (34.255–34.755) | 29.241 s (29.187–29.388) | **−15.44%** |
+| Decode per token | 453 ms (450–456) | 454 ms (453–455) | +0.22% |
+| Peak process RSS | 17,007,900 KiB (17,007,816–17,008,208) | 17,007,788 KiB (17,007,480–17,008,596) | −0.001% |
+
+All five prefill pairs improved; all 16 generated IDs matched in every pair.
+There is no demonstrated decode or peak-RSS regression in this sample. This
+gain is for the measured full-model workload, not a throughput guarantee for
+other models or prompt lengths.
+
+The shipped `oflm run` also completed two resident sessions, with the policy
+disabled/enabled. Each session included one warm-up and three requests separated
+by `/clear`. Engine prompt lengths were **72, 264, 520 and 1032** tokens (the chat
+template adds eight to the user-text fixture). All four answers matched, with
+16 text tokens each. These logs were re-audited after correcting the validation
+driver: its original comparison accidentally included changing `/status` timings
+and the next turn's streamed answer. Both processes exited successfully; inference
+was not rerun for the parser correction. Single-session timings are retained as
+a cross-check, not additional statistical performance evidence.
+
+Host validation on the review-fixed, main-merged tree:
+
+- `OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -m pytest -q specs/`:
+  **2532 passed, 172 skipped**.
+- Production Docker build: `cmake --build build --target oflm -j 4` passed;
+  `ctest --test-dir build --output-on-failure`: **29 passed, 2 skipped**.
+- Standalone CLI build passed; standalone CTest: **6 passed**, including the
+  OpenMP model-selection test. Direct settings scan and registry regeneration
+  matched the committed registry.
+- The earlier five-pair NPU result was measured with `8ba65ae9`; the review-fixed
+  tree has not been re-benchmarked. Its performance claim remains historical
+  evidence for the same startup mechanism, not a fresh measurement of this tree.
+
+**Acceptance still pending:** the four-layer boundary matrix, full-depth state
+comparison, and repeated server requests/RSS check. On resumption at 09:23 on
+2026-11-06, even the pre-PR control failed before inference with
+`DRM_IOCTL_AMDXDNA_CREATE_HWCTX ... EINVAL`. The corrected CLI failed identically.
+The kernel log reported `aie2_xrs_load: create context failed, ret -22` and
+`Allocate AIE resource failed`; no active hardware contexts were reported.
+Binary/kernel hashes still match the successful benchmark. The underlying
+driver/firmware cause is undetermined. No device reset was performed.
+Only about 14 GiB RAM was available; full-model/server checks were explicitly
+deferred by the user. This is not a completed hardware acceptance claim.
+
+Retained evidence: `Models/qwen38-27b/pr2-final/`. The benchmark's `result.json`
+contains each sample and artifact identity; `production/result.json` records the
+corrected log audit, and `boundaries/` retains both context-creation failures.
+
+## Reproduction
+
+```bash
+source utilities/env.sh
+utilities/prefill-block/build-cli.sh Models/qwen38-27b/pr2-final/build
+utilities/prefill-block/build-tile-x-bench.sh Models/qwen38-27b/pr2-final/tile-bench
+
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
+  --before Models/qwen38-27b/main-merge-20261105/build/open_qwen36_cli \
+  --after Models/qwen38-27b/pr2-final/build/open_qwen36_cli \
+  --out Models/qwen38-27b/pr2-final/benchmark
+
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
+  --check production --after build/src/oflm \
+  --out Models/qwen38-27b/pr2-final/production
+
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
+  --check boundaries \
+  --before Models/qwen38-27b/main-merge-20261105/build/open_qwen36_cli \
+  --after Models/qwen38-27b/pr2-final/build/open_qwen36_cli \
+  --generate 2 --lengths 95 96 97 255 256 257 511 512 513 \
+  --out Models/qwen38-27b/pr2-final/boundaries
+# Full-depth state control: same command with --layers 64 --generate 16 --lengths 256.
+
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
+  --check server --after build/src/oflm \
+  --out Models/qwen38-27b/pr2-final/server
 ```
 
-On Windows that works, because `vcomp` is delay-loaded and reads the variable at its first
-call. **On Linux it does nothing.** libgomp reads `OMP_WAIT_POLICY` in its ELF constructor,
-which runs when the library is mapped — before any constructor of the program. The variable
-then reads back correctly, so the log line has said `OMP_WAIT_POLICY=PASSIVE` for as long as
-it has existed while the workers spun.
+Use fresh output directories. Production checks use the registered `qwen3.8:27b`
+model; standalone checks accept explicit model/kernel paths. A shared NPU lock
+serializes resident runs. Peak RSS measures process memory, not all driver-owned
+NPU allocations. No newly compiled kernel export is used for this change.
+For a fresh checkout, build the control from `7f227b15` in a separate worktree
+and substitute its CLI path. The example control path is a retained local build.
 
-## 3. The fix
+## Isolated tiling investigation
 
-`open_qwen36::reexec_with_passive(argv)`, called at the top of both entry points
-([`cli.cpp`](../../../src/open_qwen36/cli.cpp) and [`src/main.cpp`](../../../src/src/main.cpp)),
-before anything touches the device or OpenMP:
+The original mapped-buffer experiment used `FROM_DEVICE` after CPU writes.
+That direction was incorrect for preparing GEMM input; its transfer-cost
+conclusions are superseded. The corrected probe uses `TO_DEVICE` and verifies
+identical BF16 bits for host, mapped-buffer and AVX2 paths.
 
-- if `OFLM_OPEN_OMP_REEXEC` is set, return — one hop only;
-- if `OFLM_OPEN_OMP_PASSIVE=0`, return — the documented opt-out still works;
-- otherwise `setenv` the policy, set the guard, and `execv("/proc/self/exe", argv)`.
+One corrected 20-repetition minimum-time probe (20 threads, externally supplied
+`OMP_WAIT_POLICY=PASSIVE`) measured, in milliseconds:
 
-The second process is one libgomp always reads correctly. Windows keeps the constructor and
-returns from this function immediately.
+| Input | Host scalar | Mapped buffer + sync | Host AVX2 |
+|---|---:|---:|---:|
+| K=5120, T=256 | 0.11 | 0.12 | 0.06 |
+| K=17408, T=256 | 0.45 | 0.37 | 0.27 |
 
-**The guard is `OFLM_OPEN_OMP_REEXEC` and must not be `getenv("OMP_WAIT_POLICY")`.** The static
-initialiser above has already set that variable in this very process; a check on it returns
-early and the fix silently does nothing. The first version of this patch had exactly that bug,
-measured 34.5 s instead of 29.4 s, and is now pinned by
-[`test_omp_reexec.py`](../tests/test_omp_reexec.py).
-
-## 4. Result
-
-Same binary, same prompt, alternating (`OFLM_OPEN_OMP_REEXEC=1` disarms the re-exec):
-
-| | total | `gemm_tile` | host | GEMM dispatches |
-|---|---|---|---|---|
-| A: policy not applied | 34.83 s | 3 001 ms | 5 788 ms | 24 804 ms |
-| B: re-exec (the fix) | **29.37 s** | **498 ms** | 1 940 ms | 24 306 ms |
-| C: variable set by the caller | 29.47 s | — | — | — |
-
-**−15.7% on one 256-token block.** B and C agree to 0.3%, which is what makes B the fix and
-not a coincidence. The GEMM dispatch time barely moves (24.8 → 24.3 s, i.e. the array is no
-longer being throttled by the host's spinning) — the whole saving is in the host stages.
-
-Through the shipped `oflm`:
-
-| TTFT | before | after | Δ |
-|---|---|---|---|
-| 256 tokens | 38.37 s | **32.87 s** | **−14.3%** |
-| 512 tokens | 73.36 s | **62.68 s** | **−14.6%** |
-| 1024 tokens | 141.93 s | **123.23 s** | **−13.2%** |
-
-Decode is untouched, as expected — the decode chain has no host parallel regions to wake:
-**2.083 tok/s** against 2.074 before.
-
-## 5. Correctness
-
-| check | result |
-|---|---|
-| greedy output, policy off vs on | **8 ids byte-identical** (64-token prompt, block route) |
-| greedy output, fix vs pre-fix | **16 ids byte-identical** (256-token prompt) |
-| block boundaries 255 / 256 / 257 | one block / one block / two blocks — the policy's own prediction |
-| block boundaries 511 / 512 / 513 | two / two / three blocks |
-| prefill shape checks | PASS, all (linear in blocks, flat in active rows) |
-| `pytest specs/` | **2 512 passed, 172 skipped, 0 failed** |
-| `ctest` (`src/open_qwen36`) | **4/4** |
-| shipped `oflm` build (Docker path) | PASS |
-
-The policy changes no arithmetic — it changes when a worker sleeps. A run where the workers
-spin and a run where they sleep produce the same numbers; that is why every comparison above
-is on tokens, not on timings.
-
-## 6. Rejected experiments
-
-| hypothesis | how it was tested | verdict |
-|---|---|---|
-| `tile_x`'s scalar inner loop is the cost | isolated benchmark vs an AVX2 rewrite on the real shapes | **rejected** — 0.055 ms/call either way, already at memory bandwidth |
-| writing into a mapped XRT BO is the cost | same loop into host memory vs into a real BO | **rejected** — 1.6–1.9×, not 100× |
-| fewer threads would help | `OFLM_OPEN_OMP_THREADS=1` with the policy applied | **rejected** — 31.5 s against 28.8 s at the full count; the note in `core.cpp` already says the ordering reverses once the workers sleep |
-| setting the policy later, in `main()` | re-exec as the mechanism, measured through the engine | **confirmed** — but only with the `OFLM_OPEN_OMP_REEXEC` guard, not a `getenv("OMP_WAIT_POLICY")` one |
-
-## 7. Limitations
-
-- The 256-token A/B is **single-run per arm**. The 15% is far larger than the run-to-run
-  spread seen on this box (under 2% between repeats of the same arm), and the shipped-`oflm`
-  numbers reproduce it at three lengths, but this is not a five-repetition campaign.
-- Thermal state was not recorded. The NPU was in `performance` mode throughout, and the CPU
-  governor was `powersave` — unchanged between arms, so it does not bias the comparison.
-- The fix applies the policy to the **whole process**, including any future host stage that
-  would prefer spinning. That is the right default here (the engine's own notes measure
-  PASSIVE as better for a prefill block), but it is a process-wide decision, not per-region.
-- `OFLM_OPEN_OMP_PASSIVE=0` remains the escape hatch, and it now actually does something on
-  Linux.
-
-## 8. Next
-
-The profile's remaining host time is now ~1.9 s of a 29.4 s block (6.5%), and the GEMM
-dispatches are 24.3 s (83%). The next target is the array, not the host: PR #3's Q4 GEMM work.
+These isolated minima do not establish an end-to-end gain from a tiling rewrite.
+The experimental AVX2 implementation remains in the probe only. Earlier single-run
+13–15% TTFT estimates are historical observations, not the acceptance evidence
+for the corrected change; the repeated benchmark above supersedes them.

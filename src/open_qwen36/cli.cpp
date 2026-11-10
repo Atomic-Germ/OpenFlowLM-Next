@@ -48,6 +48,7 @@
 #include <immintrin.h>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/omp_policy.hpp"
 #include "open_qwen36/spec_lookup.hpp"
 #include "open_qwen36/diagnostic_range.hpp"
 

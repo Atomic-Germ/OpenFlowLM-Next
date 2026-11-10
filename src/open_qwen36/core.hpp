@@ -55,12 +55,6 @@
 
 namespace open_qwen36 {
 
-/// Install the default passive OpenMP policy before libgomp loads, via Linux re-exec.
-/// An explicit OMP_WAIT_POLICY wins; OFLM_OPEN_OMP_PASSIVE=0 opts out. Windows
-/// uses its delay-loaded vcomp constructor and does not re-exec. Call from main
-/// before device access. A successful exec never returns; otherwise returns false.
-bool reexec_with_passive(char** argv);
-
 struct CoreConfig {
     std::string model_dir;   ///< holds config.json + model.q4nx (+ tokenizer files)
     std::string kernel_dir;  ///< holds manifest.json and the xclbin / insts.bin files it names

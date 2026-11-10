@@ -11,9 +11,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#ifdef __linux__
-#include <unistd.h>   // execv for reexec_with_passive
-#endif
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -133,8 +130,7 @@ struct OmpWaitPolicy {
         g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
-        // libgomp reads the environment before this constructor. Leave it intact
-        // so main() can distinguish a caller's policy from our default and re-exec.
+        // Linux installs the default through omp_policy.cpp before libgomp loads.
 #endif
     }
 };
@@ -162,37 +158,6 @@ unsigned omp_thread_budget() {
 }
 
 }  // namespace
-
-#ifdef _WIN32
-bool reexec_with_passive(char** argv) {
-    (void)argv;
-    return false;   // vcomp is delay-loaded on Windows, so the constructor above is in time
-}
-#else
-bool reexec_with_passive(char** argv) {
-    // The Linux constructor leaves the environment untouched. Respect a caller's
-    // policy; only the default needs to be installed before loading libgomp.
-    if (std::getenv("OMP_WAIT_POLICY") || std::getenv("OFLM_OPEN_OMP_REEXEC")) return false;
-    const char* off = std::getenv("OFLM_OPEN_OMP_PASSIVE");
-    if (off && std::string(off) == "0") return false;
-    if (!argv || !argv[0]) return false;
-    if (setenv("OMP_WAIT_POLICY", "PASSIVE", 1) != 0) {
-        std::perror("open_qwen36: cannot set OpenMP policy for re-exec");
-        return false;
-    }
-    if (setenv("OFLM_OPEN_OMP_REEXEC", "1", 1) == 0) {
-        execv("/proc/self/exe", argv);
-        std::perror("open_qwen36: OpenMP re-exec failed");
-    } else {
-        std::perror("open_qwen36: cannot set OpenMP re-exec guard");
-    }
-    // Failed startup must not advertise a policy that libgomp never read.
-    unsetenv("OMP_WAIT_POLICY");
-    unsetenv("OFLM_OPEN_OMP_REEXEC");
-    return false;
-}
-#endif
-
 
 void Core::apply_thread_budget() const {
     if (omp_threads_ > 0 && omp_get_max_threads() != omp_threads_) omp_set_num_threads(omp_threads_);
