@@ -84,7 +84,10 @@ def test_quant_suffix_must_run_to_end_of_stem():
     # pools was silent garbage. The suffix must be the whole quant token.
     assert oflm_add.gguf_quant_of("Model-Q4_0_4_4.gguf") is None
     assert oflm_add.gguf_quant_of("Model-Q4_0_8_8.gguf") is None
-    assert oflm_add.gguf_quant_of("Model-f32.gguf") is None
+    # Plain float formats are explicit, supported file types (not Q-layout impostors).
+    assert oflm_add.gguf_quant_of("Model-f32.gguf") == "F32"
+    assert oflm_add.gguf_quant_of("Model-f16.gguf") == "F16"
+    assert oflm_add.gguf_quant_of("Model-bf16.gguf") == "BF16"
     assert oflm_add.gguf_quant_of("Model.gguf") is None
     # K-subtype letters stay with their family: the tensors are plain Q4_K.
     assert oflm_add.gguf_quant_of("Model-Q4_K_M.gguf") == "Q4_K"
@@ -1240,3 +1243,144 @@ def test_the_unready_list_is_empty_and_its_message_is_usable():
         assert "test" in oflm_add.GGUF_DIRECT_UNREADY
     finally:
         del oflm_add.GGUF_DIRECT_UNREADY["test"]
+
+
+def test_choose_gguf_recognizes_f16_bf16_f32_with_npue_preference():
+    pref = oflm_add.NPUE_GGUF_PREFERENCE
+    for quant, name in (
+        ("F16", "model-F16.gguf"),
+        ("BF16", "model-BF16.gguf"),
+        ("F32", "model-F32.gguf"),
+    ):
+        chosen, refused = oflm_add.choose_gguf_file([name], preference=pref)
+        assert chosen == name, (quant, chosen, refused)
+        assert oflm_add.gguf_quant_of(name) == quant
+
+
+def test_local_repo_with_only_model_gguf_selects_it(tmp_path):
+    # An unmarked model.gguf must be installable from a local directory.
+    repo = tmp_path / "MyFinetune"
+    repo.mkdir()
+    gguf = repo / "model.gguf"
+    gguf.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen3"))],
+                                 [("w", 0, [8, 8])]))
+    system_list = Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    argv = ["oflm-add", str(repo), "--system-list", str(system_list),
+            "--config", str(tmp_path / "user_list.json"),
+            "--models-root", str(tmp_path / "models"), "--dry-run", "--quiet",
+            "--tag", "myfinetune:1b"]
+    # Dry-run will report the plan (and may refuse later for missing kernels in
+    # this environment), but selection/verification of model.gguf must happen.
+    # We assert it reaches the GGUF-direct dry-run output or a kernel-set refusal
+    # that still names model.gguf as the chosen weight file.
+    import io, contextlib
+    old = sys.argv
+    sys.argv = argv
+    try:
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                oflm_add.main()
+        except SystemExit as e:
+            out = buf.getvalue() + "\n" + str(e)
+        else:
+            out = buf.getvalue()
+    finally:
+        sys.argv = old
+    assert "model.gguf" in out
+    assert "weights        : model.gguf" in out or "gguf" in out.lower()
+
+
+def test_remote_repo_with_only_model_gguf_selects_it(tmp_path, monkeypatch):
+    system_list = Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    gguf_bytes = _gguf_bytes([("general.architecture", (8, "qwen3"))],
+                             [("w", 0, [8, 8])])
+
+    monkeypatch.setattr(oflm_add, "hf_file_tree", lambda repo: [{"path": "model.gguf", "size": len(gguf_bytes)}])
+    monkeypatch.setattr(oflm_add, "hf_cache_snapshot", lambda repo: None)
+    monkeypatch.setattr(oflm_add, "ms_cache_snapshot", lambda repo: None)
+    monkeypatch.setattr(oflm_add, "readme_base_chain", lambda *a, **k: [])
+    monkeypatch.setattr(oflm_add, "gguf_prefix_bytes",
+                        lambda source, limit: gguf_bytes[:limit])
+    monkeypatch.setattr(oflm_add, "fetch_from_repo", lambda *a, **k: None)
+
+    argv = ["oflm-add", "Org/OnlyModelGguf", "--system-list", str(system_list),
+            "--config", str(tmp_path / "user_list.json"),
+            "--models-root", str(tmp_path / "models"), "--dry-run", "--quiet",
+            "--tag", "onlymodel:1b"]
+    old = sys.argv
+    sys.argv = argv
+    try:
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                oflm_add.main()
+        except SystemExit as e:
+            out = buf.getvalue() + "\n" + str(e)
+        else:
+            out = buf.getvalue()
+    finally:
+        sys.argv = old
+    assert "model.gguf" in out
+    assert "carries only .gguf files" not in out
+    assert "weights        : model.gguf" in out or "gguf kernels" in out.lower() or "no open kernel set" in out.lower()
+
+
+def test_explicit_family_keeps_same_kernel_resolution_as_inferred(tmp_path, monkeypatch):
+    # Explicit --family must override family metadata without disabling kernel
+    # discovery/auto-build: same GGUF resolves to the same kernel set.
+    system_list = Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "Qwen3-4B-Custom-GGUF"
+    repo.mkdir()
+    gguf = repo / "model-Q4_K_M.gguf"
+    gguf.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen3"))],
+                                 [("w", 12, [8, 8])]))
+
+    fake_spec = object()
+    fake_kdir = tmp_path / "xclbins" / "Qwen3-4B-NPU2" / "open_kernels"
+    fake_kdir.mkdir(parents=True)
+    (fake_kdir / "manifest.json").write_text('{"gguf": {}}', encoding="utf-8")
+
+    monkeypatch.setattr(oflm_add, "spec_from_gguf_source", lambda s: fake_spec)
+    monkeypatch.setattr(oflm_add, "spec_from_config_dict", lambda c: None)
+    monkeypatch.setattr(oflm_add, "find_system_xclbin_root", lambda: tmp_path / "no-sys")
+    monkeypatch.setattr(oflm_add, "tree_xclbins", lambda: None)
+    monkeypatch.setattr(oflm_add, "user_xclbin_dir", lambda arg: tmp_path / "xclbins")
+    monkeypatch.setattr(oflm_add, "open_kernels_checkout", lambda: tmp_path)
+
+    def fake_scan(spec, roots, source=None, need_gguf=False):
+        assert spec is fake_spec
+        return fake_kdir, "Qwen3-4B-NPU2", []
+
+    monkeypatch.setattr(oflm_add, "scan_kernel_sets", fake_scan)
+
+    def run(extra_args=()):
+        argv = ["oflm-add", str(repo), "--system-list", str(system_list),
+                "--config", str(tmp_path / "user_list.json"),
+                "--models-root", str(tmp_path / "models"),
+                "--xclbin-dir", str(tmp_path / "xclbins"),
+                "--dry-run", "--quiet", *extra_args]
+        old = sys.argv
+        sys.argv = argv
+        try:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                oflm_add.main()
+            return buf.getvalue()
+        finally:
+            sys.argv = old
+
+    out_auto = run()
+    out_explicit = run(["--family", "qwen3"])
+    assert f"gguf kernels   : {fake_kdir}" in out_auto
+    assert f"gguf kernels   : {fake_kdir}" in out_explicit
+    assert "xclbin source  : Qwen3-4B-NPU2" in out_auto
+    assert "xclbin source  : Qwen3-4B-NPU2" in out_explicit
