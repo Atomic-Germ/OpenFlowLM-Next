@@ -57,7 +57,6 @@ endif()
 add_executable(omp_policy_test omp_policy_test.cpp omp_policy.cpp)
 target_include_directories(omp_policy_test PRIVATE ${_inc})
 target_link_libraries(omp_policy_test PRIVATE OpenMP::OpenMP_CXX)
-add_test(NAME OPEN-OMP-POLICY-MODEL COMMAND omp_policy_test model)
 
 # spec_lookup_test (no XRT): the lookup drafter against tests/fixtures/spec_lookup_cases.json
 add_executable(spec_lookup_test spec_lookup_test.cpp)

@@ -1,6 +1,7 @@
 """Acceptance gates for the matched OpenMP measurement driver."""
 import importlib.util
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -52,6 +53,15 @@ def test_inherited_policy_and_profiler_do_not_contaminate_comparison(monkeypatch
         assert k not in M.clean_env()
 
 
+def test_source_provenance_records_both_requested_commits(monkeypatch):
+    calls = iter([subprocess.CompletedProcess([], 0, stdout='current\n'),
+                  subprocess.CompletedProcess([], 0, stdout='')])
+    monkeypatch.setattr(M.subprocess, 'run', lambda *args, **kwargs: next(calls))
+    result = M.source_provenance('before', 'after')
+    assert result == dict(before_commit='before', after_commit='after',
+                          current_commit='current', tracked_worktree_clean=True)
+
+
 def test_missing_or_duplicate_repetition_rejected():
     rows = samples(); rows[-1]['rep'] = 0
     with pytest.raises(ValueError): M.summary(rows)
@@ -69,3 +79,47 @@ def test_production_outputs_preserve_model_text_and_reject_incomplete_log():
     assert M.production_outputs('[OFLM]  Model RAW Output: \nStatistics:\nvalue\n\n>>> ') == ['Statistics:\nvalue']
     with pytest.raises(ValueError):
         M.production_outputs('[OFLM]  Model RAW Output: \ntruncated')
+
+
+def test_exact_files_require_the_same_nonempty_set(tmp_path):
+    left = tmp_path / 'before'; right = tmp_path / 'after'
+    left.mkdir(); right.mkdir()
+    assert not M.exact_files(left, right, 'state_*.bin')
+    (right / 'state_0.bin').write_bytes(b'after')
+    assert not M.exact_files(left, right, 'state_*.bin')
+    (left / 'state_0.bin').write_bytes(b'after')
+    assert M.exact_files(left, right, 'state_*.bin')
+    (left / 'state_1.bin').write_bytes(b'extra')
+    assert not M.exact_files(left, right, 'state_*.bin')
+
+
+def server_rows():
+    rows = []
+    for label in ('A', 'B', 'A', 'B', 'A', 'B', 'A'):
+        rows.append(dict(prompt=label, rss_kib=1000 if label == 'A' else 2000,
+                         response=dict(ok=True, content='same answer',
+                                       usage=dict(completion_tokens=2))))
+    return rows
+
+
+def test_server_result_allows_same_answer_for_different_prompts():
+    result = M.server_result(server_rows(), 2)
+    assert result['verdict'] == 'PASS'
+
+
+def test_server_result_rejects_incomplete_or_unstable_responses():
+    rows = server_rows(); rows[0]['response'] = dict(ok=False, error='failed')
+    assert M.server_result(rows, 2)['verdict'] == 'FAIL'
+    rows = server_rows(); rows[2]['response']['content'] = 'different'
+    assert M.server_result(rows, 2)['verdict'] == 'FAIL'
+    rows = server_rows(); rows[-1]['rss_kib'] = 1100
+    assert M.server_result(rows, 2)['verdict'] == 'FAIL'
+
+
+def test_server_result_compares_rss_within_each_prompt_size():
+    rows = server_rows()
+    rows[-1]['rss_kib'] = 1020
+    result = M.server_result(rows, 2)
+    assert result['verdict'] == 'PASS'
+    assert result['rss_by_prompt']['A']['change_pct'] == pytest.approx(2)
+    assert result['rss_by_prompt']['B']['change_pct'] == 0

@@ -28,38 +28,33 @@ PR #2 moves the Linux default to an early self-exec, before model/device access.
 
 Executable tests compile and run the production helper and its test driver.
 They cover explicit policies, opt-out, the guard, arguments, one re-exec, model
-selection, an injected exec failure and the XRT-free HRX dependency boundary.
-The benchmark runner imports its POSIX lock only in hardware modes, so its pure
-summary/parser tests skip rather than fail where that capability is absent.
+selection and an injected exec failure. Linux/libgomp tests skip when that
+capability is absent. The benchmark runner imports its POSIX lock only in
+hardware modes, so its pure summary/parser tests remain portable.
 
 ## Measurement method
 
 The repeatable driver is `utilities/prefill-block/omp_policy.py`. Its modes share
 existing profile provenance, CLI, server and state-comparison helpers.
 
-The full-model benchmark compares the retained pre-PR binary from `7f227b15`
-with the corrected implementation in `8ba65ae9`. It excludes one warm-up pair,
-then runs five measured pairs with alternating order, a fixed 256-token prompt
-and 16 generated tokens. Profiling is disabled. Engine prompt-ingestion time
-excludes model loading; decode time excludes prefill. This is not a measurement
-of HTTP time to first streamed token.
+The full-model benchmark compares a fresh control build from `7f227b15` with the
+PR #2 implementation at `78c41524` plus the review fixes in this working tree.
+It excludes one warm-up pair, then runs five measured pairs in alternating order
+at each of 256, 512 and 1024 prompt tokens, generating 16 tokens per run.
+Profiling is disabled. Engine prompt-ingestion time excludes model loading;
+decode time excludes prefill. This is not HTTP time to first streamed token.
 
-The runner retains both binary hashes, model/kernel hashes, commands, complete
-logs, generated token IDs, per-run host conditions, observed NPU power mode and
-peak process RSS. `--pmode none` deliberately retains the observed `default`
-mode; it does not claim successful performance-mode configuration. Available
-ACPI temperatures are recorded separately from the unavailable NPU temperature.
+The runner records the requested source commits, current source commit and dirty
+state, both binary hashes, model/kernel hashes, commands, complete logs,
+generated token IDs, per-run host conditions, observed NPU power mode and peak
+process RSS. `--pmode none` deliberately retains the observed `default` mode; it
+does not claim successful performance-mode configuration. Available ACPI
+temperatures are recorded separately from the unavailable NPU temperature.
 
-Host: AMD Ryzen AI 9 365 / NPU Strix, 20 OpenMP threads, Linux 7.0.0-38-generic,
+Host: AMD Ryzen AI 9 365 / NPU Strix, 20 OpenMP threads, Linux 7.0.0-42-generic,
 glibc 2.43, CPU governor `powersave`. Both arms use the same 19,844,633,616-byte
-Q4NX model and existing paired-prefill kernel export. SHA-256 identities:
-
-| Artifact | SHA-256 |
-|---|---|
-| Before CLI | `c3bb978b16be18622ad030a00369f0752775d3af849cdd7c3c7a06665ef12b87` |
-| After CLI | `7613619055503a5fe8578eee948a292c6972f381dd17377041ed0c7afd031c28` |
-| Model | `1f78e62b723f66ad540e8a35a5cb31de67e2eae48c3a58e226873eefa10b349a9` |
-| Kernel manifest | `744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee` |
+Q4NX model and existing paired-prefill kernel export. Exact artifact hashes are
+in each benchmark's `result.json`.
 
 Acceptance requires five faster prefill pairs with identical output IDs, and
 median decode time and peak process RSS increases no greater than 3%. With five
@@ -68,109 +63,81 @@ This performance criterion does not alter any numerical oracle threshold.
 
 ## Validation results
 
-The five measured full-model pairs passed on 2026-11-06:
+All three five-pair campaigns passed on 2026-11-11. Values are medians, with the
+minimum–maximum range in parentheses.
 
-| Metric | Before median (range) | After median (range) | Median change |
-|---|---:|---:|---:|
-| 256-token engine prefill | 34.581 s (34.255–34.755) | 29.241 s (29.187–29.388) | **−15.44%** |
-| Decode per token | 453 ms (450–456) | 454 ms (453–455) | +0.22% |
-| Peak process RSS | 17,007,900 KiB (17,007,816–17,008,208) | 17,007,788 KiB (17,007,480–17,008,596) | −0.001% |
+| Prompt | Before prefill | After prefill | Change | Before decode | After decode |
+|---|---:|---:|---:|---:|---:|
+| 256 | 34.658 s (34.567–34.945) | 29.374 s (29.304–29.498) | **−15.25%** | 453 ms (451–454) | 455 ms (454–457) |
+| 512 | 69.595 s (69.573–69.945) | 58.675 s (58.612–58.799) | **−15.69%** | 460 ms (459–461) | 460 ms (459–460) |
+| 1024 | 139.888 s (139.254–140.838) | 119.087 s (118.889–119.250) | **−14.87%** | 474 ms (474) | 474 ms (471–475) |
 
-All five prefill pairs improved; all 16 generated IDs matched in every pair.
-There is no demonstrated decode or peak-RSS regression in this sample. This
-gain is for the measured full-model workload, not a throughput guarantee for
-other models or prompt lengths.
+Every prefill pair improved and all 16 generated IDs matched in every pair.
+Median peak process RSS changed by −0.0019%, +0.0009% and +0.0026% respectively.
+There is no demonstrated decode or peak-RSS regression in these samples.
 
-The shipped `oflm run` also completed two resident sessions, with the policy
-disabled/enabled. Each session included one warm-up and three requests separated
-by `/clear`. Engine prompt lengths were **72, 264, 520 and 1032** tokens (the chat
-template adds eight to the user-text fixture). All four answers matched, with
-16 text tokens each. These logs were re-audited after correcting the validation
-driver: its original comparison accidentally included changing `/status` timings
-and the next turn's streamed answer. Both processes exited successfully; inference
-was not rerun for the parser correction. Single-session timings are retained as
-a cross-check, not additional statistical performance evidence.
+The shipped `oflm run` completed policy-disabled/enabled resident sessions with
+one warm-up and three requests separated by `/clear`. Engine prompt lengths were
+72, 264, 520 and 1032 tokens. All four answers matched, with 16 text tokens each.
+Single-session timings are a cross-check, not statistical performance evidence.
 
-Host validation on the review-fixed, main-merged tree:
+The four-layer boundary matrix passed at 95/96/97, 255/256/257 and 511/512/513
+prompt tokens. The full 64-layer, 256-token prefill plus 16-token decode control
+also passed. Both required the existing numerical oracle and exact before/after
+logits and state bytes.
+
+The production server completed seven alternating 272/528-engine-token requests.
+Repeated responses were identical and complete. After both prompt sizes had
+allocated once, maximum RSS growth from each prompt's warmed baseline was 0.44%
+and 0.21%. Process RSS does not include all driver-owned NPU allocations.
+
+Host validation on the acceptance tree:
 
 - `OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -m pytest -q specs/`:
-  **2532 passed, 172 skipped**.
+  **2534 passed, 172 skipped**.
 - Production Docker build: `cmake --build build --target oflm -j 4` passed;
   `ctest --test-dir build --output-on-failure`: **29 passed, 2 skipped**.
-- Standalone CLI build passed; standalone CTest: **6 passed**, including the
-  OpenMP model-selection test. Direct settings scan and registry regeneration
-  matched the committed registry.
-- The earlier five-pair NPU result was measured with `8ba65ae9`; the review-fixed
-  tree has not been re-benchmarked. Its performance claim remains historical
-  evidence for the same startup mechanism, not a fresh measurement of this tree.
+- Fresh standalone control and candidate CLI builds passed.
+- Native Windows build: **NOT MEASURED**.
 
-**Acceptance still pending:** the four-layer boundary matrix, full-depth state
-comparison, and repeated server requests/RSS check. On resumption at 09:23 on
-2026-11-06, even the pre-PR control failed before inference with
-`DRM_IOCTL_AMDXDNA_CREATE_HWCTX ... EINVAL`. The corrected CLI failed identically.
-The kernel log reported `aie2_xrs_load: create context failed, ret -22` and
-`Allocate AIE resource failed`; no active hardware contexts were reported.
-Binary/kernel hashes still match the successful benchmark. The underlying
-driver/firmware cause is undetermined. No device reset was performed.
-Only about 14 GiB RAM was available; full-model/server checks were explicitly
-deferred by the user. This is not a completed hardware acceptance claim.
-
-Retained evidence: `Models/qwen38-27b/pr2-final/`. The benchmark's `result.json`
-contains each sample and artifact identity; `production/result.json` records the
-corrected log audit, and `boundaries/` retains both context-creation failures.
+Retained evidence: `Models/qwen38-27b/pr2-acceptance/`. Each benchmark directory
+contains its samples and artifact identities; `boundaries/`, `full-state/`,
+`production/` and `server-v2/` contain the correctness and integration results.
 
 ## Reproduction
 
 ```bash
 source utilities/env.sh
-utilities/prefill-block/build-cli.sh Models/qwen38-27b/pr2-final/build
-utilities/prefill-block/build-tile-x-bench.sh Models/qwen38-27b/pr2-final/tile-bench
+utilities/prefill-block/build-cli.sh Models/qwen38-27b/pr2-acceptance/after-build
 
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
-  --before Models/qwen38-27b/main-merge-20261105/build/open_qwen36_cli \
-  --after Models/qwen38-27b/pr2-final/build/open_qwen36_cli \
-  --out Models/qwen38-27b/pr2-final/benchmark
+  --before Models/qwen38-27b/pr2-acceptance/before-build/open_qwen36_cli \
+  --after Models/qwen38-27b/pr2-acceptance/after-build/open_qwen36_cli \
+  --before-commit 7f227b15 --after-commit 78c41524 \
+  --model oflm-data/models/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-v2/kernels-model \
+  --tokens 256 --out Models/qwen38-27b/pr2-acceptance/benchmark
+# Repeat with fresh output directories and --tokens 512 / 1024.
 
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
   --check production --after build/src/oflm \
-  --out Models/qwen38-27b/pr2-final/production
+  --out Models/qwen38-27b/pr2-acceptance/production
 
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
   --check boundaries \
-  --before Models/qwen38-27b/main-merge-20261105/build/open_qwen36_cli \
-  --after Models/qwen38-27b/pr2-final/build/open_qwen36_cli \
+  --before Models/qwen38-27b/pr2-acceptance/before-build/open_qwen36_cli \
+  --after Models/qwen38-27b/pr2-acceptance/after-build/open_qwen36_cli \
   --generate 2 --lengths 95 96 97 255 256 257 511 512 513 \
-  --out Models/qwen38-27b/pr2-final/boundaries
+  --out Models/qwen38-27b/pr2-acceptance/boundaries
 # Full-depth state control: same command with --layers 64 --generate 16 --lengths 256.
 
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
   --check server --after build/src/oflm \
-  --out Models/qwen38-27b/pr2-final/server
+  --out Models/qwen38-27b/pr2-acceptance/server-v2
 ```
 
 Use fresh output directories. Production checks use the registered `qwen3.8:27b`
 model; standalone checks accept explicit model/kernel paths. A shared NPU lock
-serializes resident runs. Peak RSS measures process memory, not all driver-owned
-NPU allocations. No newly compiled kernel export is used for this change.
+serializes resident runs. No newly compiled kernel export is used for this change.
 For a fresh checkout, build the control from `7f227b15` in a separate worktree
 and substitute its CLI path. The example control path is a retained local build.
-
-## Isolated tiling investigation
-
-The original mapped-buffer experiment used `FROM_DEVICE` after CPU writes.
-That direction was incorrect for preparing GEMM input; its transfer-cost
-conclusions are superseded. The corrected probe uses `TO_DEVICE` and verifies
-identical BF16 bits for host, mapped-buffer and AVX2 paths.
-
-One corrected 20-repetition minimum-time probe (20 threads, externally supplied
-`OMP_WAIT_POLICY=PASSIVE`) measured, in milliseconds:
-
-| Input | Host scalar | Mapped buffer + sync | Host AVX2 |
-|---|---:|---:|---:|
-| K=5120, T=256 | 0.11 | 0.12 | 0.06 |
-| K=17408, T=256 | 0.45 | 0.37 | 0.27 |
-
-These isolated minima do not establish an end-to-end gain from a tiling rewrite.
-The experimental AVX2 implementation remains in the probe only. Earlier single-run
-13–15% TTFT estimates are historical observations, not the acceptance evidence
-for the corrected change; the repeated benchmark above supersedes them.

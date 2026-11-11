@@ -66,16 +66,37 @@ def platform():
     return dict(mode=m[1], output=p.stdout)
 
 
+def source_provenance(before_commit=None, after_commit=None):
+    commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=O.ROOT,
+                            capture_output=True, text=True, check=True).stdout.strip()
+    changed = subprocess.run(['git', 'status', '--porcelain=v1', '--untracked-files=no'],
+                             cwd=O.ROOT, capture_output=True, text=True, check=True).stdout
+    return dict(before_commit=before_commit, after_commit=after_commit,
+                current_commit=commit, tracked_worktree_clean=not changed)
+
+
+def exact_files(left, right, names):
+    """Compare a required, identical, nonempty file set on both arms."""
+    left, right = Path(left), Path(right)
+    left_names = {p.name for p in left.glob(names)}
+    right_names = {p.name for p in right.glob(names)}
+    if not left_names or left_names != right_names:
+        return False
+    return all((left / name).read_bytes() == (right / name).read_bytes()
+               for name in sorted(left_names))
+
+
 def benchmark(a, out):
     ids = O.fixture(a.tokens, seed=26026)
     ids_file = out / 'ids.txt'
     ids_file.write_text(','.join(map(str, ids)))
     result = dict(check='omp-policy-benchmark', tokens=a.tokens, generated=a.generate,
                   prefill_definition='standalone engine prompt ingestion, excludes load',
+                  source=source_provenance(a.before_commit, a.after_commit),
                   power=platform(), rows=[], summaries=None,
                   provenance=P.provenance([a.before, a.after, a.model / 'model.q4nx',
-                                          a.kernels / 'manifest.json', *a.kernels.glob('*/final.xclbin'),
-                                          *a.kernels.glob('*/insts.bin')]))
+                                           a.kernels / 'manifest.json', *a.kernels.glob('*/final.xclbin'),
+                                           *a.kernels.glob('*/insts.bin')]))
     # One lock covers the complete paired campaign, including conditions sampling.
     import fcntl
     with O.LOCK.open('a') as lock:
@@ -193,10 +214,13 @@ def boundaries(a, out):
         checks += T.compare_state(Path(records['before']['workdir']), Path(records['after']['workdir']), slices)
         # Scheduling only: require exact bytes as well as the unchanged numerical gates.
         left, right = (Path(records[k]['workdir']) for k in ('before', 'after'))
-        states_equal = all((left / f.name).read_bytes() == f.read_bytes() for f in right.glob('state_*.bin'))
-        logits_equal = all(Path(str(records['before']['prefix']) + suffix).read_bytes() ==
+        states_equal = exact_files(left, right, 'state_*.bin')
+        suffixes = [f'_p{n-1}.bin', *[f'_t{i}.bin' for i in range(a.generate)]]
+        logits_equal = all(Path(str(records['before']['prefix']) + suffix).is_file() and
+                           Path(str(records['after']['prefix']) + suffix).is_file() and
+                           Path(str(records['before']['prefix']) + suffix).read_bytes() ==
                            Path(str(records['after']['prefix']) + suffix).read_bytes()
-                           for suffix in (f'_p{n-1}.bin', *[f'_t{i}.bin' for i in range(a.generate)]))
+                           for suffix in suffixes)
         row = dict(tokens=n, records=records, checks=checks, state_exact=states_equal,
                    logits_exact=logits_equal, verdict=O.verdict(checks))
         rows.append(row)
@@ -206,10 +230,34 @@ def boundaries(a, out):
                 verdict='PASS' if all(r['verdict'] == 'PASS' and r['state_exact'] and r['logits_exact'] for r in rows) else 'FAIL')
 
 
+def server_result(rows, generate):
+    """Grade complete responses, repeat identity and per-prompt warmed RSS."""
+    def content(row):
+        response = row.get('response', {})
+        if not response.get('ok') or not isinstance(response.get('content'), str):
+            return None
+        return response['content']
+
+    complete = all(content(r) is not None and
+                   0 < r['response'].get('usage', {}).get('completion_tokens', 0) <= generate
+                   for r in rows)
+    stable = complete and all(content(r) == content(next(x for x in rows if x['prompt'] == r['prompt']))
+                              for r in rows)
+    warmed = {}
+    for row in rows[2:]:  # both prompt sizes have allocated once
+        warmed.setdefault(row['prompt'], []).append(row['rss_kib'])
+    rss_by_prompt = {label: dict(baseline=values[0], maximum=max(values),
+                                 change_pct=100 * (max(values) / values[0] - 1))
+                     for label, values in warmed.items()}
+    bounded = bool(warmed) and all(v['change_pct'] <= 3 for v in rss_by_prompt.values())
+    return dict(repeated_outputs_identical=stable, complete_responses=complete,
+                memory_bounded=bounded, rss_by_prompt=rss_by_prompt,
+                verdict='PASS' if stable and complete and bounded else 'FAIL')
+
+
 def server(a, out):
     import fcntl
     import oflm_serve_check as S
-    import urllib.request
     D.OFLM, D.MODEL, D.KERNELS = a.after, a.model, a.kernels
     tok = D.Tokenizer()
     prompts = {'A': tok.exact_text(256) + '\nReply with only the word RED.',
@@ -224,35 +272,25 @@ def server(a, out):
             err = S.wait_ready(a.port, proc)
             if err: raise RuntimeError(err)
             for label in ('A', 'B', 'A', 'B', 'A', 'B', 'A'):
-                payload = dict(model='qwen3.8:27b', messages=[dict(role='user', content=prompts[label])],
-                               temperature=0, max_tokens=a.generate, stream=False, think=False)
-                req = urllib.request.Request(f'http://127.0.0.1:{a.port}/v1/chat/completions',
-                                             data=json.dumps(payload).encode(),
-                                             headers={'Content-Type': 'application/json'})
-                with S._open(req, 1800) as response: data = json.loads(response.read())
+                data = S.chat(a.port, prompts[label], max_tokens=a.generate)
                 status = Path(f'/proc/{proc.pid}/status').read_text()
                 rss = int(re.search(r'VmRSS:\s+(\d+)', status)[1])
                 rows.append(dict(prompt=label, response=data, rss_kib=rss))
                 (out / 'result.json').write_text(json.dumps(dict(rows=rows), indent=2) + '\n')
-                print(f'server {label}: RSS={rss} KiB', flush=True)
+                print(f'server {label}: ok={data.get("ok")} RSS={rss} KiB', flush=True)
         finally:
             proc.terminate()
             try: proc.wait(timeout=30)
             except subprocess.TimeoutExpired: proc.kill(); proc.wait()
-    stable = all(r['response']['choices'][0]['message'] == next(x for x in rows if x['prompt'] == r['prompt'])['response']['choices'][0]['message'] for r in rows)
-    distinct = rows[0]['response']['choices'][0]['message'] != rows[1]['response']['choices'][0]['message']
-    complete = all(0 < r['response'].get('usage', {}).get('completion_tokens', 0) <= a.generate for r in rows)
-    rss = [r['rss_kib'] for r in rows[2:]]  # both prompt sizes have allocated once
-    bounded = max(rss) <= min(rss) * 1.03
-    return dict(check='omp-policy-server', rows=rows, repeated_outputs_identical=stable,
-                memory_bounded=bounded, distinct_outputs=distinct,
-                verdict='PASS' if stable and complete and bounded and distinct else 'FAIL')
+    return dict(check='omp-policy-server', rows=rows, **server_result(rows, a.generate))
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--check', choices=['benchmark', 'production', 'boundaries', 'server'], default='benchmark')
     ap.add_argument('--before', type=Path)
     ap.add_argument('--after', type=Path, required=True)
+    ap.add_argument('--before-commit', help='source commit used to build the control binary')
+    ap.add_argument('--after-commit', help='source commit used to build the candidate binary')
     ap.add_argument('--model', type=Path, default=D.MODEL)
     ap.add_argument('--kernels', type=Path, default=D.KERNELS)
     ap.add_argument('--layers', type=int, default=4)
@@ -265,6 +303,8 @@ def main():
     a = ap.parse_args()
     if a.reps < 5 or a.generate < 2 or (a.check in ('benchmark', 'boundaries') and not a.before):
         ap.error('benchmark requires --before, at least five pairs and two generated tokens')
+    if a.check == 'benchmark' and not (a.before_commit and a.after_commit):
+        ap.error('benchmark requires --before-commit and --after-commit')
     for name in ('before', 'after', 'model', 'kernels'):
         if getattr(a, name): setattr(a, name, getattr(a, name).resolve())
     if a.check in ('production', 'server') and a.model != D.MODEL.resolve():
