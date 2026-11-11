@@ -477,7 +477,11 @@ def attn_kernels(inc, a):
 
 
 def attn_fifos(a):
-    of_ain = ObjectFifo(a["u8_1k"], name="ain", depth=max(4, 2 * RB + 2, A.Q_AIN_ELEMS))
+    # Bulk q acquire (KV_PAIR path) needs fifo depth >= Q_AIN_ELEMS, but large
+    # values exceed tile memory (e.g. qwen35-27b). Stream element-by-element when
+    # a full burst would not fit; keep the burst for small cases (lfm2moe fix).
+    q_burst = A.Q_AIN_ELEMS if A.Q_AIN_ELEMS <= 8 else 0
+    of_ain = ObjectFifo(a["u8_1k"], name="ain", depth=max(4, 2 * RB + 2, q_burst))
     of_aout = ObjectFifo(a["b512"], name="aout", depth=2)
     # Attention over ACORES cores: heads are independent, so each core owns NHL of them
     # and drains its own og element(s) -- the pattern dx.py uses.
@@ -491,10 +495,16 @@ def _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
     e = ain.acquire(2)
     fm(e[0], e[1], qn, kn, cs, pb)
     ain.release(2)
-    _qe = ain.acquire(A.Q_AIN_ELEMS)
-    for h in range_(A.Q_AIN_ELEMS):
-        fq(_qe[h], qn, cs, qs, h)
-    ain.release(A.Q_AIN_ELEMS)
+    if A.Q_AIN_ELEMS <= 8:
+        _qe = ain.acquire(A.Q_AIN_ELEMS)
+        for h in range(A.Q_AIN_ELEMS):
+            fq(_qe[h], qn, cs, qs, h)
+        ain.release(A.Q_AIN_ELEMS)
+    else:
+        for h in range(A.Q_AIN_ELEMS):
+            e = ain.acquire(1)
+            fq(e, qn, cs, qs, h)
+            ain.release(1)
     for h in range_(A.K_AIN_ELEMS):
         e = ain.acquire(1); fk(e, kn, cs, tmp, kout, h); ain.release(1)
     for h in range_(A.K_AIN_ELEMS):
