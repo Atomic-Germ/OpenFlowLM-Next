@@ -130,7 +130,7 @@ struct OmpWaitPolicy {
         g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
-        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+        // Linux installs the default through omp_policy.cpp before libgomp loads.
 #endif
     }
 };

@@ -71,7 +71,7 @@ declare -A UNIT_FLAGS=(
     [block_host]="-mavx2 -mfma -ffp-contract=off"
 )
 
-UNITS=(cli core block_host pools manifest q4nx_file gguf_file)
+UNITS=(cli core block_host pools manifest q4nx_file gguf_file omp_policy)
 
 echo "build-cli: $CXX -> $OUT/open_qwen36_cli"
 for u in "${UNITS[@]}"; do
