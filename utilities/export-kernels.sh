@@ -90,4 +90,11 @@ for spec in $spec_list; do
     rc=1
   fi
 done
+echo "-- export whisper kernels (Whisper-V3-Turbo-NPU2)"
+if "$VENV_PY" "$REPO/open_kernels/export_whisper_kernels.py"; then
+  echo "   ok: whisper"
+else
+  echo "   FAILED: whisper"
+  rc=1
+fi
 exit $rc

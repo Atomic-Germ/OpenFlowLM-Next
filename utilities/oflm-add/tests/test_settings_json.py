@@ -191,19 +191,23 @@ class TestWhisperShippedTagReuse:
         with open(root) as f:
             return json.load(f)
 
-    def test_allows_corresponding_whisper_v3_turbo_install(self, temp_settings):
+    def test_rejects_shipped_whisper_v3_turbo_tag(self, temp_settings):
         shipped = self._shipped_registry()
         entry = make_entry("whisper-v3", "turbo")
-        entry["name"] = "Whisper-V3-Turbo-NPU2.gguf"
+        entry["name"] = "whisper-large-v3-turbo-gguf"
         entry["asr"] = True
         entry["details"] = {"family": "whisper-v3", "format": "NPU2"}
-        tag = register(entry, temp_settings, shipped, tag="whisper-v3:turbo")
-        assert tag == "whisper-v3:turbo"
-
-    def test_rejects_unrelated_whisper_tag_collision(self, temp_settings):
-        shipped = self._shipped_registry()
-        entry = make_entry("whisper-v3", "turbo")
-        entry["name"] = "Some-Other-Model"
-        entry["details"] = {"family": "qwen3", "format": "NPU2"}
         with pytest.raises(SystemExit, match="already exists in the shipped registry"):
             register(entry, temp_settings, shipped, tag="whisper-v3:turbo")
+
+    def test_allows_distinct_whisper_gguf_tag(self, temp_settings):
+        shipped = self._shipped_registry()
+        entry = make_entry("whisper-v3", "turbo-gguf")
+        entry["name"] = "whisper-large-v3-turbo-gguf"
+        entry["asr"] = True
+        entry["details"] = {"family": "whisper-v3", "format": "NPU2"}
+        tag = register(entry, temp_settings, shipped, tag="whisper-v3:turbo-gguf")
+        assert tag == "whisper-v3:turbo-gguf"
+        with open(temp_settings) as f:
+            s = json.load(f)
+        assert s["models"]["whisper-v3"]["turbo-gguf"]["name"] == "whisper-large-v3-turbo-gguf"

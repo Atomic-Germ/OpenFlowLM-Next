@@ -109,6 +109,10 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
                                                     oflm_rt::device* device,
                                                     bool enable_preemption) {
     const std::string want = utils::getenv_oflm("OFLM_WHISPER_ENGINE");
+    const bool has_open_safetensors = has_file(model_path, "model.open.safetensors");
+    const bool has_open_gguf = has_file(model_path, "model.gguf");
+    const bool has_open_container = has_open_safetensors || has_open_gguf;
+    const char* open_container_name = has_open_safetensors ? "model.open.safetensors" : "model.gguf";
 
     if (want == "closed") {
         if (!has_file(model_path, "model.q4nx")) {
@@ -121,9 +125,9 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
 
 #ifdef OFLM_USE_OPEN_WHISPER
     if (want == "open") {
-        if (!has_file(model_path, "model.open.safetensors")) {
+        if (!has_open_container) {
             throw std::runtime_error("OFLM_WHISPER_ENGINE=open: " + model_path +
-                                     "/model.open.safetensors not found");
+                                     "/model.open.safetensors or model.gguf not found");
         }
         std::string how;
         const std::string kdir = find_open_kernels(model_path, config, &how);
@@ -134,7 +138,8 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
                 "/open_kernels; or set OFLM_WHISPER_KERNELS_DIR; or place one at " + model_path +
                 "/open_kernels)");
         }
-        header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open), kernels " << kdir << " (" << how << ")");
+        header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open, " << open_container_name
+                             << "), kernels " << kdir << " (" << how << ")");
         return make_open_engine(model_path, kdir, config);
     }
     if (!want.empty()) {
@@ -147,12 +152,12 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
     // paths, rather than silently choosing whichever engine happens to construct without
     // throwing (the "fails open" class this project keeps finding -- see CLAUDE.md rule 8).
     std::string how;
-    const std::string kdir = has_file(model_path, "model.open.safetensors")
+    const std::string kdir = has_open_container
                                  ? find_open_kernels(model_path, config, &how) : std::string();
     const bool open_ready = !kdir.empty();
     const bool closed_ready = has_file(model_path, "model.q4nx");
     if (open_ready) {
-        header_print("OFLM", "Whisper engine: open (model.open.safetensors + a kernel set "
+        header_print("OFLM", "Whisper engine: open (" << open_container_name << " + a kernel set "
                              "found, OFLM_WHISPER_ENGINE unset), kernels " << kdir << " (" << how << ")");
         return make_open_engine(model_path, kdir, config);
     }
@@ -162,7 +167,7 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
         return make_closed_whisper_engine(model_path, config, device, enable_preemption);
     }
     throw std::runtime_error(
-        "no usable Whisper weights in " + model_path + ": neither model.open.safetensors "
+        "no usable Whisper weights in " + model_path + ": neither model.open.safetensors/model.gguf "
         "(with a kernel set -- xclbins/<model>/open_kernels, <model>/open_kernels or "
         "OFLM_WHISPER_KERNELS_DIR) nor "
         "model.q4nx was found");

@@ -1378,8 +1378,16 @@ install(FILES model_info.json DESTINATION "${OFLM_SHARE_DESTINATION}")
 # relative to the executable, so we install them relative to the binary.
 # Only present when the kernel export ran (OFLM_BUILD_KERNELS=ON, or a manual
 # export); skip silently for engine-only builds.
+# Exclude open-kernel build intermediates kept for identity evidence in the
+# source tree (e.g. Whisper open_kernels/build/** with AIE .o/.ll/final.prj
+# artifacts): not needed at runtime, and RPM strip cannot process AIE objects.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
-    install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}")
+    install(DIRECTORY xclbins
+        DESTINATION "${OFLM_SHARE_DESTINATION}"
+        PATTERN "build" EXCLUDE
+        PATTERN "*.o" EXCLUDE
+        PATTERN "*.ll" EXCLUDE
+        PATTERN ".lock" EXCLUDE)
 endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3

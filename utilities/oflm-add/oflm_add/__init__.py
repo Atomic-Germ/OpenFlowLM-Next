@@ -2584,14 +2584,7 @@ def register(
                 and shipped_entry.get("npue_design_family")
                 and entry["npue_design_family"] == shipped_entry["npue_design_family"]
             )
-            same_whisper = (
-                shipped_details.get("family") in WHISPER_FAMILIES
-                and shipped_entry.get("asr")
-                and (entry.get("details") or {}).get("family") == shipped_details.get("family")
-                and (entry.get("name") == shipped_entry.get("name")
-                     or (entry.get("asr") and str(entry.get("name", "")).lower().endswith(".gguf")))
-            )
-            if not same_npue_design and not same_whisper:
+            if not same_npue_design:
                 raise SystemExit(
                     f"Model {final_tag} already exists in the shipped registry. "
                     f"Use --name to install under a different name."
@@ -2625,6 +2618,7 @@ def _link_one(user_root, name, target, force, quiet):
     The junction fallback covers Windows, where directory symlinks need a
     privilege only admin / developer mode grants; _make_dir_link tries it.
     """
+    user_root = Path(user_root)
     link = user_root / name
     if link.exists() or link.is_symlink():
         # resolve() covers a junction too, which does not answer to readlink
@@ -4138,11 +4132,17 @@ def main():
         base_entry = official[3] if official else None
         src_tag = f"{official[1]}:{official[2]}" if official else None
         if whisper_model and official:
-            # The open whisper engine's kernel discovery keys off the official
-            # entry's name (xclbins/<name>/open_kernels) and routes by tag the
-            # way npue_embed does, so a whisper model installs as its official
-            # tag, not a slug derived from the quant repo's name.
-            tag = src_tag
+            # The open whisper engine discovers kernels by official model name
+            # (xclbins/<name>/open_kernels) and/or a symlink beside the install.
+            # GGUF installs are a different weight container than the shipped
+            # q4nx entry, so give them a distinct tag to avoid colliding with
+            # the shipped whisper-v3:turbo registry entry and loader confusion.
+            if args.tag:
+                tag = args.tag
+            elif gguf_mode:
+                tag = f"{src_tag}-gguf"
+            else:
+                tag = src_tag
             bucket, size_token = tag.split(":", 1)
         # A set whose KERNELS match this model's geometry is the right answer, and
         # resolve_official's last resort -- the nearest official size -- is not: a

@@ -331,6 +331,30 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
     return len(failed)
 
 
+WHISPER_EXPORT = REPO / "open_kernels" / "export_whisper_kernels.py"
+WHISPER_SET = REPO / "src" / "xclbins" / "Whisper-V3-Turbo-NPU2" / "open_kernels"
+
+
+def export_whisper_set(py: Path, force: bool) -> int:
+    """Open Whisper kernel set (compile-only). Returns 0 on success."""
+    if not WHISPER_EXPORT.is_file():
+        print("-- whisper: exporter missing, skipping", flush=True)
+        return 0
+    if (WHISPER_SET / "whisper_kernels.json").is_file() and not force:
+        print("-- whisper: already built (use --force to rebuild)", flush=True)
+        return 0
+    print("-- export whisper kernels (Whisper-V3-Turbo-NPU2)", flush=True)
+    cmd = [str(py), str(WHISPER_EXPORT)]
+    if force:
+        cmd.append("--force")
+    rc = subprocess.run(cmd).returncode
+    if rc == 0:
+        print("   ok: whisper", flush=True)
+    else:
+        print("   FAILED: whisper", flush=True)
+    return 0 if rc == 0 else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--specs", default="", help="comma-separated open_kernels spec names (empty = all)")
@@ -348,6 +372,10 @@ def main() -> int:
     ap.add_argument("--diffusion-family", default="",
                     help="comma-separated diffusion families (default: every family the "
                          "exporter can build -- FLUX.2-klein-4B-NPU2, -9B-NPU2, ...)")
+    ap.add_argument("--skip-whisper", action="store_true",
+                    help="skip the open Whisper kernel set")
+    ap.add_argument("--whisper-only", action="store_true",
+                    help="only build the open Whisper kernel set")
     ap.add_argument("-j", "--jobs", type=int, default=0,
                    help="parallel kernel builds (default: 0 = auto-detect CPU count)")
     a = ap.parse_args()
@@ -360,6 +388,8 @@ def main() -> int:
         return 1
     if a.diffusion_only:
         # --diffusion-only is the narrow run: no dense specs, no BERT
+        a.skip_bert = True
+    if a.whisper_only:
         a.skip_bert = True
 
     skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
@@ -400,22 +430,26 @@ def main() -> int:
     if mlir_aie.is_dir():
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
-    # ---- the three kernel families -------------------------------------------
+    # ---- kernel families -----------------------------------------------------
     n_failed = 0
     specs = []
-    if not a.bert_only and not a.diffusion_only:
+    only_one = a.bert_only or a.diffusion_only or a.whisper_only
+    if not only_one:
         specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
         if not specs:
             print("FATAL: no kernel specs found", file=sys.stderr)
             return 1
         n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
-    if not a.skip_bert and not a.diffusion_only:
+    if not a.skip_bert and not a.diffusion_only and not a.whisper_only:
         n_failed += export_bert_sets(py, a.force, a.jobs)
 
-    if not a.skip_diffusion:
+    if not a.skip_diffusion and not a.bert_only and not a.whisper_only:
         fams = [f.strip() for f in a.diffusion_family.split(",") if f.strip()] or None
         n_failed += export_diffusion_sets(py, a.force, a.jobs, fams)
+
+    if not a.skip_whisper and not a.bert_only and not a.diffusion_only:
+        n_failed += export_whisper_set(py, a.force)
 
     print(flush=True)
     if n_failed:
@@ -425,10 +459,14 @@ def main() -> int:
         print("kernel export ok: BERT design sets", flush=True)
     elif a.diffusion_only:
         print("kernel export ok: diffusion sets", flush=True)
+    elif a.whisper_only:
+        print("kernel export ok: whisper set", flush=True)
     else:
         suffix = " + BERT design sets" if not a.skip_bert else ""
         if not a.skip_diffusion:
             suffix += " + diffusion sets"
+        if not a.skip_whisper:
+            suffix += " + whisper set"
         print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 

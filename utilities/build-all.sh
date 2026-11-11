@@ -138,6 +138,15 @@ if [ "$SKIP_KERNELS" -eq 0 ]; then
       echo "   FAILED (see $LOGDIR/export-$name.log)"
     fi
   done
+  echo "-- export whisper kernels (Whisper-V3-Turbo-NPU2)"
+  if "$VENV_PY" "$REPO/open_kernels/export_whisper_kernels.py" $FORCE \
+      >"$LOGDIR/export-whisper.log" 2>&1; then
+    ok_specs+=("whisper")
+    tail -1 "$LOGDIR/export-whisper.log" | sed 's/^/   /'
+  else
+    failed_specs+=("whisper")
+    echo "   FAILED (see $LOGDIR/export-whisper.log)"
+  fi
 fi
 
 # ---- 3. flm ------------------------------------------------------------------
