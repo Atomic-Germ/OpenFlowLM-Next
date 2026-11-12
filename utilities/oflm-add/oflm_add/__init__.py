@@ -1901,10 +1901,15 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
         # the id (Hy-MT2's null bos_token_id) has nothing left to fetch, and returning
         # without writing left the engine to refuse the model.
         tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
-    need_eos = "eos_token_id" not in cfg or not isinstance(cfg.get("eos_token_id"), list)
     need_bos = cfg.get("bos_token") is not None and "bos_token_id" not in cfg
-    if not (need_eos or need_bos):
-        return
+    # HF spells the eos ids three ways: tokenizer_config's array (one id, from the
+    # name resolution above -- Gemma 4 turns are ended by <turn|>, id 106, and that
+    # id is in generation_config.json / config.json, never in the GGUF's eos),
+    # generation_config.json's array, and config.json's (top level or the text tower).
+    # The engine reads the array, so union every source rather than pick one.
+    eos_ids: set[int] = set()
+    if isinstance(cfg.get("eos_token_id"), list):
+        eos_ids.update(x for x in cfg["eos_token_id"] if isinstance(x, int))
     g = None
     gc = target / "generation_config.json"
     repo_gen = None
@@ -1931,52 +1936,46 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
                 g = json.loads(Path(cand).read_text(encoding="utf-8"))
             except Exception:
                 g = None
-            if g and (need_eos and isinstance(g.get("eos_token_id"), list) or
+            if g and (isinstance(g.get("eos_token_id"), list) or
                       need_bos and isinstance(g.get("bos_token_id"), int)):
                 break
-    source = "generation_config.json"
-    # "found a generation_config.json" is not the same as "found the id": Qwen3-4B-Base
-    # ships one WITHOUT eos_token_id, so the loop kept the file, the fallback never ran,
-    # and the engine refused the model ("eos_token_id is missing or not an array").
-    need_fallback = not g or (need_eos and not isinstance(g.get("eos_token_id"), list))
-    if need_fallback:
-        g = dict(g or {})
-        source = "config.json"
-        # No generation_config.json anywhere in the chain (the Qwen3.5 line ships
-        # none). The config.json names the same ids: the model's own eos and the
-        # text tower's -- the engine reads them as an array, so give it one.
-        cfg_path = target / "config.json"
-        if cfg_path.is_file():
-            try:
-                mcfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            except Exception:
-                mcfg = {}
-            ids: list[int] = []
-            for c in (mcfg, mcfg.get("text_config") or {}):
-                v = c.get("eos_token_id")
-                if isinstance(v, int):
-                    ids.append(v)
-                elif isinstance(v, list):
-                    ids += [x for x in v if isinstance(x, int)]
-            if ids:
-                g["eos_token_id"] = sorted(set(ids))
-            bos = mcfg.get("bos_token_id")
-            if isinstance(bos, int):
-                g["bos_token_id"] = bos
-        if not g:
-            log("[WARN] no generation_config.json; the model may fail at load if the engine "
-                "needs eos_token_id in tokenizer_config.json")
-            return
-    changed = False
-    if need_eos and isinstance(g.get("eos_token_id"), list):
-        cfg["eos_token_id"] = g["eos_token_id"]
-        changed = True
-    if need_bos and isinstance(g.get("bos_token_id"), int):
-        cfg["bos_token_id"] = g["bos_token_id"]
-        changed = True
-    if changed:
-        tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        log("[INFO] merged eos/bos ids into tokenizer_config.json (from " + source + ")")
+    # Union the generation_config's ids (whole chain's best file won the loop) with
+    # config.json's, top level and text tower; a key the config omits contributes none.
+    cfg_path = target / "config.json"
+    conf_ids: set[int] = set()
+    conf_bos: int | None = None
+    if cfg_path.is_file():
+        try:
+            mcfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            mcfg = {}
+        for c in (mcfg, mcfg.get("text_config") or {}):
+            v = c.get("eos_token_id")
+            if isinstance(v, int):
+                conf_ids.add(v)
+            elif isinstance(v, list):
+                conf_ids.update(int(x) for x in v if isinstance(x, int))
+            b = c.get("bos_token_id")
+            if isinstance(b, int):
+                conf_bos = b
+    if isinstance(g, dict) and isinstance(g.get("eos_token_id"), list):
+        eos_ids.update(int(x) for x in g["eos_token_id"] if isinstance(x, int))
+    eos_ids.update(conf_ids)
+    merged_eos = sorted(eos_ids)
+    changed_list = []
+    if merged_eos != sorted(set(cfg.get("eos_token_id") or [])):
+        cfg["eos_token_id"] = merged_eos
+        changed_list.append("eos")
+    g_bos = g.get("bos_token_id") if isinstance(g, dict) else None
+    bos_src = g_bos if isinstance(g_bos, int) else conf_bos
+    if need_bos and isinstance(bos_src, int):
+        cfg["bos_token_id"] = bos_src
+        changed_list.append("bos")
+    if not changed_list:
+        return
+    tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    log("[INFO] merged eos/bos ids into tokenizer_config.json (union of config.json / "
+        "generation_config.json)")
 
 
 def _parse_base_model_frontmatter(text):
