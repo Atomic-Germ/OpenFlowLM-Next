@@ -63,7 +63,11 @@ struct PackOp {
     std::string div_running;                                            ///< put: divide the values by the product,
                                                                         ///< over the layers BEFORE this one, of this
                                                                         ///< one-value tensor ("{j}" = that layer) --
-                                                                        ///< Gemma 4's layer_output_scale, folded
+                                                                        ///< Gemma 4's layer_output_scale, folded:
+                                                                        ///< the residual is carried divided by the
+                                                                        ///< running product (see recipes/gemma4.py);
+                                                                        ///< direction-exact under RMSNorm, not what
+                                                                        ///< llama.cpp computes (it multiplies instead)
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed

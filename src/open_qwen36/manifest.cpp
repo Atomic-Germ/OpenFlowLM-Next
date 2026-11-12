@@ -75,6 +75,12 @@ PackOp parse_op(const json& j, const std::string& where) {
     if (!p.glu.empty() && (p.op != "bfp16_gemm" || (p.glu != "gate" && p.glu != "up")))
         fail(where, p.op + " " + p.tensor + ": glu must be gate or up, on a bfp16_gemm");
     p.div_running = j.value("div_running", "");
+    // Gemma 4's layer_output_scale fold: the engine carries the residual divided by the
+    // running product of this scalar (see recipes/gemma4.py's comment on the fold). It is
+    // only legal on a put of a post-norm: the fold divides the weights so later readers
+    // see the unscaled numbers; any other op would get a silently different arithmetic.
+    // The {j} placeholder makes the per-layer semantics explicit: layer j of this model
+    // divides by the product of s_0..s_{layer-1}, computed at pack time.
     if (!p.div_running.empty() && (p.op != "put" || p.div_running.find("{j}") == std::string::npos))
         fail(where, p.op + " " + p.tensor + ": div_running names a per-layer {j} tensor, on a put");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))

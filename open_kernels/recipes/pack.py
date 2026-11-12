@@ -669,7 +669,15 @@ def _scalar(m, name: str) -> float:
 
 def _div_running(op: dict, m, layer: int) -> float:
     """put's div_running: the product, in double, of a per-layer scalar over the layers
-    before this one (Gemma 4's layer_output_scale), as pools.cpp computes it."""
+    before this one (Gemma 4's layer_output_scale), as pools.cpp computes it.
+
+    The point of dividing in double and rounding ONCE at the end is that a folded
+    scale costs no extra rounding; anything weaker and the container's norm stops
+    being the model it claims to be. This fold is direction-exact under RMSNorm
+    (the engine carries the residual divided by the same product, see
+    recipes/gemma4.py's comment on the layer_output_scale run) and is NOT what
+    llama.cpp computes (it multiplies the layer output instead) -- the two differ
+    by one huge positive scalar on the residual stream and nothing else."""
     div = 1.0
     if op.get("div_running"):
         for j in range(layer):

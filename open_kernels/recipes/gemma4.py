@@ -146,10 +146,31 @@ def _layer_plan(spec: ModelSpec, kind: str) -> dict:
                  proj_op(s, "ffn", pre + "mlp.up_proj.weight", L.POOL_UP, ff, hid, hid),
                  proj_op(s, "ffn", pre + "mlp.gate_proj.weight", L.POOL_GATE, ff, hid, hid),
                  proj_op(s, "ffn", pre + "mlp.down_proj.weight", L.POOL_DOWN, hid, ff, ff)])
-    # layer_output_scale folded in: the residual is carried divided by P_l = prod_{j<l} s_j,
-    # which every reader of it -- an RMSNorm -- cannot see (up to eps), so the two outputs added
-    # to it are divided by P_l too, and the scalar disappears. `div_running` names the scalar
-    # tensor; the packer divides by the product of its value over the layers BEFORE this one.
+    # layer_output_scale: Gemma 4 multiplies the whole layer output by a per-layer scalar
+    # s_l (llama.cpp applies `cur = cur * out_scale` after the residual add).  This tree
+    # folds it INSTEAD OF multiplying: the residual is carried *divided* by
+    # P_l = prod_{j<l} s_j, the two post norms are divided by P_l at pack time, and the
+    # scale never appears at run time. Why this is legitimate and not a transcription bug:
+    #
+    #   * every reader of the residual is an RMSNorm, and RMSNorm is invariant to a positive
+    #     scalar on its input (the mean-of-squares cancels; only the tiny eps is not
+    #     scale-invariant);
+    #   * the two post norms multiply what arrives at them, so dividing their weights by
+    #     P_l hands every later reader the same numbers the unscaled fold would give;
+    #   * the final logits go through a tanh softcap, which is monotonic -- ranks survive
+    #     even at residual magnitudes of ~1e16 (bf16's cap is 3.4e38).
+    #
+    # This is NOT the same function llama.cpp computes. llama.cpp multiplies the layer
+    # output by s_l once per layer, so its residual stays ~O(10) and ours inflates by
+    # 1/P_l (observed: 1.9e1 at layer 0 ... 5.2e15 at layer 47; direction correlation vs
+    # llama.cpp stays > 0.99 at every layer). It is exact modulo eps, not "the same
+    # numbers". If this fold ever grows teeth -- a norm that is not scale-invariant, an
+    # eps that is not negligible beside a huge mean-of-squares, or a consumer before the
+    # final norm -- the fix is to multiply each layer's output by s_l (fold into the
+    # o_proj / down_proj weights at pack time), not to tune the scales.
+    # `div_running` names the scalar tensor; the packer divides by the product of s_j
+    # over the layers BEFORE this one. Do NOT change this without also changing
+    # pack.py's _div_running and pools.cpp's `put` handler, which must stay bit-identical.
     run = {"div_running": LAYER_SCALE}
     consts = [
         {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.CD_LNW, "cap": L.ELN},

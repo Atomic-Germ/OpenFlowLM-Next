@@ -1055,7 +1055,12 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const std::string name = with_layer(op.tensor, layer);
         // div_running: the product of a per-layer scalar over every layer before this one
         // (Gemma 4's layer_output_scale; the residual is carried divided by it, which the
-        // RMSNorms that read it cannot see, so the block outputs added to it are divided too)
+        // RMSNorms that read it cannot see, so the block outputs added to it are divided too).
+        // This is direction-exact under RMSNorm, NOT what llama.cpp computes (it multiplies
+        // the layer output by s_l instead); the two agree on ranks and logits order and
+        // differ by one enormous positive scalar on the residual stream. See
+        // recipes/gemma4.py's comment on the layer_output_scale run before touching this;
+        // this is also bit-identical with pack.py's _div_running (double product, one rounding).
         double div = 1.0;
         if (!op.div_running.empty())
             for (int j = 0; j < layer; ++j) {
