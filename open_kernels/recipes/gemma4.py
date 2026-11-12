@@ -34,6 +34,7 @@ import os
 from dataclasses import dataclass, replace
 
 from . import dense as D
+from . import gguf as GGUF
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
 from .catalogue import OpRangeError, check_buffer_args
 from .qwen36moe import MB, proj_op, q4_chunks, role_bytes, roundup
@@ -164,15 +165,17 @@ def pack_plan(spec: ModelSpec) -> dict:
     s = sub_spec(spec, "local")
     L = D.layout(s)
     hid = spec.hidden
-    f32 = spec.quant == "q4_1_f32"
+    # A GGUF file keeps the raw embedding table (Gemma 3 / Gemma 4 both multiply by
+    # sqrt(hidden) at lookup), so the GGUF-reading routes carry the scale here; an HF-built
+    # spec reads_gguf only when quant says so, which is the same condition the packers use.
+    rg = spec.reads_gguf
     return {
         "pool_bytes": pool_bytes(spec), "chunk_bytes": D.chunk_bytes(D.pool_quant(spec)),
         "layer_types": {KINDS[k]: _layer_plan(spec, k) for k in KINDS},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm_gguf" if f32 else "std_perm", "tensor": "lm_head.weight", "dst": 0,
+                    "ops": [{"op": "std_perm_gguf" if rg else "std_perm", "tensor": "lm_head.weight", "dst": 0,
                              "nch": q4_chunks(D.lm_rows(spec), hid, D.pool_quant(spec)), "in_dim": hid}]},
-        # GGUF stores the raw table; HF multiplies by sqrt(hidden) at lookup (as Gemma 3)
-        "embed": {"tensor": "model.embed_tokens.weight", "dim": hid, **({"scale": hid ** 0.5} if f32 else {})},
+        "embed": {"tensor": "model.embed_tokens.weight", "dim": hid, **({"scale": hid ** 0.5} if rg else {})},
         "norm": {"tensor": "model.norm.weight", "bytes": hid * 2},
     }
 
@@ -218,9 +221,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": kn, "args": args}],
         }
-    if spec.quant == "q4_1":
-        g = programs(replace(spec, quant="q4_1_f32"), max_ctx)
-        out["gguf"] = {k: g[k] for k in ("contexts", "kernels", "layer_types", "tail", "globals")}
+    sec = GGUF.section(spec, max_ctx, programs)
+    if sec:
+        # The GGUF-direct view: the same q4_1 builds and chunk law, with the pack ops in
+        # their GGUF-reading form (std_perm_gguf). The engine swaps this whole section in
+        # when the model ships a model.gguf; no f32-scale twins are built.
+        out["gguf"] = sec
     return out
 
 

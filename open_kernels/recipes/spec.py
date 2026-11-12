@@ -1757,6 +1757,107 @@ def _gemma4_unsupported(cfg: Mapping[str, Any], real_vocab: int | None) -> Model
                     "The 12B (gemma4_unified) is.")
 
 
+def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """Gemma 4 12B from the GGUF header (llama.cpp's `gemma4` arch).
+
+    Only the 12B (the gemma4_unified tower) is served: the E2B / E4B also call themselves
+    `gemma4`, and nothing builds per-layer embeddings or KV sharing. They are named refused
+    by the two keys that say so -- embedding_length_per_layer_input and
+    attention.shared_kv_layers -- rather than guessed from a size or a head dim.
+
+    The sliding (SWA) layers are Gemma 3 12B's geometry (head dim 256, 8 kv heads, a 1024-row
+    window, theta 10000); the global layers carry their own (head dim 512, one kv head,
+    proportional RoPE at theta 1000000, K = V). llama.cpp's header carries the per-layer kv
+    heads and the per-layer sliding pattern as ARRAYS; the HF dict nests them instead."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    elpi = md.get(f"{a}.embedding_length_per_layer_input", 0)
+    skv = md.get(f"{a}.attention.shared_kv_layers", 0)
+    if elpi or skv:
+        raise SpecError(f"gemma4: embedding_length_per_layer_input={elpi} / "
+                        f"attention.shared_kv_layers={skv}: the E2B / E4B are not implemented "
+                        f"(per-layer embeddings, KV sharing across layers)")
+    n = k("block_count")
+    hid = k("embedding_length")
+    hd = k("attention.key_length_swa")           # sliding layers' head dim (256)
+    ghd = k("attention.key_length")              # global layers' (512)
+    vocab = md.get(f"{a}.vocab_size")
+    toks = md.get("tokenizer.ggml.tokens")
+    if vocab is None:
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    n_heads = k("attention.head_count")
+    kv = k("attention.head_count_kv")
+    kv_list = list(kv) if isinstance(kv, list) else None
+    num_kv = kv_list[0] if kv_list else int(kv)
+    gkv = kv_list[-1] if kv_list else 1
+    if kv_list:
+        full = [int(v) for i, v in enumerate(kv_list)]
+        pat0 = md.get(f"{a}.attention.sliding_window_pattern")
+        if isinstance(pat0, list) and len(pat0) == n:
+            for i, (p, v) in enumerate(zip(pat0, full)):
+                want = 1 if not p else 8
+                if int(v) != want:
+                    raise SpecError(f"gemma4: layer {i} has kv_heads {v}, the pattern says {want}")
+        num_kv = 8 if max(full) <= 8 else num_kv
+        gkv = 1
+    pat = md.get(f"{a}.attention.sliding_window_pattern")
+    if isinstance(pat, list):
+        if len(pat) != n:
+            raise SpecError(f"gemma4: sliding_window_pattern has {len(pat)} entries, block_count is {n}")
+        layer_types = tuple(DENSE_LOCAL if bool(p) else DENSE for p in pat)
+    else:
+        p = int(pat if pat is not None else 6)
+        layer_types = tuple(DENSE if (l + 1) % p == 0 else DENSE_LOCAL for l in range(n))
+    bad = sorted(set(layer_types) - {DENSE, DENSE_LOCAL})
+    if bad:
+        raise SpecError(f"gemma4: layer_types {bad} (sliding / full, one per layer)")
+    if len(layer_types) != n:
+        raise SpecError(f"gemma4: layer_types has {len(layer_types)} entries, block_count is {n}")
+    rope_dim = k("rope.dimension_count")
+    swa_dim = int(md.get(f"{a}.rope.dimension_count_swa", hd))
+    # proportional RoPE on the global layers: the HF config turns 64 pairs of a 512-dim
+    # head at theta^(-2i/512); the header says nothing about the partial factor, so it is
+    # the 12B's: a quarter of the head.
+    grot = 2 * int(0.25 * rope_dim // 2)
+    scs = md.get(f"{a}.final_logit_softcapping", 0.0)
+    return ModelSpec(
+        family="gemma4",
+        hidden=hid,
+        num_layers=n,
+        layer_types=layer_types,
+        vocab=vocab,
+        real_vocab=len(toks) if toks is not None else vocab,
+        num_heads=n_heads,
+        num_kv_heads=num_kv,
+        head_dim=hd,
+        rotary_dim=swa_dim,
+        rope_theta=float(k("rope.freq_base")),
+        rope_local_theta=float(md.get(f"{a}.rope.freq_base_swa", 10000.0)),
+        sliding_window=int(k("attention.sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        global_head_dim=ghd if ghd != hd else 0,
+        global_kv_heads=gkv,
+        global_rotary_dim=grot,
+        attn_k_eq_v=bool(k("attention.value_length") == k("attention.key_length")),
+        v_norm=True,
+        attn_scale=1.0,
+        final_softcap=float(scs or 0.0),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
+
 # `qwen3_5_moe_text` is the text-only derivative of the VLM `qwen3_5_moe` (Ornith-1.0-35B-A3B
 # and friends: `Qwen3_5MoeForCausalLM`, no vision_config). Every field the recipe and the
 # config check read is identical to the VLM's, so it derives through the same builder --
@@ -1784,7 +1885,8 @@ GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qw
                  # M-RoPE sections live in config.json, so the spec hashes as plain qwen2.
                  "qwen2": _qwen2_gguf, "qwen2vl": _qwen2_gguf, "llama": _llama3_gguf,
                  "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
-                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
+                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf,
+                 "gemma4": _gemma4_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
@@ -1794,7 +1896,7 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
               _lfm2_hf: "lfm2", _gptoss_hf: "gptoss", _k2_hf: "k2",
-              _gemma4_hf: "gemma4", _gemma4_unsupported: "gemma4"}
+              _gemma4_hf: "gemma4", _gemma4_unsupported: "gemma4", _gemma4_gguf: "gemma4"}
 
 
 def hf_model_types(family: str) -> list[str]:
