@@ -1379,7 +1379,12 @@ install(FILES model_info.json DESTINATION "${OFLM_SHARE_DESTINATION}")
 # Only present when the kernel export ran (OFLM_BUILD_KERNELS=ON, or a manual
 # export); skip silently for engine-only builds.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
-    install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}")
+    # The export leaves a build/ tree beside the insts (final.prj/objects_*, the
+    # AIE core .o/.elf intermediates). Nothing at runtime reads them; RPM's
+    # brp-strip cannot recognise them and aborts the package, so they stay out.
+    install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}"
+        PATTERN "*/open_kernels/build" EXCLUDE
+        PATTERN "*/open_kernels/build/*" EXCLUDE)
 endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3
