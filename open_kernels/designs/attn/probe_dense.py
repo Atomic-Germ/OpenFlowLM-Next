@@ -55,6 +55,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes import dense as D  # noqa: E402
+from recipes.families import for_spec  # noqa: E402
 from recipes.load import load_spec  # noqa: E402
 from designs.attn import probe_support as P  # noqa: E402
 
@@ -66,7 +67,11 @@ if ROWS < 1:
     raise SystemExit("probe_dense: ATTN_PROBE_ROWS must be at least 1")
 
 SPEC = load_spec(Path(SPEC_PATH))
-G = D.geometry(SPEC)
+# The family picks the geometry leg: gemma4's two layer types differ in head dim,
+# kv heads and RoPE partner (the sliding one is Gemma 3's shape; the global one
+# has head dim 512, a doubled kv head and proportional RoPE). dx.py does the
+# same through `for_spec`; G4_KIND=local|global selects which one this probe builds.
+G = for_spec(SPEC).geometry(SPEC)
 if G.QKVB:
     raise SystemExit("probe_dense: a family with a q/k/v bias is not covered by this gate")
 if G.RB not in (1, 2, 4):
@@ -96,7 +101,10 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
     og_ty = ty(OGH * HD, bfloat16)    # attn_fin writes kOGH heads at a time
     fcs = ty(G.ROT, np.float32)       # [cos | sin]
     fhd = ty(HD, np.float32)
-    fq = ty(2 * QW, bfloat16) if G.VEXP else ty(QW, np.float32)
+    # ATTN_QLOCAL: each core stores only its own heads' q rows, so the buffer is
+    # per-core, not the full broadcast. (dx.py does the same through QWL.)
+    tl = (G.NHL * G.HD) if G.QLOCAL else QW
+    fq = ty(2 * tl, bfloat16) if G.VEXP else ty(tl, np.float32)
     foacc = ty(NHL * HD, np.float32)  # this core's heads only
     fml = ty(2 * G.MLS, np.float32)   # [m | l]
     pb_ty = ty(8 if RB > 1 else 4, np.int32)
@@ -122,19 +130,34 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
     aout = ObjectFifo(brow, name="aout", depth=2)
     ogs = [ObjectFifo(og_ty, name=f"og{c}", depth=2) for c in range(ACORES)]
 
-    def attn_body(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-                  f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
-        BODY(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-             f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_, 0)
+    if RB > 1:
+        def attn_body(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
+            BODY(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                 f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_, 0)
 
-    def make_attn_body(c):
-        h0 = c * NHL
+        def make_attn_body(c):
+            h0 = c * NHL
 
-        def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-                 f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
-            BODY(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-                 f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_, h0)
-        return body
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
+                BODY(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_, h0)
+            return body
+    else:
+        def attn_body(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_):
+            BODY(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                 f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, None, 0)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_):
+                BODY(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, None, h0)
+            return body
 
     def abufs(c):
         s = "" if c == 0 else str(c)

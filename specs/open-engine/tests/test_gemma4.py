@@ -156,9 +156,10 @@ def test_manifest_rows_are_per_kernel(unvalidated):
         assert lay["rope_inv_freq"] == mm["globals"]["ptab_local"]["inv_freq"]
 
 
-def test_the_catalogue_does_not_take_gemma3s_point_for_a_gemma4_layer(monkeypatch):
-    """The sliding layers have Gemma 3 12B's shape, which IS validated; with a V norm and a
-    score scale of 1 it is another kernel, and it is refused until it has run."""
+def test_the_gemma4_knob_points_are_in_the_catalogue(monkeypatch):
+    """The sliding layers share Gemma 3 12B's attention shape; with a V norm and a score scale
+    of 1 they are a different kernel, and the gate on this machine validated exactly that tuple
+    (and the global one) on hardware."""
     monkeypatch.delenv("OPEN_KERNELS_UNVALIDATED", raising=False)
-    with pytest.raises(OpRangeError):
-        G4._require(spec(), "local", G4.geometry(spec(), "local"))
+    G4._require(spec(), "local", G4.geometry(spec(), "local"))
+    G4._require(spec(), "global", G4.geometry(spec(), "global"))

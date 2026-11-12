@@ -49,14 +49,23 @@ def template_node(tree: ast.Module, op: str) -> ast.Call:
     raise SystemExit(f"catalogue-add-point: no template {op!r} in {CAT}")
 
 
-def combination_call(tpl: ast.Call) -> ast.Call:
+def combination_call(tpl: ast.Call, index: int = 0) -> ast.Call:
     for kw in tpl.keywords:
         if kw.arg != "combos":
             continue
         value = kw.value
         if isinstance(value, ast.Tuple) and value.elts:   # combos=(combination(...),)
-            value = value.elts[0]
+            elts = [e for e in value.elts if isinstance(e, ast.Call)]
+            if not elts:
+                break
+            if index >= len(elts):
+                raise SystemExit(f"catalogue-add-point: the template has {len(elts)} combination(s), "
+                                  f"combo {index} is out of range")
+            return elts[index]
         if isinstance(value, ast.Call):
+            if index != 0:
+                raise SystemExit(f"catalogue-add-point: the template has one combination, "
+                                  f"cannot pick combo {index}")
             return value
     raise SystemExit("catalogue-add-point: that template has no combination() to add to")
 
@@ -146,6 +155,9 @@ def main() -> int:
     ap.add_argument("--value", default="", help="values() write: the validated value (e.g. 5120)")
     ap.add_argument("--note", default="", help="what the point is (a model, a family, a date)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--combo", type=int, default=0,
+                    help="which combination() to add to (0 = the first; 1 = the second; "
+                         "Gemma 4 uses 1 for the v_norm/attn_scale/rope_pair knobs)")
     a = ap.parse_args()
 
     if a.param:
@@ -190,7 +202,7 @@ def main() -> int:
     point = parse_point(a.point)
     text = CAT.read_text()
     tree = ast.parse(text)
-    combo = combination_call(template_node(tree, a.op))
+    combo = combination_call(template_node(tree, a.op), a.combo)
 
     keys = None
     for kw in combo.keywords:

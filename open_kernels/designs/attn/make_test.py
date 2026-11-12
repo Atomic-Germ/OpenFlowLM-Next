@@ -36,6 +36,7 @@ HERE = Path(__file__).parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
 from recipes import dense as D  # noqa: E402
+from recipes.families import for_spec  # noqa: E402
 from recipes.load import load_spec  # noqa: E402
 from designs.attn import attn_reference as REF  # noqa: E402
 
@@ -58,8 +59,16 @@ def main() -> int:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     spec = load_spec(Path(a.spec))
-    G = D.geometry(spec)
+    # dx.py reads the geometry off the family module (G4_KIND for gemma4's two layer
+    # types); the gate must too, or it tests a worker that is not the one that ships.
+    G = for_spec(spec).geometry(spec)
     nh, kvh, hd, rot = G.NH, G.KVH, G.HD, G.ROT
+    # Gemma 4 rides build-new-spec's G4_KIND contract with dx.py: the probe builds
+    # the family's geometry, so the geometry carries the layer type's own RoPE law
+    # (sliding: full theta, denom ROT; global: proportional, theta full and a quarter
+    # of the head rotated) and its knobs.
+    gemma4_local = spec.family == "gemma4" and G.WINDOW > 0
+    gemma4 = spec.family == "gemma4"
     e_a, nptab = G.KVW * 2, G.PTAB_ELEMS
     if a.rows < 1:
         raise SystemExit("make_test: --rows must be at least 1")
@@ -69,7 +78,15 @@ def main() -> int:
     rng = np.random.default_rng(a.seed)
     qn = rng.uniform(0.8, 1.2, (hd,)).astype(bfloat16)      # the q/k norm weights
     kn = rng.uniform(0.8, 1.2, (hd,)).astype(bfloat16)
-    cs = REF.cos_sin(a.rows, rot, spec.rope_theta)            # the position record's cos / sin
+    if gemma4:
+        # the host's record from the same table the engine plays (pools.cpp's ptab
+        # records are this law for this family: sliding layers full, global layers
+        # proportional with the head dim as denominator)
+        inv = np.asarray(spec.rope_inv_freq(local=gemma4_local), np.float64)
+        ang = a.rows * inv
+        cs = np.concatenate([np.cos(ang), np.sin(ang)]).astype(np.float32)
+    else:
+        cs = REF.cos_sin(a.rows, rot, spec.rope_theta).astype(np.float32)        # the position record's cos / sin
 
     meta = np.zeros((1 + nptab) * e_a, np.uint8)
     meta[:hd * 2] = qn.view(np.uint8)
@@ -99,7 +116,10 @@ def main() -> int:
         new, og = REF.decode(q, k, v, qn, kn, cs, ck, cv, nh=nh, kvh=kvh, hd=hd,
                              eps=spec.norm_eps, qk_norm=spec.qk_norm,
                              post=bool(G.QKNORM_POST),
-                             interleaved=bool(spec.rope_interleaved))
+                             interleaved=bool(spec.rope_interleaved),
+                             pair=(G.ROPE_PAIR if gemma4 else None),
+                             v_norm=bool(getattr(G, "VNORM", 0)),
+                             attn_scale=(G.SCALE if gemma4 else None))
         cache = np.concatenate([ck, cv], 1)               # [rows, 2, KVH, HD]
         for prefix, data in (("meta", meta), ("qg", qg), ("kvn", kvn),
                              ("ref-new", new), ("ref-og", og.astype(np.float32))):

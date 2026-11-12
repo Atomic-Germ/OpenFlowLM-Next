@@ -30,6 +30,6 @@ def worker(g, nptab: int, cse: int, rb: int, acores: int, nhl: int, n_og: int, k
     dx = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "dx")
     body = next(n for n in dx.body if isinstance(n, ast.FunctionDef) and n.name == "_attn")
     ns = {"G": g, "NPTAB": nptab, "CSE": cse, "RB": rb, "ACORES": acores, "NHL": nhl,
-          "N_OG": n_og, "KVW": kvw, "range_": loop}
+          "N_OG": n_og, "KVW": kvw, "range_": loop, "QLOCAL": bool(getattr(g, "QLOCAL", 0))}
     exec(compile(ast.Module(body=[body], type_ignores=[]), str(DX), "exec"), ns)
     return ns["_attn"]
