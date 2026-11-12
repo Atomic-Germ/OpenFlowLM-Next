@@ -70,6 +70,9 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"gemma3-text", SupportedModelFamily::gemma3_text},
         {"gemma4e", SupportedModelFamily::gemma4e},
         {"gemma4-12b", SupportedModelFamily::gemma4_12b},
+        // The open Gemma 4 12B kernels (the GGUF-direct route): same adapter, same decoder,
+        // loaded through `_shared_select_open_engine` -- open kernels are the only path.
+        {"gemma4", SupportedModelFamily::gemma4_12b},
         {"gpt-oss", SupportedModelFamily::gpt_oss},
         {"lfm2", SupportedModelFamily::lfm2},
         {"lfm2.5-tk", SupportedModelFamily::lfm2_5_tk},
