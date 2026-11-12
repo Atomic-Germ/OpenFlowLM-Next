@@ -939,6 +939,10 @@ def test_the_two_family_maps_keep_their_own_spellings():
     assert oflm_add.family_from_config_dict({"model_type": "k2_horizon"}) == "k2"
     assert oflm_add.GGUF_ARCH_FAMILIES["hunyuan-dense"] == "hunyuan"
     assert oflm_add.family_from_config_dict({"model_type": "hunyuan_v1_dense"}) == "hunyuan"
+    # Gemma 4's open kernels serve the 12B's gemma4_unified(_text) only; the E2B/E4B stay refused
+    assert oflm_add.GGUF_ARCH_FAMILIES["gemma4"] == "gemma4"
+    assert oflm_add.family_from_config_dict({"model_type": "gemma4_unified"}) == "gemma4"
+    assert "gemma4" not in oflm_add.CONFIG_MODEL_FAMILIES
     # a GGUF arch must not resolve through the config table and vice versa
     assert "hunyuan_v1_dense" not in oflm_add.GGUF_ARCH_FAMILIES
 

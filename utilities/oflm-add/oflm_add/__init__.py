@@ -592,6 +592,10 @@ GGUF_ARCH_FAMILIES = {
     "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
     "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
     "whisper": "whisper-v3",         # speech-to-text, on the open whisper_gemm set
+    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): the marker is the 12B's own arch.
+    # The E2B / E4B also call themselves gemma4; nothing serves them yet, and
+    # kernel linking fails closed rather than bind the wrong set.
+    "gemma4": "gemma4",
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -627,6 +631,11 @@ CONFIG_MODEL_FAMILIES = {
     "qwen2_5_vl": "qwen2vl",
     "qwen2_5_vl_text": "qwen2vl",
     "whisper": "whisper-v3",
+    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): only the 12B (gemma4_unified /
+    # gemma4_unified_text) is served -- the E2B / E4B (plain gemma4 / gemma4_text)
+    # need per-layer embeddings and KV sharing and stay unmapped.
+    "gemma4_unified": "gemma4",
+    "gemma4_unified_text": "gemma4",
 }
 
 

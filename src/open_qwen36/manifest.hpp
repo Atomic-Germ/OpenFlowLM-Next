@@ -60,6 +60,10 @@ struct PackOp {
     uint64_t row0 = 0, n_total = 0;                                     ///< bfp16_gemm: this tensor's first row in the stacked
                                                                         ///< weight, and the weight's padded row count
     std::string glu;                                                    ///< bfp16_gemm: "gate" | "up" half of OPEN-PREFILL-BFP16-FFN's gate|up
+    std::string div_running;                                            ///< put: divide the values by the product,
+                                                                        ///< over the layers BEFORE this one, of this
+                                                                        ///< one-value tensor ("{j}" = that layer) --
+                                                                        ///< Gemma 4's layer_output_scale, folded
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -235,6 +239,10 @@ struct KernelDesc {
     uint64_t rb = 1;
     /// attnpos: rows of one per-core window element (OPEN-ATTN-KVSLICE); 0 = the one broadcast window fill.
     uint64_t kvslice = 0;
+    /// attnpos / attnrows: this kernel's KV row and position record, in bytes. A model whose
+    /// layer types have different attention geometry (Gemma 4: head dim 256 and 512) builds a
+    /// kernel per type, each patched with its own; absent in the manifest = the layout's.
+    uint64_t kv_row = 0, ptab_row = 0;
 };
 
 // OPEN-DECODE-ROWS: `kernel` reuses each layer's pool / consts / state / ptab; l == 0 means no rows pass.
@@ -259,6 +267,9 @@ struct RowsDesc {
 struct RowGlobal {
     uint64_t per_row = 0;
     std::vector<double> inv_freq;            ///< its RoPE frequencies (rotary_dim / 2)
+    /// the pairs its record carries x 2; 0 = the layout's rotary_dim. Gemma 4's global table
+    /// rotates 128 dims of a 512-dim head while the sliding one rotates all 256.
+    uint64_t rotary_dim = 0;
     double scale = 1.0;                      ///< on cos and sin (longrope's attention factor)
     uint64_t window = 0;                     ///< the row counts follow this window
     /// Phi-3's longrope: row r takes `long_inv_freq` once r >= switch_row, `inv_freq` before
@@ -285,6 +296,7 @@ struct Manifest {
     bool rope_interleaved = false;           ///< layout.rope_pairing: the RoPE pairs ADJACENT dims
                                              ///< (2i, 2i + 1), llama.cpp's NORM layout for the llama
                                              ///< archs -- vs the default half-split (i, i + rot/2)
+    double final_logit_softcapping = 0;      ///< logits = c * tanh(logits / c) on the host (Gemma 4: 30); 0 = none
     bool has_moe = false;                    ///< layout.moe present (a family with routed experts)
     /// The kernel set DECLARES that the block-loop schedule was measured correct on it, so
     /// it may be preferred over layer-major for a set with no routed experts.

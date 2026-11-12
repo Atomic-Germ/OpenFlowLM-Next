@@ -177,6 +177,12 @@ nlohmann::json derive_config(const GgufFile& g) {
         c["vocab_size"] = u("vocab_size");
     else
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
+    // A per-layer value is an ARRAY in the metadata (Gemma 4's head_count_kv is 8 on sliding
+    // layers, 1 on full ones) and reads back as ""; it has no single value to derive, so it is
+    // left to config.json, and check_model refuses by name if nothing supplies it.
+    auto scalar = [&](const char* key, const std::string& k) {
+        if (g.kv_has(arch + "." + k) && !g.kv_str(arch + "." + k).empty()) c[key] = u(k);
+    };
     c["num_attention_heads"] = u("attention.head_count");
     c["num_key_value_heads"] = u("attention.head_count_kv");
     // A dense arch has feed_forward_length; a MoE has expert_feed_forward_length and no
@@ -406,12 +412,12 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
         // A MULTIMODAL config wraps the text tower: hidden_size, layer_types,
-        // full_attention_interval ... live under `text_config` and the top level
-        // carries the vision keys. The checks below are top-level, and the GGUF's
-        // derived metadata fills only what it has (it has no layer_types), so an
-        // empero-ai/Qwen3.8-4B install failed with "config.json lacks
-        // 'layer_types'" although the tower's config had it all along. Lift the
-        // tower's keys where the top level has none; the wrapper stays intact.
+        // full_attention_interval ... live under `text_config` (gemma4_unified, Qwen3.8's
+        // wrapper) and the top level carries the vision keys. The checks below are
+        // top-level, and the GGUF's derived metadata fills only what it has (it has no
+        // layer_types), so an empero-ai/Qwen3.8-4B install failed with "config.json lacks
+        // 'layer_types'" although the tower's config had it all along. Lift the tower's
+        // keys where the top level has none; the wrapper stays intact.
         for (const char* wrapper : {"text_config", "llm_config", "language_config"}) {
             auto it = j.find(wrapper);
             if (it == j.end() || !it->is_object()) continue;
@@ -957,7 +963,12 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.moe2 = stream_patch::moe2_table(k.words, name, g);
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
-        k.geom = w_->attn;
+        // Gemma 4's two layer types have different attention geometry; patch each kernel with its own rows.
+        stream_patch::AttnGeometry g = w_->attn;
+        g.kv_row = d.kv_row;
+        g.ptab_row = d.ptab_row;
+        k.attn = stream_patch::attn_table(k.words, name, g);
+        k.geom = g;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
         k.geom.kvslice = d.kvslice;
@@ -2679,6 +2690,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         xrt::bo& lg = buffer("logits", 0);
         read_back(lg, w_->vocab * 4, 0);
         std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+        softcap_logits();
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
@@ -2959,7 +2971,17 @@ void Core::tail_logits(const float* row) {
     xrt::bo& lg = buffer("logits", 0);
     read_back(lg, w_->vocab * 4, 0);
     std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+    softcap_logits();
     timing_.lmhead_ms = ms_since(t1);
+}
+
+// Gemma 4's final_logit_softcapping: c * tanh(z / c), on the host, on the real logits. Monotone,
+// so a greedy argmax is the same with or without it; sampling at temperature is not.
+void Core::softcap_logits() {
+    const double c = w_->final_logit_softcapping;
+    if (c <= 0.0) return;
+    const float cf = static_cast<float>(c), inv = static_cast<float>(1.0 / c);
+    for (float& z : logits_host_) z = cf * std::tanh(z * inv);
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
