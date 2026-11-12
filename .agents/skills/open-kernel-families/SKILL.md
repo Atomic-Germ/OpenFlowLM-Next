@@ -11,6 +11,12 @@ run the build and the gates. **This file is the reference for what is
 different inside each family** — the durable traps, not a list of commands to
 run by hand.
 
+**Adding a family end to end?** Read `open-family-addition` first: recipe vs.
+design, the two builders (HF config + GGUF header), the oflm-add / frontend
+wiring, verification with `cmp_layers` against llama.cpp, and the
+layer-scale fold (what the xres magnitude means). This file is the
+per-family reference it builds on.
+
 ## The map
 
 | family | recipe | designs | specs | shape |
