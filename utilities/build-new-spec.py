@@ -317,7 +317,7 @@ def main() -> int:
         print("-- build the kernel set (the catalogue's override is on: the geometry is not validated yet)",
               flush=True)
         e = dict(env, OPEN_KERNELS_UNVALIDATED="1")
-        rc = run([py, EXPORT, "--specs", name, "--skip-bert"], env=e, check=False)
+        rc = run([py, EXPORT, "--specs", name, "--skip-bert", "--skip-diffusion"], env=e, check=False)
         if rc != 0:
             print("build-new-spec: the kernel set did not build at this geometry", file=sys.stderr)
             return rc
@@ -349,7 +349,7 @@ def main() -> int:
         # 5. the build through the validated path
         if not a.skip_export:
             print("-- rebuild through the validated path", flush=True)
-            rc = run([py, EXPORT, "--specs", name, "--skip-bert"], env=env, check=False)
+            rc = run([py, EXPORT, "--specs", name, "--skip-bert", "--skip-diffusion"], env=env, check=False)
             if rc != 0:
                 print("build-new-spec: the validated rebuild failed", file=sys.stderr)
                 return rc

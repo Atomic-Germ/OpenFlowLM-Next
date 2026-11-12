@@ -42,6 +42,7 @@ from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
 band_bytes = D.band_bytes    # noqa: F401  (dx.py: band_bytes(K, quant))
 chunk_bytes = D.chunk_bytes  # noqa: F401  (dx.py: chunk_bytes(quant))
+attn_flags = D.attn_flags    # noqa: F401  (dx.py: attn_flags(G, probe_env))
 
 KIND_ENV = "G4_KIND"          # which layer type a dx.py build is for: "local" | "global"
 KINDS = {"local": DENSE_LOCAL, "global": DENSE}
