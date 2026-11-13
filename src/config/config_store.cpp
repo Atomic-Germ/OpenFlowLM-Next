@@ -8,6 +8,7 @@
 namespace utils {
     std::string getenv_oflm(const char* oflm_name);
     std::string find_shipped_registry();
+    std::string find_shipped_registry_quiet();
     std::string find_user_settings();
     std::string get_models_directory();
 }
@@ -63,6 +64,24 @@ nlohmann::json deep_merge(const nlohmann::json& base, const nlohmann::json& over
     }
     return result;
 }
+
+// A user-added model is a complete replacement for any shipped entry that shares
+// its tag (see get_merged_model_entry and load_effective_config). The shipped
+// model_info.json is keyed by TAG, though, so an added model whose tag collides
+// with a shipped one (whisper-v3:turbo) silently inherited the shipped model's
+// per-file records: `oflm pull`-time checks hashed the user's GGUF-installed
+// files against the upstream .q4nx manifest and found them "wrong size", then
+// tried to re-download them from an entry whose file_url is empty -- a wall,
+// not a registry. The synthetic key can never match a shipped record, so the
+// pull path falls back to presence-only verification, which is exactly right
+// for a model installed by `oflm add`.
+namespace {
+nlohmann::json user_installed_marker(nlohmann::json entry) {
+    if (!entry.is_object() || entry.contains("model_info_key")) return entry;
+    entry["model_info_key"] = "oflm-add:" + entry.value("name", std::string{"<unnamed>"});
+    return entry;
+}
+}  // namespace
 
 // ============================================================================
 // SettingsLock
@@ -208,7 +227,7 @@ nlohmann::json get_merged_model_entry(const EffectiveConfig& cfg, const std::str
     if (cfg.user_settings.contains("models") &&
         cfg.user_settings["models"].contains(type) &&
         cfg.user_settings["models"][type].contains(size)) {
-        entry = cfg.user_settings["models"][type][size];
+        entry = user_installed_marker(cfg.user_settings["models"][type][size]);
     }
 
     return entry;
@@ -358,6 +377,47 @@ std::vector<std::string> migrate_legacy_user_registry(
 // load_effective_config
 // ============================================================================
 
+// A read-only peek at the same merged overlay load_effective_config builds,
+// without the migration check's notices and writes. The splash must never
+// rewrite a user's settings.json to print itself.
+nlohmann::json load_merged_registry_quiet() {
+    nlohmann::json merged = nlohmann::json::object();
+    std::string shipped_path;
+    try {
+        shipped_path = utils::find_shipped_registry_quiet();
+    } catch (const std::exception&) {
+        return merged;
+    }
+    std::ifstream stream(shipped_path);
+    if (!stream.is_open()) return merged;
+    try {
+        merged = nlohmann::json::parse(stream);
+    } catch (const nlohmann::json::exception&) {
+        return nlohmann::json::object();
+    }
+    // User overlay: complete replacement per (family, size), as in
+    // load_effective_config. No defaults, no migration, no settings write.
+    try {
+        const std::string settings_path = utils::find_user_settings();
+        std::ifstream sstream(settings_path);
+        if (sstream.is_open()) {
+            const nlohmann::json settings = nlohmann::json::parse(sstream);
+            if (settings.contains("models")) {
+                for (const auto& [type, sizes] : settings["models"].items()) {
+                    for (const auto& [size, entry] : sizes.items()) {
+                        if (!merged.contains("models")) merged["models"] = nlohmann::json::object();
+                        if (!merged["models"].contains(type)) merged["models"][type] = nlohmann::json::object();
+                        merged["models"][type][size] = entry;
+                    }
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        // Unreadable settings: show the shipped registry rather than fail.
+    }
+    return merged;
+}
+
 EffectiveConfig load_effective_config() {
     EffectiveConfig cfg;
 
@@ -465,7 +525,7 @@ EffectiveConfig load_effective_config() {
         for (const auto& [type, sizes] : cfg.user_settings["models"].items()) {
             for (const auto& [size, entry] : sizes.items()) {
                 if (!cfg.merged["models"].contains(type)) cfg.merged["models"][type] = nlohmann::json::object();
-                cfg.merged["models"][type][size] = entry;
+                cfg.merged["models"][type][size] = user_installed_marker(entry);
             }
         }
     }

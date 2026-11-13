@@ -11,6 +11,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "gguf/gguf_file.hpp"
+
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
@@ -99,6 +101,50 @@ Linear load_linear_nobias(const open_qwen36::Q4nxFile &f, const std::string &wna
   L.out = out;
   L.in = in;
   L.w = load_bf16_raw(f, wname, out, in);
+  L.b.assign(static_cast<size_t>(out), 0.f);
+  return L;
+}
+
+// --- GGUF-direct decoder loading. GgufFile::f32_all() already returns the
+// HF-natural row-major [out, in], so -- unlike the encoder's tiled B -- there
+// is no transpose here: just a f32 -> bf16 narrowing and the modern `dec.`
+// tensor names.
+uint16_t gguf_bf16_rne(float x) {
+  uint32_t u;
+  std::memcpy(&u, &x, sizeof u);
+  return static_cast<uint16_t>(((u + 0x7FFF + ((u >> 16) & 1)) >> 16) & 0xFFFFu);
+}
+
+std::vector<uint16_t> gguf_bf16(const std::vector<float>& f32) {
+  std::vector<uint16_t> v(f32.size());
+  for (size_t i = 0; i < f32.size(); ++i) v[i] = gguf_bf16_rne(f32[i]);
+  return v;
+}
+
+Linear gguf_linear(const open_qwen36::GgufFile& gf, const std::string& wname,
+                   const std::string& bname, int64_t out, int64_t in) {
+  std::vector<float> w = gf.f32_all(wname);
+  if (static_cast<int64_t>(w.size()) != out * in)
+    throw std::runtime_error("whisper gguf: '" + wname + "' dequantizes to " +
+                             std::to_string(w.size()) + " values, expected " + std::to_string(out * in));
+  Linear L;
+  L.out = out;
+  L.in = in;
+  L.w = gguf_bf16(w);
+  L.b = gf.f32_all(bname);
+  return L;
+}
+
+Linear gguf_linear_nobias(const open_qwen36::GgufFile& gf, const std::string& wname,
+                          int64_t out, int64_t in) {
+  std::vector<float> w = gf.f32_all(wname);
+  if (static_cast<int64_t>(w.size()) != out * in)
+    throw std::runtime_error("whisper gguf: '" + wname + "' dequantizes to " +
+                             std::to_string(w.size()) + " values, expected " + std::to_string(out * in));
+  Linear L;
+  L.out = out;
+  L.in = in;
+  L.w = gguf_bf16(w);
   L.b.assign(static_cast<size_t>(out), 0.f);
   return L;
 }
@@ -323,6 +369,11 @@ Decoder::Decoder(const std::string &model_dir) {
     L.ln_final_w = load_f32(f, p + "final_layer_norm.weight", {static_cast<size_t>(D)});
     L.ln_final_b = load_f32(f, p + "final_layer_norm.bias", {static_cast<size_t>(D)});
   }
+  finalize();
+}
+
+void Decoder::finalize() {
+  const int64_t D = DG::d_model, FFN = DG::ffn;
 
   // OPTIONAL precision variants (task 0180 Part 8, defaults changed Parts
   // 11-15 -- see decoder_quant.cpp): read once, strict -- print the VALUE
@@ -381,6 +432,59 @@ Decoder::Decoder(const std::string &model_dir) {
                               0.f);
 
   clear_context();
+}
+
+Decoder Decoder::from_gguf(const open_qwen36::GgufFile& gf) {
+  // Geometry from the GGUF's own metadata -- same discipline as the encoder.
+  auto eq = [&](const char* key, int64_t want) {
+    if (!gf.kv_has(key))
+      throw std::runtime_error(std::string("whisper GGUF: missing metadata '") + key + "'");
+    const int64_t got = static_cast<int64_t>(gf.kv_u64(key));
+    if (got != want)
+      throw std::runtime_error(std::string("whisper GGUF: '") + key + "' is " + std::to_string(got) +
+                               ", this decoder only implements " + std::to_string(want));
+  };
+  eq("stt.whisper.decoder.d_model", DG::d_model);
+  eq("stt.whisper.decoder.n_layers", DG::n_layers);
+  eq("stt.whisper.decoder.n_heads", DG::n_heads);
+  eq("stt.whisper.decoder.ffn_dim", DG::ffn);
+  eq("stt.whisper.decoder.max_target_positions", DG::max_target_positions);
+  eq("stt.whisper.decoder.vocab_size", DG::vocab);
+  if (gf.kv_has("stt.whisper.decoder.scale_embedding") &&
+      gf.kv_str("stt.whisper.decoder.scale_embedding") == "True")
+    throw std::runtime_error("whisper GGUF: scale_embedding is true");
+
+  Decoder d;
+  const int64_t D = DG::d_model, FFN = DG::ffn, V = DG::vocab;
+
+  d.embed_tokens_ = gguf_linear_nobias(gf, "dec.token_embd.weight", V, D);
+  d.embed_positions_ = gf.f32_all("dec.pos_emb.weight");
+  d.ln_w_ = gf.f32_all("dec.final_norm.weight");
+  d.ln_b_ = gf.f32_all("dec.final_norm.bias");
+
+  d.layers_.resize(static_cast<size_t>(DG::n_layers));
+  for (int64_t l = 0; l < DG::n_layers; ++l) {
+    auto& L = d.layers_[static_cast<size_t>(l)];
+    const std::string p = "dec.blocks." + std::to_string(l) + ".";
+    L.self_q = gguf_linear(gf, p + "self_attn.q.weight", p + "self_attn.q.bias", D, D);
+    L.self_k = gguf_linear_nobias(gf, p + "self_attn.k.weight", D, D);
+    L.self_v = gguf_linear(gf, p + "self_attn.v.weight", p + "self_attn.v.bias", D, D);
+    L.self_out = gguf_linear(gf, p + "self_attn.out.weight", p + "self_attn.out.bias", D, D);
+    L.ln_self_w = gf.f32_all(p + "norm_self.weight");
+    L.ln_self_b = gf.f32_all(p + "norm_self.bias");
+    // cross_attn.k/v are not here -- they live in dec.xkv (Encoder::xkv()).
+    L.cross_q = gguf_linear(gf, p + "cross_attn.q.weight", p + "cross_attn.q.bias", D, D);
+    L.cross_out = gguf_linear(gf, p + "cross_attn.out.weight", p + "cross_attn.out.bias", D, D);
+    L.ln_cross_w = gf.f32_all(p + "norm_cross.weight");
+    L.ln_cross_b = gf.f32_all(p + "norm_cross.bias");
+    L.fc1 = gguf_linear(gf, p + "ffn.fc1.weight", p + "ffn.fc1.bias", FFN, D);
+    L.fc2 = gguf_linear(gf, p + "ffn.fc2.weight", p + "ffn.fc2.bias", D, FFN);
+    L.ln_final_w = gf.f32_all(p + "norm_ffn.weight");
+    L.ln_final_b = gf.f32_all(p + "norm_ffn.bias");
+  }
+
+  d.finalize();
+  return d;
 }
 
 void Decoder::clear_context() { pos_ = 0; }   // cache rows at/beyond pos_ are never read

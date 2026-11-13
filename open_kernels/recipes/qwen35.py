@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 
+from . import gguf as GGUF
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
@@ -168,7 +169,7 @@ def pack_plan(spec: ModelSpec) -> dict:
         proj_op(spec, "ffn", pre + "mlp.gate_proj.weight", L.POOL_FFN_GATE, ff, hid, hid),
         proj_op(spec, "ffn", pre + "mlp.down_proj.weight", L.POOL_FFN_DOWN, hid, ff, ff),
     ]
-    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK, "layer_types": {},
+    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": M.pool_chunk(spec), "layer_types": {},
                   "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
                               "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight",
                                        "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]},
@@ -225,10 +226,12 @@ def pack_plan(spec: ModelSpec) -> dict:
         plan["layer_types"][FULL] = {
             "pool": ffn_pool + [
                 # q_proj is the fused [q | gate] rows; the pool splits the halves
-                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, qw, hid, hid, chunk0=0),
+                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, qw, hid, hid, chunk0=0,
+                        qgate="q"),
                 proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, kvw, hid, hid),
                 proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, kvw, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_GATE, qw, hid, hid, chunk0=nq),
+                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_GATE, qw, hid, hid, chunk0=nq,
+                        qgate="gate"),
                 proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, qw, qw),
             ],
             "consts": [
@@ -297,6 +300,13 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     tile (not a multiple of 256) -- refused here rather than failing the whole export, since
     the sequential path serves that size either way."""
     try:
+        if spec.quant == "q4_1_f32":
+            # The GGUF-direct twin's pool is the f32-scale one (6144 B a chunk);
+            # the block-prefill GEMM reads the bf16 chunk law by a hardcoded
+            # constant, so a f32-scale set must not advertise the route -- the
+            # engine then prefills through step() (decode-as-prefill), which is
+            # exact. The same holds for the MoE recipe.
+            return None
         route = M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
         if route and paired_prefill(spec):
             for g in route["layer_types"].values():
@@ -331,11 +341,14 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                     "lmpool": L.LMHEAD_POOL_BYTES,
                     "ptab": {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq()}},
     }
+    f32 = spec.quant == "q4_1_f32"
+    lx_set = "lx_f32" if f32 else "lx"
+    ax_set = "ax_f32" if f32 else "ax"
     if spec.has_linear:
         args = ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx/final.xclbin"
-        out["kernels"]["lx"] = {"context": "lx", "insts": "lx/insts.bin", "build": "lx"}
+        out["contexts"]["lx"] = f"{lx_set}/final.xclbin"
+        out["kernels"]["lx"] = {"context": "lx", "insts": f"{lx_set}/insts.bin", "build": lx_set}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
@@ -346,8 +359,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax/final.xclbin"
-        out["kernels"]["ax"] = {"context": "ax", "insts": "ax/insts.bin", "patch": "attnpos", "build": "ax"}
+        out["contexts"]["ax"] = f"{ax_set}/final.xclbin"
+        out["kernels"]["ax"] = {"context": "ax", "insts": f"{ax_set}/insts.bin", "patch": "attnpos", "build": ax_set}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES,
                         "state": {"kind": "kv", "row": L.KV_ROW}},
@@ -362,6 +375,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         # Only a set whose block loop was measured declares it; see block_loop_validated().
         if block_loop_validated(spec):
             out["block_loop_preferred"] = True
+    sec = GGUF.section(spec, max_ctx, programs)
+    if sec:
+        # The GGUF-direct view: the SAME builds and chunk law, with the pack ops in their
+        # GGUF-reading form. The engine swaps this whole section in when the model ships a
+        # model.gguf; no f32-scale twins are built any more.
+        out["gguf"] = sec
     return out
 
 
@@ -384,7 +403,7 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
         **({"q4_activation_sum": "quantized_fp32"} if M.consistent_q4_sum(spec) else {}),
         **({"ffn_norm_dtype": "float32"} if ffn_geometry(spec).XM_F32 else {}),
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
-        "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
+        "chunk_bytes": M.pool_chunk(spec), "pool_bytes": L.POOL_BYTES,
         "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim,
         "rope_theta": spec.rope_theta, "rope_inv_freq": spec.rope_inv_freq(),
@@ -412,6 +431,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                        "build_dir": f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(n)}}
+    # No f32-scale twins: a GGUF model runs on the q4_1 builds above (recipes/gguf.py).
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])

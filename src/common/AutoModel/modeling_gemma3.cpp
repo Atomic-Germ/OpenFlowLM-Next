@@ -15,9 +15,8 @@ void Gemma3::load_model(std::string model_path, json model_info, int default_con
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when installed for this model, the closed
-    // gemma_npu DLL otherwise; images always need the closed one
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_GEMMA_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA_ENGINE", "Gemma 3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -57,6 +56,8 @@ std::string Gemma3::apply_chat_template(nlohmann::ordered_json& messages, nlohma
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -128,7 +129,7 @@ bool Gemma3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std:
             filtered_messages.push_back(filtered_message);
         }
         header_print("OFLM", "Total images: " << total_images);
-        templated_text = this->apply_chat_template(filtered_messages);
+        templated_text = this->apply_chat_template(filtered_messages, input.tools);
 
         if (total_images > 0) {
             pixel_values.resize(3 * 896 * 896 * sizeof(bf16) * total_images);

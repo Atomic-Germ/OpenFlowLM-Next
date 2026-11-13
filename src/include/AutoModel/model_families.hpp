@@ -50,6 +50,10 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"granite", SupportedModelFamily::granite},
         {"deepseek-r1", SupportedModelFamily::deepseek_r1},
         {"deepseek-r1-0528", SupportedModelFamily::deepseek_r1_0528},
+        // Hy-MT2 (dense Hunyuan decoder): served by the open engine, template-driven
+        // like Granite, so it shares that adapter. Nothing shipped a Hunyuan before, so
+        // the map had no entry and the server called it "not a chat model".
+        {"hunyuan", SupportedModelFamily::granite},
         {"qwen2", SupportedModelFamily::qwen2},
         {"qwen3", SupportedModelFamily::qwen3},
         {"qwen3-it", SupportedModelFamily::qwen3_it},
@@ -66,6 +70,9 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"gemma3-text", SupportedModelFamily::gemma3_text},
         {"gemma4e", SupportedModelFamily::gemma4e},
         {"gemma4-12b", SupportedModelFamily::gemma4_12b},
+        // The open Gemma 4 12B kernels (the GGUF-direct route): same adapter, same decoder,
+        // loaded through `_shared_select_open_engine` -- open kernels are the only path.
+        {"gemma4", SupportedModelFamily::gemma4_12b},
         {"gpt-oss", SupportedModelFamily::gpt_oss},
         {"lfm2", SupportedModelFamily::lfm2},
         {"lfm2.5-tk", SupportedModelFamily::lfm2_5_tk},

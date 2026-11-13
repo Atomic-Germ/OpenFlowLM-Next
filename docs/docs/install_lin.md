@@ -198,9 +198,11 @@ If `oflm validate` passes but `oflm run` fails with `No such device with index '
 
 ### Building from Source
 
-1. Clone the repository:
+1. Clone the repository with its submodules, and install the development
+   packages listed in the
+   [Linux getting-started guide](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/docs/linux-getting-started.md#before-the-first-build):
    ```sh
-   git clone https://github.com/Atomic-Germ/OpenFlowLM.git
+   git clone --recursive https://github.com/Atomic-Germ/OpenFlowLM.git
    cd OpenFlowLM
    ```
 2. Build and install from the **repository root** (the root presets are what

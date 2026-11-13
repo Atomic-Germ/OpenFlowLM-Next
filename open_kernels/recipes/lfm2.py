@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 from . import dense as D
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
+from .dense import attn_flags  # noqa: F401  (the same list the dense design builds attn.h with)
 from .catalogue import OpRangeError, check_buffer_args, require
 from .qwen36moe import (CHUNK, ELEM, MB, mixed_check, proj_op, q4_chunks, quant_check,
                         require_gemv, role_bytes, roundup)
@@ -223,7 +224,8 @@ def pack_plan(spec: ModelSpec) -> dict:
         "pool_bytes": Lx.POOL_BYTES, "chunk_bytes": CHUNK,
         "layer_types": {FULL: attn, SHORT_CONV: sc},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm", "tensor": "lm_head.weight", "dst": 0,
+                    "ops": [{"op": "std_perm_gguf" if spec.reads_gguf else "std_perm",
+                             "tensor": "lm_head.weight", "dst": 0,
                              "nch": q4_chunks(D.lm_rows(spec), hid), "in_dim": hid}]},
         # LFM2 containers name the table token_embd, not embed_tokens
         "embed": {"tensor": EMBED, "dim": hid},
@@ -272,7 +274,16 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
 
 
 def hf_config_check(spec: ModelSpec) -> dict:
-    return D.hf_config_check(spec)
+    d = D.hf_config_check(spec)
+    # LFM2's config publishes the FFN width BEFORE transformers' two-thirds adjustment
+    # (12288 on the 1.2B), while the kernels run 8192 -- and a spec record carries one
+    # number, so a set may have been built from either spelling. Both are accepted: the
+    # engine reads an array as "any of these", the same shape Granite's attention
+    # multiplier uses for a value a container and a GGUF legitimately write differently.
+    pub = spec.extra.get("published_intermediate")
+    d["intermediate_size"] = sorted({int(spec.intermediate), int(spec.intermediate * 3 // 2)}
+                                    | ({int(pub)} if pub else set()))
+    return d
 
 
 GEN_KERNELS = "designs/dense/gen_kernels.py"

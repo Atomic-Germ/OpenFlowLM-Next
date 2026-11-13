@@ -86,10 +86,9 @@ def linear_decode(m, spec, layer, x_res, conv_state, S):
     dtb = m.f32(pre + "linear_attn.ssm_dt.bias")
     decay = np.exp(A * np.log1p(np.exp(x @ Wa + dtb)))
     beta = sigmoid(x @ Wb)
-    grp = vh // kh                                              # value heads per key head
     o = np.zeros((vh, vd))
     for h in range(vh):
-        kk, qq = k[h // grp], q[h // grp]
+        kk, qq = k[h % kh], q[h % kh]
         S[h] *= decay[h]
         delta = beta[h] * (v[h] - S[h].T @ kk)
         S[h] += np.outer(kk, delta)

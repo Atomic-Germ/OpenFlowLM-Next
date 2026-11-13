@@ -31,6 +31,10 @@ std::string find_shipped_registry() {
     throw std::runtime_error("stub: set OFLM_CONFIG_PATH to a registry for this test");
 }
 
+std::string find_shipped_registry_quiet() {
+    return find_shipped_registry();
+}
+
 std::string find_user_settings() {
     if (const char* p = getenv("OFLM_SETTINGS_PATH")) {
         if (*p) return p;

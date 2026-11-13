@@ -15,21 +15,18 @@ void Nanbeige::load_model(std::string model_path, json model_info, int default_c
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
-    // The engine: the open kernels when installed for this model, the closed
-    // DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_LLAMA_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "Nanbeige");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // model_type == nanbeige
-        this->lm_engine = std::make_unique<nanbeige_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-
-        this->lm_engine->load_weights(*this->q4nx);
-
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Nanbeige engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_LLAMA_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_LLAMA_ENGINE=closed requested, but this build ships no closed Nanbeige engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     
     this->lm_engine->clear_context();
@@ -56,7 +53,8 @@ std::string Nanbeige::apply_chat_template(nlohmann::ordered_json& messages, nloh
     minja::chat_template_inputs inputs;
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
-    // inputs.tools = tools;
+    if (!tools.empty())
+        inputs.tools = tools;
     inputs.extra_context = this->extra_context;
     return this->_shared_apply_template(inputs);
 }
