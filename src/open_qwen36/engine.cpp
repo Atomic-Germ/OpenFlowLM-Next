@@ -33,13 +33,20 @@ namespace fs = std::filesystem;
 std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     auto chose = [how](const char* where) { if (how) *how = where; };
     // A kernel set is a manifest.json plus every xclbin / insts.bin it names.
-    auto complete = [](const fs::path& dir, std::string* why) {
+    std::string declined;
+    auto complete = [&config, &declined](const fs::path& dir, std::string* why) {
         std::error_code ec;
         if (!fs::is_regular_file(dir / "manifest.json", ec)) { *why = "no manifest.json"; return false; }
         try {
             Manifest m = Manifest::load((dir / "manifest.json").string());
             for (const auto& f : m.files())
                 if (!fs::is_regular_file(dir / f, ec)) { *why = "manifest names missing " + f; return false; }
+            // Declining leaves a .q4nx model (the official Gemma4-E4B-IT-NPU2) on the closed engine.
+            if (m.reads_gguf_only() && !Core::reads_gguf(config.model_path)) {
+                *why = "it packs GGUF-direct, which only a model.gguf can feed";
+                declined = dir.string();
+                return false;
+            }
         } catch (const std::exception& e) {
             *why = e.what();
             return false;
@@ -78,6 +85,9 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
         if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
         incomplete(cand, why);
     }
+    if (!declined.empty())
+        std::fprintf(stderr, "open_qwen36: not using %s: it packs GGUF-direct and %s has no model.gguf "
+                     "(or also a model.q4nx)\n", declined.c_str(), config.model_path.c_str());
     return {};
 }
 
@@ -128,6 +138,8 @@ buffer<bf16> Engine::logits_view() {
     for (size_t i = 0; i < real; ++i) logits_[i] = bf16(lg[i]);
     // lm_head rows past the tokenizer's vocab are padding with undefined content
     for (size_t i = real; i < vocab; ++i) logits_[i] = bf16(-std::numeric_limits<float>::infinity());
+    for (int id : suppressed_)
+        if (id >= 0 && static_cast<size_t>(id) < vocab) logits_[id] = bf16(-std::numeric_limits<float>::infinity());
     return buffer<bf16>(logits_.data(), logits_.size());
 }
 
@@ -557,15 +569,17 @@ void Engine::clear_context() {
 }
 
 buffer<bf16> Engine::get_k_cache(int layer_idx, int idx) {
-    buffer<bf16> out(core_->manifest().kv_row / (core_->manifest().attn_kv_pair ? 8 : 4));   // one K row: bf16[kv heads x head dim]
-    if (!core_->is_attention_layer(layer_idx)) return out;
+    const size_t div = core_->manifest().attn_kv_pair ? 8 : 4;
+    if (!core_->is_attention_layer(layer_idx)) return buffer<bf16>(core_->manifest().kv_row / div);
+    buffer<bf16> out(core_->kv_row_bytes(layer_idx) / div);   // one K row: bf16[kv heads x this layer's head dim]
     core_->kv_row(layer_idx, idx, false, reinterpret_cast<uint16_t*>(out.data()));
     return out;
 }
 
 buffer<bf16> Engine::get_v_cache(int layer_idx, int idx) {
-    buffer<bf16> out(core_->manifest().kv_row / (core_->manifest().attn_kv_pair ? 8 : 4));
-    if (!core_->is_attention_layer(layer_idx)) return out;
+    const size_t div = core_->manifest().attn_kv_pair ? 8 : 4;
+    if (!core_->is_attention_layer(layer_idx)) return buffer<bf16>(core_->manifest().kv_row / div);
+    buffer<bf16> out(core_->kv_row_bytes(layer_idx) / div);
     core_->kv_row(layer_idx, idx, true, reinterpret_cast<uint16_t*>(out.data()));
     return out;
 }

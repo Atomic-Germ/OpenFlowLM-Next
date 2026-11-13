@@ -58,7 +58,8 @@ def test_the_new_fields_leave_every_other_spec_alone():
 
 
 def test_the_e_models_and_unbuilt_features_are_refused():
-    with pytest.raises(SpecError, match="E2B / E4B"):
+    # the E2B / E4B are family gemma4e (test_gemma4e.py); the 12B's tower under their model_type is not one
+    with pytest.raises(SpecError, match="per-layer inputs"):
         ModelSpec.from_hf_config({"model_type": "gemma4", "text_config": dict(TC, model_type="gemma4_text")})
     with pytest.raises(SpecError, match="num_kv_shared_layers"):
         ModelSpec.from_hf_config({"model_type": "gemma4_unified", "text_config": dict(TC, num_kv_shared_layers=20)})

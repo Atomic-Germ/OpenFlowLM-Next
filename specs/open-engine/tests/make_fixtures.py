@@ -9,6 +9,7 @@ sources, which would churn the fixtures on every edit):
     fixtures/manifest_hy_mt2_7b.json  Hy-MT2-7B (post-RoPE q/k norm, a padded head)
     fixtures/manifest_qwen35_9b.json  Qwen3.8-Distilled-9B (the qwen35 composition)
     fixtures/manifest_phi4_mini_4b.json  Phi4-mini (a 96-dim rotation, longrope's two tables, hf_config_defaults)
+    fixtures/manifest_gemma4_e4b.json  Gemma 4 E4B (KV-shared layers, two head widths, per-layer inputs on the NPU)
 
     python specs/open-engine/tests/make_fixtures.py
 """
@@ -52,6 +53,8 @@ FIXTURE_Q35 = HERE / "fixtures" / "manifest_qwen35_9b.json"
 SPEC_Q35 = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "qwen35-9b.json"
 FIXTURE_PH = HERE / "fixtures" / "manifest_phi4_mini_4b.json"
 SPEC_PH = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "phi4-mini-4b.json"
+FIXTURE_G4 = HERE / "fixtures" / "manifest_gemma4_e4b.json"
+SPEC_G4 = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "gemma4-e4b.json"
 
 
 def fixture_manifest() -> dict:
@@ -82,10 +85,27 @@ def fixture_manifest_ph() -> dict:
     return manifest(load_spec(SPEC_PH), key="sha256:fixture")
 
 
+def fixture_manifest_g4() -> dict:
+    """The one-context image with the per-layer input in it (OPEN_G4_PLE_NPU=1), the layout whose
+    `ple_in` keys manifest_test.cpp reads."""
+    saved = {k: os.environ.get(k) for k in ("OPEN_LAYER_ONE_CTX", "OPEN_G4_PLE_NPU")}
+    os.environ.pop("OPEN_LAYER_ONE_CTX", None)
+    os.environ["OPEN_G4_PLE_NPU"] = "1"
+    try:
+        return manifest(load_spec(SPEC_G4), key="sha256:fixture")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 if __name__ == "__main__":
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     for f, m in ((FIXTURE, fixture_manifest()), (FIXTURE_Q3, fixture_manifest_q3()),
                  (FIXTURE_G3, fixture_manifest_g3()), (FIXTURE_HY, fixture_manifest_hy()),
-                 (FIXTURE_Q35, fixture_manifest_q35()), (FIXTURE_PH, fixture_manifest_ph())):
+                 (FIXTURE_Q35, fixture_manifest_q35()), (FIXTURE_PH, fixture_manifest_ph()),
+                 (FIXTURE_G4, fixture_manifest_g4())):
         f.write_text(json.dumps(m, indent=1) + "\n", encoding="utf-8", newline="\n")
         print(f"wrote {f}")

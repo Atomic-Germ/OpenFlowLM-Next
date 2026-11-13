@@ -109,6 +109,33 @@ struct AttnGeom {
     bool kv_pair = false;   ///< cache planes [K hi, K lo, V hi, V lo]
 };
 
+struct G4AttnGeom {
+    size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;
+    size_t pos0 = 0;        ///< the block's first position (and KV row)
+    size_t window = 0;      ///< sliding window in rows, 0 = every earlier row
+    double eps = 1e-6;
+};
+
+/// Which attention a Gemma 4 block takes: mode 0 the host's, 1 fa_wide, 2 automatic -- the host's while the block ends at
+/// or before `after` tokens, fa_wide past that, and never fa_wide on a model without per-layer inputs (the 12B).
+inline bool gemma4_use_wide(int mode, bool has_ple, size_t block_end, size_t after) {
+    return mode == 1 || (mode == 2 && has_ple && block_end > after);
+}
+
+/// Gemma 4's attention over a block (OPEN-PREFILL-G4): q [T, nh*hd], k / v [T, kvh*hd] are the projections' outputs,
+/// qn / kn [hd]. q and k are RMS-normed with their weights, v without one; the first rot/2 pairs (i, i + hd/2) turn at
+/// pos * inv_freq[i]; scores are unscaled, causal, and cut to `window` rows when it is non-zero. k and v are cached
+/// as bf16 rows [K_t | V_t] of kv_row_elems at rows [pos0, pos0 + t_real). k == nullptr is a KV-shared layer: kv
+/// already holds every row it reads, the block's included. og [T, nh*hd] out, zero past t_real.
+void gemma4_attention(const G4AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
+                      const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* og);
+
+/// OPEN-PREFILL-ATTN-WIDE: gemma4_attention's host half when fa_wide computes the scores and values: the block's K / V
+/// cache rows as gemma4_attention writes them (k == nullptr: a shared layer, nothing written), and its q rows normed and
+/// rotated the same way, as bf16 [T, nh*hd] in dq (rows past t_real zero).
+void gemma4_attention_prep(const G4AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
+                           const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, uint16_t* dq);
+
 /// The full-attention layer's middle over a block. q / gate [T, nh*hd], k / v [T, kvh*hd]
 /// are the fused projection's outputs; qn / kn [hd]; inv_freq [rot/2]. kv is the layer's
 /// cache: rows of kv_row_elems bf16, [K_t | V_t] each kvh*hd wide, rows [0, pos0) valid on
@@ -125,6 +152,9 @@ float scores_f32(const float* K, size_t stride, const float* q, size_t hd, size_
 double exp_sum_f32(float* s, size_t n, float mx);
 void axpy_f32(float* out, float a, const float* v, size_t n);
 int argmax_bf16_row(const float* p, size_t n);
+
+/// Y [T, N] = X [T, K] W^T for W [N, K] (rows of dot products), all f32; K a multiple of 8.
+void matmul_nt(const float* W, size_t N, size_t K, const float* X, size_t T, float* Y);
 
 /// The host half of the block attention when its products run on the NPU (OPEN-PREFILL-ATTN):
 /// what attention_block does before its products and nothing after. Q [T, nh*hd] fp32 out,

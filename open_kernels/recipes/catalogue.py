@@ -163,8 +163,9 @@ class Template:
 
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
-             {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
+             {"K": values(1024, 1536, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
                           10752, 11264, 12288, 14336, 15360, 10496, 11008),
+                                                 # 1536: Gemma 4 E2B (OPEN-FAMILY-GEMMA4, 2026-10-16);
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
@@ -238,6 +239,15 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "(128, 16, 8) -- a GQA group of 2 at head dim 128 -- through silently, "
                   "because each value came from a different model. A new tuple needs a family "
                   "procedure run at exactly that configuration"),
+    # Gemma 4 E-series kinds: the 12B's knobs (ATTN_SCALE, ATTN_VNORM, ATTN_ROPE_PAIR) plus ATTN_KV_SHARED and one kv head
+    Template("attn_gemma4", "designs/attn/attn.h",
+             combos=(combination(
+                 # E4B's four kinds, 2026-10-16: the 6- and 30-layer slices and the whole model against the fp64 replica
+                 (256, 8, 2, 256, False), (512, 8, 2, 128, False), (256, 8, 2, 256, True), (512, 8, 2, 128, True),
+                 # E2B's four at one kv head, the same day: its 6- and 20-layer slices and the whole model
+                 (256, 8, 1, 256, False), (512, 8, 1, 128, False), (256, 8, 1, 256, True), (512, 8, 1, 128, True),
+                 keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim", "kv_shared")),),
+             note="OPEN-FAMILY-GEMMA4's procedure: the replica slice through these kinds"),
     Template("deltanet", "designs/layer_x/dnx.h",
              {"heads": values(16, 32, 48), "dim": values(128), "key_heads": values(16), "conv_kernel": values(4)},
              note="Qwen3-Next / 3.5 / 3.6 families only; heads/key_heads is the value heads per "
@@ -251,7 +261,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "the core holds taps - 1 state rows, so another tap count is a design change, "
                   "not a knob"),
     Template("ln", "designs/ln/ln.cc",
-             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)},
+             {"width": values(1024, 1536, 2048, 2560, 3072, 3840, 4096, 5120)},
              combos=(combination(
                  # (width, groups); 1024 / 2048 take the fused single-core path (N <= 2048),
                  # 2560 / 3072 / 4096 the split-output one, 5120 the streamed residual (ln.py
@@ -263,6 +273,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  # (4096, 4): K2-Horizon-7B's GroupRMSNorm(4), make_test PASS on the NPU 2026-10-08 (OPEN-FAMILY-K2).
                  (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (4096, 4),
                  (5120, 1),
+                 (1536, 1),                      # Gemma 4 E2B's final norm, the fused path (OPEN-FAMILY-GEMMA4)
                  keys=("width", "groups"),
                  defaults={"groups": 1}),),),
     Template("router", "designs/router/router.h",
@@ -277,8 +288,9 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family, 5120 with "
                   "the 27B"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
-             {"K": values(1024, 2048, 2560, 3072, 3840, 4096, 5120), "vocab": multiple_of(64)},  # qwen3-14b (utilities/op-gate.py: the lm_head_q4 fixture at this geometry)
-             note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
+             {"K": values(1024, 1536, 2048, 2560, 3072, 3840, 4096, 5120), "vocab": multiple_of(64)},  # qwen3-14b (utilities/op-gate.py: the lm_head_q4 fixture at this geometry)
+             note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K "
+                  "(1536: Gemma 4 E2B's whole model on the NPU)"),
 ]}
 
 

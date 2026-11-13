@@ -1345,7 +1345,263 @@ engine -- the open one has no vision path.
 
 **Result 2026-09-05 (Gemma3-4B):** slice logits corr 0.999998 / 0.999998, same argmax and top-5, residual corr 1.000000 every layer; identical through the engine; a finite step at position 1103; a coherent two-sentence answer ending in `<end_of_turn>` at token 43 (96 ms/token). Details: `.claude/plans/open-kernels-phase-d-gemma3.md`.
 
+**GGUF norm names.** A Gemma 3 GGUF stores HF's `post_attention_layernorm` as `post_attention_norm` and
+HF's `pre_feedforward_layernorm` as `ffn_norm`, where a llama GGUF's `ffn_norm` is HF's
+`post_attention_layernorm`. `GgufFile::resolve` sends `post_attention_layernorm` to
+`post_attention_norm` when the file has that tensor and to `ffn_norm` otherwise. From #180 until this fix the
+map had Gemma's two swapped, so every Gemma 3 GGUF ran with its post-attention and pre-FFN norms exchanged.
+**Acceptance criteria (unit, `gguf_pack_test`):** a Gemma-shaped GGUF (all four norms present) maps
+`post_attention_layernorm` to `post_attention_norm.weight` and `pre_feedforward_layernorm` to
+`ffn_norm.weight`; a llama-shaped one (no `post_attention_norm`) still maps `post_attention_layernorm` to
+`ffn_norm.weight`; `has()` agrees with `tensor()` for both.
+
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
+
+### OPEN-FAMILY-GEMMA4: Gemma 4 (text) on the dense recipe -- the 12B (family gemma4) and the E2B / E4B (family gemma4e)
+**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py` (the 12B), `gemma4e.py` (the E-series), `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py` (the 12B), `gx.py` and `dxkit.py` (the E-series), `designs/ln/ple_ln.cc`, `designs/attn/attn.h`, `designs/attn/attn_step*.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `src/common/AutoModel/modeling_gemma4_12b.cpp`, `utilities/oflm-add`)
+**Verification:** test (the 12B's derivation and two geometries: `tests/test_gemma4.py`; the E-series' derivation, KV-sharing layout, tensor names, kind geometry and manifest: `tests/test_gemma4e.py`, `tests/test_one_context.py`, `tests/test_gemma4_block_prefill.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`, its fixture kept current by `tests/test_manifest_fixture.py`; the install's token ids and family routing: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
+
+**The 12B** (family `gemma4`, transformers' `gemma4_unified`; Google's `gemma-4-12b-it-qat-q4_0.gguf`) runs on
+`designs/dense/dx.py`, one build per layer type: the 40 sliding layers have Gemma 3 12B's shape, the 8 global
+layers head dim 512 and one kv head, duplicated so the attention element carries two, with K = V (the k
+projection packed into the v slot), the attention switches `ATTN_VNORM`, `ATTN_SCALE` (1.0), `ATTN_ROPE_PAIR`
+and `ATTN_QLOCAL`, the layer output scalar folded into the post norms, and the soft cap on the host
+(`layout.final_logit_softcapping`). Its acceptance criteria are `tests/test_gemma4.py`'s.
+
+**The E2B / E4B** (family `gemma4e`): Google's Gemma 4 E-series GGUFs (`gemma-4-E4B_q4_0-it.gguf`, `gemma-4-E2B_q4_0-it.gguf`, QAT Q4_0) shall
+run as text on the open kernels through the dense recipe, the model loaded straight from the GGUF and
+served by `oflm serve` from an `oflm-add` install. Four layer kinds --
+sliding or global, each with its own KV cache or sharing one -- are four `dx` builds:
+
+- **Global heads are 512 wide** and rotate only pairs `(i, i + 256)` for `i < 64`, at
+  `theta^(-2i/512)` (transformers' `proportional` RoPE; llama.cpp writes it as `rope_freqs`, 64 ones
+  then 1e30). attn.h's `ATTN_ROPE_PAIR` puts a pair's partner HD/2 away; the position table carries
+  64 frequencies. Sliding heads are 256 wide and rotate fully at theta 1e4.
+- **Scores are unscaled** (`ATTN_SCALE` 1.0, the 12B's switch), and each v head is RMS-normalised with no weight
+  before it is cached (`ATTN_VNORM`). q and k keep their norms with weights, used as stored (the
+  GGUF holds `w`, not `1 + w`).
+- **KV sharing:** the last `shared_kv_layers` layers have no k / v projection. Each attends over
+  the cache of the last layer of its own kind before the first shared one (`kv_source`; E4B: 22
+  for sliding, 23 for global), the current position's row included, read back from that cache;
+  the engine aliases the source layer's KV buffer.
+- **Per-layer inputs:** before the layers, on the host, `ple = (rms(model_proj(e) / sqrt(hidden))
+  * model_norm + per_layer_token_embd[id] * 16) / sqrt(2)`; after each layer's dispatch,
+  `h += rms(proj(gelu_tanh(gate(h)) * ple_l)) * post_norm`, then `h *= layer_output_scale`. On the
+  one-context image (the default) the per-layer part runs at the end of `gx.py`'s layer program: the
+  gate GEMV on main cores 0-3, `gelu_tanh(g) * ple_l` and `(y + r) * scalar` on the norm helper
+  (`designs/ln/ple_ln.cc`), the projection GEMV over every main core, `post_norm` through `ln_nr32`.
+  The pool gains `inp_gate` and `proj` (`std_perm_gguf`, Q4_0 as shipped), consts gain `post_norm` and
+  the scalar as f32 (`put_f32`), and each layer type names `ple_in`, the act offset the host writes
+  that layer's `ple` to before the walk; the engine then runs nothing between layers and keeps
+  submit-ahead on. `per_layer_model_proj` is F16, which no NPU kernel reads, so `ple` stays on the
+  host, once per token, multithreaded. **Rollback:** `OPEN_G4_PLE_NPU=0` at export (in the build key)
+  keeps the per-layer part on the host between dispatches, its two GEMVs
+  threaded over output rows in the serial summation order (bit-exact against one thread).
+- **The logits are soft-capped** at 30 on the host after the tied head (token_embd, Q6_K
+  re-quantized to q4_1), through the 12B's `layout.final_logit_softcapping`.
+- The four kinds are four parts of `gx.py`, one image in one hardware context. `gx.py` builds them from
+  `dxkit.py`: `dx.py`'s attention cores, norm helper and host sequence as they stood when the E-series
+  was validated, kept apart so `dx.py` (the 12B and every other dense family) is unchanged. attn.h's
+  E-series switches (`ATTN_KVH` 1, `ATTN_KV_SHARED`, `ATTN_PTAB_CS_OFF`, `ATTN_NORM_SHARED`) are off for
+  every other build.
+- The pools are GGUF-direct with bf16 scales (OPEN-GGUF-BF16-POOL); no f32-scale twin is built.
+- Text only: the adapter refuses images and audio on the open engine as a request error. The server
+  answers 400 "Invalid request" (not "Max length reached!"; its error policy keeps exception text off
+  the wire), its log and `oflm run` give the reason, naming the curated `gemma4-it` tags, whose
+  `.q4nx` containers run them on the closed engine, and the server keeps serving.
+  `OFLM_GEMMA4_ENGINE=closed` is no way round it: an install holding only `model.gguf` has nothing
+  the closed engine can read.
+- The kernel set lives under the official model's name (`Gemma4-E4B-IT-NPU2`), where the official
+  `.q4nx` container finds it too. Its one view packs GGUF-direct, which no `.q4nx` can feed, so the
+  engine declines it for a model directory without a `model.gguf` (or with a `model.q4nx` beside it),
+  and the official container stays on the closed engine.
+**Acceptance criteria (unit):**
+- The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
+  layers, hidden 2560, 8 heads over 2 kv, head dims 256 / 512, global rotation 128, ff 10240,
+  per-layer input 256, softcap 30, layers 24-41 KV-shared, sources 22 / 23.
+- E2B: its GGUF (which lists one FFN width per layer) and transformers' config derive the same spec,
+  `recipes/specs/gemma4-e2b.json`: 35 layers, hidden 1536, 8 heads over ONE kv head, ff 6144, and
+  12288 in its 20 KV-shared layers, sources 13 / 14. Every kind takes one chunk per weight element:
+  the 12288-wide activation table leaves room for no more, and the generated kernel TUs are shared by
+  every kind of an export. The sliding kinds split over 4 cores (their kv projection is 256 rows),
+  the global kinds over 8. At one kv head the attention element is the whole cache row
+  (OPEN-ATTN-ONE-KV-HEAD), cos / sin stay at record offset 512 (read across the sliding kinds' two
+  record elements), and a KV-shared kind takes this position's row back as one element
+  (`ATTN_KV_SHARED`).
+- Every tensor the plan and the host stages name is in the real E4B and E2B files' tables, at the
+  widths the plan packs; the shared kinds name no `attn_k` / `attn_v` / `attn_k_norm`, and the files
+  have none for layers 24-41 (E4B) and 15-34 (E2B).
+- The four kinds' geometry: head dim, rotation, pair distance, cos / sin offset (1024 on the sliding
+  kinds, whose 1024-byte fifo element cannot hold 512 + 1024 bytes), record elements, no k / v pool
+  on a shared kind. Every other family keeps the attention defaults, so its build line does not
+  change.
+- The MoE block and bidirectional attention over text (`use_bidirectional_attention: "all"`) are
+  refused by name; `"vision"` (image tokens only) is accepted for text decode.
+- The E4B manifest reads GGUF-only (`Manifest::reads_gguf_only`, `manifest_test`); none of the other
+  fixtures' manifests does.
+- Per-layer inputs in the layer program (`tests/test_gemma4.py`): every region the
+  stages use fits after the kind's own layout without overlap, `ple_in` sits right after the gate's
+  output, the pack ops name the four tensors at their file widths (the scalar as `put_f32`), and
+  with `OPEN_G4_PLE_NPU=0` no layer type has `ple_in` or the extra ops. The manifest
+  reader (`manifest_test`) refuses `ple_in` on some layer types only or past the act buffer.
+
+**Verification (manual):**
+1. Replica against transformers: `python open_kernels/model/gemma4_transformers_check.py <model.gguf>`
+   builds a four-layer Gemma4ForCausalLM (real layers 0, 5, 24, 29: both kinds, own and shared caches;
+   E2B: `--layers 0,4,15,19`, which also covers the double-wide FFN) with the GGUF's dequantized weights
+   and compares every layer, the final norm and the soft-capped logits with `replica_gemma4.py` in fp64.
+   Pass: worst relative difference under 1e-4.
+2. Probe: `export_qwen36_kernels.py --spec recipes/specs/gemma4-e4b.json --only dx_local,dx_global`
+   (and the two `_shared` sets) links, and `utilities/core_sizes.py`
+   reports every core within its 16384 B of program memory.
+3. Slice: `open_qwen36_cli --model <dir with model.gguf> --kernels <set> --layers 6 --ids <prompt>
+   --dump-logits` against `replica_gemma4.py --logits-at 6,...` on the same ids (the head re-quantized
+   as the engine does: `head(..., as_npu=True)`), then a slice through both shared kinds (E4B 30
+   layers, E2B 20) and the full model. Pass: corr >= 0.999 and the same argmax.
+4. `oflm-add google/gemma-4-E4B-it-qat-q4_0-gguf` (or a local directory holding the GGUF beside
+   Google's tokenizer files and generation_config.json; on a shared box add `--config`, `--models-root`
+   and `--xclbin-dir` pointing at a scratch root), `oflm serve`, `oflm-test --llm --model <tag>`,
+   `oflm-test --tools --model <tag>`. An answer whose working is garbled ("$64 - $6") most likely
+   comes from the sampler's default frequency and presence penalties: replay the request with both at
+   0 before suspecting the engine. An image request to the install comes back as 400 "Invalid request", the
+   server log names the `gemma4-it` tags, and a text request after it still answers.
+5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
+   `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
+   "not using ... it packs GGUF-direct" and does not start the open engine.
+Steps 3 and 4 are also the regression checks for two load fixes with no unit test (the GGUF config
+derivation and the adapter sit in XRT-linked code): on E2B, step 3 stops at load unless `derive_config`
+takes the FFN width from layer 0's tensor (its GGUF lists one width per layer); in step 4 the server
+crashes on the first token unless the adapter lifts `text_config` (the sampler gets vocabulary 0).
+
+**Result 2026-10-16 (replica):** the four-layer slice (layers 0, 5, 24, 29; 13 tokens) agrees with
+fp32 transformers to 8.8e-7 relative at worst (every layer, the final norm, the soft-capped logits),
+same argmax. E2B (layers 0, 4, 15, 19: one kv head, the 12288-wide FFN in the shared pair): 1.2e-6 at
+worst, same argmax.
+
+**Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
+soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split
+record and the full rotation); with `ATTN_INTFP` (bit-identical integer routines) and one shared RMS helper
+for the q / k / v norms, the fullest attention core is 14,496 B (global) and 14,576 B (sliding) of 16,384.
+The shared kinds have no k / v work and sit near 13.2 KB. MLIR of every shipped dense spec's dx / dx_attn
+build is unchanged and every (kernel source, flags) pair preprocesses identically (re-proven after the
+merge below, with the tools that survived it).
+
+**Result 2026-10-16 (NPU, E4B, `open_qwen36_cli`, one 21-token chat prompt):** against the replica with
+its head read through the engine's q4_1 re-quantization of the Q6_K `token_embd`: logits corr 0.999998
+after 6 layers, 0.999995 after 30 (both shared kinds), 0.999996 for all 42, same top 5 in order each time;
+the greedy answer is "The capital of France is Paris." then `<turn|>`. Against the exact Q6_K head the
+6-layer corr is 0.997: that gap is the head's re-quantization (the weights rule's Q6_K -> q4_1), not the
+layers.
+
+**Result 2026-10-16 (`oflm serve`, E4B, a local-directory `oflm-add` install, tag `gemma4-it-open:e4b`
+given with `--tag`):** the server loads the GGUF on the open kernels and answers "What is the capital of
+France?" with "The capital of France is Paris." (finish_reason stop). `oflm-test --llm --gen-lim 256`:
+5 of 5 pass, the context retention check included. `oflm-test --tools --gen-lim 256`, run as two
+15-minute halves because the prefill is one token at a time. Non-stream: 7 of 8 checks pass (a basic and
+an inferred call, restraint, two parallel calls, the loop's lookup, the tool result's tail reproduced, a
+nullable schema). Stream: the 7 checks it reached pass, the time limit cutting it during the last level
+(the nullable schema); its loop level passed only because the checker found "54" in "$54.48", an answer
+with garbled working that ran to the token limit. The miss: the non-stream loop's final answer at
+temperature 0.3 stopped after "$60.0 - $6."; greedily it reaches "$54.00" through "$64 - $6".
+
+The miss traces to the server's Gemma 4 sampler defaults rather than the kernels: frequency and presence
+penalty 1.0 each over the last 64 sampled tokens (`modeling_gemma4e.cpp`, the closed engine's too) push
+down every digit the answer has already written. On the same engine, the same request with both
+penalties at 0 answers "$60.00 - $6.00 = $54.00" greedily, and "$54.00" with clean working in two samples
+at 0.3, finish_reason stop each time (three tries of that one request, not a rerun of the category). Over that loop's prompt (346 tokens as transformers renders it) the 42 layers match the
+replica with the engine's q4_1 head to corr 0.999986, same top 5 in order; against the file's exact Q6_K
+head the logits differ more (corr 0.9988, top 5 reordered), the cost of the weights rule's head
+re-quantization.
+
+**Result 2026-10-16 (NPU, E2B, `open_qwen36_cli`, the same 21-token prompt):** against the replica with
+the engine's q4_1 head: logits corr 0.999998 after 6 layers, 0.999991 after 20 (both KV-shared kinds at
+one kv head, the 12288-wide FFN), 0.999988 for all 35, same top 5 in order each time; the greedy answer
+is "The capital of France is Paris." then `<turn|>`. Against the exact Q6_K head the 6-layer corr is
+0.9974 (logits up to 4.1 apart, top 5 reordered): the head's re-quantization costs E2B the same as E4B.
+Program memory: the fullest core is 14,512 B (global) and 14,352 B (sliding) of 16,384.
+
+**Result 2026-10-16 (`oflm serve`, E2B, a local-directory `oflm-add` install, tag `gemma4-it-open:e2b`
+given with `--tag`):** the server loads the GGUF on the open kernels and answers "The capital of France
+is Paris." (finish_reason stop); `oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context retention
+check included.
+
+**Result 2026-10-16 (the hub install, E2B):** `oflm-add google/gemma-4-E2B-it-qat-q4_0-gguf` into a
+scratch root (its system kernel root a scratch copy holding the E2B set under `Gemma4-E2B-IT-NPU2`)
+downloads the GGUF, takes tokenizer, config and chat template from the first base its README names
+(`google/gemma-4-E2B-it-qat-q4_0-unquantized`), merges bos 2 / eos [1, 106, 50] into
+tokenizer_config.json, registers `gemma-e:2b` text only, links the official xclbins and finds the open
+set by its spec hash; `oflm serve gemma-e:2b` runs it on the open kernels and answers "The capital of
+France is Paris." (finish_reason stop).
+
+**Result 2026-10-17 (`oflm serve` after the review's rebuild):** E4B (`gemma4-it-open:e4b`) and the E2B hub
+install (`gemma-e:2b`) answer "The capital of France is Paris."; an image sent to E4B comes back as the
+400 "Invalid request" body with the reason in the server log, and the next text request answers the
+same. Before the refusal was a `request_error` the client got "Max length reached!".
+
+**Result 2026-10-16 (the official container keeps the closed engine):** `oflm serve` on a stand-in
+directory holding the E4B kernel set, a `model.gguf` and a `model.q4nx` prints "not using ...
+open_kernels: it packs GGUF-direct and ... has no model.gguf (or also a model.q4nx)" and goes to the
+closed engine (which then refuses the stand-in `.q4nx`); the open engine never starts.
+
+**Result 2026-10-16 (after merging OPEN-ATTN-ONE-KV-HEAD and adding E2B's recipe):** every shipped spec's
+attention flags are unchanged; the MLIR of the 73 kernel sets the four dense designs (dx, dx_attn, ln,
+lm_head_q4) build for the 15 shipped specs matches the base commit's, and E4B's 6 match the pre-merge
+tree's. E4B re-exported from the merged tree with `--check` against the set that passed on the NPU: all 12
+kernel files match (instruction streams byte-identical, xclbins apart from build stamps).
+
+**Result 2026-10-17 (rerun with the hardened tools):** every attention translation unit preprocesses
+identically at every spec's own flags, 176 against the base and 196 (with E4B's two kinds) against the
+pre-merge tree, with none failing to preprocess, and every base and pre-merge flag line is unchanged
+(`ALL_SPECS=1 utilities/attn_pp_identical.sh`, `utilities/attn_flags.py`). `utilities/mlir_equiv.py
+--designs all` generates 129 of the 500 sets the 15 shipped specs build, in both trees, and all 129 are
+identical (every dense-recipe set and the Qwen3.5 sets). The other 371 are the attention-block prefill
+sets (their design imports a module from another directory, which the tool cannot load) and the 35B's
+sets after `ux.py`, which exits the tool; they come from design files this branch does not touch, and
+every spec's `builds()` (design, build dir and environment of all 500) is identical to the base's.
+
+**Procedure (manual, the per-layer inputs in the layer program):** export the default set and an
+`OPEN_G4_PLE_NPU=0` set; the step-3 CLI and prompt on both, `--prefill-logits` at the step-3 slices and
+the full model with `--max-tokens 24`: bf16 against fp64, so not bit-exact -- pass at the same greedy
+tokens, the same argmax at every position except near ties, and corr >= 0.999 (step 3's standard);
+then `oflm-test --llm` 5 of 5 through `oflm serve`, and `--bench-step` against the host route.
+
+**Result 2026-10-19 (the per-layer inputs).** The threaded host step is bit-exact against the
+single-threaded one (E2B and E4B, 25 of 25 dumps of a 24-token full-depth run, max |diff| 0.0).
+The NPU route, against it (built natively on Windows, mlir-aie 1.4.2): full model, the same 24
+greedy tokens and argmax 25 of 25 on both models; corr through the answer >= 0.99988 (E2B) and
+>= 0.99991 (E4B), lowest 0.99972 (E2B) at a position past end-of-turn. Slices: argmax 22 of 22 at 6
+layers; at 20 (E2B) / 30 (E4B) layers 21 of 22, the one flip a near tie in each (top-2 margin
+0.0035 and 0.008 on soft-capped logits), min corr 0.99995 / 0.99989. Program memory: the main cores
+that run a gate band 11,136 B, the others 10,208 B, the norm helper 11,200 B (E2B). Decode,
+`--bench-step 15`, two alternated rounds against the four-context set on the bring-up's engine,
+median wall ms/token (busy box, not `--measure`):
+
+| | E2B pos 1 | E2B pos 512 | E4B pos 1 | E4B pos 512 |
+|---|---|---|---|---|
+| four contexts, host per-layer step | 119.4 / 114.7 | 136.0 / 131.1 | 203.0 / 194.9 | 213.2 / 214.3 |
+| one context, per-layer input on the NPU | 57.9 / 61.7 | 69.6 / 69.7 | 90.4 / 96.6 | 113.3 / 115.6 |
+
+About 1.9-2.1x. What the step spends on the host outside the dispatches drops from 27-31 ms (E2B)
+and 57-61 ms (E4B) to 0.5-0.8 ms, and submit-ahead is worth about 10 ms a token again. `oflm serve`
+(this branch's `oflm.exe`, the set chosen by `OFLM_OPEN_KERNELS_DIR`): both answer "The capital of
+France is Paris." and pass `oflm-test --llm` 5 of 5. On these results the route became the default.
+
+### OPEN-GGUF-BF16-POOL: a GGUF packs into the bf16-scale pool
+**Applies to:** openflowlm-next (`src/open_qwen36/pools.cpp`)
+**Verification:** test (`src/open_qwen36/gguf_pack_test.cpp`, GGUF-PACK)
+
+`std_perm_gguf` into a 5120-byte pool chunk (the q4nx layout) shall write the GGUF block's fp16
+scale and min narrowed to bf16 by round-to-nearest-even -- the bits the f32-scale kernel's own
+narrowing produces -- and the codes byte for byte as the 6144-byte chunk holds them; a Q4_0 block's
+min is `-8 d`. A block re-quantized from Q8_0 / Q4_K / Q6_K takes `requant_q4_1_chunks`' law (min
+toward -inf, scale toward +inf). So a new GGUF family needs no `*_f32` kernel twin, and keeps f32
+out of device memory.
+
+**Acceptance criteria:** for a Q4_1 and a Q4_0 tensor, the 5120-byte pool's code planes equal the
+6144-byte pool's byte for byte and every bf16 scale and min is the RNE narrowing of the f32 one. For a
+Q8_0 tensor re-quantized into the 5120-byte pool, every block's bf16 min is its lowest value rounded
+toward -inf, its bf16 scale the smallest bf16 at or above (highest - min) / 15, and every code decodes
+to within half a scale step of its value.
 
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`)
@@ -2942,6 +3198,48 @@ agreement between the device and the replica says nothing about the weights bein
 because they share a dequantiser; and the apparent bf16 KV-cache sensitivity in the first
 run was an artefact of the misread weights and is not real. `qwen2` reaches the fast
 attention path the way every family does, by measurement, and has not been measured yet.
+
+### OPEN-ATTN-ONE-KV-HEAD: attention with a single kv head
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `attn_step.cc`, `attn_stepb.cc`,
+`designs/dense/dx.py`, `recipes/dense.py`)
+**Verification:** test (`tests/test_attn_one_kv_head.py`) for the element accounting; manual (below)
+for the unchanged families and for the kernel itself
+
+The attention core's fifo element is half a KV cache row, `KVH * HD` bf16, and a q, k or v
+element carries `KVH / 2` fp32 heads. With one kv head (Gemma 3 1B, every Gemma 4 layer)
+that is half a head, which no kernel can normalise or rotate. So at `ATTN_KVH 1` the element
+shall be the whole cache row, `[K_t | V_t]` = `HD * 4` bytes: one head per q, k or v element,
+one element per cached row, and `[qn | kn]` exactly one element. The position record grows to
+two elements, and cos / sin run from the first into the second; `attn_meta` reads them 32
+floats at a time from whichever element holds them. An odd kv count above one is still
+refused, and so is the block-prefill route (`dx_attn.py` walks two elements per row).
+
+Every family with an even kv count shall compile exactly what it compiled before: the new
+code sits behind `#if ATTN_KVH == 1` and the design's row walk is the old one at two elements.
+
+**Acceptance criteria (unit):**
+- A one-kv-head spec at head dim 256 gives `E_A = KV_ROW = 1024`, `PTAB_ROW = 2048`,
+  `(PTAB_ELEMS, PTAB_CS_ELEM) == (2, 1)` and one head per q / k / v element; every fill is a
+  whole number of elements and matches what the core acquires.
+- cos / sin cross the record's element boundary only between 32-float vectors.
+- Every shipped dense family keeps `E_A = KVW * 2`, `KV_ROW = 2 * E_A`, `PTAB_ROW =
+  max(1024, E_A)` and its old `PTAB_CS_ELEM`.
+
+**Verification (manual), for the families that must not move:** generate the MLIR of every
+kernel set every `recipes/specs/*.json` builds from a `git archive` of the base commit and
+from the working tree (`utilities/mlir_equiv.py`) and diff them; preprocess every attention
+translation unit at every spec's own flags from both trees (`ALL_SPECS=1 OLD_DIR=<archive>
+utilities/attn_pp_identical.sh`). Identical MLIR plus identical preprocessed kernels is an
+identical xclbin.
+
+**Result 2026-10-16:** 73 kernel sets over the 15 shipped specs give identical MLIR, and every
+attention translation unit preprocesses identically at every shipped spec's flags (the logs
+are kept with the Gemma 3 1B bring-up, branch feat/gemma3-1b; the same check after this
+requirement met Gemma 4's attention changes is OPEN-FAMILY-GEMMA4's merge result). The
+one-kv-head kernels compile with Peano at Gemma 3 1B's flags. On hardware: Gemma 4 E2B, one kv
+head in every layer, matches its fp64 reference at logits corr 0.999998 / 0.999991 / 0.999988
+after 6 / 20 / 35 layers (OPEN-FAMILY-GEMMA4); Gemma 3 1B's NPU result is OPEN-FAMILY-GEMMA3's,
+recorded on feat/gemma3-1b.
 
 ### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
@@ -5723,7 +6021,7 @@ that change (level 2) hung the array three times in three runs
 layer types does.
 
 ### OPEN-DECODE-ONE-CONTEXT: the decode layer loop runs in one hardware context
-**Applies to:** openflowlm-next (`open_kernels/designs/layer_x/ux.py` + `xlayer.py`, `open_kernels/recipes/qwen36moe.py` `one_context()` / `merged_image()`)
+**Applies to:** openflowlm-next (`open_kernels/designs/layer_x/ux.py` + `xlayer.py`, `open_kernels/recipes/qwen36moe.py` `one_context()` / `merged_image()`; Gemma 4: `open_kernels/designs/dense/gx.py` + `dxkit.py`, `open_kernels/recipes/gemma4.py`)
 **Test category:** test (the recipe emission, `tests/test_one_context.py`) + manual (the hardware claim below)
 
 For the qwen36moe family (the 35B and the 27B), the export's four layer kernels
@@ -6030,6 +6328,65 @@ route. With a K2 set, both env vars run and give the same 24 tokens as the defau
 **Result 2026-10-08:** all of the above on Qwen3-8B (the dense-prefill kernel set) and
 K2-Horizon-3.7B (built from IFM's GGUF).
 
+**Gemma 4 (E2B / E4B).** The gemma4e family's four layer kinds (sliding or global, own or shared KV
+cache) are, by default, four instruction streams over one image (`designs/dense/gx.py`), all in
+context `dx`; only `ln` and `lm` keep their own. The walk changed context 16 times a token on four
+images and changes it zero times inside the layers now.
+
+- The main cores run one program for every kind. The counts that differ between kinds (q|k|v bands,
+  og elements and width, up / gate bands, h elements and width, and each width's group and chunk
+  counts) are RTP words each stream writes before its first fill (`recipes/gemma4e.py` `rtp_words`).
+  Each band is the same GEMV call on the same table as before.
+- Every kind uses the image's main cores (`image_cores`: 8 on both). E2B's sliding kinds ran on 4,
+  because their kv projection is 4 bands; on the image cores 0-3 take one k band each and cores 4-7
+  one v band each (`recipes/dense.py` `qkv_segments`). A row's GEMV does not depend on which core
+  runs it, so this is still bit-exact.
+- One attention core set per kind, each compiled exactly as `dx.py` compiles that kind, with its
+  symbols prefixed so the four sets link side by side. Head width, rotation and the shared row are
+  compile-time in attn.h and the attention cores are within 2-3 KB of full, so one core cannot run
+  two kinds. A set waits on its `ain` while the other kinds run.
+- Each set's og fifos are joined in a memory tile and drained as one: four sets of four og drains
+  would take all 16 of the shim's drain channels. Fills: 8 w, lni, x, 4 ain (14). Drains: 8 y, lno,
+  4 og, 2 aout (15).
+- `dx.py`'s attention cores, norm helper and host sequence as of 2026-10-20 live in
+  `designs/dense/dxkit.py`, which only `gx.py` uses; `dx.py` itself is unchanged, so no other family's
+  kernels move. There is no four-context rollback: `dx.py` does not build the E-series kinds.
+- **Program memory:** main cores 9,552 B (E2B), norm helper 7,408 B, attention cores exactly the
+  sizes of the four `dx.py` builds (fullest 14,512 B on E2B, 14,576 B on E4B).
+
+**Verification (manual, Gemma 4):**
+1. Export the four `dx_*` sets (default flavour) beside a copy of the `ln` and `lm_head_q4` sets;
+   `utilities/core_sizes.py` on each build directory.
+2. The four parts must describe one image: their MLIR outside the runtime sequence is identical.
+3. (Done once, 2026-10-19, when the image replaced four contexts.) Bit-exact against the four-context set, same CLI: `open_qwen36_cli --model <model dir> --kernels
+   <set> --pmode performance --layers N --ids 2,105,2364,107,3689,563,506,5279,529,7001,236881,25685,528,886,13315,236761,106,107,105,4368,107
+   --max-tokens 1 --prefill-logits --dump-logits <prefix> --quiet` at N = 6 (both own-cache kinds) and
+   N = 20 (E2B) / 30 (E4B) (both shared kinds), then the full model with `--max-tokens 24`: **max
+   |diff| 0.0** on every dump.
+
+**Result 2026-10-19 (Gemma 4 E2B and E4B, step 1: one context, the per-layer input still on the
+host).** Both PASS: max |diff| 0.0 on all 22 dumps (21 prefill positions and the next token) at 6
+and at 20 (E2B) / 30 (E4B) layers, and on all 25 dumps of the full-depth 24-token greedy run, the
+same tokens. The four parts' images are identical. Built with mlir-aie 1.4.2, about 4-8 minutes a
+part. `oflm serve` on the E2B one-context set (`OFLM_OPEN_KERNELS_DIR`): "The capital of France is
+Paris." and `oflm-test --llm` PASS 5 of 5.
+
+Decode, `--bench-step 15` (the real step) at positions 1 and 512, two alternated rounds on a busy box
+(other agents building; not `dibs run --measure`), median wall ms/token, submit-ahead row. "Before" is
+the four-context set on the bring-up's engine; "after" is the one-context set with the threaded host
+per-layer step (OPEN-FAMILY-GEMMA4), bit-exact against each other:
+
+| | E2B pos 1 | E2B pos 512 | E4B pos 1 | E4B pos 512 |
+|---|---|---|---|---|
+| before | 113.6 / 116.0 | 128.5 / 126.1 | 187.6 / 184.4 | 206.0 / 205.7 |
+| after | 77.1 / 72.2 | 89.2 / 80.7 | 117.3 / 125.1 | 131.1 / 139.0 |
+
+The one context alone (host step still single-threaded) moved E2B at 512 from 124-128 to 104-106 ms and
+E4B from 205-212 to 193-200 ms; the rest is the threaded host step. What remains on the host per token,
+outside the dispatches, is about 8-15 ms (E2B) and 12 ms (E4B), the per-layer input, which also kept
+submit-ahead off; with the per-layer input in the layer program (OPEN-FAMILY-GEMMA4, now the default)
+both go, and decode is about 2x the four-context set's.
+
 ### OPEN-SPEC-VERIFY: a verify pass over a token block, and the rollback to its accepted prefix
 **Applies to:** openflowlm-next (`src/open_qwen36/{block_host,core}.cpp`, `open_kernels/designs/{gemm_q4,moe_batch}/`)
 **Test category:** test + manual -- the host-stage rollback is unit-tested in
@@ -6103,3 +6460,141 @@ step. No kernel and no hardware is involved in any of it, which is the point of 
 **Result 2026-10-12 (the mismatched tape).** The throw criterion is now tested: a tape from a
 block of another `t_real`, and a tape with an oversized per-token array, both throw. Both
 replayed silently under the first version's at-least-this-big size checks.
+
+### OPEN-PREFILL-BATCHED: a model does not ship with one-token prefill
+**Applies to:** openflowlm-next (every `OPEN-FAMILY-*` model; `open_kernels/recipes/`, `src/open_qwen36/`)
+**Verification:** manual (needs the NPU and the model's kernel set)
+
+A model added to the open engine shall prefill a prompt in token blocks (the block route of
+`OPEN-PREFILL-BATCH`, or another route that dispatches once per block), not one token per full pass. A
+model whose prefill still runs one token at a time is not finished: it does not go into a release
+or a PR to upstream, whatever else it passes. The reason is cost. Shipping it only creates a
+follow-up, and a long prompt (a tool conversation, a document) then takes as long as that many decode steps.
+
+**Acceptance criteria:**
+- A prompt of at least 512 tokens served through `oflm serve` reports `usage.prefill_speed_tps` at
+  least 3 times the same request's decode rate. One-token prefill measures about 1 times; 3 times is a floor that
+  separates the two routes, not a speed target.
+- The engine's load log names the batched prefill route the model uses, or the model's report
+  says which route and why.
+
+**Verification (manual):**
+1. Install the model with `oflm-add` into a scratch root and `oflm serve` it under `dibs run npu`.
+2. Send one request with a prompt of at least 512 tokens and `max_tokens` 64. Read `usage.prefill_speed_tps`
+   and the decode rate from the response and the server log. Discard the first three requests of a fresh
+   server; they read fast.
+3. Pass when the prefill rate is at least 3 times the decode rate. Record both rates in the model's report.
+
+**Known gaps, 2026-11-13** (each blocked by batched-prefill kernel work): Hy-MT2 1.8B, Gemma 3 1B (the
+one-kv-head attention record and the padded widths), and the Gemma 4 12B as main ships it (two contexts on
+`dx.py`; its prefill runs one token at a time). Gemma 4 E2B / E4B left this list on 2026-10-20
+(`OPEN-PREFILL-G4`: 8.6-13x).
+
+### OPEN-PREFILL-G4: Gemma 4 E2B / E4B prefill in blocks
+**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4e.py`, `src/open_qwen36/` `block_host.cpp`, `core.cpp`, `manifest.cpp`)
+**Verification:** test (the recipe emission, the manifest checks and the host attention) and manual (the route on the NPU)
+
+A Gemma 4 E-series kernel set carries a block prefill route per layer kind (`gemm_block` of kind `gemma4`, T = 256 tokens),
+and the engine prefills a prompt of 64 tokens or more through it. Per layer, in this order: the entry norm; the
+input projection as one GEMM (q|k|v on a layer with its own cache, q alone on a KV-shared one); attention on the
+host; the o GEMM; the sandwich norms and residuals; the gate and up GEMMs, GELU-tanh and the down GEMM; then the
+per-layer input (E2B / E4B: the gate GEMM, GELU against this layer's input, the projection GEMM, its norm and
+residual) and the layer scalar. Every GEMM is the unchanged `gemm_q4_prefill` over the layer's decode pool, so the
+whole block stays in one `gemm` hardware context; the per-layer inputs of the block come from one host matrix
+product over the model projection (a bf16 weight, never re-quantized). The host attention is the model's: q and k
+RMS-normed with their weights, v without one; the first `rot/2` pairs `(i, i + hd/2)` rotated by the kind's table;
+scores unscaled; causal, and cut to the 512-row window on the sliding kinds; K and V cached as bf16 rows `[k | v]`
+in the decode layout, so decode continues from a block-prefilled cache; a KV-shared layer reads its source layer's
+rows.
+
+**Acceptance criteria:**
+- The recipe emits for every kind seven steps, each weight one contiguous run of
+  pool ops of exactly N x K x 5/8 bytes, a build and a kernel per GEMM shape, the same route in the `gguf` view,
+  and nothing of the decode manifest changes (`tests/test_gemma4_block_prefill.py`).
+- The manifest reader refuses a route whose shared kind has a k / v width, whose position table has another
+  rotary width, that lacks a step, or whose per-layer input width disagrees (`manifest_test.cpp`).
+- `host::gemma4_attention` equals a naive double-precision walk of the same definition, with cached rows, a
+  window, a shared layer and a partial rotation (`block_host_test.cpp`, `max |diff| < 2e-4`).
+- Block against one-token route on a prompt of a few hundred tokens: correlation >= 0.999 at every position, the
+  same argmax except near ties, the same greedy tokens (manual).
+- A prompt of at least 512 tokens served through `oflm serve` reports `usage.prefill_speed_tps` at least 3 times
+  its decode rate (`OPEN-PREFILL-BATCHED`), and `oflm-test --llm` passes 5 of 5 (manual).
+
+**Verification (manual):** on the Gemma 4 E-series installs, export the set (the `gemm_n*_k*` shapes come with
+the export), point `open_qwen36_cli --model <dir with model.gguf> --kernels <set>` at a prompt of a few hundred
+ids twice, with `OFLM_OPEN_GEMM_BLOCK=0` and with `--gemm-block`, both `--prefill-logits --dump-logits`, score
+them with `python utilities/cmp_prefill_logits.py <seq prefix> <block prefix> --vocab <real vocab>`, then
+`OPEN-PREFILL-BATCHED`'s procedure.
+
+**Result 2026-10-20 (Strix, E2B and E4B GGUF installs, host attention; other agents were on the box, so the ratio inside one request is the figure):**
+E2B, 300 tokens, block against the one-token route: argmax 300/300, top-5 set 293/300, correlation median
+0.99997, one position (263) at 0.9938 with the same argmax and a top-2 margin of 8.9; the 24 greedy tokens are
+identical. Through `oflm serve` (`max_tokens` 64, first three requests discarded; prefill / decode tok/s): E2B
+469 tokens 160 / 14.1 (**11.3x**), 869 tokens 138-144 / 12.8-13.5 (10.7x), 3219 tokens 143-144 / 11.4-11.6
+(12.5x), 6419 tokens 121-122 / 9.0-9.2 (13.4x); E4B 469 tokens 89 / 10.0-10.3 (**8.8x**), 869 tokens 85-86 /
+9.8-10.0 (8.6x). The one-token route on the same installs: E2B 18-21 tok/s prefill against 11-13 decode
+(1.4-1.6x), E4B 7-9 against 6 (1.2-1.5x). `oflm-test --llm` passes 5 of 5 on E2B and on E4B. One 256-token
+block at 1k tokens on E2B takes 1.5-1.7 s: GEMMs 0.87 s, norms, GELU and residuals 0.21-0.24 s, GEMM input and
+output tiling and transposes 0.15 s, host attention 0.11 s (first block) to 0.31 s (fourth).
+E4B, 300 tokens, block against the one-token route: argmax 300/300, top-5 set 286/300, correlation median
+0.99999, minimum 0.99955, the 24 greedy tokens identical. The 12B (five steps, K = V global layers, layer scalar on the host)
+through `oflm serve`: 473 tokens 41.7-42.8 / 2.5-3.5 tok/s (12-17x), 873 tokens 38.7-39.8 / 2.5-2.8 (14-15x);
+`oflm-test --llm` 5 of 5. Its logits gate, on a real 341-token English paragraph (the first probe, a templated
+prompt, made the one-token route loop on one token): argmax agrees at 335 of 340 positions (the first miss is at
+position 28), correlation median 0.99987 (minimum 0.961 at position 319), mean next-token NLL 6.797 for the one-token
+route and 6.771 for the block route (-0.026 nats/token, mean |per-position difference| 0.078); the greedy tokens agree
+at step 0 and differ from step 1, where the one-token route repeats one token. Block against one-token after the first
+1 / 6 / 12 / 24 layers: correlation median 0.999994 / 0.999982 / 0.999961 / 0.999968, minimum 0.99997 / 0.99996 /
+0.99988 / 0.9886, so no layer breaks the route; a few positions drift in the deeper layers. The E2B results of
+`OPEN-SERVE-TOOL-FOLLOWUP` replace the earlier open question about the stream-mode re-prefill.
+The NPU attention (`OPEN-PREFILL-ATTN-WIDE`, `fa_wide`, `OFLM_OPEN_ATTN_WIDE=1`; the host's is the default until its
+accuracy gate passes), E2B, `open_qwen36_cli`, 256-token blocks: at 1000 tokens host attention takes 1.60-1.69 s a
+block (152 tok/s over the prompt) and fa_wide 1.74-1.79 s (142 tok/s); at 4000 tokens the host's blocks grow from
+1.74 s to 2.54 s (4000 tokens in 32.2 s, 124 tok/s) while fa_wide's stay at 1.66-1.86 s (28.2 s, 142 tok/s). Its attention stage is flat
+at about 0.23 s against the host's 0.37 s to 1.09 s, but the GEMM column rises by 0.29 s a block (the two extra
+hardware-context switches), so it pays above about 2.5k tokens. Through `oflm serve` at 6419 tokens (prefill /
+decode tok/s): E2B host 119.8-128.2 / 8.8-9.2, fa_wide 128.4-129.6 / 10.5-11.0; E4B 82.1 / 6.9-7.1 either way.
+The first block costs the same as the others in the CLI (1.69 s against 1.60-1.66 s) and the first 469-token
+request through serve matches the second (2.97 s against 2.92 s), so there is no per-request warm-up.
+One 31019-token prompt through `oflm serve` on E2B (host attention, 4096-token chunks): prefill 30.9 tok/s (1002.7 s),
+decode 3.6 tok/s, **8.6x**. The host attention is quadratic (the per-block attention time grew about 0.29 s per 1000
+tokens of context at 4k and the 32k prompt took 17 minutes), so the NPU attention is what a long prompt needs.
+Gate for choosing fa_wide automatically (`OFLM_OPEN_ATTN_WIDE=auto`: the host's up to 4096 tokens, fa_wide past them; the
+12B stays on the host's), host attention against fa_wide on 5200 tokens of prose, `open_qwen36_cli --gemm-block`: E4B
+next-token NLL 3.4541 against 3.4538 (-0.009 %), argmax agreement 98.08 % (5099 of 5199), correlation median 0.99983,
+minimum 0.9587; E2B NLL 3.9282 against 3.9326 (+0.110 %), argmax agreement **97.69 %** (5079 of 5199, under the 98 % bar),
+correlation median 0.99973, minimum 0.9385. E2B is 0.31 points under the 98 % argmax bar; it is accepted: the first misses
+are at positions 4 and 7 (early near-ties), the NLL difference (+0.11 %) is far under the 0.5 % bar, E4B passes, and the
+comparison is route against route, so each route's own error against the model counts twice. `auto` is therefore the
+default on the E-series (the 12B stays on the host's attention); `OFLM_OPEN_ATTN_WIDE=1` forces fa_wide and any other
+value (`0`) the host's. fa_wide's gain over the host's attention at long prompts is 1.13x at 4.5k tokens and 1.63x at
+8k (Att's data). The CLI prefill times of this gate include writing the logits of every position and are not speeds.
+With `auto` on (a refreshed set, the load log names "the host up to 4096 tokens, fa_wide on the NPU past them"),
+`oflm-test --llm` passes 5 of 5 on E2B and on E4B, and the same 31019-token E2B prompt through `oflm serve` prefills at
+**138.0 tok/s** (224.8 s) and decodes at 3.06 tok/s, a ratio of **45x**, against the host's attention on the same box
+40.8 tok/s (760 s; 30.9 tok/s on the earlier, busier run), so 3.4x faster than the host's attention.
+
+### OPEN-SERVE-TOOL-FOLLOWUP: a tool round trip prefills only what is new
+**Applies to:** openflowlm-next (`src/server/tool_messages.hpp`, `src/common/AutoModel/modeling_gemma4e.cpp`)
+**Verification:** test (the follow-up prompt, `src/server/tool_messages_test.cpp`) and manual (the cache on the NPU)
+
+The follow-up request of a tool exchange (the assistant's call, then the tool's reply) renders a prompt that begins
+with the tokens the model generated for the call, so the engine keeps its cache and prefills only the reply and the
+new generation prompt. The Gemma 4 template writes tool calls with unquoted keys, which minja's capability probe
+does not recognize; the polyfills it then applies moved the call out of the model turn into a JSON blob after the
+response, and the cache never matched. Gemma 4's chat template is applied with the polyfills off and the call's
+string arguments deserialized (`tool_messages::gemma4_template_options`, `deserialize_tool_arguments`), as
+`Gemma4_12B` already did.
+
+**Acceptance criteria:**
+- Rendering `[user, assistant tool_calls (string arguments), tool]` through the Gemma 4 template with the server's
+  rewriting contains `<|tool_call>call:get_price{item:<|"|>widget<|"|>}<tool_call|>` before
+  `<|tool_response>response:get_price{price:18}<tool_response|>`; the same render with minja's default options does not
+  (`tool_messages_test`, check "the follow-up prompt keeps the assistant's tool call").
+- Through `oflm serve` on E2B, `oflm-test --tools` passes 16 of 16 and the log shows no "System prompt changed" for
+  the follow-ups (manual).
+
+**Result 2026-10-20 (E2B, block route):** before, every follow-up re-prefilled 409-412 tokens in 3.6-4.8 s (111-122
+tok/s; 6 cache misses in a run, the first difference at the first generated token: cached `<|tool_call>` 48,
+prompt `<|tool_response>` 50); after, it prefills 12 tokens and the first token arrives in 0.5-1.4 s, with no
+cache miss; `oflm-test --tools` 16 of 16 both times.
