@@ -128,6 +128,45 @@ NPU_EMBED_FILES = [
 WHISPER_FAMILIES = {"whisper-v3"}
 WHISPER_AUX = ["config.json", "tokenizer.json", "tokenizer_config.json",
                "generation_config.json"]
+
+
+def _whisper_gguf_llcpp_layout(source):
+    """True when a whisper GGUF uses llama.cpp's tensor names (enc.* / dec.*), the
+    layout the open engine reads straight from model.gguf. The HF-layout GGUFs
+    (model.encoder.conv1.weight) are not readable by the engine, so the caller
+    builds an open container from the HF base checkpoint instead."""
+    inv = read_gguf_inventory(source, limit_mb=16)
+    if not inv:
+        return False
+    _, tensors = inv
+    names = [t[0] for t in tensors]
+    return any(n.startswith("enc.") for n in names) and any(n.startswith("dec.") for n in names)
+
+
+def _build_open_whisper(target, repo, bases, modelscope, local_dir):
+    """Build the open whisper container (model.open.safetensors + weights_manifest.json)
+    into `target` from the base HF checkpoint the README names."""
+    candidates = list(bases) if bases else []
+    if not candidates:
+        candidates = ["openai/whisper-large-v3-turbo"]
+    for b in candidates:
+        try:
+            # the bundled q4nx-build's open whisper builder; import the module
+            # in-process rather than re-implementing the build
+            here = Path(__file__).resolve().parents[2]
+            sys.path.insert(0, str(here / "utilities" / "q4nx-build"))
+            import q4nx.open_whisper as ow  # type: ignore
+            ow.build_open_whisper_repo(b, str(target))
+            return True
+        except Exception as ex:
+            log(f"[WARN] open whisper build from {b} failed: {ex}")
+            continue
+    raise SystemExit(
+        f"{repo}: could not build the open whisper container from any base model the "
+        f"README names (tried: {', '.join(candidates)}). Pass --tag with a different "
+        f"base, or install a llm.cpp-style GGUF directly.")
+
+
 # The quant must run to the end of the stem: 'Q4_0_4_4' is a different
 # tensor layout (ik_llama matmul shuffles), not Q4_0, and matching only a
 # prefix once installed exactly that as Q4_0 pools (silent garbage).
@@ -2636,8 +2675,6 @@ def register(
                 shipped_details.get("family") in WHISPER_FAMILIES
                 and shipped_entry.get("asr")
                 and (entry.get("details") or {}).get("family") == shipped_details.get("family")
-                and (entry.get("name") == shipped_entry.get("name")
-                     or (entry.get("asr") and str(entry.get("name", "")).lower().endswith(".gguf")))
             )
             if not same_npue_design and not same_whisper:
                 raise SystemExit(
@@ -4363,6 +4400,29 @@ def main():
         print(f"registry       : {user_list}")
         return
 
+    if whisper_model and gguf_mode:
+        # Prefer the GGUF direct route when it can serve (the open engine reads
+        # llm.cpp-style whisper GGUFs straight from model.gguf). Anything else --
+        # the HF-Layout whisper GGUFs like unsloth/oxide-lab -- has to go through
+        # the bundled open whisper builder instead (build model.open.safetensors
+        # from the base HF checkpoint the README names). The installer then
+        # proceeds as a container install of that build.
+        src = local_dir if local_dir is not None else (
+            cache / gguf_name if cache and (cache / gguf_name).is_file()
+            else f"https://huggingface.co/{repo}/resolve/main/{gguf_name}")
+        llcpp = _whisper_gguf_llcpp_layout(src)
+        if not llcpp:
+            bases = get_base_chain() or []
+            if local_dir is None:
+                log(f"[INFO] whisper GGUF not in llm.cpp layout; building open container from "
+                    + (bases[0] if bases else "openai/whisper-large-v3-turbo"))
+            # Build the open container into target via the bundled q4nx-build
+            target.mkdir(parents=True, exist_ok=True)
+            _build_open_whisper(target, repo, bases, modelscope, local_dir)
+            local_dir = target
+            repo_arg = str(target)
+            gguf_mode = False
+            gguf_name = None
     # --- acquire model files ---
     if gguf_mode and not args.quiet:
         log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
