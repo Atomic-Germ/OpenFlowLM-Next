@@ -72,10 +72,10 @@ recipe and all route images to the closed `gemma_npu` DLL. See the
 oflm run gemma4-it:e2b
 ```
 
-> ⚠️ **Gemma 4 has no open kernels.** Every Gemma 4 tag dispatches entirely to
-> the closed `gemma4e_npu` / `gemma4_12b_npu` engines -- there is no open AIE
-> design for it, so nothing here is built from source in this repository. The
-> same applies to its vision and audio paths. See the
+> ⚠️ **Gemma 4 E2B and E4B have no open kernels.** Those tags dispatch
+> entirely to the closed `gemma4e_npu` engine -- per-layer embeddings and
+> cross-layer KV sharing are not built here. The **12B** text decoder runs on the
+> open kernels (two dense geometries); see the
 > [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 🖼️ **Note:** In CLI mode, attach an image with:
@@ -151,6 +151,11 @@ oflm run gemma4-it:e4b
 ```shell
 oflm run gemma4-it:12b
 ```
+
+> ⚠️ **The 12B's text decoder runs on the open kernels** (source-built in this
+> repository, two dense geometries). **Vision and audio do not** — an image or
+> audio attach selects the closed `gemma4_12b_npu` engine, which is what
+> upstream ships. Nothing here builds the vision tower from source.
 
 🖼️ **Note:** In CLI mode, attach an image with:
 
