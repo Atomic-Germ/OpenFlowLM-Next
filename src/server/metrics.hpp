@@ -1,6 +1,6 @@
 /*!
  * \file metrics.hpp
- * \brief OpenTelemetry (OTLP/JSON) and Prometheus/OpenMetrics exposition for OpenFlowLM
+ * \brief Prometheus text exposition and plain JSON summary for OpenFlowLM
  */
 #pragma once
 
@@ -42,7 +42,7 @@ struct LiveState {
     std::string loaded_model;
 };
 
-/// Point-in-time snapshot used by the Prometheus and OTLP renderers.
+/// Point-in-time snapshot used by the Prometheus and JSON renderers.
 struct Snapshot {
     uint64_t start_time_unix_nano = 0;
     uint64_t now_unix_nano = 0;
@@ -142,7 +142,7 @@ inline std::string escape_prometheus_label(std::string_view s) {
     return out;
 }
 
-/// Format a Snapshot in Prometheus / OpenMetrics text exposition format (0.0.4).
+/// Format a Snapshot in Prometheus text exposition format (0.0.4).
 /// Compatible with Prometheus and the OpenTelemetry Collector `prometheus` receiver.
 inline std::string render_prometheus(const Snapshot& snap) {
     std::ostringstream out;
@@ -224,20 +224,6 @@ inline std::string render_prometheus(const Snapshot& snap) {
     }
     out << "\n";
 
-    // OpenTelemetry GenAI semantic convention metric name mapped to Prometheus format.
-    out << "# HELP gen_ai_client_token_usage_total Number of input and output tokens used (OTel GenAI semantic convention).\n"
-        << "# TYPE gen_ai_client_token_usage_total counter\n";
-    for (const auto& [model, s] : snap.by_model) {
-        if (s.generation_requests > 0) {
-            std::string m = escape_prometheus_label(model);
-            out << "gen_ai_client_token_usage_total{gen_ai_request_model=\"" << m
-                << "\",gen_ai_token_type=\"input\"} " << s.prompt_tokens << "\n";
-            out << "gen_ai_client_token_usage_total{gen_ai_request_model=\"" << m
-                << "\",gen_ai_token_type=\"output\"} " << s.completion_tokens << "\n";
-        }
-    }
-    out << "\n";
-
     out << "# HELP oflm_prefill_duration_seconds_total Cumulative prompt prefill duration in seconds.\n"
         << "# TYPE oflm_prefill_duration_seconds_total counter\n";
     for (const auto& [model, s] : snap.by_model) {
@@ -271,6 +257,17 @@ inline std::string render_prometheus(const Snapshot& snap) {
     }
     out << "\n";
 
+    out << "# HELP oflm_total_duration_seconds_total Cumulative end-to-end generation duration in seconds.\n"
+        << "# TYPE oflm_total_duration_seconds_total counter\n";
+    for (const auto& [model, s] : snap.by_model) {
+        if (s.generation_requests > 0) {
+            out << "oflm_total_duration_seconds_total{model=\""
+                << escape_prometheus_label(model) << "\"} "
+                << (static_cast<double>(s.total_duration_ns) / 1e9) << "\n";
+        }
+    }
+    out << "\n";
+
     out << "# HELP oflm_embeddings_requests_total Total embedding requests completed.\n"
         << "# TYPE oflm_embeddings_requests_total counter\n";
     for (const auto& [model, s] : snap.by_model) {
@@ -293,226 +290,58 @@ inline std::string render_prometheus(const Snapshot& snap) {
     return out.str();
 }
 
-/// Format a Snapshot as an OpenTelemetry OTLP/JSON ExportMetricsServiceRequest payload.
-inline json render_otlp_json(const Snapshot& snap) {
-    const std::string start_ns = std::to_string(snap.start_time_unix_nano);
-    const std::string now_ns = std::to_string(snap.now_unix_nano);
-
-    auto str_attr = [](const std::string& key, const std::string& val) -> json {
-        return json{{"key", key}, {"value", {{"stringValue", val}}}};
-    };
-
-    auto int_gauge = [&](const std::string& name, const std::string& desc, const std::string& unit,
-                         int64_t value, json attrs = json::array()) -> json {
-        json dp = {
-            {"timeUnixNano", now_ns},
-            {"asInt", std::to_string(value)}
-        };
-        if (!attrs.empty()) {
-            dp["attributes"] = std::move(attrs);
-        }
-        return json{
-            {"name", name},
-            {"description", desc},
-            {"unit", unit},
-            {"gauge", {{"dataPoints", json::array({std::move(dp)})}}}
-        };
-    };
-
-    auto int_counter = [&](const std::string& name, const std::string& desc, const std::string& unit,
-                           json data_points) -> json {
-        return json{
-            {"name", name},
-            {"description", desc},
-            {"unit", unit},
-            {"sum", {
-                {"aggregationTemporality", 2}, // AGGREGATION_TEMPORALITY_CUMULATIVE
-                {"isMonotonic", true},
-                {"dataPoints", std::move(data_points)}
-            }}
-        };
-    };
-
-    auto double_counter = [&](const std::string& name, const std::string& desc, const std::string& unit,
-                              json data_points) -> json {
-        return json{
-            {"name", name},
-            {"description", desc},
-            {"unit", unit},
-            {"sum", {
-                {"aggregationTemporality", 2},
-                {"isMonotonic", true},
-                {"dataPoints", std::move(data_points)}
-            }}
-        };
-    };
-
-    json metrics_arr = json::array();
-
-    // Server & NPU gauges
-    metrics_arr.push_back(int_gauge(
-        "oflm.active_connections", "Currently active HTTP connections", "{connection}",
-        static_cast<int64_t>(snap.live.active_connections)));
-    metrics_arr.push_back(int_gauge(
-        "oflm.active_requests", "Currently executing HTTP requests", "{request}",
-        static_cast<int64_t>(snap.live.active_requests)));
-    metrics_arr.push_back(int_gauge(
-        "oflm.npu.available", "Whether the NPU is currently available (1 = available, 0 = busy)", "1",
-        snap.live.npu_available ? 1 : 0));
-    metrics_arr.push_back(int_gauge(
-        "oflm.npu.active_requests", "Requests currently holding the NPU lock", "{request}",
-        snap.live.npu_active_requests));
-    metrics_arr.push_back(int_gauge(
-        "oflm.npu.queued_requests", "Requests waiting in the NPU queue", "{request}",
-        static_cast<int64_t>(snap.live.npu_queued_requests)));
-
-    if (!snap.live.loaded_model.empty()) {
-        metrics_arr.push_back(int_gauge(
-            "oflm.loaded_model", "Currently resident chat model on the NPU", "1",
-            1, json::array({str_attr("gen_ai.request.model", snap.live.loaded_model)})));
-    }
-
-    // HTTP counters
-    metrics_arr.push_back(int_counter(
-        "oflm.http.requests", "Total HTTP requests processed by the server", "{request}",
-        json::array({{
-            {"startTimeUnixNano", start_ns},
-            {"timeUnixNano", now_ns},
-            {"asInt", std::to_string(snap.http_requests_total)}
-        }})));
-
-    metrics_arr.push_back(int_counter(
-        "oflm.http.errors", "Total HTTP requests resulting in status >= 400", "{request}",
-        json::array({{
-            {"startTimeUnixNano", start_ns},
-            {"timeUnixNano", now_ns},
-            {"asInt", std::to_string(snap.http_errors_total)}
-        }})));
-
-    // Per-model OTel GenAI token usage & durations
-    json token_dps = json::array();
-    json gen_req_dps = json::array();
-    json prefill_dps = json::array();
-    json decode_dps = json::array();
-    json load_dps = json::array();
-    json embed_req_dps = json::array();
-    json embed_tok_dps = json::array();
-
+/// Format a Snapshot as a plain JSON summary of the oflm.* instruments.
+/// This is not an OTLP payload: OTLP is a push protocol, so nothing scrapes it
+/// over a GET. Scrapers that speak OTLP should use the Prometheus endpoint with
+/// an OpenTelemetry Collector `prometheus` receiver.
+inline json render_json_summary(const Snapshot& snap) {
+    auto by_model = json::object();
     for (const auto& [model, s] : snap.by_model) {
-        if (s.generation_requests > 0) {
-            gen_req_dps.push_back({
-                {"attributes", json::array({str_attr("gen_ai.request.model", model)})},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asInt", std::to_string(s.generation_requests)}
-            });
-            token_dps.push_back({
-                {"attributes", json::array({
-                    str_attr("gen_ai.request.model", model),
-                    str_attr("gen_ai.token.type", "input")
-                })},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asInt", std::to_string(s.prompt_tokens)}
-            });
-            token_dps.push_back({
-                {"attributes", json::array({
-                    str_attr("gen_ai.request.model", model),
-                    str_attr("gen_ai.token.type", "output")
-                })},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asInt", std::to_string(s.completion_tokens)}
-            });
-            prefill_dps.push_back({
-                {"attributes", json::array({str_attr("gen_ai.request.model", model)})},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asDouble", static_cast<double>(s.prefill_duration_ns) / 1e9}
-            });
-            decode_dps.push_back({
-                {"attributes", json::array({str_attr("gen_ai.request.model", model)})},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asDouble", static_cast<double>(s.decoding_duration_ns) / 1e9}
-            });
-            load_dps.push_back({
-                {"attributes", json::array({str_attr("gen_ai.request.model", model)})},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asDouble", static_cast<double>(s.load_duration_ns) / 1e9}
-            });
-        }
-        if (s.embedding_requests > 0) {
-            embed_req_dps.push_back({
-                {"attributes", json::array({str_attr("gen_ai.request.model", model)})},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asInt", std::to_string(s.embedding_requests)}
-            });
-            embed_tok_dps.push_back({
-                {"attributes", json::array({str_attr("gen_ai.request.model", model)})},
-                {"startTimeUnixNano", start_ns},
-                {"timeUnixNano", now_ns},
-                {"asInt", std::to_string(s.embedding_tokens)}
-            });
-        }
+        by_model[model] = json{
+            {"generation_requests_total", s.generation_requests},
+            {"tokens_prompt_total", s.prompt_tokens},
+            {"tokens_generated_total", s.completion_tokens},
+            {"prefill_duration_seconds_total", static_cast<double>(s.prefill_duration_ns) / 1e9},
+            {"decoding_duration_seconds_total", static_cast<double>(s.decoding_duration_ns) / 1e9},
+            {"load_duration_seconds_total", static_cast<double>(s.load_duration_ns) / 1e9},
+            {"total_duration_seconds_total", static_cast<double>(s.total_duration_ns) / 1e9},
+            {"embeddings_requests_total", s.embedding_requests},
+            {"embeddings_tokens_total", s.embedding_tokens},
+        };
     }
-
-    if (!gen_req_dps.empty()) {
-        metrics_arr.push_back(int_counter(
-            "oflm.generation.requests", "Total LLM generation requests completed", "{request}",
-            std::move(gen_req_dps)));
-        metrics_arr.push_back(int_counter(
-            "gen_ai.client.token.usage", "Number of input and output tokens used", "{token}",
-            std::move(token_dps)));
-        metrics_arr.push_back(double_counter(
-            "oflm.prefill.duration", "Cumulative prompt prefill duration", "s",
-            std::move(prefill_dps)));
-        metrics_arr.push_back(double_counter(
-            "oflm.decoding.duration", "Cumulative token decoding duration", "s",
-            std::move(decode_dps)));
-        metrics_arr.push_back(double_counter(
-            "oflm.load.duration", "Cumulative model load duration", "s",
-            std::move(load_dps)));
+    auto by_route = json::object();
+    for (const auto& [route, count] : snap.requests_by_route) {
+        by_route[route] = count;
     }
-
-    if (!embed_req_dps.empty()) {
-        metrics_arr.push_back(int_counter(
-            "oflm.embeddings.requests", "Total embedding requests completed", "{request}",
-            std::move(embed_req_dps)));
-        metrics_arr.push_back(int_counter(
-            "oflm.embeddings.tokens", "Total tokens processed by embedding requests", "{token}",
-            std::move(embed_tok_dps)));
+    json live = {
+        {"active_connections", snap.live.active_connections},
+        {"active_requests", snap.live.active_requests},
+        {"npu_available", snap.live.npu_available},
+        {"npu_active_requests", snap.live.npu_active_requests},
+        {"npu_queued_requests", snap.live.npu_queued_requests},
+    };
+    if (!snap.live.loaded_model.empty()) {
+        live["loaded_model"] = snap.live.loaded_model;
     }
-
     return json{
-        {"resourceMetrics", json::array({
-            {
-                {"resource", {
-                    {"attributes", json::array({
-                        str_attr("service.name", "openflowlm"),
-                        str_attr("gen_ai.system", "openflowlm")
-                    })}
-                }},
-                {"scopeMetrics", json::array({
-                    {
-                        {"scope", {{"name", "openflowlm.server"}}},
-                        {"metrics", std::move(metrics_arr)}
-                    }
-                })}
-            }
-        })}
+        {"oflm", json{
+            {"uptime_seconds", static_cast<double>(snap.now_unix_nano - snap.start_time_unix_nano) / 1e9},
+            {"http_requests_total", snap.http_requests_total},
+            {"http_errors_total", snap.http_errors_total},
+            {"requests_by_route", std::move(by_route)},
+            {"live", std::move(live)},
+            {"models", std::move(by_model)},
+        }},
     };
 }
 
-/// Decide whether the caller asked for OTLP/JSON instead of Prometheus text.
+/// Decide whether the caller asked for the JSON summary instead of Prometheus text.
 /// - `/metrics` defaults to Prometheus text (`text/plain; version=0.0.4`), unless
-///   `?format=otlp` / `?format=json` is in the query string or `Accept: application/json`
-///   is sent.
-/// - `/api/metrics` and `/v1/metrics` default to OTLP/JSON unless `?format=prometheus`
+///   `?format=json` is in the query string or `Accept: application/json`
+///   is sent without `text/plain`.
+/// - `/api/metrics` defaults to the JSON summary unless `?format=prometheus`
 ///   is in the query string.
-inline bool wants_otlp_json(std::string_view target, std::string_view accept_header) {
+inline bool wants_json(std::string_view target, std::string_view accept_header) {
     auto qpos = target.find('?');
     std::string_view path = (qpos == std::string_view::npos) ? target : target.substr(0, qpos);
     std::string_view query = (qpos == std::string_view::npos) ? std::string_view{} : target.substr(qpos + 1);
@@ -521,11 +350,10 @@ inline bool wants_otlp_json(std::string_view target, std::string_view accept_hea
         query.find("format=prom") != std::string_view::npos) {
         return false;
     }
-    if (query.find("format=otlp") != std::string_view::npos ||
-        query.find("format=json") != std::string_view::npos) {
+    if (query.find("format=json") != std::string_view::npos) {
         return true;
     }
-    if (path == "/api/metrics" || path == "/v1/metrics") {
+    if (path == "/api/metrics") {
         return true;
     }
     if (accept_header.find("application/json") != std::string_view::npos &&

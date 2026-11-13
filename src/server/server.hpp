@@ -97,6 +97,7 @@ using RequestHandler = std::function<void(
     const http::request<http::string_body>& req,
     std::function<void(const json&)> send_response,
     std::function<void(const json&, bool)> send_streaming_response,  // data, is_final
+    std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,  // body, content_type, status
     std::shared_ptr<HttpSession> session,  // for streaming support
     std::shared_ptr<CancellationToken> cancellation_token  // for cancellation support
 )>;

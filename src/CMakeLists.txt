@@ -1605,7 +1605,7 @@ if(MSVC)
 endif()
 add_test(NAME multipart COMMAND multipart_test)
 
-# OTel/Prometheus metrics exposition and content negotiation. Header-only; no device.
+# Prometheus text and JSON metrics exposition and content negotiation. Header-only; no device.
 add_executable(metrics_test server/metrics_test.cpp)
 target_include_directories(metrics_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"

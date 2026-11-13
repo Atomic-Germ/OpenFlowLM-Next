@@ -1,5 +1,5 @@
 /// \file metrics_test.cpp
-/// \brief Unit tests for Prometheus/OpenMetrics text exposition and OTLP/JSON serialization.
+/// \brief Unit tests for Prometheus text exposition and the JSON summary.
 #include <cstdio>
 #include <string>
 
@@ -50,19 +50,17 @@ static void test_prometheus_exposition() {
     contains(prom, "oflm_http_errors_total 1\n", "total http errors counter");
     contains(prom, "oflm_tokens_prompt_total{model=\"qwen3:1.7b\"} 120\n", "prompt tokens counter");
     contains(prom, "oflm_tokens_generated_total{model=\"qwen3:1.7b\"} 45\n", "generated tokens counter");
-    contains(prom, "gen_ai_client_token_usage_total{gen_ai_request_model=\"qwen3:1.7b\",gen_ai_token_type=\"input\"} 120\n",
-             "OTel GenAI input tokens in Prometheus format");
-    contains(prom, "gen_ai_client_token_usage_total{gen_ai_request_model=\"qwen3:1.7b\",gen_ai_token_type=\"output\"} 45\n",
-             "OTel GenAI output tokens in Prometheus format");
     contains(prom, "oflm_prefill_duration_seconds_total{model=\"qwen3:1.7b\"} 0.250000\n", "prefill duration in seconds");
     contains(prom, "oflm_decoding_duration_seconds_total{model=\"qwen3:1.7b\"} 1.500000\n", "decoding duration in seconds");
+    contains(prom, "oflm_total_duration_seconds_total{model=\"qwen3:1.7b\"} 1.800000\n", "total duration in seconds");
     contains(prom, "oflm_embeddings_tokens_total{model=\"embed-gemma:300m\"} 32\n", "embedding tokens counter");
 }
 
-static void test_otlp_json() {
-    std::printf("\n-- otlp json --\n");
+static void test_json_summary() {
+    std::printf("\n-- json summary --\n");
     oflm::metrics::Collector col;
     col.record_http_request("POST /v1/chat/completions", 200);
+    col.record_http_request("unmatched", 404);
     col.record_generation("llama3.2:1b", 64, 128, 100'000'000ULL, 800'000'000ULL, 0ULL, 900'000'000ULL);
 
     oflm::metrics::LiveState live;
@@ -71,50 +69,39 @@ static void test_otlp_json() {
     live.loaded_model = "llama3.2:1b";
 
     const auto snap = col.snapshot(live, 1700000000000000000ULL);
-    const auto j = oflm::metrics::render_otlp_json(snap);
+    const auto j = oflm::metrics::render_json_summary(snap);
 
-    ok(j.contains("resourceMetrics") && j["resourceMetrics"].is_array() && j["resourceMetrics"].size() == 1,
-       "top-level ExportMetricsServiceRequest has resourceMetrics[1]");
-    const auto& rm = j["resourceMetrics"][0];
-    ok(rm.contains("scopeMetrics") && rm["scopeMetrics"].is_array() && rm["scopeMetrics"].size() == 1,
-       "resourceMetrics[0] has scopeMetrics[1]");
-    const auto& metrics = rm["scopeMetrics"][0]["metrics"];
-    ok(metrics.is_array() && !metrics.empty(), "scopeMetrics[0].metrics is non-empty array");
-
-    bool found_token_usage = false;
-    bool found_npu_avail = false;
-    for (const auto& m : metrics) {
-        if (m["name"] == "gen_ai.client.token.usage") {
-            found_token_usage = true;
-            ok(m.contains("sum") && m["sum"]["aggregationTemporality"] == 2 && m["sum"]["isMonotonic"] == true,
-               "gen_ai.client.token.usage is cumulative monotonic sum");
-            ok(m["sum"]["dataPoints"].size() == 2, "gen_ai.client.token.usage has input + output dataPoints");
-        }
-        if (m["name"] == "oflm.npu.available") {
-            found_npu_avail = true;
-            ok(m["gauge"]["dataPoints"][0]["asInt"] == "1", "oflm.npu.available gauge is \"1\"");
-        }
-    }
-    ok(found_token_usage, "OTLP JSON includes gen_ai.client.token.usage");
-    ok(found_npu_avail, "OTLP JSON includes oflm.npu.available");
+    ok(j.contains("oflm") && j["oflm"].is_object(), "top-level oflm object exists");
+    ok(!j.contains("resourceMetrics"), "not an OTLP payload");
+    const auto& summary = j["oflm"];
+    ok(summary["http_requests_total"] == 2, "http_requests_total is 2");
+    ok(summary["http_errors_total"] == 1, "http_errors_total counts the 404");
+    ok(summary["requests_by_route"]["unmatched"] == 1, "unmatched paths are bucketed");
+    ok(summary["live"]["npu_available"] == true, "npu_available is true");
+    ok(summary["live"]["loaded_model"] == "llama3.2:1b", "loaded model is reported");
+    const auto& model = summary["models"]["llama3.2:1b"];
+    ok(model["generation_requests_total"] == 1, "generation requests counter");
+    ok(model["tokens_prompt_total"] == 64, "prompt tokens counter");
+    ok(model["total_duration_seconds_total"] == 0.9, "total duration rendered in seconds");
 }
 
 static void test_content_negotiation() {
     std::printf("\n-- content negotiation --\n");
-    using oflm::metrics::wants_otlp_json;
-    ok(!wants_otlp_json("/metrics", "*/*"), "GET /metrics defaults to Prometheus text");
-    ok(!wants_otlp_json("/metrics", "text/plain; version=0.0.4"), "GET /metrics with text/plain is Prometheus text");
-    ok(wants_otlp_json("/metrics", "application/json"), "GET /metrics with Accept: application/json is OTLP JSON");
-    ok(wants_otlp_json("/metrics?format=otlp", "*/*"), "GET /metrics?format=otlp is OTLP JSON");
-    ok(wants_otlp_json("/api/metrics", "*/*"), "GET /api/metrics defaults to OTLP JSON");
-    ok(wants_otlp_json("/v1/metrics", "*/*"), "GET /v1/metrics defaults to OTLP JSON");
-    ok(!wants_otlp_json("/api/metrics?format=prometheus", "application/json"),
+    using oflm::metrics::wants_json;
+    ok(!wants_json("/metrics", "*/*"), "GET /metrics defaults to Prometheus text");
+    ok(!wants_json("/metrics", "text/plain; version=0.0.4"), "GET /metrics with text/plain is Prometheus text");
+    ok(wants_json("/metrics", "application/json"), "GET /metrics with Accept: application/json is the JSON summary");
+    ok(wants_json("/metrics?format=json", "*/*"), "GET /metrics?format=json is the JSON summary");
+    ok(wants_json("/api/metrics", "*/*"), "GET /api/metrics defaults to the JSON summary");
+    ok(!wants_json("/api/metrics?format=prometheus", "application/json"),
        "query ?format=prometheus overrides path and Accept");
+    ok(!wants_json("/metrics?format=prometheus", "application/json"),
+       "query ?format=prometheus overrides Accept on /metrics");
 }
 
 int main() {
     test_prometheus_exposition();
-    test_otlp_json();
+    test_json_summary();
     test_content_negotiation();
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures == 0 ? 0 : 1;
