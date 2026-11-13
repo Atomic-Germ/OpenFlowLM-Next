@@ -201,7 +201,7 @@ cmake --install --preset linux-default
 Or do all of it, in the host-native and portable package formats, with one command:
 
 ```bash
-cmake --workflow --preset linux-package   # configures, builds, tests, packages RPM+TGZ (+ kernels)
+cmake --workflow --preset linux-package   # configures, builds, tests, packages runtime+devel RPMs and TGZ (+ kernels)
 ```
 
 The install lands in `/opt/openflowlm` and adds `/usr/bin/oflm` plus

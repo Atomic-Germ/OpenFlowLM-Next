@@ -27,11 +27,68 @@ is not a default pkg-config search path; nonexistent paths are ignored elsewhere
 
 ## What ships
 
+The runtime package (`openflowlm` on both formats) contains:
+
 - `/opt/openflowlm/bin/oflm` + engine `.so` (`lib/xrt`) + `share/oflm/{model_list,model_info}.json`
 - `share/oflm/xclbins/` — tracked closed sets + open sets built by `export_kernels`
 - `share/oflm/{oflm-add,open_kernels/recipes}` — end-user model installer + spec derivation
 - `share/oflm/utilities/{oflm-test,q4nx-build}` + launchers in `bin/` (`OFLM_BUILD_UTILITIES`)
 - `/usr/bin/oflm` symlink and `/etc/profile.d/openflowlm.sh` (`OFLM_INSTALL_PATH_PLUMBING`)
+
+The companion package (`openflowlm-devel` RPM / `openflowlm-dev` DEB) contains
+the kernel-build toolchain under `/opt/openflowlm/share/oflm/devel/`:
+
+- `utilities/{env.sh,env.fish,export-kernels.py}`, `ironvenv-requirements.txt`
+- the full `open_kernels/` source tree (recipes, designs, specs, packers)
+- `npu_offload/gemm_rtp/` + `npu_offload/m5-eltwise/kernels/` (BERT/embedding sets)
+- `src/model_list.json` — the marker `env.sh` walks up to find its root
+- `README.md` explaining that `/opt` is not writable and the tree must be copied
+- `/etc/yum.repos.d/_copr:copr.fedorainfracloud.org:abn:amd-npu.repo` — the
+  `abn/amd-npu` COPR that provides `xrt-base`, `xrt-npu`,
+  `xrt-plugin-amdxdna`, `xrt-devel` and `python3-xrt` on Fedora. (The
+  `xrt-devel` subpackage is the real name; older docs said `xrt-base-devel`,
+  which does not exist.)
+
+The TGZ is one archive containing both payloads: CPack component install is
+enabled only for RPM and DEB, so TGZ keeps its single-archive behaviour.
+
+### The two-package split (CPack components)
+
+`src/CMakeLists.txt` sets `CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "runtime"`, so
+every existing `install()` is runtime and only the devel block says
+`COMPONENT devel`. `CPACK_COMPONENTS_ALL "runtime;devel"`,
+`CPACK_RPM_COMPONENT_INSTALL ON` / `CPACK_DEB_COMPONENT_INSTALL ON`, plus:
+
+- `CPACK_RPM_MAIN_COMPONENT "runtime"` keeps the runtime RPM named
+  `openflowlm` (otherwise it becomes `openflowlm-runtime`).
+- `CPACK_RPM_DEVEL_PACKAGE_REQUIRES "openflowlm = %{version}-%{release}, ..."`
+  pins the exact runtime NEVR and names all five COPR packages.
+- DEB: `CPACK_DEBIAN_{RUNTIME,DEVEL}_PACKAGE_NAME`, plus
+  `CPACK_DEBIAN_ENABLE_COMPONENT_DEPENDS ON` and
+  `CPACK_COMPONENT_DEVEL_DEPENDS runtime` to get
+  `Depends: openflowlm (= <version>)`; `CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS`
+  adds `libxrt-dev, python3-xrt`.
+- `/etc/yum.repos.d` is in `CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION` so
+  the devel RPM does not claim to own a directory that `fedora-repos` owns.
+
+A package cannot enable a repository in the transaction that installs from it,
+so the COPR must be enabled first; the `.repo` file the devel package installs
+is the same one `dnf copr enable abn/amd-npu` writes, so it does not duplicate
+the definition.
+
+The `open_kernels` copy is an `install(CODE)` walk, not `install(DIRECTORY)`
+with `PATTERN "build*" EXCLUDE`: that pattern also eats real sources
+`build_design.py` and `build_mlir.sh`. The walk skips only *directory*
+components matching `^build`, `__pycache__`, `^\.staging`, `.locks`, and files
+matching `\.(pyc|xclbin|o|elf|prj)$` — an AIE `.o`/`.elf` in the package makes
+RPM's `brp-strip` abort. It uses `file(COPY)` (keeps permissions, does **not**
+prepend `$ENV{DESTDIR}`) and fails configure/pkg if it copied zero files.
+
+`utilities/release/verify-package.sh` routes `openflowlm-devel-*` /
+`openflowlm-dev_*` to `check_devel` + `check_devel_requires` and runs
+`check_common` only on the runtime; the TGZ is checked against both payloads.
+It also asserts the runtime RPM `Requires: xrt-plugin-amdxdna` (the engine
+`dlopen()`s the plugin, so `AUTOREQ` cannot derive it).
 
 ## Invariants that keep it "no manual steps"
 
@@ -91,7 +148,9 @@ No `PKG_CONFIG_PATH` export needed: `common-xrt` supplies it (the preset's XRT
 line should read `Found XRT via pkg-config`).
 
 Inspect: `rpm -qlp`/`dpkg-deb -c` for `/usr/bin/oflm`, `/etc/profile.d/openflowlm.sh`,
-utilities, and **no** `.bak`; `rpm -qpR` for `libxrt_coreutil.so.2`. The full
+utilities, and **no** `.bak`; `rpm -qpR` for `libxrt_coreutil.so.2` and
+`xrt-plugin-amdxdna`. A cpack run emits two RPMs and two DEBs (`openflowlm` and
+`openflowlm-devel` / `openflowlm-dev`) and one TGZ. The full
 `cmake --workflow --preset linux-package` additionally rebuilds the kernels
 (cached) and runs the tests in one shot; `git status` should show `src/xclbins`
 manifests only if a recipe actually changed.

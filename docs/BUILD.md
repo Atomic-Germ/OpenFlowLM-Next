@@ -126,10 +126,10 @@ Test presets exist only in the repository-root `CMakePresets.json`. Run
 
 | Preset | Output |
 |---|---|
-| `linux-package` | `.rpm` + `.tar.gz` (one command) |
-| `linux-package-tgz` | `.tar.gz` distribution |
-| `linux-package-deb` | `.deb` package (build on Debian/Ubuntu or in a Debian container) |
-| `linux-package-rpm` | `.rpm` package |
+| `linux-package` | two `.rpm` (`openflowlm`, `openflowlm-devel`) + `.tar.gz` (one command) |
+| `linux-package-tgz` | `.tar.gz` distribution (contains both payloads) |
+| `linux-package-deb` | two `.deb` (`openflowlm`, `openflowlm-dev`) (build on Debian/Ubuntu or in a Debian container) |
+| `linux-package-rpm` | two `.rpm` (`openflowlm`, `openflowlm-devel`) |
 
 ### Workflow Presets
 
@@ -182,12 +182,16 @@ cmake --install build
 cmake --workflow --preset linux-package
 ```
 
-This configures, builds, tests, and emits the `.rpm` and portable `.tar.gz` into
-`build/packages/`. Note that `linux-package-deb` and `linux-package-tgz` are
-*package* presets, not workflow presets -- drive them with
-`cmake --build --preset linux-package-deb && cpack --preset linux-package-deb`,
-not with `cmake --workflow`. Packages depend on the system XRT (`xrt-base`
-on Fedora, `libxrt-npu2` on Ubuntu), matching the runtime-prerequisite flow.
+This configures, builds, tests, and emits the runtime and devel RPMs plus the
+portable `.tar.gz` into `build/packages/`. `openflowlm` is the engine and
+xclbins; `openflowlm-devel` is the kernel-build toolchain (sources, `env.sh`,
+`export-kernels.py`) and the `abn/amd-npu` COPR definition. The TGZ packs both
+components into one archive. Note that `linux-package-deb` and
+`linux-package-tgz` are *package* presets, not workflow presets -- drive them
+with `cmake --build --preset linux-package-deb && cpack --preset
+linux-package-deb`, not with `cmake --workflow`. Packages depend on the system
+XRT (`xrt-base`/`xrt-npu` on Fedora, `libxrt-npu2` on Ubuntu), matching the
+runtime-prerequisite flow.
 
 `.deb` is intentionally **not** part of this preset: a DEB is only valid when
 built on Debian/Ubuntu, since the engine binary carries the build host's glibc,
@@ -574,7 +578,8 @@ git submodule update --init --recursive
 The development packages are missing. The full list for Fedora and Ubuntu is in
 [linux-getting-started.md](linux-getting-started.md#before-the-first-build).
 `Package 'xrt' not found` on the line before it means the same for XRT's
-headers (`xrt-base-devel` on Fedora, `libxrt-dev` on Ubuntu).
+headers (`xrt-devel` on Fedora, from the `abn/amd-npu` COPR; `libxrt-dev` on
+Ubuntu).
 
 ### "fatal error: libdrm/drm.h: No such file or directory"
 

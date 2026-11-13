@@ -107,11 +107,18 @@ sudo reboot
 
 ```sh
 # Debian / Ubuntu (.deb)
-sudo apt install ./openflowlm*.deb
+sudo apt install ./openflowlm_*.deb
 
 # Fedora / RHEL (.rpm)
-sudo dnf install ./openflowlm*.rpm
+sudo dnf install ./openflowlm-[0-9]*.rpm
 ```
+
+Each release also publishes a companion package with the kernel-build
+toolchain: `openflowlm-dev_*.deb` on Debian/Ubuntu and `openflowlm-devel-*.rpm`
+on Fedora. It is optional for running models and is what lets you compile
+xclbin sets on the host. On Fedora it needs the XRT packages from the
+`abn/amd-npu` COPR, so enable that COPR first. The `.tar.gz` below already
+contains both.
 
 > Pick the package that matches your distribution. The engine binary carries
 > the build host's glibc, FFmpeg and Boost sonames, so a `.deb` is only valid on

@@ -49,16 +49,24 @@ sudo reboot
 
 ```sh
 # Debian / Ubuntu (.deb)
-sudo apt install ./openflowlm*.deb
+sudo apt install ./openflowlm_*.deb
 
 # Fedora / RHEL (.rpm) -- needs glibc 2.39+ (Fedora 41+, RHEL 10+)
-sudo dnf install ./openflowlm*.rpm
+sudo dnf install ./openflowlm-[0-9]*.rpm
 
 # Any Linux, no package manager (bundles XRT/XDNA; expects /opt/openflowlm)
 tar xf openflowlm-<version>-Linux.tar.gz
 sudo cp -r openflowlm-<version>-Linux/opt/openflowlm /opt/
 export PATH=/opt/openflowlm/bin:$PATH
 ```
+
+Each release also ships a companion package that carries the kernel-build
+toolchain (`env.sh`, `export-kernels.py`, the `open_kernels`/`npu_offload`
+sources and the COPR definition): `openflowlm-dev_*.deb` on Debian/Ubuntu,
+`openflowlm-devel-*.rpm` on Fedora. The runtime package does not need it; install
+it only if you want to compile your own xclbin sets on this host. On Fedora it
+requires the XRT packages from the `abn/amd-npu` COPR, so enable that first
+(step 1 of the Fedora section below). The TGZ above contains both.
 
 #### 5. (NPU) Check memlock limit
 - Run:
@@ -137,20 +145,23 @@ only the userspace side needs installing.
 #### 1. Install XRT and the NPU plugin
 
 Fedora's own repositories have no XRT. The third-party COPR
-[`darrencocco/ryzen-ai-npu`](https://copr.fedorainfracloud.org/coprs/darrencocco/ryzen-ai-npu/)
-packages it as `xrt-base`, the name the OpenFlowLM `.rpm` depends on:
+[`abn/amd-npu`](https://copr.fedorainfracloud.org/coprs/abn/amd-npu/) packages
+it as the `xrt-base`, `xrt-npu`, `xrt-plugin-amdxdna`, `xrt-devel` and
+`python3-xrt` subpackages the OpenFlowLM `.rpm` files depend on: the runtime
+package needs `xrt-base`, `xrt-npu`, `xrt-plugin-amdxdna` and `python3-xrt`,
+and `openflowlm-devel` adds `xrt-devel`.
 
 ```sh
-sudo dnf copr enable darrencocco/ryzen-ai-npu
-sudo dnf install --allowerasing xrt-base xrt-plugin-amdxdna
+sudo dnf copr enable abn/amd-npu
+sudo dnf install --allowerasing xrt-base xrt-npu xrt-plugin-amdxdna
 ```
 
 `--allowerasing` is there because `xrt-base` requires the `ocl-icd` OpenCL
 loader, and a default Fedora install has the other one, `OpenCL-ICD-Loader`,
 which conflicts with it. Both provide the same `libOpenCL.so.1` and read the
 same `/etc/OpenCL/vendors/`, so dnf swapping one for the other loses nothing;
-check that the transaction removes nothing else. The COPR also has
-`amdxdna-kmod`, which you don't need with the in-tree driver.
+check that the transaction removes nothing else. The COPR tracks XRT itself and
+does not ship a kernel module, which you don't need with the in-tree driver.
 
 #### 2. Raise the memlock limit
 
@@ -213,11 +224,12 @@ Fedora 44:
 ```sh
 sudo dnf install gcc-c++ cmake ninja-build mold ccache git cargo rust patchelf uv \
     boost-devel libcurl-devel fftw-devel ffmpeg-free-devel \
-    readline-devel ncurses-devel libdrm-devel xrt-base-devel
+    readline-devel ncurses-devel libdrm-devel xrt-devel
 ```
 
-`xrt-base-devel` comes from the COPR above. `uv` is optional; the kernel build
-uses it, when it is there, to set up its Python venv. `ffmpeg-free-devel` is
+`xrt-devel` comes from the `abn/amd-npu` COPR above (the package is `xrt-devel`;
+older docs said `xrt-base-devel`, which that COPR does not provide). `uv` is
+optional; the kernel build uses it, when it is there, to set up its Python venv. `ffmpeg-free-devel` is
 enough to build; RPM Fusion's `ffmpeg-devel` adds the codecs Fedora leaves
 out.
 
