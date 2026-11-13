@@ -73,6 +73,21 @@ inline size_t bfp16_b_offset(size_t r, size_t cb, size_t N, size_t K, const Bfp1
     return (tile * t.n * (t.k / 8) + bfp16_detail::in_tile(r % t.n, cb, t)) * BFP16_BLOCK_BYTES;
 }
 
+/// bfp16_b_offset(r, cb, ...) from bfp16_b_offset(r, 0, ...) = `row0`: a row's block cb sits in the
+/// row's tile cb / (k / 8), and inside it 16 blocks per block column on.
+inline size_t bfp16_b_row_block(size_t row0, size_t cb, const Bfp16Tiling& t) {
+    const size_t tkb = t.k / 8;
+    return row0 + ((cb / tkb) * t.n * tkb + (cb % tkb) * 16) * BFP16_BLOCK_BYTES;
+}
+
+/// Float offset of output (row r, column n) in the kernel's c-tiled fp32 C of an M x N product: each array
+/// column c holds M * N / cols floats, for each block of m * rows rows its n-groups in order, each block
+/// row-major (rows of n floats), so a row's n columns of one tile are contiguous.
+inline size_t bfp16_c_offset(size_t r, size_t n, size_t M, size_t N, const Bfp16Tiling& t) {
+    const size_t rb = t.m * t.rows, ct = n / t.n, J = N / (t.n * t.cols);
+    return (ct % t.cols) * (M * N / t.cols) + ((r / rb) * J + ct / t.cols) * rb * t.n + (r % rb) * t.n + n % t.n;
+}
+
 /// pack.py glu_row's twin (up row f is 8 further): ff chunk kc in n-tile (kc % per_col) * cols + kc / per_col keeps a column's H slots one run
 inline size_t bfp16_glu_row(size_t f, size_t ff, const Bfp16Tiling& t) {
     const size_t per_col = 2 * ff / t.n / t.cols, half = t.n / 2, kc = f / half;

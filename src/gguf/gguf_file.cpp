@@ -2,6 +2,7 @@
 /// \brief GGUF parsing and the per-token embedding dequant (see gguf_file.hpp).
 #include "gguf/gguf_file.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -101,6 +102,7 @@ uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
         case 13: return values / 256 * 176;               // q5_k
         case 20: return values / 32 * 18;                 // iq4_nl
         case 23: return values / 256 * 136;               // iq4_xs
+        case 39: return values / 32 * 17;                 // mxfp4 (e8m0 exponent + 16 nibble bytes; GPT-OSS's experts)
         default: return 0;                                // unsupported
     }
 }
@@ -147,7 +149,7 @@ const char* GgufFile::type_name(Type t) {
         case Type::IQ4_NL: return "IQ4_NL"; case Type::IQ3_S: return "IQ3_S"; case Type::IQ2_S: return "IQ2_S";
         case Type::IQ4_XS: return "IQ4_XS"; case Type::I8: return "I8"; case Type::I16: return "I16";
         case Type::I32: return "I32"; case Type::I64: return "I64"; case Type::F64: return "F64";
-        case Type::IQ1_M: return "IQ1_M"; case Type::BF16: return "BF16";
+        case Type::IQ1_M: return "IQ1_M"; case Type::BF16: return "BF16"; case Type::MXFP4: return "MXFP4";
     }
     return "type?";
 }
@@ -759,6 +761,13 @@ void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* o
 void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float* out) const {
     const TensorInfo& t = tensor(name);
     const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
+    if (cols < dim) {
+        // a residual padded past the model's width (GPT-OSS: 2880 in 3072): the row's own values, then
+        // zeros -- the same zero-extension Q4nxFile::bf16_row gives (OPEN-EMBED-STRIDE)
+        embed_row(name, row, static_cast<size_t>(cols), out);
+        std::fill(out + cols, out + dim, 0.0f);
+        return;
+    }
     if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
     // A row index is a FLAT row of the tensor: for a 2-D [rows, cols] it is dims[1], but a
     // MoE expert tensor is 3-D ([in, n, experts]) and its rows are n * experts. Counting

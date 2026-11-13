@@ -230,12 +230,14 @@ def test_lfm2_routes_to_its_own_recipe_not_the_dense_one():
     assert families.family_module("lfm2") is LR
 
 
-def test_a_family_with_no_recipe_still_says_so_by_name():
+def test_a_family_with_no_recipe_still_says_so_by_name(monkeypatch):
     """The NOT_IMPLEMENTED table is the standing rule's mechanism; lfm2 left it when the
-    design landed, and gptoss is what it holds now."""
+    design landed and gptoss when recipes/gptoss.py did, so the table is empty today and a
+    stand-in family keeps the mechanism itself under test."""
+    monkeypatch.setitem(families.NOT_IMPLEMENTED, "standin", "no design for its mixer yet")
     with pytest.raises(NotImplementedError) as e:
-        families.family_module("gptoss")
-    assert "gptoss" in str(e.value)
+        families.family_module("standin")
+    assert "standin" in str(e.value) and "mixer" in str(e.value)
 
 
 def test_lfm2_is_in_the_implemented_family_list():

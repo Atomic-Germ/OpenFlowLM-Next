@@ -17,6 +17,10 @@
 #ifndef LN_GROUPS
 #define LN_GROUPS 1
 #endif
+// LN_DIV: the mean's width when the buffer is padded past the model's (designs/ln/ln.h)
+#ifndef LN_DIV
+#define LN_DIV LN_N
+#endif
 static constexpr unsigned kN = LN_N;
 static constexpr unsigned kHalf = LN_N / 2;
 static constexpr unsigned kV = 32;
@@ -69,7 +73,7 @@ void ln_nr(const float *__restrict x0, const float *__restrict x1, const bfloat1
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
   }
-  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kN) + LN_EPS);
+  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / LN_DIV) + LN_EPS);
   const bfloat16 ih = (bfloat16)inv;
   const bfloat16 il = (bfloat16)(inv - (float)ih);
 #pragma clang loop unroll(disable)

@@ -56,6 +56,16 @@ static constexpr unsigned kQ8ScaleBytes = 256;
 static constexpr unsigned kQ8TileBytes = 5120;
 static constexpr unsigned kQ8RowSplit = 4;     // 16-row parts per 64-row band
 
+// GEMV_Q8_PAD_BIAS (GPT-OSS, designs/gptoss): the projection's per-row bias rides in the pad
+// of each k-tile-0 half-tile, as f32[16] at kQ8PadBias, and the accumulator STARTS from it
+// instead of zero -- the same place a bias would join y anyway, with no stream of its own. The
+// pad is zero wherever a projection has no bias, so the define changes nothing there; it is a
+// define rather than always-on only so every other family's build stays byte for byte.
+#ifndef GEMV_Q8_PAD_BIAS
+#define GEMV_Q8_PAD_BIAS 0
+#endif
+static constexpr unsigned kQ8PadBias = 4352;   // == the end of the codes; 64-byte aligned
+
 // Half-tiles per entry-point call (one ObjectFifo element = kQ8PerCall * 5120 B), the
 // same knob the q4 GEMV takes so a design's w element is one size for both formats.
 #ifndef GEMV_PER_CALL
@@ -96,7 +106,11 @@ __attribute__((noinline)) inline void gemv_q8_half_tile(const uint8_t *__restric
 
   aie::accum<accfloat, kQ8Rows> acc;
   if (first)
+#if GEMV_Q8_PAD_BIAS
+    acc.from_vector(aie::load_v<kQ8Rows>((const float *)(tile + kQ8PadBias)));
+#else
     acc = aie::zeros<accfloat, kQ8Rows>();
+#endif
   else
     acc.from_vector(aie::load_v<kQ8Rows>(y));
 
@@ -151,5 +165,23 @@ static inline void gemv_q8_pool_group_rt(const uint8_t *__restrict chunks,
     const unsigned part = c % rs;                   // which 16-row slice of the band
     const unsigned kt = c / rs;
     gemv_q8_half_tile(chunks + i * kQ8TileBytes, tab, K, kt, kt == 0, y + part * kQ8Rows);
+  }
+}
+
+// The same walk, but the band's first k-tile starts afresh only when `fresh`: otherwise it
+// adds onto what y already holds. GPT-OSS's down projection sums its four routed experts
+// this way, each expert one more pass over the same 64-float accumulator (the routing
+// weight is already in the activation), so the experts' sum never leaves the core.
+static inline void gemv_q8_pool_group_acc(const uint8_t *__restrict chunks,
+                                          const uint8_t *__restrict tab,
+                                          unsigned group, float *__restrict y,
+                                          unsigned per_band, bool fresh) {
+  const unsigned K = kQ8TileK * per_band / kQ8RowSplit;
+#pragma clang loop unroll(disable)
+  for (unsigned i = 0; i < kQ8PerCall; ++i) {
+    const unsigned c = group * kQ8PerCall + i;
+    const unsigned part = c % kQ8RowSplit;
+    const unsigned kt = c / kQ8RowSplit;
+    gemv_q8_half_tile(chunks + i * kQ8TileBytes, tab, K, kt, fresh && kt == 0, y + part * kQ8Rows);
   }
 }

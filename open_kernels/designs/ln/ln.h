@@ -23,6 +23,12 @@
 #ifndef LN_GROUPS
 #define LN_GROUPS 1
 #endif
+// LN_DIV: the width the mean is taken over, when the buffer is padded past the model's own
+// (GPT-OSS: 2880 values in a 3072-lane residual whose padding is exactly zero, so the sum of
+// squares is the model's and only the divisor differs). Defaults to LN_N: the same code.
+#ifndef LN_DIV
+#define LN_DIV LN_N
+#endif
 static constexpr unsigned kN = LN_N;
 static constexpr unsigned kHalf = LN_N / 2;
 static constexpr unsigned kV = 32;
@@ -48,7 +54,7 @@ static inline float ln_inv(const float *__restrict x0, const float *__restrict x
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
   }
-  return srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kN) + LN_EPS);
+  return srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / LN_DIV) + LN_EPS);
 }
 
 #if LN_GROUPS > 1

@@ -315,7 +315,8 @@ public:
     /// Whether step_gemm_prompt() can RUN this kernel set: a block route whose every layer
     /// carries a gemm_block program. This is a capability, not a preference, and it ignores
     /// OFLM_OPEN_LAYER_MAJOR on purpose -- an operator cannot force a schedule onto a set
-    /// with no kernels for it. The force is applied in layer_major_preferred().
+    /// with no kernels for it. The force is applied in layer_major_preferred(). GPT-OSS's
+    /// own route (gptoss_prefill_ok()) is always capable.
     bool layer_major_ok() const;
     bool host_attn_fits() const;
 
@@ -340,6 +341,18 @@ public:
     /// force. The decision itself is `open_qwen36::layer_major::preferred()`, a pure
     /// function, so the operator contract is tested without a device.
     bool layer_major_preferred() const;
+    /// OPEN-PREFILL-GPTOSS: the set carries GPT-OSS's block prefill (manifest gptoss_prefill) and
+    /// OFLM_OPEN_GPTOSS_PREFILL is not 0. step_gemm_prompt() then runs step_gptoss_prompt().
+    bool gptoss_prefill_ok() const { return gp_on_; }
+    /// The shortest prompt the block route takes by default: the kernel set's own crossover where it measured
+    /// one (gptoss_prefill.min_prompt), else the 64 the Qwen3.6 MoE route measured.
+    size_t block_prefill_min() const { return gp_on_ && w_->gptoss.min_prompt ? w_->gptoss.min_prompt : 64; }
+    /// The whole prompt through each layer before the next on GPT-OSS's route: q|k|v and o as
+    /// gemm_bfp16 dispatches of T tokens, attention with the sinks on the host, the router on the
+    /// host, each routed expert's gate|up and down as MXFP4 GEMM dispatches over its own tokens
+    /// (T at a time), the clamped SwiGLU and the weighted sum on the host. The KV rows land in the
+    /// cache as the decode kernels keep them (bf16), so decode continues from pos + ids.size().
+    void step_gptoss_prompt(const std::vector<int>& ids, bool want_logits);
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
     /// sequential path needs. Off by default; costs a tail per token.
@@ -418,6 +431,13 @@ private:
         std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         std::map<int, xrt::run> runs;        ///< per layer: the decode walk's commands, built once and restarted
+        /// gxexpert (OPEN-PREFILL-GPTOSS): every buffer-0 address word of the stream, compiled for
+        /// expert 0, and its compiled offset -- set to offset + e * stride to run expert e
+        std::vector<std::pair<size_t, uint32_t>> gx_sites;
+        /// gxexpert: a second copy of the stream, so the expert of the next run can be patched in while this one
+        /// executes (consecutive runs of one kernel alternate between the two)
+        std::unique_ptr<xrt::bo> instr_alt;
+        bool use_alt = false;
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
 
@@ -529,6 +549,20 @@ private:
     // byte 0 of their own buffer; an XRT sub-buffer view is untested here).
     // Built once in load_weights() from the same host bytes the pool upload uses.
     std::map<std::string, std::vector<xrt::bo>> gemm_w_;
+    // ---- OPEN-PREFILL-GPTOSS (the route's weights live in gemm_w_ by their manifest names)
+    bool gp_on_ = false;
+    bool gp_hilo_ = true;                 ///< OFLM_OPEN_GPTOSS_HILO: activations as [hi ; lo] rows, T / 2 tokens a dispatch
+    bool gp_hilo_x_ = true;               ///< OFLM_OPEN_GPTOSS_HILO_EXPERTS: the same for the experts' GEMMs alone
+    struct GpHost {                       ///< one layer's small tensors, f32 from the GGUF
+        std::vector<float> ln, post, bqkv, bo, sinks, router, router_b, bg, bu, bd;
+    };
+    std::vector<GpHost> gp_host_;
+    struct GpScratch {                    ///< reused across layers and prompts
+        std::vector<float> a, gate, up, h, y;
+    } gp_scr_;
+    void gp_load_layer(int l);
+    void gp_layer(int l, std::vector<float>& x, size_t N, size_t pos0);
+    void gp_expert(Kern& k, uint64_t e, uint64_t stride);
     // dense: the two norm weights (bf16) the host RMSNorm reads, captured from consts
     std::vector<std::vector<uint16_t>> ln_w_bf16_, post_ln_w_bf16_;
     // dense, sandwich only (gemm_block.sandwich): the two extra norms Gemma 3's chain reads,
@@ -710,7 +744,38 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// blocked is how long THIS call sat in wait() -- the same number serially, and the only
     /// honest one to add up once a dispatch has been running while the host did something else.
     std::pair<double, double> wait_run(Inflight& f);
+    /// One NPU job of a pipeline(): the kernel, its arguments, the output synced back before
+    /// the job's post, and the job whose post its inputs come from (-1: none).
+    struct PipeJob {
+        Kern* k = nullptr;
+        std::vector<std::string> args;
+        std::string out;
+        size_t out_bytes = 0;
+        long dep = -1;
+        const char* tag = "";    ///< the step it is, for OFLM_OPEN_PIPE_LOG's table
+    };
+    /// OFLM_OPEN_PIPE_LOG: per step, the host's stage / post time and how long it waited on the NPU
+    struct PipeStat {
+        size_t n = 0;
+        double stage_ms = 0, post_ms = 0, blocked_ms = 0, elapsed_ms = 0;
+    };
+    std::map<std::string, PipeStat> pipe_stats_;
+    bool pipe_log_ = false;
+    /// The jobs in order, one run outstanding: job j + 1's inputs are staged while j runs and
+    /// j's outputs read while j + 1 runs, unless j + 1 reads what post(j) writes (dep == j),
+    /// when the two take turns. The host's time blocked on the NPU, submits included, adds to wait_ms.
+    void pipeline(int l, const std::vector<PipeJob>& jobs, const std::function<void(size_t)>& stage,
+                  const std::function<void(size_t)>& post, double& wait_ms);
     void route(Kern& k, int layer, uint64_t act_off);
+    /// A program step that is not a dispatch: moeroute2 (route) or gptoss_route.
+    void host_step(const Step& s, int layer);
+    /// GPT-OSS's router on the host between gx_att and gx_moe (manifest.hpp Step::gptoss_route).
+    void gptoss_route(const Step& s, int layer);
+    /// gptoss_route's per-layer F32 weights, read from the file on first use.
+    struct GxRouter {
+        std::vector<float> w, bias, down_bias;   ///< [experts][hidden_real], [experts], [experts][hidden_real]
+    };
+    std::map<int, GxRouter> gx_router_;
     void log(const std::string& s) const;
 
     // ---- the block route's helpers (core.cpp)
