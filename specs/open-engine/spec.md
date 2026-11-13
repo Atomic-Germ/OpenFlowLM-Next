@@ -3240,7 +3240,7 @@ kept at load average 30-55, not a clean benchmark):**
 
 **Result 2026-11-13 (Strix Point, Ryzen AI 9 HX PRO 370, Windows 11, MSVC build of this tree,
 kernels exported natively with mlir-aie 1.4.2 / Peano 21.0.0.2026080301; `open_qwen36_cli
---gemm-block`, 8 OMP threads, `dibs run --measure`, median of 3):**
+--gemm-block`, 8 OMP threads, median of 3):**
 - The 77-token harmony chat prompt (`reasoning_effort` low): 32 greedy tokens equal llama.cpp's
   (Vulkan build, the same GGUF).
 - Prefill on the block route: 16 tokens 0.82 s, 128 tokens 1.53 s, 663 tokens 3.76 s, 2000
@@ -3248,7 +3248,7 @@ kernels exported natively with mlir-aie 1.4.2 / Peano 21.0.0.2026080301; `open_q
   15.0 s (117 ms a token).
 - Decode after that prompt (64 tokens): 127 ms a token at 16 rows of context, 129 at 128, 133
   at 663, 144 at 2000 (7.9 to 6.9 tok/s).
-- The third repeat ran under another process (`dibs` reported it NOISY); its 2000-token prefill
+- The third repeat overlapped another process starting; its 2000-token prefill
   was 12.1 s against 10.1 / 10.2. The medians above include it.
 
 Not established: contexts past 4096 rows, attention products on the NPU
