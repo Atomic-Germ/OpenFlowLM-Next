@@ -852,7 +852,8 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // is independent -- it reads its own rows of the mapping and writes its own
         // slot -- so the loop is parallel; the decode buffer moves inside it.
 #pragma omp parallel for schedule(dynamic) if (kq)
-        for (size_t c = 0; c < op.nch; ++c) {
+        for (long long cc = 0; cc < static_cast<long long>(op.nch); ++cc) {   // MSVC's OpenMP 2.0 wants a signed index
+            const size_t c = static_cast<size_t>(cc);
             std::vector<float> rd;                       // this chunk's decode buffer
             uint8_t* d = dst + op.dst + c * ch;
             // the file's chunk this pool chunk reads: the op's range (chunk0)
