@@ -52,7 +52,9 @@ N_CORES = int(os.environ.get("GEMV_CORES", 8))
 # many buffer args). Default: YOFF = 0, YTOT = N.
 YOFF = int(os.environ.get("GEMV_YOFF", 0))
 YTOT = int(os.environ.get("GEMV_YTOT", 0)) or (N + YOFF)
-PER_CALL = 4          # 4 x 5120 = 20480 B per element, x2 buffered -> 40 KB of L1
+PER_CALL = int(os.environ.get("GEMV_PER_CALL", 4))  # 4 x 5120 = 20480 B per element, x2 buffered
+# -> 40 KB of L1. A width whose chunks per band (RS * K / 256) is not a multiple of 4 builds
+# with the recipe's own per_call instead (2 or 1: recipes/dense.py per_call()).
 NULL = int(os.environ.get("GEMV_NULL", 0))   # 1: DMA-only probe (no arithmetic, y = 0)
 EXTRA = os.environ.get("GEMV_CFLAGS", "")        # extra kernel compile flags, e.g. "-O3"
 

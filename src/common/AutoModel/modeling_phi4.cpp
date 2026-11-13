@@ -16,20 +16,18 @@ void Phi4::load_model(std::string model_path, json model_info, int default_conte
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
-    // The engine: the open kernels when installed for this model, the closed
-    // DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_PHI4_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_PHI4_ENGINE", "Phi-4");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // model_type == phi4
-        this->lm_engine = std::make_unique<phi4_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Phi-4 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_PHI4_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_PHI4_ENGINE=closed requested, but this build ships no closed Phi-4 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     
     this->lm_engine->clear_context();
@@ -49,45 +47,16 @@ void Phi4::load_model(std::string model_path, json model_info, int default_conte
 }
 
 void Phi4::setup_tokenizer(std::string model_path) {
-    // load tokenizer configurations
-    #ifdef _WIN32
-    std::string tokenizer_config_path = model_path + "\\tokenizer_config.json";
-    #else
-    std::string tokenizer_config_path = model_path + "/tokenizer_config.json";
-    #endif
-    std::ifstream fs_config(tokenizer_config_path, std::ios::in | std::ios::binary);
-    if (fs_config.fail()) {
-        std::cerr << "Cannot open " << tokenizer_config_path << std::endl;
-        exit(1);
-    }
-    std::string data_config;
-    fs_config.seekg(0, std::ios::end);
-    size_t size_config = static_cast<size_t>(fs_config.tellg());
-    fs_config.seekg(0, std::ios::beg);
-    data_config.resize(size_config);
-    fs_config.read(data_config.data(), size_config);
-    fs_config.close();
-    auto tokenizer_config = nlohmann::json::parse(data_config);
+    auto tokenizer_config = this->_shared_setup_tokenizer(model_path);
     this->has_bos_token = false;
-    // load chat template
-    this->chat_tmpl = std::make_unique<minja::chat_template>(
-        tokenizer_config["chat_template"],
-        "",
-        ""
-    );
-
-    if (this->has_bos_token) {
-        this->bos_token_id = tokenizer_config["bos_token_id"].get<int>();
+    this->bos_token_id = -1;
+    // Phi-4-mini's config.json lists only 199999 (<|endoftext|>) while generation_config.json
+    // lists [200020, 199999] (<|end|>, <|endoftext|>); include <|end|> so turns stop cleanly.
+    auto end_ids = this->tokenizer->encode("<|end|>");
+    if (end_ids.size() == 1 &&
+        std::find(this->eos_token_ids.begin(), this->eos_token_ids.end(), end_ids[0]) == this->eos_token_ids.end()) {
+        this->eos_token_ids.push_back(end_ids[0]);
     }
-    else {
-        this->bos_token_id = -1;
-    }
-    this->eos_token = "";
-    for (auto& token : tokenizer_config["eos_token_id"]) {
-        this->eos_token_ids.push_back(token.get<int>());
-    }
-    this->user_system_prompt = "";
-    this->extra_context["user_system_prompt"] = this->user_system_prompt;
 }
 
 std::string Phi4::apply_chat_template(nlohmann::ordered_json& messages, nlohmann::ordered_json tools) {
@@ -95,6 +64,8 @@ std::string Phi4::apply_chat_template(nlohmann::ordered_json& messages, nlohmann
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -107,7 +78,7 @@ bool Phi4::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::f
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;

@@ -26,7 +26,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <map>
+#include <vector>
+#include <algorithm>
 #include <filesystem>
+#include <cstdio>
 #include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
@@ -523,6 +527,95 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
 }
 
 
+// Naked `oflm` is not an error -- it is the one screen a first-time user needs.
+// The family:size matrix is generated from the live merged registry at
+// startup, so it cannot drift away from what this build can serve.
+static int print_quick_start() {
+    std::cout << "OpenFlowLM -- a local, open, NPU-accelerated AI on AMD Ryzen AI NPUs.\n\n";
+    std::cout << "New here? These are the steps:\n\n"
+              << "  oflm add <huggingface-repo>   install a model and register it\n"
+              << "                                 e.g. oflm add Atomic-Germ/Gemma-4-12B-it-i1-GGUF\n"
+              << "  oflm list                    see what this machine can run\n"
+              << "  oflm run <tag>               chat with it\n"
+              << "  oflm serve <tag>             OpenAI-compatible server (127.0.0.1:52625)\n"
+              << "  oflm serve -a 1              also load Whisper for transcription\n\n";
+    std::cout << "Good first installs (open, and run on the NPU):\n"
+              << "  Gemma 4 12B:       oflm add Atomic-Germ/Gemma-4-12B-it-i1-GGUF\n"
+              << "  Whisper large-v3:  oflm add oxide-lab/whisper-large-v3-turbo-GGUF\n"
+              << "  EmbeddingGemma:    oflm add ggml-org/embeddinggemma-300M-GGUF\n\n";
+    std::cout << "`oflm pull <tag>` downloads the small curated upstream set; `oflm add`\n"
+              << "installs anything GGUF or OpenNPU2 that matches an open-kernel geometry,\n"
+              << "including fine-tunes and community quants. An unknown tag is a\n"
+              << "refusal with instructions, never a silent substitute.\n\n";
+
+    // The breadth, from the kernel tree this build actually ships -- the same
+    // roots `oflm add` links from. The manifest's own family string groups
+    // each set, so this cannot name something the package does not carry,
+    // nor stay silent about one it does.
+    {
+        std::map<std::string, std::vector<std::string>> by_family;
+        std::error_code ec;
+        for (const std::string& root : utils::xclbin_roots()) {
+            const std::filesystem::path xdir = std::filesystem::path(root) / "xclbins";
+            if (!std::filesystem::is_directory(xdir, ec)) continue;
+            try {
+                for (const auto& entry : std::filesystem::directory_iterator(xdir)) {
+                    const std::filesystem::path open_dir = entry.path() / "open_kernels";
+                    if (!std::filesystem::is_directory(open_dir, ec)) continue;
+                    std::string family;
+                    const std::filesystem::path manifest = open_dir / "manifest.json";
+                    if (std::filesystem::is_regular_file(manifest, ec)) {
+                        std::ifstream f(manifest);
+                        const nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+                        if (j.is_object()) family = j.value("family", std::string());
+                    }
+                    if (family.empty() && std::filesystem::is_regular_file(open_dir / "whisper_kernels.json", ec))
+                        family = "whisper";
+                    if (family.empty() && std::filesystem::is_regular_file(open_dir / "diffusion_kernels.json", ec))
+                        family = "flux2-klein";
+                    if (family.empty() && std::filesystem::is_directory(open_dir / "npu_matmul_f32", ec))
+                        family = "embeddinggemma";
+                    if (family.empty()) family = "other";
+                    std::string label = entry.path().filename().string();
+                    if (label.size() > 5 && label.compare(label.size() - 5, 5, "-NPU2") == 0)
+                        label.resize(label.size() - 5);
+                    by_family[family].push_back(label);
+                }
+            } catch (const std::filesystem::filesystem_error& e) {
+                std::fprintf(stderr, "[OFLM] Warning: cannot scan %s: %s\n", xdir.c_str(), e.what());
+            }
+        }
+        if (by_family.empty()) {
+            std::cout << "(the open kernel tree was not found -- `oflm add` fetches\n"
+                      << " kernels for a model at install time)\n\n";
+        } else {
+            std::cout << "What this machine can run (open kernel sets `oflm` found --\n"
+                      << "shipped with this build, or linked by `oflm add`):\n\n";
+            for (auto& [family, labels] : by_family) {
+                std::sort(labels.begin(), labels.end());
+                labels.erase(std::unique(labels.begin(), labels.end()), labels.end());
+                std::string line = "  " + family;
+                while (line.size() < 16) line.push_back(' ');
+                for (size_t i = 0; i < labels.size(); ++i) {
+                    if (i) line += "  ";
+                    line += labels[i];
+                }
+                std::cout << line << "\n";
+            }
+            std::cout << "\n"
+                      << "Any GGUF whose geometry matches a set above runs on it via oflm add --\n"
+                      << "fine-tunes and community quants included. Distills inherit their base\n"
+                      << "recipe: deepseek-r1:8b on Llama-3.1-8B, deepseek-r1-0528:8b on Qwen3-8B.\n"
+                      << "FLUX.2-klein-9B loads but currently renders garbled images -- 4B is the\n"
+                      << "working one.\n\n";
+        }
+    }
+    std::cout << "oflm help             full command reference\n"
+              << "oflm list             what is installed on this machine\n"
+              << "oflm version          version information\n";
+    return 1;  // nothing ran; a missing command is still a non-zero exit
+}
+
 ///@brief main function
 ///@param argc the number of arguments
 ///@param argv the arguments
@@ -553,6 +646,11 @@ int main(int argc, char* argv[]) {
         return pack_command::run(argc - 2, argv + 2);
     }
     
+    // Naked `oflm`: print the quick start, not an error.
+    if (argc == 1) {
+        return print_quick_start();
+    }
+
     // Parse command line arguments using Boost Program Options
     program_args_t parsed_args;
     if (!arg_utils::parse_options(argc, argv, parsed_args)) {

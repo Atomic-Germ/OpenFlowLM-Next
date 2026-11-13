@@ -183,3 +183,27 @@ class TestSaveJsonAtomic:
         save_json_atomic(path, {"v": 2})
         with open(path) as f:
             assert json.load(f) == {"v": 2}
+
+
+class TestWhisperShippedTagReuse:
+    def _shipped_registry(self):
+        root = Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+        with open(root) as f:
+            return json.load(f)
+
+    def test_allows_corresponding_whisper_v3_turbo_install(self, temp_settings):
+        shipped = self._shipped_registry()
+        entry = make_entry("whisper-v3", "turbo")
+        entry["name"] = "Whisper-V3-Turbo-NPU2.gguf"
+        entry["asr"] = True
+        entry["details"] = {"family": "whisper-v3", "format": "NPU2"}
+        tag = register(entry, temp_settings, shipped, tag="whisper-v3:turbo")
+        assert tag == "whisper-v3:turbo"
+
+    def test_rejects_unrelated_whisper_tag_collision(self, temp_settings):
+        shipped = self._shipped_registry()
+        entry = make_entry("whisper-v3", "turbo")
+        entry["name"] = "Some-Other-Model"
+        entry["details"] = {"family": "qwen3", "format": "NPU2"}
+        with pytest.raises(SystemExit, match="already exists in the shipped registry"):
+            register(entry, temp_settings, shipped, tag="whisper-v3:turbo")

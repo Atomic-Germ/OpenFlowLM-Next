@@ -70,6 +70,29 @@ def captured_bytes(f, region: str, expert: int, bands_cap: int | None):
     return w, n
 
 
+def build_names(region: str, *, k_override: int | None = None, n_override: int | None = None,
+                per_call: int | None = None, layout: str = "q4nx", captured: bool = False,
+                expert: int = 0) -> tuple[str, str]:
+    """The fixture's output tag and build dir: `(tag, build)`.
+
+    One definition, two callers: this script and utilities/op-gate.py, which has
+    to predict both to run the harness on what the fixture just built. An
+    off-region geometry (--K / --N / --per-call) gets its own tag and build dir,
+    so a second width never reuses the first one's xclbin or vectors.
+    """
+    tag = region if not region.startswith("exp_") else f"{region}{expert}"
+    if layout == "gguf":
+        tag += "_gguf"
+    build = f"{region}_gguf" if layout == "gguf" else region
+    if k_override is not None or n_override is not None:
+        tag += f"_k{k_override}"
+        build += f"_k{k_override}"
+    if per_call is not None:
+        tag += f"_p{per_call}"
+        build += f"_p{per_call}"
+    return tag, build
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--region", default="qkv", choices=sorted(REGIONS))
@@ -82,9 +105,23 @@ def main() -> int:
     ap.add_argument("--layout", default="q4nx", choices=["q4nx", "gguf"],
                     help="q4nx: bf16-scale chunks (q4_1_pack); gguf: the direct-GGUF "
                          "f32-scale chunks (gguf_pool), built with GEMV_SCALES_F32=1")
+    ap.add_argument("--K", type=int, default=None,
+                    help="override the region's K (synthetic only): validate a width no "
+                         "region carries, e.g. --region share_down --N 2560 --K 10496")
+    ap.add_argument("--N", type=int, default=None, help="override the region's N (synthetic only)")
+    ap.add_argument("--per-call", type=int, default=None,
+                    help="chunks per weight element for the build (default: the design's 4; "
+                         "use the recipe's per_call when RS * K / 256 is not a multiple of 4)")
     a = ap.parse_args()
 
     _, n, k, rs = REGIONS[a.region]
+    if a.K is not None or a.N is not None:
+        if a.source != "synthetic":
+            ap.error("--K/--N only apply to the synthetic source (a captured region is fixed)")
+        if a.K is not None:
+            k = a.K
+        if a.N is not None:
+            n = a.N
     if a.source == "captured":
         sys.path.insert(0, str(HERE.parents[1]))
         import fixture_paths as FX
@@ -130,10 +167,8 @@ def main() -> int:
         ref = y.astype(np.float32)
     else:
         ref = pool_reference(w, x, n, k, rs)
-    tag = a.region if not a.region.startswith("exp_") else f"{a.region}{a.expert}"
-    if a.layout == "gguf":
-        tag += "_gguf"
-    build = f"{a.region}_gguf" if a.layout == "gguf" else a.region
+    tag, build = build_names(a.region, k_override=a.K, n_override=a.N, per_call=a.per_call,
+                             layout=a.layout, captured=a.source == "captured", expert=a.expert)
     if a.source == "captured":
         tag += "_cap"
     (HERE / f"w_{tag}.bin").write_bytes(w.tobytes())
@@ -151,7 +186,8 @@ def main() -> int:
     cores = min(8, n // (32 * rs))
     print(f"{tag}: N={n} K={k} RS={rs} w={nbytes} B x={x.nbytes} B ref={ref.nbytes} B "
           f"ref[:4]={ref[:4]} absmax={np.abs(ref).max():.4g}")
-    print(f"build: GEMV_N={n} GEMV_K={k} GEMV_RS={rs} GEMV_CORES={cores} "
+    pc = f"GEMV_PER_CALL={a.per_call} " if a.per_call is not None else ""
+    print(f"build: GEMV_N={n} GEMV_K={k} GEMV_RS={rs} GEMV_CORES={cores} {pc}"
           f"python build_design.py designs/gemv_q4/gemv_q4.py designs/gemv_q4/build_{build}")
     print(f"run:   (cd designs/gemv_q4 && run_kernel run_{tag}.cfg && python compare.py {tag})")
     return 0

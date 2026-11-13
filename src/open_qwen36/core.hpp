@@ -43,7 +43,7 @@
 #include "xrt/xrt_kernel.h"
 
 #include "open_qwen36/block_host.hpp"
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 #include "open_qwen36/layer_major_policy.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
@@ -434,6 +434,22 @@ private:
     std::map<std::string, std::unique_ptr<xrt::hw_context>> ctxs_;
     std::map<std::string, Kern> kerns_;
 
+    /// Host memory registered as a userptr BO (Core::device_bo). Declared before the
+    /// BO vectors so it is destroyed AFTER them: the BO handle has to go before the
+    /// pages it pinned are unmapped.
+    struct HostArena {
+        void* p = nullptr;
+        size_t n = 0;
+        HostArena() = default;
+        HostArena(void* p_, size_t n_) : p(p_), n(n_) {}
+        ~HostArena();
+        HostArena(const HostArena&) = delete;
+        HostArena& operator=(const HostArena&) = delete;
+        HostArena(HostArena&& o) noexcept : p(o.p), n(o.n) { o.p = nullptr; o.n = 0; }
+        HostArena& operator=(HostArena&& o) noexcept;
+    };
+    std::vector<HostArena> host_arenas_;
+
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
     std::vector<xrt::bo> lora_;                 ///< per layer: the draft pass's LoRA pool (rows.lora_file), if any
     xrt::bo lora_none_;                         ///< what the verify stream's unused LoRA argument binds to
@@ -460,6 +476,10 @@ private:
     int submit_ahead_ = 0;
     bool run_reuse_ = true;                    ///< one-dispatch layers and a shared-context tail restart their run (OFLM_OPEN_RUN_REUSE=0 builds anew)
     int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
+    bool merged_q41_ = false;
+    bool layer_nan_ = false;                   ///< OFLM_OPEN_LAYER_NAN: per-layer xres census
+    size_t dump_seq_ = 0;
+    void layer_nan_check(xrt::bo& xres, int layer);                  ///< OFLM_GGUF_POOL_Q41 rewrote the gguf section onto the q4_1 twin
     /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
     /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
     /// this box's NPU clock down through the shared package budget.
@@ -657,6 +677,9 @@ private:
     xrt::hw_context& context(const std::string& name);
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
+    /// A large buffer the NPU reads or writes: ordinary host memory wrapped as a
+    /// userptr BO on Linux (see the definition), the driver's own BO elsewhere.
+    xrt::bo device_bo(size_t bytes);
     xrt::bo& buffer(const std::string& name, int layer);
 void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                    const float* deepstack = nullptr, int n_deepstack = 0);
@@ -714,6 +737,7 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     std::map<std::string, prefill_precision::Workspace> precision_workspaces_;
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
+    void softcap_logits();                  ///< the manifest's final_logit_softcapping, in place
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
     /// T-wide scratch buffer (`wide`, e.g. "gact") and an ordinary T=1
     /// per-layer scratch buffer (`scratch1`, e.g. "act").

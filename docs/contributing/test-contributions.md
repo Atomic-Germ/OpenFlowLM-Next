@@ -183,10 +183,10 @@ TEST(CLI, run_command) {
 
 ```bash
 # Activate toolchain
-source ironvenv/bin/activate
+source utilities/env.sh
 
-# Build test kernel
-python open_kernels/export_qwen36_kernels.py --only qwen3-4b:ax0
+# Build a kernel set to test against
+python utilities/export-kernels.py --specs qwen3-4b
 ```
 
 ### Testing Kernel Execution

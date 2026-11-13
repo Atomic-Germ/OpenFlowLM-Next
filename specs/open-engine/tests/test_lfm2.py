@@ -183,7 +183,7 @@ def test_no_shipped_models_hash_moved():
         "hy-mt2-7b.json": "sha256:857e09843a229d259ec52d5174560e429af3597b446142eab140977a571cd1d7",
         "llama31-8b.json": "sha256:e4baa37e429635bc133b50b9bdac750abb02e6ce58c0d10efcb06bc2bd29a4bb",
         "phi4-mini-4b.json": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
-        "qwen25-3b.json": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
+        "qwen25-3b.json": "sha256:de4056c2532530eac75366b3b5c89b1be841dbcf1d9de04fc02d385abbefe1ba",
         "qwen3-4b.json": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
         "qwen3-8b.json": "sha256:04374f23aede126f34237de4e298a9d385dd36eb6041723032de14884648bab5",
         "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
@@ -196,6 +196,17 @@ def test_no_shipped_models_hash_moved():
         "qwen35-0.8b.json": "sha256:f898e975f56aa24616a8841a31085c52a16d7215e681e1542d80dff57e856155",
         "qwen35-2b.json": "sha256:619eb2dae91329a88a725bedffcbcc32a1050cca5d9836ceedc237d8b36404a7",
         "qwen35-4b.json": "sha256:06e3163fc4e66163c1e2ee7ea97759f1dc7ce23cfa3440c4969418d2f06af7e5",
+        "qwen3-0.6b.json": "sha256:940adeebeea9138ec2b179544c42db59c57f029440d7ffe5a863a4fac1d4615e",
+        "qwen3-1.7b.json": "sha256:46183f28f630e6904f71c1877be03c01f024f887dd6c62babe29c7132c218dbe",
+        "lfm2-2.6b.json": "sha256:90aa8796c49d11448b8841e0d17355b958a83715529d9e09f5cc4befc6ec675d",
+        "llama32-1b.json": "sha256:131a7093af07c5af73222e02979def3fcf66e28ef05a77ba7d35a61240fbf96b",
+        "llama32-3b.json": "sha256:557fcf71747d606e5bc23aaf26ea287f46d06fe58c70ace11d465ae7b9c5c427",
+        "nanbeige41-3b.json": "sha256:a65a02d9c89825b338e369726e0e449a7704394a5ad4cae756d6331930c1e127",
+        "qwen3-14b.json": "sha256:2462660b6a12ca1b5133236ff7417e0911a831c9566f4fc8a6a145cee340152d",
+        "llama3-8b.json": "sha256:1e654fbae88eee4af17d6f7a8e6c46ab632a5242b8ee200af94492602c2e4d2f",
+        "qwen3vl-4b.json": "sha256:981fe2a61e060fe6751aa63d616d321f7e3c96794f7e5ddca0c2138ad985084e",
+        "qwen3vl-8b.json": "sha256:f34322ee88f75e951520353931ab64a5f119a5af2a632654aef4ad3e2926e66f",
+        "gemma-4-12b-it-npu2.json": "sha256:47f6e4ed7aff6b93dc061750f41a8a5f0ae14d6fc4f31c1f716a5f70bc84a0da",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

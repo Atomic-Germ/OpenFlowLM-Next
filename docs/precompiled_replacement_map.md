@@ -14,15 +14,15 @@ The default inventory covers `src/lib` and `src/xclbins`:
 
 | Category | Count | Replacement policy |
 |---|---:|---|
-| Closed XCLBIN NPU kernels | 222 | Recompile from open Iron/mlir-aie designs |
-| Open XCLBIN NPU kernels | 24 | Already ours; shipped with the app, rebuilt at build time |
-| Closed engine/primitive binaries | 133 | Replace host implementation and both XRT/HRX builds |
+| Closed XCLBIN NPU kernels | 141 | Recompile from open Iron/mlir-aie designs |
+| Open XCLBIN NPU kernels | 826 | Ours; shipped with the app, rebuilt at release time |
+| Closed engine/primitive binaries | 91 | Replace host implementation and both XRT/HRX builds |
 | Third-party runtime binaries | 23 | Build or package from upstream open source |
 | Runtime support archives | 2 | Rebuild AIEBU from upstream source |
-| **Total** | **404** | **288 unique payloads, 472,115,761 bytes** |
+| **Total** | **1083** | **688 unique payloads, 662,449,775 bytes** |
 
-The 24 open kernels are the EmbeddingGemma `npu_matmul_f32` designs (6 shapes
-× 2 M pads, plus instruction streams). They are counted separately by the
+The open kernels are the per-family `open_kernels/` sets (826, including the
+EmbeddingGemma `npu_matmul_f32` designs). They are counted separately by the
 inventory tool so work we have already done is never listed as pending.
 
 EmbeddingGemma is now fully closed-binary removed: the `gemma_embedding`
@@ -39,9 +39,15 @@ libraries, 131 PE DLLs, 99 COFF libraries, and 2 static archives. These total
 snapshot; replacement tracking uses the 386-artifact shipping set to avoid
 double-counting.
 
-The 139 closed engine artifacts include Linux `.so`, Windows `.dll`, Windows
-`.lib`, and one backup `.so`. There are 47 ELF libraries: 24 XRT and 23 HRX.
-HRX has no Gemma4-12B engine, so the backend sets are not currently symmetric.
+As of the v0.1.0 open-default sweep the shipping tree carries 91 closed
+engine/primitive artifacts (46 in `src/lib/xrt`, 45 in `src/lib/hrx`): ten
+family engines and five foundational primitives per backend, times the Linux
+`.so` and Windows `.dll`/`.lib` triplets. One HRX asymmetry remains: HRX has
+no Gemma4-12B engine, so `gemma4_12b` is XRT-only. The machine-readable
+inventory is `docs/precompiled_artifacts.json`; after the sweep it counts 826
+open NPU kernels against 141 remaining closed ones (the VL/omni/Whisper/
+Gemma4-E/GPT-OSS escape hatches and the Gemma3/MedGemma vision sets), plus the
+five BERT design sets kept prebuilt by policy (`stage-prebuilts.sh`).
 
 Every XCLBIN has the same section set: `MEM_TOPOLOGY`, `AIE_PARTITION`,
 `EMBEDDED_METADATA`, `IP_LAYOUT`, `CONNECTIVITY`, `GROUP_CONNECTIVITY`, and
@@ -51,9 +57,14 @@ kernel shapes therefore cannot be recovered from metadata alone.
 
 ## Closed Host Libraries
 
-The application links 22 closed libraries. Public headers and call sites show
-that they comprise five foundational primitives and 17 family engines. The
-table also records the now-unlinked `gemma_embedding` residual binaries.
+The application links 15 closed libraries. Public headers and call sites show
+that they comprise five foundational primitives and ten family engines -- the
+the other seven family engines (llama_npu, qwen2_npu, qwen3_npu, lfm2_npu,
+phi4_npu, nanbeige_npu, gemma_text_npu) were removed entirely with their
+prebuilt kernels, their standalone engine test projects, and the closed
+dispatch branches in `modeling_*.cpp`; their models run on the open kernels
+only. The table also records the now-unlinked `gemma_embedding` residual
+binaries.
 
 ### Foundational Primitives
 
@@ -75,14 +86,14 @@ largest source gap because the repository has no declaration for its exported
 | Library | Models/components | Rough open replacement |
 |---|---|---|
 | `gemma_embedding` | EmbeddingGemma | Replaced by `src/open_embedding`; removed, including residual XRT/HRX/Windows binary copies and installer/test references. |
-| `gemma_text_npu` | Gemma3 text | First causal engine. Reuse Gemma3 math from open embedding; add causal masks, KV cache, prefill/decode, and LM head. |
+| `gemma_text_npu` — **removed v0.1.0** | Gemma3 text | First causal engine. Reuse Gemma3 math from open embedding; add causal masks, KV cache, prefill/decode, and LM head. |
 | `gemma_npu` | Gemma3 vision-language | Build on open Gemma3 text, then add SigLIP/vision encoder, projector, image payload, and multimodal RoPE/token placement. |
-| `llama_npu` | Llama3 1B/3B/8B and DeepSeek-Llama 8B | Implement standard GQA decoder with RoPE and KV cache; compile per hidden/intermediate/head shape. |
-| `nanbeige_npu` | Nanbeige4.1 3B | Reuse Llama-like engine with family config and weight-name adapter; validate architectural deviations before adding kernels. |
-| `phi4_npu` | Phi4 mini | Reuse dense decoder primitives; add long/short RoPE behavior and Phi-specific config/weight mapping. |
-| `qwen2_npu` | Qwen2.5 text | Dense GQA decoder with Qwen config/weight mapping. |
-| `qwen3_npu` | Qwen3 sizes, instruct/thinking derivatives, DeepSeek-Qwen3 | Dense decoder plus Q/K norm. Fine-tunes link to size-specific family bundles. |
-| `lfm2_npu` | LFM2/LFM2.5 text variants | Add short-convolution and hybrid layer scheduler around shared attention/GEMM. Keep CPU reference for convolution before NPU offload. |
+| `llama_npu` — **removed v0.1.0** | Llama3 1B/3B/8B and DeepSeek-Llama 8B | Implement standard GQA decoder with RoPE and KV cache; compile per hidden/intermediate/head shape. |
+| `nanbeige_npu` — **removed v0.1.0** | Nanbeige4.1 3B | Reuse Llama-like engine with family config and weight-name adapter; validate architectural deviations before adding kernels. |
+| `phi4_npu` — **removed v0.1.0** | Phi4 mini | Reuse dense decoder primitives; add long/short RoPE behavior and Phi-specific config/weight mapping. |
+| `qwen2_npu` — **removed v0.1.0** | Qwen2.5 text | Dense GQA decoder with Qwen config/weight mapping. |
+| `qwen3_npu` — **removed v0.1.0** | Qwen3 sizes, instruct/thinking derivatives, DeepSeek-Qwen3 | Dense decoder plus Q/K norm. Fine-tunes link to size-specific family bundles. |
+| `lfm2_npu` — **removed v0.1.0** | LFM2/LFM2.5 text variants | Add short-convolution and hybrid layer scheduler around shared attention/GEMM. Keep CPU reference for convolution before NPU offload. |
 | `gpt_oss_npu` | GPT-OSS 20B and Safeguard | Add MoE routing/expert dispatch, attention sinks, and short-sequence GEMM specialization. |
 | `qwen2vl_npu` | Qwen2.5-VL | Build on Qwen2 text; add vision encoder, windowed vision attention, projector, payload ABI, and multimodal positions. |
 | `qwen3vl_npu` | Qwen3-VL 4B | Build on Qwen3 text; add vision encoder/projector and payload handling. |
@@ -195,6 +206,37 @@ The shared test helper, `src/test/CMakeLists.txt`, still unconditionally links
 `q4_npu_eXpress`, `lm_head`, `dequant`, `gemm`, and `mha` for other model
 tests. Any future open-engine test must not use that helper until it is
 refactored to link those primitives conditionally.
+
+## Completed: Fully-Open Family Engine Removal
+
+The open engine has run every text model in the fully-open families for a long
+time; the closed DSOs only served the "model installed, open kernels missing"
+case, silently. As of the v0.1.0 open-default sweep the situation is simple:
+the closed engines for those families are gone, for all builds, with no
+`OFLM_<FAMILY>_ENGINE=closed` escape hatch.
+
+Removed (42 prebuilt engine binaries -- `.so`/`.dll`/`.lib` per backend --,
+15 closed-engine headers, seven standalone engine test projects, and the
+closed XCLBIN bundles that nothing can load any more):
+
+| Removed | Families served | Open set that serves them |
+|---|---|---|
+| `llama_npu` | Llama 3.1-8B, Llama 3.2-1B/3B | `Llama-3.{1,2}-*-NPU2/open_kernels` (density, dx/dx_attn) |
+| `qwen2_npu` | Qwen 2.5-3B-Instruct | `Qwen2.5-3B-Instruct-NPU2/open_kernels` |
+| `qwen3_npu` | Qwen3 sizes plus `qwen3-it:4b` / `qwen3-tk:4b` derivatives and DeepSeek-R1-0528 | `Qwen3-*-NPU2/open_kernels` (derivative tags link to the family bundle at install time) |
+| `lfm2_npu` | LFM2-1.2B/2.6B, LFM2-2.6B-Transcript, LFM2.5-1.2B(-Thinking) | `LFM2-{1.2B,2.6B}-NPU2/open_kernels` (derivative tags likewise) |
+| `phi4_npu` | Phi-4-mini | `Phi4-mini-Instruct-NPU2/open_kernels` |
+| `nanbeige_npu` | Nanbeige 4.1 3B | `Nanbeige4.1-3B-NPU2/open_kernels` |
+| `gemma_text_npu` | Gemma 3 1B | no open set was ever built — not runnable |
+| (closed kernels only) | DeepSeek-R1-Distill-Llama-8B, DeepSeek-R1-0528-Qwen3-8B | family bundles per above |
+
+The remaining closed surface is exactly what still needs it: the VL/omni
+engines (`qwen2vl_npu`, `qwen3vl_npu`, `qwen3_5vl_npu`, `qwen3_5_omni_npu`,
+`qwen3_6_moe_npu`) and the Gemma vision paths (`gemma_npu`), the two closed
+only families (`gemma4e_npu` for Gemma 4 E2B/E4B, `gpt_oss_npu`), `whisper_npu`
+(kept as the documented legacy escape hatch), and
+`gemma4_12b_npu` (Gemma 4 12B vision escape). The `BERT-h*` design sets ship
+prebuilt by policy (`utilities/release/stage-prebuilts.sh`).
 
 ## Third-Party Precompiled Files
 

@@ -15,11 +15,47 @@ parent: Models
 - **Max Output Length:** 448 tokens (fixed)
 - **Maximum Encoder Window:** 30 seconds of audio (1500 frames)
 
-> ⚠️ **The shipped `whisper-v3:turbo` container runs the closed engine.** It ships
-> only `model.q4nx`; the open Whisper path needs both `model.open.safetensors`
-> and a kernel set, which the published container does not have. Its decoder also
-> runs entirely on the host in fp32 -- the open Whisper README makes no NPU
-> performance claim for it.
+> ⚠️ **From this repo, the open engine is the default Whisper.**
+> `oflm add <whisper GGUF repo>` builds the open container from the base
+> checkpoint the README names and installs the tag **`whisper-v3:turbo`** on the
+> open engine. The closed engine is still available (`OFLM_WHISPER_ENGINE=closed`
+> or an upstream `model.q4nx` container), but it is the fallback, not the
+> product.
+
+## Installing the open Whisper build
+
+```shell
+oflm add oxide-lab/whisper-large-v3-turbo-GGUF
+```
+
+One command. The installer:
+
+1. Reads the GGUF header to get the architecture (`whisper`) and from it the
+   family.
+2. Detects the llm.cpp tensor layout (`enc.conv.*`, `dec.*`) — used when the
+   open engine can read the GGUF directly; otherwise it builds
+   `model.open.safetensors` + `weights_manifest.json` from the base HF
+   checkpoint the README names (e.g. `openai/whisper-large-v3-turbo`) by the
+   bundled `q4nx-build --open-whisper` — the same builder a user can invoke
+   by hand:
+   ```shell
+   q4nx-build --open-whisper -i openai/whisper-large-v3-turbo -o Whisper-V3-Turbo-OpenNPU2
+   oflm add Whisper-V3-Turbo-OpenNPU2 --name whisper-open:turbo
+   ```
+3. Registers the tag on the open engine and links the shipped `whisper_gemm`
+   kernel set beside the model.
+
+Then run anything with `--asr 1`; the default ASR model is `whisper-v3:turbo`,
+and it is the open engine:
+
+```shell
+oflm run gemma3:4b --asr 1
+```
+
+The closed engine (`whisper_npu` from the shipped container, upstream-
+only) still exists. It is a fallback away, not a path we maintain — if a
+whisper repo is faster from it than from the open path, prefer the open path
+and move on.
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 
