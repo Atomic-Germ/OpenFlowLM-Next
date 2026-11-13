@@ -1,0 +1,71 @@
+{
+  "model": "LFM2.5-24B-A2B-NPU2",
+  "spec_hash": "sha256:d3cec676c77adfe7ff7e75483e5fcb218b76bfacc90de83ca20083860cc04719",
+  "build_key": "sha256:9b2cf62686205ae9bd4436f5c5f5fb4a1d3c6ac51c00da6decfc93ee91b36c8d",
+  "built": "2026-11-10T15:02:46-0800",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "e5a3fa14879d2049295e2baff02fcc6a82697e73",
+  "source_git_head": "a71246ed23947e638104517eccd41124b8997356",
+  "sets": {
+    "sx0": {
+      "design": "open_kernels/designs/layer_x/sx.py",
+      "env": {
+        "SX_PART": "0"
+      }
+    },
+    "sx1": {
+      "design": "open_kernels/designs/layer_x/sx.py",
+      "env": {
+        "SX_PART": "1"
+      }
+    },
+    "ax0": {
+      "design": "open_kernels/designs/layer_x/ax.py",
+      "env": {
+        "AX_PART": "0"
+      }
+    },
+    "ax1": {
+      "design": "open_kernels/designs/layer_x/ax.py",
+      "env": {
+        "AX_PART": "1"
+      }
+    },
+    "short_conv": {
+      "design": "open_kernels/designs/short_conv/cx.py",
+      "env": {
+        "SC_HID": "2048",
+        "SC_TAPS": "3"
+      }
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {}
+    },
+    "lm_head_q8": {
+      "design": "open_kernels/designs/lm_head_q8/lm_head_q8.py",
+      "env": {
+        "LMHEAD_N": "128000",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "8"
+      }
+    }
+  },
+  "sha256": {
+    "sx0/final.xclbin": "55660208967fe1b982c8997379ef68e74fb7074999fe8eb3f1ac42acb94ef91c",
+    "sx0/insts.bin": "57b19d0717aeffb257ffe637c8837cfcee4066c2b94024964907a46c91551196",
+    "sx1/final.xclbin": "c1e98994be1d54bc813ccb968422ca54e6e1252101d845144718407e72b60146",
+    "sx1/insts.bin": "125e1774c8bd0b3734c8a2bc1e056dfab034dd14d96ce96770248dfc03125a96",
+    "ax0/final.xclbin": "0728d989b33314a42d0ccfcd50334b836ebf25ea4d277ddc1e841085c0975a28",
+    "ax0/insts.bin": "6dc49e8994811dc25ae0fa4c313f6b72f3d34f4e966d5a6ab1b2854d25925e08",
+    "ax1/final.xclbin": "4fff2eaa9e4b786990a87e7a6d836782a8210f109dd8b5647d39e408cb192558",
+    "ax1/insts.bin": "e8086c4f9e5875e00b6b0452194fe61af0f208b4ea97b4b5e97f583684c2b2b7",
+    "short_conv/final.xclbin": "45d5953a34d953d966c6cf0529bc265c6f21d05cd62be173c79d6f6c5ee1bf10",
+    "short_conv/insts.bin": "a7f68e3bf10d1cfd23eda964f98f96c283415682ee71222a623c353828338722",
+    "ln/final.xclbin": "96277918f9ef06c76423139f0117dfeb80b5e42a0b22353dd9bb2b3d68d8673c",
+    "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
+    "lm_head_q8/final.xclbin": "acab632ecec7b28025569476a4724c5b70aa8dff48ec212fe88f4d8fd8bfac81",
+    "lm_head_q8/insts.bin": "aa6d46a771f2930492e9217a338ed2dafc48a63e35f12ad3078fb0d988ce452e"
+  }
+}

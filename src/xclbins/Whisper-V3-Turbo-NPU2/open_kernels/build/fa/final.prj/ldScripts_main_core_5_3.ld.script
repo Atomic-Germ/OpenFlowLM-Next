@@ -1,0 +1,256 @@
+
+MEMORY
+{
+   program (RX) : ORIGIN = 0, LENGTH = 0x0020000
+   data (!RX) : ORIGIN = 0x7CF80, LENGTH = 0x3080
+}
+ENTRY(__start)
+SECTIONS
+{
+  . = 0x0;
+  .text : {
+     /* the __start symbol has to come at address zero. */
+     *crt0.o(.text*)
+     _ctors_start = .;
+     _init_array_start = .;
+     KEEP(SORT(*.init_array))
+     _ctors_end = .;
+     _init_array_end = .;
+     _dtors_start = .;
+     _dtors_end = .;
+     *(.text*)
+  } > program
+  .data : {
+     *(.data*)
+     *(.rodata*)
+  } > data
+  .comment : {
+     *(.comment*)
+  }
+  .symtab : {
+     *(.symtab)
+  }
+  .shstrtab : {
+     *(.shstrtab)
+  }
+  .strtab : {
+     *(.strtab)
+  }
+  .stack_sizes : {
+     *(.stack_sizes)
+  }
+
+. = 0x70000;
+_sp_start_value_DM_stack = .;
+. += 0x800; /* stack */
+. = 0x4A800;
+V_L2L1_h1_s0_1_cons_buff_0 = .;
+. += 0x2000;
+. = 0x40800;
+QK_L2L1_h1_s0_1_cons_buff_0 = .;
+. += 0x2000;
+. = 0x42800;
+GP_L1L2_5_buff_0 = .;
+. += 0x2000;
+. = 0x44800;
+q_saved_5_0 = .;
+. += 0x2000;
+. = 0x46800;
+g_5_0 = .;
+. += 0x2000;
+. = 0x48800;
+gp_5_0 = .;
+. += 0x2000;
+. = 0x4EF00;
+up_5_0 = .;
+. += 0x80;
+. = 0x4EB00;
+sp_5_0 = .;
+. += 0x100;
+. = 0x4EC80;
+s_tmp_5_0 = .;
+. += 0x80;
+. = 0x4EC00;
+r_tmp_5_0 = .;
+. += 0x80;
+. = 0x4EA00;
+s_tmp_f32_5_0 = .;
+. += 0x100;
+. = 0x4C800;
+gp_c_5_0 = .;
+. += 0x2000;
+. = 0x4ED00;
+up_c_5_0 = .;
+. += 0x80;
+. = 0x4E900;
+sp_c_5_0 = .;
+. += 0x100;
+. = 0x4ED80;
+up_s_5_0 = .;
+. += 0x80;
+. = 0x4EE00;
+rc_5_0 = .;
+. += 0x80;
+. = 0x4EE80;
+rl_5_0 = .;
+. += 0x80;
+. = 0x4E800;
+st_5_0 = .;
+. += 0x100;
+. = 0x58800;
+V_L2L1_h1_s1_0_cons_buff_0 = .;
+. += 0x2000;
+. = 0x50800;
+QK_L2L1_h1_s1_0_cons_buff_0 = .;
+. += 0x2000;
+. = 0x52800;
+q_saved_4_1 = .;
+. += 0x2000;
+. = 0x54800;
+g_4_1 = .;
+. += 0x2000;
+. = 0x56800;
+gp_4_1 = .;
+. += 0x2000;
+. = 0x5CF00;
+up_4_1 = .;
+. += 0x80;
+. = 0x5CB00;
+sp_4_1 = .;
+. += 0x100;
+. = 0x5CC80;
+s_tmp_4_1 = .;
+. += 0x80;
+. = 0x5CC00;
+r_tmp_4_1 = .;
+. += 0x80;
+. = 0x5CA00;
+s_tmp_f32_4_1 = .;
+. += 0x100;
+. = 0x5A800;
+gp_c_4_1 = .;
+. += 0x2000;
+. = 0x5CD00;
+up_c_4_1 = .;
+. += 0x80;
+. = 0x5C900;
+sp_c_4_1 = .;
+. += 0x100;
+. = 0x5CD80;
+up_s_4_1 = .;
+. += 0x80;
+. = 0x5CE00;
+rc_4_1 = .;
+. += 0x80;
+. = 0x5CE80;
+rl_4_1 = .;
+. += 0x80;
+. = 0x5C800;
+st_4_1 = .;
+. += 0x100;
+. = 0x68800;
+V_L2L1_h1_s2_1_cons_buff_0 = .;
+. += 0x2000;
+. = 0x60800;
+QK_L2L1_h1_s2_1_cons_buff_0 = .;
+. += 0x2000;
+. = 0x62800;
+q_saved_5_2 = .;
+. += 0x2000;
+. = 0x64800;
+g_5_2 = .;
+. += 0x2000;
+. = 0x66800;
+gp_5_2 = .;
+. += 0x2000;
+. = 0x6CF00;
+up_5_2 = .;
+. += 0x80;
+. = 0x6CB00;
+sp_5_2 = .;
+. += 0x100;
+. = 0x6CC80;
+s_tmp_5_2 = .;
+. += 0x80;
+. = 0x6CC00;
+r_tmp_5_2 = .;
+. += 0x80;
+. = 0x6CA00;
+s_tmp_f32_5_2 = .;
+. += 0x100;
+. = 0x6A800;
+gp_c_5_2 = .;
+. += 0x2000;
+. = 0x6CD00;
+up_c_5_2 = .;
+. += 0x80;
+. = 0x6C900;
+sp_c_5_2 = .;
+. += 0x100;
+. = 0x6CD80;
+up_s_5_2 = .;
+. += 0x80;
+. = 0x6CE00;
+rc_5_2 = .;
+. += 0x80;
+. = 0x6CE80;
+rl_5_2 = .;
+. += 0x80;
+. = 0x6C800;
+st_5_2 = .;
+. += 0x100;
+. = 0x78800;
+V_L2L1_h1_s1_1_cons_buff_0 = .;
+. += 0x2000;
+. = 0x70800;
+QK_L2L1_h1_s1_1_cons_buff_0 = .;
+. += 0x2000;
+. = 0x72800;
+q_saved_5_1 = .;
+. += 0x2000;
+. = 0x74800;
+g_5_1 = .;
+. += 0x2000;
+. = 0x76800;
+gp_5_1 = .;
+. += 0x2000;
+. = 0x7CF00;
+up_5_1 = .;
+. += 0x80;
+. = 0x7CB00;
+sp_5_1 = .;
+. += 0x100;
+. = 0x7CC80;
+s_tmp_5_1 = .;
+. += 0x80;
+. = 0x7CC00;
+r_tmp_5_1 = .;
+. += 0x80;
+. = 0x7CA00;
+s_tmp_f32_5_1 = .;
+. += 0x100;
+. = 0x7A800;
+gp_c_5_1 = .;
+. += 0x2000;
+. = 0x7CD00;
+up_c_5_1 = .;
+. += 0x80;
+. = 0x7C900;
+sp_c_5_1 = .;
+. += 0x100;
+. = 0x7CD80;
+up_s_5_1 = .;
+. += 0x80;
+. = 0x7CE00;
+rc_5_1 = .;
+. += 0x80;
+. = 0x7CE80;
+rl_5_1 = .;
+. += 0x80;
+. = 0x7C800;
+st_5_1 = .;
+. += 0x100;
+  .bss : { *(.bss*) } > data
+}
+INPUT(/home/atomic-germ/Projects/OpenFlowLM-Next/src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/build/fa/final.prj/copy_tile.o)
+PROVIDE(main = core_5_3);

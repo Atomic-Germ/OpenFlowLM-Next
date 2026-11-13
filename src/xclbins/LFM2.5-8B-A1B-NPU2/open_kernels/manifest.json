@@ -1,0 +1,1468 @@
+{
+ "manifest_version": 1,
+ "family": "lfm2moe",
+ "spec": {
+  "family": "lfm2moe",
+  "hidden": 2048,
+  "num_layers": 24,
+  "layer_types": [
+   "short_conv_dense",
+   "short_conv_dense",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv"
+  ],
+  "vocab": 128000,
+  "real_vocab": 125017,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 64,
+  "rotary_dim": 64,
+  "rope_theta": 5000000.0,
+  "rope_scaling": null,
+  "rope_local_theta": 0.0,
+  "sliding_window": 0,
+  "qk_norm": true,
+  "attn_gate": false,
+  "lin_key_heads": 0,
+  "lin_value_heads": 0,
+  "lin_key_dim": 0,
+  "lin_value_dim": 0,
+  "conv_kernel": 3,
+  "intermediate": 7168,
+  "activation": "silu",
+  "sandwich_norms": false,
+  "num_experts": 32,
+  "experts_per_tok": 4,
+  "moe_intermediate": 1792,
+  "shared_expert_intermediate": 0,
+  "norm_eps": 1e-05,
+  "dense_lead": 2,
+  "quant": "q4_1",
+  "extra": {
+   "model_type": "lfm2_moe",
+   "source": "hf_config",
+   "expert_gating_func": 2,
+   "routed_scaling_factor": 1.0,
+   "norm_topk_prob": true,
+   "use_expert_bias": true,
+   "model": "LFM2.5-8B-A1B-NPU2"
+  }
+ },
+ "spec_hash": "sha256:fc8e618f08427dd1cc1c5050f825038f2823f88ceec091a0ace10df8987fb747",
+ "build_key": "sha256:ea800d197959dab67eec19801f72caed370403af965735515e4e89d1b50f9ed8",
+ "max_ctx_default": 4096,
+ "hf_config_check": {
+  "model_type": [
+   "lfm2_moe"
+  ],
+  "hidden_size": 2048,
+  "num_hidden_layers": 24,
+  "vocab_size": 128000,
+  "num_experts": 32,
+  "num_experts_per_tok": 4,
+  "moe_intermediate_size": 1792,
+  "intermediate_size": 7168,
+  "num_dense_layers": 2,
+  "head_dim": 64,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "rope_parameters": {
+   "rope_theta": 5000000.0,
+   "rope_type": "default"
+  },
+  "norm_eps": 1e-05,
+  "layer_types": [
+   "short_conv_dense",
+   "short_conv_dense",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv"
+  ]
+ },
+ "hf_config_defaults": {
+  "norm_eps": 1e-05,
+  "rope_parameters": {
+   "rope_theta": 5000000.0,
+   "rope_type": "default"
+  }
+ },
+ "layout": {
+  "hidden": 2048,
+  "vocab": 128000,
+  "real_vocab": 125017,
+  "chunk_bytes": 5120,
+  "pool_bytes": 536870912,
+  "lmhead_pool_bytes": 278921216,
+  "lmhead_chunk_bytes": 8704,
+  "kv_row": 2048,
+  "ptab_row": 1024,
+  "rotary_dim": 64,
+  "rope_theta": 5000000.0,
+  "rope_inv_freq": [
+   1.0,
+   0.6175287581263234,
+   0.38134176711303913,
+   0.23548950786701264,
+   0.14542154334489538,
+   0.08980198506658653,
+   0.055455308315447815,
+   0.03424524767555086,
+   0.021147425268811283,
+   0.01305914326381826,
+   0.008064396521899431,
+   0.004979996769206797,
+   0.0030752912203613754,
+   0.0018990807681865454,
+   0.0011727369883598215,
+   0.0007241988160306451,
+   0.00044721359549995795,
+   0.00027616725624629693,
+   0.00017054122278492985,
+   0.00010531410951572237,
+   6.503449126242363e-05,
+   4.0160668624661695e-05,
+   2.4800367821310132e-05,
+   1.5314940341769677e-05,
+   9.457416090031758e-06,
+   5.84022641316122e-06,
+   3.6065077640959997e-06,
+   2.227122260735146e-06,
+   1.3753120438672643e-06,
+   8.492947384855272e-07,
+   5.244639251401881e-07,
+   3.2387155637387736e-07
+  ],
+  "rout_idx_off": 128,
+  "moe": {
+   "experts": 32,
+   "topk": 4,
+   "stripe": 163840,
+   "up_bytes": 2621440,
+   "down_core": 327680,
+   "pool_down": 167772160,
+   "share_up": 0,
+   "share_gate": 0,
+   "share_down": 0,
+   "padded_ff": 2048,
+   "halves_per_core": 4
+  }
+ },
+ "layers": [
+  "short_conv_dense",
+  "short_conv_dense",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv"
+ ],
+ "contexts": {
+  "ln": "ln/final.xclbin",
+  "lm": "lm_head_q8/final.xclbin",
+  "sx": "sx0/final.xclbin",
+  "ax": "ax0/final.xclbin",
+  "cx": "short_conv/final.xclbin"
+ },
+ "kernels": {
+  "ln": {
+   "context": "ln",
+   "insts": "ln/insts.bin",
+   "build": "ln"
+  },
+  "lm": {
+   "context": "lm",
+   "insts": "lm_head_q8/insts.bin",
+   "build": "lm_head_q8"
+  },
+  "sx0": {
+   "context": "sx",
+   "insts": "sx0/insts.bin",
+   "build": "sx0"
+  },
+  "sx1": {
+   "context": "sx",
+   "insts": "sx1/insts.bin",
+   "patch": "moeroute2",
+   "build": "sx1"
+  },
+  "ax0": {
+   "context": "ax",
+   "insts": "ax0/insts.bin",
+   "patch": "attnpos",
+   "build": "ax0"
+  },
+  "ax1": {
+   "context": "ax",
+   "insts": "ax1/insts.bin",
+   "patch": "moeroute2",
+   "build": "ax1"
+  },
+  "cx": {
+   "context": "cx",
+   "insts": "short_conv/insts.bin",
+   "build": "short_conv"
+  }
+ },
+ "layer_types": {
+  "short_conv": {
+   "buffers": {
+    "consts": 167936,
+    "act": 126976,
+    "state": {
+     "kind": "linear",
+     "bytes": 16384
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "sx0",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act"
+     ]
+    },
+    {
+     "op": "moeroute2",
+     "kernel": "sx1",
+     "act_off": 55296
+    },
+    {
+     "op": "run",
+     "kernel": "sx1",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act"
+     ]
+    }
+   ],
+   "pack": {
+    "pool": [
+     {
+      "op": "expert_stripes",
+      "up": "model.layer.{l}.mlp.up_exps_proj.weight",
+      "gate": "model.layer.{l}.mlp.gate_exps_proj.weight",
+      "dst": 0,
+      "experts": 32,
+      "stripes": 16,
+      "stripe_bytes": 163840,
+      "in_dim": 2048,
+      "src_rows": 1792
+     },
+     {
+      "op": "expert_down",
+      "tensor": "model.layer.{l}.mlp.down_exps_proj.weight",
+      "dst": 167772160,
+      "experts": 32,
+      "expert_bytes": 2621440,
+      "src_rows": 1792
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+      "dst": 251658240,
+      "chunk0": 0,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+      "dst": 254279680,
+      "chunk0": 512,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+      "dst": 256901120,
+      "chunk0": 1024,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.out_proj.weight",
+      "dst": 259522560,
+      "nch": 512,
+      "in_dim": 2048
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.post_attention_layernorm.weight",
+      "dst": 4096,
+      "cap": 4096
+     },
+     {
+      "op": "transpose",
+      "tensor": "model.layer.{l}.shortconv.conv.weight",
+      "dst": 149504,
+      "rows": 2048,
+      "cols": 3,
+      "elem": 2
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.moe_router.weight",
+      "dst": 10240,
+      "cap": 131072
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.exp_probs_b.bias",
+      "dst": 145408,
+      "cap": 128
+     }
+    ]
+   }
+  },
+  "full_attention": {
+   "buffers": {
+    "consts": 167936,
+    "act": 126976,
+    "state": {
+     "kind": "kv",
+     "row": 2048
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "ax0",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ]
+    },
+    {
+     "op": "moeroute2",
+     "kernel": "ax1",
+     "act_off": 55296
+    },
+    {
+     "op": "run",
+     "kernel": "ax1",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ]
+    }
+   ],
+   "pack": {
+    "pool": [
+     {
+      "op": "expert_stripes",
+      "up": "model.layer.{l}.mlp.up_exps_proj.weight",
+      "gate": "model.layer.{l}.mlp.gate_exps_proj.weight",
+      "dst": 0,
+      "experts": 32,
+      "stripes": 16,
+      "stripe_bytes": 163840,
+      "in_dim": 2048,
+      "src_rows": 1792
+     },
+     {
+      "op": "expert_down",
+      "tensor": "model.layer.{l}.mlp.down_exps_proj.weight",
+      "dst": 167772160,
+      "experts": 32,
+      "expert_bytes": 2621440,
+      "src_rows": 1792
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.self_attn.q_proj.weight",
+      "dst": 251658240,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.self_attn.k_proj.weight",
+      "dst": 254279680,
+      "nch": 128,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.self_attn.v_proj.weight",
+      "dst": 254935040,
+      "nch": 128,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.self_attn.o_proj.weight",
+      "dst": 255590400,
+      "nch": 512,
+      "in_dim": 2048
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.post_attention_layernorm.weight",
+      "dst": 4096,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.self_attn.q_norm.weight",
+      "dst": 8192,
+      "cap": 128
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.self_attn.k_norm.weight",
+      "dst": 8320,
+      "cap": 128
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.moe_router.weight",
+      "dst": 10240,
+      "cap": 131072
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.exp_probs_b.bias",
+      "dst": 145408,
+      "cap": 128
+     }
+    ]
+   }
+  },
+  "short_conv_dense": {
+   "buffers": {
+    "consts": 167936,
+    "act": 126976,
+    "state": {
+     "kind": "linear",
+     "bytes": 16384
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "cx",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act"
+     ]
+    }
+   ],
+   "pack": {
+    "pool": [
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+      "dst": 251658240,
+      "chunk0": 0,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+      "dst": 254279680,
+      "chunk0": 512,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+      "dst": 256901120,
+      "chunk0": 1024,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.shortconv.out_proj.weight",
+      "dst": 259522560,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.mlp.up_proj.weight",
+      "dst": 262144000,
+      "nch": 1792,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.mlp.gate_proj.weight",
+      "dst": 271319040,
+      "nch": 1792,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layer.{l}.mlp.down_proj.weight",
+      "dst": 280494080,
+      "nch": 1792,
+      "in_dim": 7168
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layer.{l}.post_attention_layernorm.weight",
+      "dst": 4096,
+      "cap": 4096
+     },
+     {
+      "op": "transpose",
+      "tensor": "model.layer.{l}.shortconv.conv.weight",
+      "dst": 149504,
+      "rows": 2048,
+      "cols": 3,
+      "elem": 2
+     }
+    ]
+   }
+  }
+ },
+ "tail": [
+  {
+   "op": "run",
+   "kernel": "ln",
+   "args": [
+    "xres",
+    "zero",
+    "normw",
+    "xresf",
+    "hn"
+   ]
+  },
+  {
+   "op": "run",
+   "kernel": "lm",
+   "args": [
+    "lmpool",
+    "hn",
+    "logits"
+   ]
+  }
+ ],
+ "globals": {
+  "xres": 8192,
+  "zero": 8192,
+  "normw": 4096,
+  "xresf": 8192,
+  "hn": 4096,
+  "logits": 512000,
+  "lmpool": 278921216,
+  "ptab": {
+   "per_row": 1024
+  }
+ },
+ "builds": {
+  "sx0": {
+   "design": "layer_x/sx.py",
+   "build_dir": "layer_x/build_sx0",
+   "env": {
+    "SX_PART": "0"
+   }
+  },
+  "sx1": {
+   "design": "layer_x/sx.py",
+   "build_dir": "layer_x/build_sx1",
+   "env": {
+    "SX_PART": "1"
+   }
+  },
+  "ax0": {
+   "design": "layer_x/ax.py",
+   "build_dir": "layer_x/build_ax0",
+   "env": {
+    "AX_PART": "0"
+   }
+  },
+  "ax1": {
+   "design": "layer_x/ax.py",
+   "build_dir": "layer_x/build_ax1",
+   "env": {
+    "AX_PART": "1"
+   }
+  },
+  "short_conv": {
+   "design": "short_conv/cx.py",
+   "build_dir": "short_conv/build_h2048_t3_lfm2moe",
+   "env": {
+    "SC_HID": "2048",
+    "SC_TAPS": "3"
+   }
+  },
+  "ln": {
+   "design": "ln/ln.py",
+   "build_dir": "ln/build",
+   "env": {}
+  },
+  "lm_head_q8": {
+   "design": "lm_head_q8/lm_head_q8.py",
+   "build_dir": "lm_head_q8/build_full",
+   "env": {
+    "LMHEAD_N": "128000",
+    "LMHEAD_K": "2048",
+    "LMHEAD_CORES": "8"
+   }
+  }
+ },
+ "pack": {
+  "pool_bytes": 536870912,
+  "chunk_bytes": 5120,
+  "lm_head": {
+   "pool_bytes": 278921216,
+   "ops": [
+    {
+     "op": "lmhead_q8",
+     "tensor": "lm_head.weight",
+     "chunk_bytes": 8704,
+     "in_dim": 2048,
+     "dst": 0
+    }
+   ]
+  },
+  "embed": {
+   "tensor": "model.embed_tokens.weight",
+   "dim": 2048
+  },
+  "norm": {
+   "tensor": "model.norm.weight",
+   "bytes": 4096
+  }
+ },
+ "gguf": {
+  "manifest_version": 1,
+  "family": "lfm2moe",
+  "spec": {
+   "family": "lfm2moe",
+   "hidden": 2048,
+   "num_layers": 24,
+   "layer_types": [
+    "short_conv_dense",
+    "short_conv_dense",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv"
+   ],
+   "vocab": 128000,
+   "real_vocab": 125017,
+   "num_heads": 32,
+   "num_kv_heads": 8,
+   "head_dim": 64,
+   "rotary_dim": 64,
+   "rope_theta": 5000000.0,
+   "rope_scaling": null,
+   "rope_local_theta": 0.0,
+   "sliding_window": 0,
+   "qk_norm": true,
+   "attn_gate": false,
+   "lin_key_heads": 0,
+   "lin_value_heads": 0,
+   "lin_key_dim": 0,
+   "lin_value_dim": 0,
+   "conv_kernel": 3,
+   "intermediate": 7168,
+   "activation": "silu",
+   "sandwich_norms": false,
+   "num_experts": 32,
+   "experts_per_tok": 4,
+   "moe_intermediate": 1792,
+   "shared_expert_intermediate": 0,
+   "norm_eps": 1e-05,
+   "dense_lead": 2,
+   "quant": "q4_1_gguf",
+   "extra": {
+    "model_type": "lfm2_moe",
+    "source": "hf_config",
+    "expert_gating_func": 2,
+    "routed_scaling_factor": 1.0,
+    "norm_topk_prob": true,
+    "use_expert_bias": true,
+    "model": "LFM2.5-8B-A1B-NPU2"
+   }
+  },
+  "spec_hash": "sha256:aaec3eafe5e3800eef9367a341894dc000ebd5eba8d52845511b7bc041deab9b",
+  "build_key": "sha256:ea800d197959dab67eec19801f72caed370403af965735515e4e89d1b50f9ed8",
+  "max_ctx_default": 4096,
+  "hf_config_check": {
+   "model_type": [
+    "lfm2_moe"
+   ],
+   "hidden_size": 2048,
+   "num_hidden_layers": 24,
+   "vocab_size": 128000,
+   "num_experts": 32,
+   "num_experts_per_tok": 4,
+   "moe_intermediate_size": 1792,
+   "intermediate_size": 7168,
+   "num_dense_layers": 2,
+   "head_dim": 64,
+   "num_attention_heads": 32,
+   "num_key_value_heads": 8,
+   "rope_parameters": {
+    "rope_theta": 5000000.0,
+    "rope_type": "default"
+   },
+   "norm_eps": 1e-05,
+   "layer_types": [
+    "short_conv_dense",
+    "short_conv_dense",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv",
+    "full_attention",
+    "short_conv",
+    "short_conv"
+   ]
+  },
+  "hf_config_defaults": {
+   "norm_eps": 1e-05,
+   "rope_parameters": {
+    "rope_theta": 5000000.0,
+    "rope_type": "default"
+   }
+  },
+  "layout": {
+   "hidden": 2048,
+   "vocab": 128000,
+   "real_vocab": 125017,
+   "chunk_bytes": 5120,
+   "pool_bytes": 536870912,
+   "lmhead_pool_bytes": 278921216,
+   "lmhead_chunk_bytes": 8704,
+   "kv_row": 2048,
+   "ptab_row": 1024,
+   "rotary_dim": 64,
+   "rope_theta": 5000000.0,
+   "rope_inv_freq": [
+    1.0,
+    0.6175287581263234,
+    0.38134176711303913,
+    0.23548950786701264,
+    0.14542154334489538,
+    0.08980198506658653,
+    0.055455308315447815,
+    0.03424524767555086,
+    0.021147425268811283,
+    0.01305914326381826,
+    0.008064396521899431,
+    0.004979996769206797,
+    0.0030752912203613754,
+    0.0018990807681865454,
+    0.0011727369883598215,
+    0.0007241988160306451,
+    0.00044721359549995795,
+    0.00027616725624629693,
+    0.00017054122278492985,
+    0.00010531410951572237,
+    6.503449126242363e-05,
+    4.0160668624661695e-05,
+    2.4800367821310132e-05,
+    1.5314940341769677e-05,
+    9.457416090031758e-06,
+    5.84022641316122e-06,
+    3.6065077640959997e-06,
+    2.227122260735146e-06,
+    1.3753120438672643e-06,
+    8.492947384855272e-07,
+    5.244639251401881e-07,
+    3.2387155637387736e-07
+   ],
+   "rout_idx_off": 128,
+   "moe": {
+    "experts": 32,
+    "topk": 4,
+    "stripe": 163840,
+    "up_bytes": 2621440,
+    "down_core": 327680,
+    "pool_down": 167772160,
+    "share_up": 0,
+    "share_gate": 0,
+    "share_down": 0,
+    "padded_ff": 2048,
+    "halves_per_core": 4
+   }
+  },
+  "layers": [
+   "short_conv_dense",
+   "short_conv_dense",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv"
+  ],
+  "contexts": {
+   "ln": "ln/final.xclbin",
+   "lm": "lm_head_q8/final.xclbin",
+   "sx": "sx0/final.xclbin",
+   "ax": "ax0/final.xclbin",
+   "cx": "short_conv/final.xclbin"
+  },
+  "kernels": {
+   "ln": {
+    "context": "ln",
+    "insts": "ln/insts.bin",
+    "build": "ln"
+   },
+   "lm": {
+    "context": "lm",
+    "insts": "lm_head_q8/insts.bin",
+    "build": "lm_head_q8"
+   },
+   "sx0": {
+    "context": "sx",
+    "insts": "sx0/insts.bin",
+    "build": "sx0"
+   },
+   "sx1": {
+    "context": "sx",
+    "insts": "sx1/insts.bin",
+    "patch": "moeroute2",
+    "build": "sx1"
+   },
+   "ax0": {
+    "context": "ax",
+    "insts": "ax0/insts.bin",
+    "patch": "attnpos",
+    "build": "ax0"
+   },
+   "ax1": {
+    "context": "ax",
+    "insts": "ax1/insts.bin",
+    "patch": "moeroute2",
+    "build": "ax1"
+   },
+   "cx": {
+    "context": "cx",
+    "insts": "short_conv/insts.bin",
+    "build": "short_conv"
+   }
+  },
+  "layer_types": {
+   "short_conv": {
+    "buffers": {
+     "consts": 167936,
+     "act": 126976,
+     "state": {
+      "kind": "linear",
+      "bytes": 16384
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "sx0",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act"
+      ]
+     },
+     {
+      "op": "moeroute2",
+      "kernel": "sx1",
+      "act_off": 55296
+     },
+     {
+      "op": "run",
+      "kernel": "sx1",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act"
+      ]
+     }
+    ],
+    "pack": {
+     "pool": [
+      {
+       "op": "expert_stripes_gguf",
+       "up": "model.layer.{l}.mlp.up_exps_proj.weight",
+       "gate": "model.layer.{l}.mlp.gate_exps_proj.weight",
+       "dst": 0,
+       "experts": 32,
+       "stripes": 16,
+       "stripe_bytes": 163840,
+       "in_dim": 2048,
+       "src_rows": 1792
+      },
+      {
+       "op": "expert_down_gguf",
+       "tensor": "model.layer.{l}.mlp.down_exps_proj.weight",
+       "dst": 167772160,
+       "experts": 32,
+       "expert_bytes": 2621440,
+       "src_rows": 1792
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+       "dst": 251658240,
+       "chunk0": 0,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+       "dst": 254279680,
+       "chunk0": 512,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+       "dst": 256901120,
+       "chunk0": 1024,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.out_proj.weight",
+       "dst": 259522560,
+       "nch": 512,
+       "in_dim": 2048
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 4096
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.post_attention_layernorm.weight",
+       "dst": 4096,
+       "cap": 4096
+      },
+      {
+       "op": "transpose",
+       "tensor": "model.layer.{l}.shortconv.conv.weight",
+       "dst": 149504,
+       "rows": 2048,
+       "cols": 3,
+       "elem": 2
+      },
+      {
+       "op": "transpose",
+       "tensor": "model.layer.{l}.moe_router.weight",
+       "dst": 10240,
+       "rows": 32,
+       "cols": 2048,
+       "elem": 2
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.exp_probs_b.bias",
+       "dst": 145408,
+       "cap": 128
+      }
+     ]
+    }
+   },
+   "full_attention": {
+    "buffers": {
+     "consts": 167936,
+     "act": 126976,
+     "state": {
+      "kind": "kv",
+      "row": 2048
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "ax0",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act",
+       "ptab"
+      ]
+     },
+     {
+      "op": "moeroute2",
+      "kernel": "ax1",
+      "act_off": 55296
+     },
+     {
+      "op": "run",
+      "kernel": "ax1",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act",
+       "ptab"
+      ]
+     }
+    ],
+    "pack": {
+     "pool": [
+      {
+       "op": "expert_stripes_gguf",
+       "up": "model.layer.{l}.mlp.up_exps_proj.weight",
+       "gate": "model.layer.{l}.mlp.gate_exps_proj.weight",
+       "dst": 0,
+       "experts": 32,
+       "stripes": 16,
+       "stripe_bytes": 163840,
+       "in_dim": 2048,
+       "src_rows": 1792
+      },
+      {
+       "op": "expert_down_gguf",
+       "tensor": "model.layer.{l}.mlp.down_exps_proj.weight",
+       "dst": 167772160,
+       "experts": 32,
+       "expert_bytes": 2621440,
+       "src_rows": 1792
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.self_attn.q_proj.weight",
+       "dst": 251658240,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.self_attn.k_proj.weight",
+       "dst": 254279680,
+       "nch": 128,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.self_attn.v_proj.weight",
+       "dst": 254935040,
+       "nch": 128,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.self_attn.o_proj.weight",
+       "dst": 255590400,
+       "nch": 512,
+       "in_dim": 2048
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 4096
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.post_attention_layernorm.weight",
+       "dst": 4096,
+       "cap": 4096
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.self_attn.q_norm.weight",
+       "dst": 8192,
+       "cap": 128
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.self_attn.k_norm.weight",
+       "dst": 8320,
+       "cap": 128
+      },
+      {
+       "op": "transpose",
+       "tensor": "model.layer.{l}.moe_router.weight",
+       "dst": 10240,
+       "rows": 32,
+       "cols": 2048,
+       "elem": 2
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.exp_probs_b.bias",
+       "dst": 145408,
+       "cap": 128
+      }
+     ]
+    }
+   },
+   "short_conv_dense": {
+    "buffers": {
+     "consts": 167936,
+     "act": 126976,
+     "state": {
+      "kind": "linear",
+      "bytes": 16384
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "cx",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act"
+      ]
+     }
+    ],
+    "pack": {
+     "pool": [
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+       "dst": 251658240,
+       "chunk0": 0,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+       "dst": 254279680,
+       "chunk0": 512,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.in_proj.weight",
+       "dst": 256901120,
+       "chunk0": 1024,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.shortconv.out_proj.weight",
+       "dst": 259522560,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.mlp.up_proj.weight",
+       "dst": 262144000,
+       "nch": 1792,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.mlp.gate_proj.weight",
+       "dst": 271319040,
+       "nch": 1792,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layer.{l}.mlp.down_proj.weight",
+       "dst": 280494080,
+       "nch": 1792,
+       "in_dim": 7168
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 4096
+      },
+      {
+       "op": "put",
+       "tensor": "model.layer.{l}.post_attention_layernorm.weight",
+       "dst": 4096,
+       "cap": 4096
+      },
+      {
+       "op": "transpose",
+       "tensor": "model.layer.{l}.shortconv.conv.weight",
+       "dst": 149504,
+       "rows": 2048,
+       "cols": 3,
+       "elem": 2
+      }
+     ]
+    }
+   }
+  },
+  "tail": [
+   {
+    "op": "run",
+    "kernel": "ln",
+    "args": [
+     "xres",
+     "zero",
+     "normw",
+     "xresf",
+     "hn"
+    ]
+   },
+   {
+    "op": "run",
+    "kernel": "lm",
+    "args": [
+     "lmpool",
+     "hn",
+     "logits"
+    ]
+   }
+  ],
+  "globals": {
+   "xres": 8192,
+   "zero": 8192,
+   "normw": 4096,
+   "xresf": 8192,
+   "hn": 4096,
+   "logits": 512000,
+   "lmpool": 278921216,
+   "ptab": {
+    "per_row": 1024
+   }
+  },
+  "builds": {
+   "sx0": {
+    "design": "layer_x/sx.py",
+    "build_dir": "layer_x/build_sx0",
+    "env": {
+     "SX_PART": "0"
+    }
+   },
+   "sx1": {
+    "design": "layer_x/sx.py",
+    "build_dir": "layer_x/build_sx1",
+    "env": {
+     "SX_PART": "1"
+    }
+   },
+   "ax0": {
+    "design": "layer_x/ax.py",
+    "build_dir": "layer_x/build_ax0",
+    "env": {
+     "AX_PART": "0"
+    }
+   },
+   "ax1": {
+    "design": "layer_x/ax.py",
+    "build_dir": "layer_x/build_ax1",
+    "env": {
+     "AX_PART": "1"
+    }
+   },
+   "short_conv": {
+    "design": "short_conv/cx.py",
+    "build_dir": "short_conv/build_h2048_t3_lfm2moe",
+    "env": {
+     "SC_HID": "2048",
+     "SC_TAPS": "3"
+    }
+   },
+   "ln": {
+    "design": "ln/ln.py",
+    "build_dir": "ln/build",
+    "env": {}
+   },
+   "lm_head_q8": {
+    "design": "lm_head_q8/lm_head_q8.py",
+    "build_dir": "lm_head_q8/build_full",
+    "env": {
+     "LMHEAD_N": "128000",
+     "LMHEAD_K": "2048",
+     "LMHEAD_CORES": "8"
+    }
+   }
+  },
+  "pack": {
+   "pool_bytes": 536870912,
+   "chunk_bytes": 5120,
+   "lm_head": {
+    "pool_bytes": 278921216,
+    "ops": [
+     {
+      "op": "lmhead_q8",
+      "tensor": "lm_head.weight",
+      "chunk_bytes": 8704,
+      "in_dim": 2048,
+      "dst": 0
+     }
+    ]
+   },
+   "embed": {
+    "tensor": "model.embed_tokens.weight",
+    "dim": 2048
+   },
+   "norm": {
+    "tensor": "model.norm.weight",
+    "bytes": 4096
+   }
+  }
+ }
+}

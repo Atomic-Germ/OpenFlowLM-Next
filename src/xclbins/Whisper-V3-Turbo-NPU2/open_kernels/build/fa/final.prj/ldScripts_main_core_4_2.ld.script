@@ -1,0 +1,211 @@
+
+MEMORY
+{
+   program (RX) : ORIGIN = 0, LENGTH = 0x0020000
+   data (!RX) : ORIGIN = 0x7EF80, LENGTH = 0x1080
+}
+ENTRY(__start)
+SECTIONS
+{
+  . = 0x0;
+  .text : {
+     /* the __start symbol has to come at address zero. */
+     *crt0.o(.text*)
+     _ctors_start = .;
+     _init_array_start = .;
+     KEEP(SORT(*.init_array))
+     _ctors_end = .;
+     _init_array_end = .;
+     _dtors_start = .;
+     _dtors_end = .;
+     *(.text*)
+  } > program
+  .data : {
+     *(.data*)
+     *(.rodata*)
+  } > data
+  .comment : {
+     *(.comment*)
+  }
+  .symtab : {
+     *(.symtab)
+  }
+  .shstrtab : {
+     *(.shstrtab)
+  }
+  .strtab : {
+     *(.strtab)
+  }
+  .stack_sizes : {
+     *(.stack_sizes)
+  }
+
+. = 0x70000;
+_sp_start_value_DM_stack = .;
+. += 0x800; /* stack */
+/* No tile with memory exists to the south. */
+. = 0x40000;
+. += 0x10000;
+. = 0x5A800;
+V_L2L1_h0_s0_3_cons_buff_0 = .;
+. += 0x2000;
+. = 0x50800;
+QK_L2L1_h0_s0_3_cons_buff_0 = .;
+. += 0x2000;
+. = 0x52800;
+GP_L1L2_3_buff_0 = .;
+. += 0x2000;
+. = 0x54800;
+q_saved_3_0 = .;
+. += 0x2000;
+. = 0x56800;
+g_3_0 = .;
+. += 0x2000;
+. = 0x58800;
+gp_3_0 = .;
+. += 0x2000;
+. = 0x5EF00;
+up_3_0 = .;
+. += 0x80;
+. = 0x5EB00;
+sp_3_0 = .;
+. += 0x100;
+. = 0x5EC80;
+s_tmp_3_0 = .;
+. += 0x80;
+. = 0x5EC00;
+r_tmp_3_0 = .;
+. += 0x80;
+. = 0x5EA00;
+s_tmp_f32_3_0 = .;
+. += 0x100;
+. = 0x5C800;
+gp_c_3_0 = .;
+. += 0x2000;
+. = 0x5ED00;
+up_c_3_0 = .;
+. += 0x80;
+. = 0x5E900;
+sp_c_3_0 = .;
+. += 0x100;
+. = 0x5ED80;
+up_s_3_0 = .;
+. += 0x80;
+. = 0x5EE00;
+rc_3_0 = .;
+. += 0x80;
+. = 0x5EE80;
+rl_3_0 = .;
+. += 0x80;
+. = 0x5E800;
+st_3_0 = .;
+. += 0x100;
+. = 0x68800;
+V_L2L1_h1_s1_0_cons_buff_0 = .;
+. += 0x2000;
+. = 0x60800;
+QK_L2L1_h1_s1_0_cons_buff_0 = .;
+. += 0x2000;
+. = 0x62800;
+q_saved_4_1 = .;
+. += 0x2000;
+. = 0x64800;
+g_4_1 = .;
+. += 0x2000;
+. = 0x66800;
+gp_4_1 = .;
+. += 0x2000;
+. = 0x6CF00;
+up_4_1 = .;
+. += 0x80;
+. = 0x6CB00;
+sp_4_1 = .;
+. += 0x100;
+. = 0x6CC80;
+s_tmp_4_1 = .;
+. += 0x80;
+. = 0x6CC00;
+r_tmp_4_1 = .;
+. += 0x80;
+. = 0x6CA00;
+s_tmp_f32_4_1 = .;
+. += 0x100;
+. = 0x6A800;
+gp_c_4_1 = .;
+. += 0x2000;
+. = 0x6CD00;
+up_c_4_1 = .;
+. += 0x80;
+. = 0x6C900;
+sp_c_4_1 = .;
+. += 0x100;
+. = 0x6CD80;
+up_s_4_1 = .;
+. += 0x80;
+. = 0x6CE00;
+rc_4_1 = .;
+. += 0x80;
+. = 0x6CE80;
+rl_4_1 = .;
+. += 0x80;
+. = 0x6C800;
+st_4_1 = .;
+. += 0x100;
+. = 0x7A800;
+V_L2L1_h1_s0_0_cons_buff_0 = .;
+. += 0x2000;
+. = 0x70800;
+QK_L2L1_h1_s0_0_cons_buff_0 = .;
+. += 0x2000;
+. = 0x72800;
+GP_L1L2_4_buff_0 = .;
+. += 0x2000;
+. = 0x74800;
+q_saved_4_0 = .;
+. += 0x2000;
+. = 0x76800;
+g_4_0 = .;
+. += 0x2000;
+. = 0x78800;
+gp_4_0 = .;
+. += 0x2000;
+. = 0x7EF00;
+up_4_0 = .;
+. += 0x80;
+. = 0x7EB00;
+sp_4_0 = .;
+. += 0x100;
+. = 0x7EC80;
+s_tmp_4_0 = .;
+. += 0x80;
+. = 0x7EC00;
+r_tmp_4_0 = .;
+. += 0x80;
+. = 0x7EA00;
+s_tmp_f32_4_0 = .;
+. += 0x100;
+. = 0x7C800;
+gp_c_4_0 = .;
+. += 0x2000;
+. = 0x7ED00;
+up_c_4_0 = .;
+. += 0x80;
+. = 0x7E900;
+sp_c_4_0 = .;
+. += 0x100;
+. = 0x7ED80;
+up_s_4_0 = .;
+. += 0x80;
+. = 0x7EE00;
+rc_4_0 = .;
+. += 0x80;
+. = 0x7EE80;
+rl_4_0 = .;
+. += 0x80;
+. = 0x7E800;
+st_4_0 = .;
+. += 0x100;
+  .bss : { *(.bss*) } > data
+}
+INPUT(/home/atomic-germ/Projects/OpenFlowLM-Next/src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/build/fa/final.prj/copy_tile.o)
+PROVIDE(main = core_4_2);

@@ -1,0 +1,532 @@
+{
+  "model": "Qwen3.6-35B-A3B-NPU2",
+  "spec_hash": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
+  "build_key": "sha256:038f76089c3b704484ab43ec273f14121b182f8a292e4edc206afda25a4f1181",
+  "built": "2026-11-12T14:45:35-0800",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "e5a3fa14879d2049295e2baff02fcc6a82697e73",
+  "source_git_head": "f940fd9fc9ef82aa6d68bd4bae3ea0567ca3a7ba",
+  "sets": {
+    "lx0": {
+      "design": "open_kernels/designs/layer_x/ux.py",
+      "env": {
+        "UX_PART": "0"
+      }
+    },
+    "lx1": {
+      "design": "open_kernels/designs/layer_x/ux.py",
+      "env": {
+        "UX_PART": "1"
+      }
+    },
+    "ax0": {
+      "design": "open_kernels/designs/layer_x/ux.py",
+      "env": {
+        "UX_PART": "2"
+      }
+    },
+    "ax1": {
+      "design": "open_kernels/designs/layer_x/ux.py",
+      "env": {
+        "UX_PART": "3"
+      }
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {}
+    },
+    "lm_head_q8": {
+      "design": "open_kernels/designs/lm_head_q8/lm_head_q8.py",
+      "env": {
+        "LMHEAD_N": "248320",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "mx_linear": {
+      "design": "open_kernels/designs/layer_x/mx.py",
+      "env": {
+        "MX_KIND": "linear"
+      }
+    },
+    "mx_full": {
+      "design": "open_kernels/designs/layer_x/mx.py",
+      "env": {
+        "MX_KIND": "full"
+      }
+    },
+    "mb_s256": {
+      "design": "open_kernels/designs/moe_batch/moe_batch.py",
+      "env": {
+        "MB_SLOTS": "256",
+        "MB_NT": "8",
+        "MB_HID": "2048",
+        "MB_FF": "512",
+        "MB_EXPERTS": "256",
+        "MB_POOL_DOWN": "335544320",
+        "MB_POOL_BYTES": "536870912"
+      }
+    },
+    "mb_s128": {
+      "design": "open_kernels/designs/moe_batch/moe_batch.py",
+      "env": {
+        "MB_SLOTS": "128",
+        "MB_NT": "8",
+        "MB_HID": "2048",
+        "MB_FF": "512",
+        "MB_EXPERTS": "256",
+        "MB_POOL_DOWN": "335544320",
+        "MB_POOL_BYTES": "536870912"
+      }
+    },
+    "mb_s64": {
+      "design": "open_kernels/designs/moe_batch/moe_batch.py",
+      "env": {
+        "MB_SLOTS": "64",
+        "MB_NT": "8",
+        "MB_HID": "2048",
+        "MB_FF": "512",
+        "MB_EXPERTS": "256",
+        "MB_POOL_DOWN": "335544320",
+        "MB_POOL_BYTES": "536870912"
+      }
+    },
+    "mb_s32": {
+      "design": "open_kernels/designs/moe_batch/moe_batch.py",
+      "env": {
+        "MB_SLOTS": "32",
+        "MB_NT": "8",
+        "MB_HID": "2048",
+        "MB_FF": "512",
+        "MB_EXPERTS": "256",
+        "MB_POOL_DOWN": "335544320",
+        "MB_POOL_BYTES": "536870912"
+      }
+    },
+    "mb_s16": {
+      "design": "open_kernels/designs/moe_batch/moe_batch.py",
+      "env": {
+        "MB_SLOTS": "16",
+        "MB_NT": "8",
+        "MB_HID": "2048",
+        "MB_FF": "512",
+        "MB_EXPERTS": "256",
+        "MB_POOL_DOWN": "335544320",
+        "MB_POOL_BYTES": "536870912"
+      }
+    },
+    "mb_s8": {
+      "design": "open_kernels/designs/moe_batch/moe_batch.py",
+      "env": {
+        "MB_SLOTS": "8",
+        "MB_NT": "8",
+        "MB_HID": "2048",
+        "MB_FF": "512",
+        "MB_EXPERTS": "256",
+        "MB_POOL_DOWN": "335544320",
+        "MB_POOL_BYTES": "536870912"
+      }
+    },
+    "ag_s256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "256"
+      }
+    },
+    "ag_pv256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "256"
+      }
+    },
+    "ag_s512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "512"
+      }
+    },
+    "ag_pv512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "512",
+        "AG_N": "256"
+      }
+    },
+    "ag_s768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "768"
+      }
+    },
+    "ag_pv768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "768",
+        "AG_N": "256"
+      }
+    },
+    "ag_s1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "1024"
+      }
+    },
+    "ag_pv1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "1024",
+        "AG_N": "256"
+      }
+    },
+    "ag_s1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "1280"
+      }
+    },
+    "ag_pv1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "1280",
+        "AG_N": "256"
+      }
+    },
+    "ag_s1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "1536"
+      }
+    },
+    "ag_pv1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "1536",
+        "AG_N": "256"
+      }
+    },
+    "ag_s1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "1792"
+      }
+    },
+    "ag_pv1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "1792",
+        "AG_N": "256"
+      }
+    },
+    "ag_s2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "2048"
+      }
+    },
+    "ag_pv2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "2048",
+        "AG_N": "256"
+      }
+    },
+    "ag_s2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "2304"
+      }
+    },
+    "ag_pv2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "2304",
+        "AG_N": "256"
+      }
+    },
+    "ag_s2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "2560"
+      }
+    },
+    "ag_pv2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "2560",
+        "AG_N": "256"
+      }
+    },
+    "ag_s2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "2816"
+      }
+    },
+    "ag_pv2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "2816",
+        "AG_N": "256"
+      }
+    },
+    "ag_s3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "3072"
+      }
+    },
+    "ag_pv3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "3072",
+        "AG_N": "256"
+      }
+    },
+    "ag_s3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "3328"
+      }
+    },
+    "ag_pv3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "3328",
+        "AG_N": "256"
+      }
+    },
+    "ag_s3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "3584"
+      }
+    },
+    "ag_pv3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "3584",
+        "AG_N": "256"
+      }
+    },
+    "ag_s3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "3840"
+      }
+    },
+    "ag_pv3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "3840",
+        "AG_N": "256"
+      }
+    },
+    "ag_s4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "256",
+        "AG_N": "4096"
+      }
+    },
+    "ag_pv4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "2048",
+        "AG_K": "4096",
+        "AG_N": "256"
+      }
+    },
+    "gemm_n1024_k2048": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "1024",
+        "GQP_K": "2048",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n2048_k512": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2048",
+        "GQP_K": "512",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n2048_k4096": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2048",
+        "GQP_K": "4096",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n9216_k2048": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "9216",
+        "GQP_K": "2048",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n12288_k2048": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "12288",
+        "GQP_K": "2048",
+        "GQP_T": "256"
+      }
+    }
+  },
+  "sha256": {
+    "lx0/final.xclbin": "0a3b902b7da1ead8d1ce051eedc4aeaa3ca82c634598ee518acad883d0fb2b72",
+    "lx0/insts.bin": "77cfb7b5e8ad1f01f9a8c2106161d49bb55fab41f0dfd13ee76ec0f564739233",
+    "lx1/final.xclbin": "5293bebd44e56faab88587463dfb882f48243ca7cc0d2d3c8d8359555f264393",
+    "lx1/insts.bin": "5e2601309b04d9fa03198505ff24ed1389c398ad731d42a19a9c185bacab17e2",
+    "ax0/final.xclbin": "ef2b5bfea7a83f9cfe0ff50e2f0b710be28fb7538b51dc3d30f4e3297ecaa7bc",
+    "ax0/insts.bin": "4123948ef61acda476d185d31609082ff00ca57cd0f5e211cc0dea32620b4b64",
+    "ax1/final.xclbin": "b4fc562c93b6b24d14080f4ec6a2baa99768690847a1ec79f289416e2349b718",
+    "ax1/insts.bin": "9cd0ff43cecc54d1102d62b2e64bef4c0ad304c3a0bda2f9afb3617665c40f86",
+    "ln/final.xclbin": "96277918f9ef06c76423139f0117dfeb80b5e42a0b22353dd9bb2b3d68d8673c",
+    "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
+    "lm_head_q8/final.xclbin": "d3d24174a563bbf7d6746ffa7b04e14a59b8b3b92a946d3871d55a6b97fb2488",
+    "lm_head_q8/insts.bin": "59b1379e17036161493987980dbfe8afca149c33324c3267398b9f02ed3fd1da",
+    "mx_linear/final.xclbin": "c755c4f019ec4a3c2347f5852b262662675039c5b2faa1f71cfbd42d5f634226",
+    "mx_linear/insts.bin": "4bef4d6ff7a6325fc1e47847aac9e054a8eef216663451baefb2356721ad4866",
+    "mx_full/final.xclbin": "96bc06a32bfff8d3dd6f1bcbe3098e94893c28d5666a9002d933cfe0f9f07170",
+    "mx_full/insts.bin": "8f7097b156fd2a01c9401fbc3805fc51b6de72f94048bccb1b18fbe79a4c33a8",
+    "mb_s256/final.xclbin": "13e68cd267e9cd5c4d9ccc112589e847a15c483832a5fc0e34486c0491307cfc",
+    "mb_s256/insts.bin": "606a62a746f96b92cfe7c73b84356ad8514bdb7bf97a562dcb25a933dbab8ecf",
+    "mb_s128/final.xclbin": "8a842ecf0beb3c5b720722a64e6f0607a8855aaa27930e1cd0052c06c81bb064",
+    "mb_s128/insts.bin": "ebaef976a65ce50d51fc6d0dffc8aa238709561e18dceac4b98cc8717bbf5826",
+    "mb_s64/final.xclbin": "e79406c8aa7f3c164ac4b3d4a0e421e1c40d92d4f51903eef15129a8a69e9da6",
+    "mb_s64/insts.bin": "160ad823219d3518cbf7a7a7c9ddf0efd68a2f29ad3d660899d67f002f5ffa1e",
+    "mb_s32/final.xclbin": "4304ab789ec8f5935e09a34b8603e115f281a3a50af0e44461fb7a672f80c5d0",
+    "mb_s32/insts.bin": "1aecef965e39fd74c22278f9db63fa56f63a125e3c056bf9809c88aaea5bcfc9",
+    "mb_s16/final.xclbin": "e5e8cdef7877a24d0cbe0f41e56937cdfce7e90832ca3731f97d90c49bfcb12a",
+    "mb_s16/insts.bin": "591b61abe4ba21bb2d7610c2bfa251b62951ae37009f9889b362138a248f9bc0",
+    "mb_s8/final.xclbin": "3f3305e3c910679d76a803c50b23a9b2dbefeeed3aa0fc9ea3483690cb62acc2",
+    "mb_s8/insts.bin": "ab8dd75490cf1ca924c6e67e78b50370064c1e8dfd9366cacdaeab52bddec659",
+    "ag_s256/final.xclbin": "417d76b447ce53afdc3c94b1242d1884b697b09d945160a9993e9f68daa046fc",
+    "ag_s256/insts.bin": "01f2312b6d2358e069cc6faa9b9f630b5daf134997df12467dd73ecb50c6d1cb",
+    "ag_pv256/final.xclbin": "a0c335c5bd4afa924942bcbe1fd34f54547b9d33fb3ceb52e72a1e24734af60a",
+    "ag_pv256/insts.bin": "01f2312b6d2358e069cc6faa9b9f630b5daf134997df12467dd73ecb50c6d1cb",
+    "ag_s512/final.xclbin": "55f80783d5f83d4740c2f9a1ff8de5dc2bfed3e61a4e6bd6c3a57e9b46824d69",
+    "ag_s512/insts.bin": "b7938d1505ff1e27f5023c997d4545e6483329687669923c9366b80d2be307f2",
+    "ag_pv512/final.xclbin": "53a597b6039362dcad2dc2bc7e1c373762d4a914636573a2c368e44637911b41",
+    "ag_pv512/insts.bin": "e1466c0eac3242d3e80b4a58114551ac374a006f2e203b7c515f77745adb70b0",
+    "ag_s768/final.xclbin": "54421b8c2ccd26be1bf106441dfd50b238a47ad01a9d744a002f0e2e41232538",
+    "ag_s768/insts.bin": "d315e8f27e58aa1212b8efffd18cca7bc842a00055ba4afa71d6ba18a7c09150",
+    "ag_pv768/final.xclbin": "70c65583f631c3a297de2f5c33406268b74c6b22ff15d625e0fafdeb5f04a185",
+    "ag_pv768/insts.bin": "f4c0b373bb8aea155e8de15c0a4919404e6072df7e99206605435bfaafd1157f",
+    "ag_s1024/final.xclbin": "19b3bb615ce17c88086d4329c378aa953ffba9c333a79625267deb62da86c360",
+    "ag_s1024/insts.bin": "0c755946f8296e741bc6617cb22eaa93b169090341617049718f473641bf4121",
+    "ag_pv1024/final.xclbin": "786ad5fb6d2d2b5ee9baeae142987af0b06214eb1b954e826e6502f5a7ebae2c",
+    "ag_pv1024/insts.bin": "ef070a858eb427b085810f8e34cc50b9907151027d48b2aa1f5d0890eaabd0eb",
+    "ag_s1280/final.xclbin": "32af7d2c6c99305c0c5844c05fdd6dc4b3b53fc97c22d2c597ad5f3ba9187a50",
+    "ag_s1280/insts.bin": "9aaf7dfb1b95cbf794eaff27aaa20bf2d58cdc7574b901c205aea5edb7fcdeee",
+    "ag_pv1280/final.xclbin": "89e4d2302d82c779195debbe39955f707d857b640b4549ea3bdfd4bb9665aaf6",
+    "ag_pv1280/insts.bin": "e3f1a975c05cc53882c93d0abadb63bfb7f12b33a1209b189ebcf158f56041c5",
+    "ag_s1536/final.xclbin": "55092a901d68b8c54ddb2213e0f2bd100855fe45cc6112a970fa11230ee31e60",
+    "ag_s1536/insts.bin": "82b4ee526ae4cf76441ce274020c081b55528915d827c2dccad831b3f2c612a1",
+    "ag_pv1536/final.xclbin": "f49f315643f48eac144dc86c4b4d90a565c4eca1921416ecfb7b13f2bb31e986",
+    "ag_pv1536/insts.bin": "821ffd97792493a7fe9e3e37b481be3a51f05e4d0c136113262902e95787bfe7",
+    "ag_s1792/final.xclbin": "784c09a115767950fcc2a512f99603c1b0cda68b7bf80807fc6dacd9d67dc188",
+    "ag_s1792/insts.bin": "39a93bdeb1c9f4cb601601cf46210627a3437e927b869a9473694d049a4f3846",
+    "ag_pv1792/final.xclbin": "1c7f929510b6d2b976d9c6067679d1f73f86a92b852ed234c964a7fccb6ef566",
+    "ag_pv1792/insts.bin": "d454cd805b54f5960e2eb8775ec3f1b7bacea3116b12721692cf1c4fa822ca8b",
+    "ag_s2048/final.xclbin": "75392c47ca486ffc58712f9f22338d17c77d00e1a97b882f8926e6129f6a99bb",
+    "ag_s2048/insts.bin": "ec8c4720994bc13b76b3ae9dd5cc25ccc87cb710d1a5bcc15f1ed571e3ebd62f",
+    "ag_pv2048/final.xclbin": "c61275a56efba99cf413939b9970448eddcc26066f01ddd00e58bcdd85ce8c56",
+    "ag_pv2048/insts.bin": "efb788a0ad8450f9a7bbd09db9e29540bdfe8e78c98e92045ff1f8849661bbc6",
+    "ag_s2304/final.xclbin": "e3bbd0984450469fd6722b5b0d0a03421cb1f20807b40c282523aac49005b0e5",
+    "ag_s2304/insts.bin": "59ed0ee446562e58d566fd2a0593c78b0d1c8ea958b2e07a5d092e651f0a2c98",
+    "ag_pv2304/final.xclbin": "ca31f8801272ee762c6234539a42db3abfb287c99b1d75455da75830f14f1667",
+    "ag_pv2304/insts.bin": "b02953d6b51fb5715108bd41a30d9399007635d235640cd6309de4c897829d96",
+    "ag_s2560/final.xclbin": "7d06671c74bcaaedd8001d636a4b9d6e429405ca0c6b1368d63d52e952ad857e",
+    "ag_s2560/insts.bin": "81f863743aae2e43eb6524d76f600eccc44d96d87bf84b2a81163d1d63fdda1d",
+    "ag_pv2560/final.xclbin": "0f608fa59f8caa47d377e4aa87ded5a9e2991b0f09d611726b983aad4aea02e9",
+    "ag_pv2560/insts.bin": "885443c392bf2e4a8fe0c9c1e4a39518212976244ada15b9d6cba332be40f032",
+    "ag_s2816/final.xclbin": "23293c5c62a98849ee6b11e3c068e8e7515df399f7dfb89ccc283df03f445ba9",
+    "ag_s2816/insts.bin": "b4fdd9991f3cfb1377b881ae4b531b4d9e064ba6b86723514c3a3b725ab1a70f",
+    "ag_pv2816/final.xclbin": "db6aad49a7219cab3613e8559c544dd2a8e31462608736ff90f090f093ca72bc",
+    "ag_pv2816/insts.bin": "54b784f015e00f4501bc2fdc61db75fc5a83bb3276fe05e0ede172ead60c5065",
+    "ag_s3072/final.xclbin": "8534bf40240269ad60a0c2b5b6bcfa02cccea06e21df6694fef05de99457f1e5",
+    "ag_s3072/insts.bin": "5cafe6351cae70270f9e6f6502a3bbd60bdab80fedf9f498998adad96e351631",
+    "ag_pv3072/final.xclbin": "3050aba2468915e4d5569333b2786d2aca5ad5ce08ad6ca54342deba976410ff",
+    "ag_pv3072/insts.bin": "a7ca40f7812de959286d4f922513e2e89b74116f972c8b4d8cdac9d2081231bf",
+    "ag_s3328/final.xclbin": "b295ad7fb121067051ebcb8ace77bd5237f23c9a3cff55b4ce00bad0b0a80c3e",
+    "ag_s3328/insts.bin": "d5816584eb56f921d14b75981aa4472f682fcf87060df54d7b95ba0d6162cf65",
+    "ag_pv3328/final.xclbin": "279b6ab4ef408a9683fd8429211800fdb645ee5975480502c4a638254438dece",
+    "ag_pv3328/insts.bin": "3f3606f031397586f00e25cc651704f533f4597ab62bfc921b8b86937064ade2",
+    "ag_s3584/final.xclbin": "58c75d4246c5ec49bbf89b6967d3a9438770b483a443c856a2aa4b1b72f3a694",
+    "ag_s3584/insts.bin": "e286642bb573751fc4fb763ae114d29a53328e8e46ddd134b7539df8dbe065bf",
+    "ag_pv3584/final.xclbin": "a7893ffe0d872d94ae65437c958ab3f4c146ff6ac34fd22657e8cd91cd5c2508",
+    "ag_pv3584/insts.bin": "36c542ba436de9644d0e3b413bd8e680c5096b30d911588dc922fe03f124e860",
+    "ag_s3840/final.xclbin": "6c2b22cc74ac811e2e0f0218f2e575ada75ee35963e97413d4a927c8733633b3",
+    "ag_s3840/insts.bin": "a702add05e2240c6ad6dbbb202afd8929b9a2f14298b51ebd6a877ca420f3c77",
+    "ag_pv3840/final.xclbin": "0ae73736512e9a00ff9b1c24056668c0192c92490193e70a5d198bf92f0f7011",
+    "ag_pv3840/insts.bin": "a13552a15a3156cd1eeebc0844223f914f19cf67a2f33a681e5d492876622032",
+    "ag_s4096/final.xclbin": "f77099f45b24fbdc2614f0faa4cfeedc18182c400f3ee5553fc25d11e061b4c1",
+    "ag_s4096/insts.bin": "20e5eb10431c9809514cdba41e7c2b6c415389cb7139c12620593c07a229f854",
+    "ag_pv4096/final.xclbin": "f53c3bfb4dec7f9677a0d051501f3cdf3b5f453373526c8eccaa18f7df4475f5",
+    "ag_pv4096/insts.bin": "507a81724076b430e52467cc671a4cfcebfdd92a8a53c59ed8d59f96986e8b9a",
+    "gemm_n1024_k2048/final.xclbin": "0482ba55050dbab8afd163b247df1f0d635b1bcb420052518cd81f37c5edfda3",
+    "gemm_n1024_k2048/insts.bin": "905b998d390bb97dfbc679f2b12b446f30464bbb907e482bfce7bfec7de72866",
+    "gemm_n2048_k512/final.xclbin": "111d8e67b5bc19a1021b0ed78900efc9d900a373dea65ceb43483baa83c061ba",
+    "gemm_n2048_k512/insts.bin": "83b9ec5175f2f1ddd81e9084d1d7831ee363e710fa09b3b4c9c13990f6f15243",
+    "gemm_n2048_k4096/final.xclbin": "a10f1eab098b70e233e5b3131ed60ff056f2df9d30772124a52a517f8c98a811",
+    "gemm_n2048_k4096/insts.bin": "a8e3bca3f4d57c4e5adc6a75046504fb8a6087a9453c7034b280d7fcbf2b1d97",
+    "gemm_n9216_k2048/final.xclbin": "786917141dbb14941a91752543e4ea151793f4e2865291ff986afb4cc86e1fc5",
+    "gemm_n9216_k2048/insts.bin": "ce8ed1c8d64c61e42a75b929acf0daea14ce7dad4f23a82494bf3bf1280ba6ad",
+    "gemm_n12288_k2048/final.xclbin": "5e498214b7a49d5c8b06c6b8939744044bbd917db0a4df89fcd2f12b7d5b58b2",
+    "gemm_n12288_k2048/insts.bin": "cef57b39c9790e76bd576ac912be87cfb52907af78d090bcb4c165a417875d62"
+  }
+}

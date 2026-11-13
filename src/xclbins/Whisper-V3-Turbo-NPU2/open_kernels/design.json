@@ -1,0 +1,93 @@
+{
+  "name": "whisper_gemm",
+  "kind": "gemm_rtp",
+  "kernel": "MLIR_AIE",
+  "M": 3072,
+  "K": 5120,
+  "N": 10240,
+  "buffers": [
+    15728640,
+    26214400,
+    62914560
+  ],
+  "c_dtype": "f32",
+  "a_dtype": "bf16",
+  "emulate_bfp16": true,
+  "b_layout_hash": "f2ab7b0d310c935eba027bd5c3132cb1a36561e211196580c539acb94036e5cd",
+  "b_layout": {
+    "kind": "block_panel",
+    "tile_k": 64,
+    "tile_n": 32,
+    "order": "k,n,kt,nt",
+    "inner": "s,t",
+    "mac_s": 8,
+    "mac_t": 8,
+    "dtype": "BF16"
+  },
+  "cols": 8,
+  "tile": {
+    "m": 64,
+    "k": 64,
+    "n": 32
+  },
+  "tb_max_n_rows": 4,
+  "tg_depth": 2,
+  "streams": [
+    {
+      "op": "conv1",
+      "slot": 0,
+      "file": "insts_conv1.bin",
+      "M": 3072,
+      "K": 384,
+      "N": 1280
+    },
+    {
+      "op": "conv2",
+      "slot": 1,
+      "file": "insts_conv2.bin",
+      "M": 1536,
+      "K": 3840,
+      "N": 1280
+    },
+    {
+      "op": "qkv",
+      "slot": 2,
+      "file": "insts_qkv.bin",
+      "M": 1536,
+      "K": 1280,
+      "N": 3840
+    },
+    {
+      "op": "o",
+      "slot": 3,
+      "file": "insts_o.bin",
+      "M": 1536,
+      "K": 1280,
+      "N": 1280
+    },
+    {
+      "op": "fc1",
+      "slot": 4,
+      "file": "insts_fc1.bin",
+      "M": 1536,
+      "K": 1280,
+      "N": 5120
+    },
+    {
+      "op": "fc2",
+      "slot": 5,
+      "file": "insts_fc2.bin",
+      "M": 1536,
+      "K": 5120,
+      "N": 1280
+    },
+    {
+      "op": "xkv",
+      "slot": 6,
+      "file": "insts_xkv.bin",
+      "M": 1536,
+      "K": 1280,
+      "N": 10240
+    }
+  ]
+}

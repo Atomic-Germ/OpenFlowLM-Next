@@ -1,0 +1,39 @@
+{
+  "model": "Qwen2.5-3B-Instruct-NPU2",
+  "spec_hash": "sha256:de4056c2532530eac75366b3b5c89b1be841dbcf1d9de04fc02d385abbefe1ba",
+  "build_key": "sha256:97ca90ec578cc69a2ca7ee7bb50df7c559fca62f637c7dfd8cd9abfdcaa46315",
+  "built": "2026-11-12T14:45:34-0800",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "e5a3fa14879d2049295e2baff02fcc6a82697e73",
+  "source_git_head": "f940fd9fc9ef82aa6d68bd4bae3ea0567ca3a7ba",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2048",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "151936",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "4"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "35c73cc45e949679ff5d387653a4748dfd2142e5f826d2c5e9961e7a316206cc",
+    "dx/insts.bin": "e88770114f14a7da4c9bb9e3b5e17c60b02c2448b01d5790aa6e0263a45bbfc7",
+    "ln/final.xclbin": "e2da76cd75fed3059778b22815cf62e947027cd890a7f99fc5fa927676af088b",
+    "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
+    "lm_head_q4/final.xclbin": "8a32f1604e9d8a8fb09ca584239cb7ca4e874a1545be38304d0b2bfb67e1bcff",
+    "lm_head_q4/insts.bin": "ac952fa9fe3ceda04db00d8d4cd0d76831c8c62bbb78bbdef234dd87c2c3c0af"
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "format": "oflm-open-diffusion-kernels-v2",
+  "family": "FLUX.2-klein-4B-NPU2",
+  "resolutions": [
+    512,
+    1024
+  ],
+  "edits": [
+    512,
+    1024
+  ],
+  "layout": "e667e5952ca22004",
+  "elf": {
+    "512": "diffusion_r512.elf",
+    "1024": "diffusion_r1024.elf",
+    "512e512": "diffusion_r512e512.elf",
+    "1024e1024": "diffusion_r1024e1024.elf"
+  },
+  "sets": [
+    "gemm",
+    "fa",
+    "ew",
+    "conv",
+    "conv1",
+    "vew"
+  ],
+  "cfg": {
+    "gemm": [
+      "main:cfg_gemm_a",
+      "main:cfg_gemm_b"
+    ],
+    "fa": [
+      "main:cfg_fa_a",
+      "main:cfg_fa_b"
+    ],
+    "ew": [
+      "main:cfg_ew_a",
+      "main:cfg_ew_b"
+    ],
+    "conv": [
+      "main:cfg_conv_a",
+      "main:cfg_conv_b"
+    ],
+    "conv1": [
+      "main:cfg_conv1_a",
+      "main:cfg_conv1_b"
+    ],
+    "vew": [
+      "main:cfg_vew_a",
+      "main:cfg_vew_b"
+    ]
+  },
+  "valid_len": {
+    "stream": "te_attn",
+    "head": "te_attn_vl{n}",
+    "max": 512
+  },
+  "complete": true
+}

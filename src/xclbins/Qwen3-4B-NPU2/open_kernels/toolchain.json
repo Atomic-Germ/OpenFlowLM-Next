@@ -1,0 +1,437 @@
+{
+  "model": "Qwen3-4B-NPU2",
+  "spec_hash": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
+  "build_key": "sha256:7d95799ca4d4375cc336364b1d3047b20ea90e24dda80dcc9efcb9840661b603",
+  "built": "2026-11-12T14:47:33-0800",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "e5a3fa14879d2049295e2baff02fcc6a82697e73",
+  "source_git_head": "f940fd9fc9ef82aa6d68bd4bae3ea0567ca3a7ba",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2560",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "151936",
+        "LMHEAD_K": "2560",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "dx_attn": {
+      "design": "open_kernels/designs/dense/dx_attn.py",
+      "env": {}
+    },
+    "ag_s256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "256",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "256",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "512",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "512",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "768",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "768",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "1024",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "1024",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "1280",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "1280",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "1536",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "1536",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "1792",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "1792",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "2048",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "2048",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "2304",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "2304",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "2560",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "2560",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "2816",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "2816",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "3072",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "3072",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "3328",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "3328",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "3584",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "3584",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "3840",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "3840",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "128",
+        "AG_N": "4096",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1024",
+        "AG_K": "4096",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "gemm_n2560_k4096": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2560",
+        "GQP_K": "4096",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n2560_k9728": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2560",
+        "GQP_K": "9728",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n6144_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "6144",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n9728_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "9728",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "6d94555b4b98d29784b3e83fa08d26583738ca79b80bf963ff50153ab6fce8f7",
+    "dx/insts.bin": "174ff0c0568fe94d100b6b97569b90eddb17a1885c6c7a7013ed842157bb329a",
+    "ln/final.xclbin": "fbb002d051d1704641549eb03cf0235c47eeca8e8aaccd1095c341b5f73fa3b5",
+    "ln/insts.bin": "7f9fd0d6ebc95a4dde540944fff61649144b023e332dbf07c4e93a88b7e74d53",
+    "lm_head_q4/final.xclbin": "4b0f0045e3730038163c032555ffc802eda66209641eb4f89c3f19e6da1ac2a1",
+    "lm_head_q4/insts.bin": "d2aeca8dfbdc19fd95834616563cb0a0cbde24efa3f8c01fc6fb69921b2aa579",
+    "dx_attn/final.xclbin": "9872382a23564967c9591f022e8faad9dae546a8ecb0260ade6c125e619aef24",
+    "dx_attn/insts.bin": "e891f82b61d0aa1d79239046068d605e0f663f5d996c8a9f8a9f0b1c255b4311",
+    "ag_s256/final.xclbin": "75a686f48ece7aa067f01050c6042260cc8966f5ddf1a265c09925d70b94f3a0",
+    "ag_s256/insts.bin": "750c7bf5cb2e6ab288ba3719e49558611ee9e4a4257fceb5330ca3e0ab2e2630",
+    "ag_pv256/final.xclbin": "878f40c42d89a3b3eb5f82a05ad434450da529a42c192a628d5e72085525e4d7",
+    "ag_pv256/insts.bin": "531295ca9e3d474a1ac022992a7aac7aa602d831275d4f06edc4f4acf55fa057",
+    "ag_s512/final.xclbin": "4951b3ccbfaae93afc199f743e9111d2a49c1ea3f77e34e56d3a0ae3d1cef5be",
+    "ag_s512/insts.bin": "184aa13291f08f3b409823d2968c0775fa0ff79beec719ed7e0a3dd845e27fc3",
+    "ag_pv512/final.xclbin": "1e3bed9cc13fee930c1e6297b61bd4a2548e8f5c349cb4250c1b62abfe4d86a1",
+    "ag_pv512/insts.bin": "01a732f5faf7dc2eb3da40b7f34a8a5031ef011a75a2d2bb1e9fb2aea01f7d89",
+    "ag_s768/final.xclbin": "6053a03d866a158426caa9266adc8a40965487663da30e49521b88bf0988882f",
+    "ag_s768/insts.bin": "2deac195255d9f748320e2838f09529c2713945e02218857977ef2bf29e60651",
+    "ag_pv768/final.xclbin": "94e0e0ac869228048ccb448f363a2810e81fef2739bae3558c4ae9ea5b932046",
+    "ag_pv768/insts.bin": "94149a4eee1766b3396b6b1272850424f97410db81240dd20abef16029bd598b",
+    "ag_s1024/final.xclbin": "6178fec9a4360e8d83965c44ffbe36ea6faa3868dfb5a4a59dce3538d6d28fd3",
+    "ag_s1024/insts.bin": "64e4d40f6f068b54b34d55a739f264b6a74b5a4871678017bd5e2112499d2b01",
+    "ag_pv1024/final.xclbin": "a624846a223ced907e0e73024dbb6cf07575ae0d8a718a209a0a8d1e78b4ec13",
+    "ag_pv1024/insts.bin": "a90d4d410d1dcb86739e71fa9d1c08fbb58d663e9665a62cc49df719a2cbd267",
+    "ag_s1280/final.xclbin": "b582f3306c7d12cfc7316968f051850105a98df35523623fbb9dbc5f34b8368f",
+    "ag_s1280/insts.bin": "00b68c79b3013e86b60568e2e760b1b9a14f416015293ab1e451ed6f6848087a",
+    "ag_pv1280/final.xclbin": "a262db38be53dd916fe9b2d62c57e7e6265de90222cf76ace736c8e01f208497",
+    "ag_pv1280/insts.bin": "519c5b3cf60a52030fe8bc2cc34a80764b54f6e5723ef8363364c6c6a4f4526a",
+    "ag_s1536/final.xclbin": "bd2a8b78f6f3d9129e914c39cee941b24a45d6828227635ad547fb569c2d0d05",
+    "ag_s1536/insts.bin": "df1e4ded702511ed771618173de6fbbf7d2e65456d96c4a6e8b0d80828190ba7",
+    "ag_pv1536/final.xclbin": "18b582be2c05b0cb43baa67730e7db080a1b07588a51fd492ee0e8223d4fa132",
+    "ag_pv1536/insts.bin": "7057a3ccd5804115d30dcdb6b933c93c6285695207c5398756cf529f940e17f8",
+    "ag_s1792/final.xclbin": "c33b823fd32e3f8599289658f2270107cca55a028706550250bf856a15eb36c5",
+    "ag_s1792/insts.bin": "4038bc955e985f3f485b499f89d358e9c24dfc11c0c2ca11bb364ed245d7b974",
+    "ag_pv1792/final.xclbin": "1d68f60af6c9edea3d49da3d7b80a3d6e43982ef0efb75972fe1a811f54d9724",
+    "ag_pv1792/insts.bin": "63118a6967d3f68035967f1766f8e3e640458d5d54bcf6ec915a63b0f65d91d3",
+    "ag_s2048/final.xclbin": "218fc0cb926acb4fc41b3da24f86bdc0d52cc5b3787ca7f9a8b70143c0647272",
+    "ag_s2048/insts.bin": "214019ec3545f27387ec803458c382d62ba9c49c634cab22769a8e394644c3ee",
+    "ag_pv2048/final.xclbin": "d15f84a35e99a051f410087f373bc3cc08a85f6c0782febc3906e5ae0e38b49c",
+    "ag_pv2048/insts.bin": "36b69395e1ab2cbfcb9e65889aef7b1d702e1d4289686c6efc75c5cd65d45cf7",
+    "ag_s2304/final.xclbin": "eb5f0ac75b5e5d5100e82321b5c433f0bd9b20749ce567fc1a62020ce8578fad",
+    "ag_s2304/insts.bin": "c86a6ad603eb27b8c7c5cb30090ce81e5a185e0cbb5c0e9fafc971950877eb84",
+    "ag_pv2304/final.xclbin": "1fe6bed89ec8fb10067c463ea0137f87a0307a6a1c4aef9803051443356491b9",
+    "ag_pv2304/insts.bin": "af1193f3498247fcc4382150dcc2011a97a96f35146bf80792b498254d7e10ae",
+    "ag_s2560/final.xclbin": "209ac4926dd4299700f97250fe16d9e14f280898a93686e1f2112e6b6bce7c69",
+    "ag_s2560/insts.bin": "8a16878e825dd791efb4fd55ed2dff626a117196d82ccd288a1b52d5ec9d0ba3",
+    "ag_pv2560/final.xclbin": "25ae3e912928abca7cf37819d3f207c403488a57e79fc662e085da11d1bdefdf",
+    "ag_pv2560/insts.bin": "94965dbda42f5590093ee529c1a5d9523601b58d8f2536b6b40f495fe8bbd1ad",
+    "ag_s2816/final.xclbin": "6908aa55a2cb9416767bacb4c80a093c3384d37fa1d95bf9b5c05051a572312e",
+    "ag_s2816/insts.bin": "734bf617c92fac80af4e07a79fae60dad77b90489a5d3263f4e7795973e87e79",
+    "ag_pv2816/final.xclbin": "3771dccb637c2961e710a449d00551d5e4c81097f0b765750c6124d07242fcd9",
+    "ag_pv2816/insts.bin": "85a5a2d68dd65a5ab4b3bdd4366d9ff32103fb0d61c6941b31fd7b7fba9be047",
+    "ag_s3072/final.xclbin": "7daf6232806347ca20a3e709116461e67d87543740be99c819e304ea61f6bcd9",
+    "ag_s3072/insts.bin": "d8c53e419beebc505f03ee2215ff7685b2deafcad80a61431d470643d0657516",
+    "ag_pv3072/final.xclbin": "f077338f9eba22f170fd620cb8f746ad18285720d35ab4dce6cf9695e5fcc593",
+    "ag_pv3072/insts.bin": "26b6ee210f2ec05fa231df1f32e128a3b95c471715aba7a4b355d64edd67a3da",
+    "ag_s3328/final.xclbin": "a2f474db18a952ba4c6306ad9ed23436996fb37695f522cfeace9cc084ebcaac",
+    "ag_s3328/insts.bin": "8db41511e790ec27fa6b0aed81773add8e22a4206449dbc7c870ce9f57e1b972",
+    "ag_pv3328/final.xclbin": "a98c25049c578d045c9bd57cd1a93116671a9e2c6756750d31b1cb725938f2ef",
+    "ag_pv3328/insts.bin": "81d74c169e922dde213ee16233df362004c1860c95fa8d9bba1bb2dda8a0f48f",
+    "ag_s3584/final.xclbin": "4e51109873a197a0247e22f2e00488eb9322a7b0b22003690a95c58e3569e712",
+    "ag_s3584/insts.bin": "c57dfb0bba400427c2fd54ccebfa8f6b11ab194b18401e2163dc42e7c5a60953",
+    "ag_pv3584/final.xclbin": "b2ab24f619e3866c0989eee3fa7a5f546cf632f2d5ae87e574129d4b7adb62e5",
+    "ag_pv3584/insts.bin": "4712b3a420d3b7447c92bcdeda9cdf7de0a9e339a620b1e70d9eff0c93d3d0c0",
+    "ag_s3840/final.xclbin": "6b53c3b2bec3db57d7792b7ca39f9b5f72e7871239fd514cf09e5bc81a40a122",
+    "ag_s3840/insts.bin": "a44d1161a594bb4dff45ed479eb40c3267c6db16879478292f75359c01ea3dd7",
+    "ag_pv3840/final.xclbin": "b1389fdaf73aa0dba01ddb2ab2d243041125d9f37f4e77af78f6dfb3f9069470",
+    "ag_pv3840/insts.bin": "e8d7d5d3d3ea33e58cb84ae758181fa7590c6f4e0a158c504b8eaf7e3974cef9",
+    "ag_s4096/final.xclbin": "bb22151b336c96bb736e413c417f76aa3d679c2e261e9a13796852a214d2cbb4",
+    "ag_s4096/insts.bin": "6fffe4bb5b2879257a71d39576fdd4b524fed53f8c6f2de4c9e229a7a96ca94c",
+    "ag_pv4096/final.xclbin": "2c62cec5569b2c47c813df17cae02197348b37233426b3405bcd9173bf217d28",
+    "ag_pv4096/insts.bin": "4fa646eb94ed11317edaba24e96217af350963ae15a1d53d4a47f6bba73517df",
+    "gemm_n2560_k4096/final.xclbin": "3549951c832754a528dbd2f7cb05cc3d122bfdacebb431a6aaa1eaef47a1e03d",
+    "gemm_n2560_k4096/insts.bin": "8f7631e7e5d812cc21b90f874abaaedf2d14f3bc82180158fd7b3cef2169c986",
+    "gemm_n2560_k9728/final.xclbin": "c22bdfb3b6aca7a5009dd731d2f10d0d4b127f2beb9cf05ecad0c546b2dd4bd4",
+    "gemm_n2560_k9728/insts.bin": "ec0461f5ea192f05a2bf1271f144a104f2d36aa2bb6c3a519174371876666ed5",
+    "gemm_n6144_k2560/final.xclbin": "aa9235a45cfe0c36561bffc75b4c94208abb54b29d51165c342d55c32f805aa7",
+    "gemm_n6144_k2560/insts.bin": "1234212b7e251e9f47594a840e9ba0d57a4deb043b7bff9219acc091efc6094f",
+    "gemm_n9728_k2560/final.xclbin": "7809088eda1e292cb5ff84a70f46dbe4e0d0ed7e2b6089c8bd1c7e5504b51ee5",
+    "gemm_n9728_k2560/insts.bin": "02f02669031089a837dc4dc2607c4d95f191bbd3ba2052aef039dbf58661e739"
+  }
+}
