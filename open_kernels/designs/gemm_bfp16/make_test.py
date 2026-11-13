@@ -14,6 +14,11 @@ and (b) the product of the original floats (the bfp16 rounding of both operands,
 make-glu / compare-glu (OPEN-PREFILL-BFP16-FFN): the gate|up GEMM with the SwiGLU epilogue into the H operand, then
 the down GEMM reading H, in one hardware context. H against silu(g) * u of the decoded operands encoded by the host
 (the bytes, and the decoded error beside the encode's own), and y against the decoded-H x decoded-down product.
+
+    python make_test.py make --mx4 --build <GB_B=mx4 build> --out <dir> --M 256 --K 2880 --N 6144
+
+--mx4: B is random MXFP4 (pack_b_mx4, the experts' form), the rest as `make`; `compare` checks the kernel against the
+product of the decoded operands, which for B is the MXFP4 values themselves (the conversion is exact).
 """
 
 import argparse
@@ -32,15 +37,24 @@ def make(a) -> None:
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(1)
     x = rng.standard_normal((a.M, a.K), dtype=np.float32)
-    w = (rng.standard_normal((a.N, a.K), dtype=np.float32) * 0.05).astype(np.float32)
     pack.pack_a(x, a.m, a.k).tofile(out / "a.bin")
-    pack.pack_b(w, a.n, a.k).tofile(out / "b.bin")
+    if a.mx4:
+        # GPT-OSS-like MXFP4: uniform nibbles, block exponents around 2^-7 (the 20B's experts span e 115..136)
+        v = rng.integers(-8, 8, (a.N, a.K)).astype(np.int8)
+        v[v == -7] = 7
+        e = rng.integers(116, 128, (a.N, a.K // 32)).astype(np.uint8)
+        b = pack.pack_b_mx4(v, e, a.n, a.k)
+        w = pack.unpack_b_mx4(b, a.N, a.K, a.n, a.k)
+    else:
+        w = (rng.standard_normal((a.N, a.K), dtype=np.float32) * 0.05).astype(np.float32)
+        b = pack.pack_b(w, a.n, a.k)
+    b.tofile(out / "b.bin")
     np.save(out / "x.npy", x)
     np.save(out / "w.npy", w)
-    json.dump(dict(M=a.M, K=a.K, N=a.N, m=a.m, k=a.k, n=a.n), open(out / "meta.json", "w"))
+    json.dump(dict(M=a.M, K=a.K, N=a.N, m=a.m, k=a.k, n=a.n, mx4=bool(a.mx4)), open(out / "meta.json", "w"))
     build = Path(a.build).resolve()
     cfg = ["device", f"xclbin G {build / 'final.xclbin'}", f"kernelx k G {build / 'insts.bin'}",
-           f"buf a {a.M * a.K // 8 * 9} a.bin", f"buf b {a.N * a.K // 8 * 9} b.bin", f"buf c {a.M * a.N * 4}"]
+           f"buf a {a.M * a.K // 8 * 9} a.bin", f"buf b {b.size} b.bin", f"buf c {a.M * a.N * 4}"]
     cfg += ["run k b a c"] * a.repeat + [f"dump c c.bin {a.M * a.N * 4}", ""]
     (out / "run.cfg").write_text("\n".join(cfg))
 
@@ -52,7 +66,8 @@ def compare(a) -> int:
     x, w = np.load(out / "x.npy"), np.load(out / "w.npy")
     c = pack.untile_c(np.fromfile(out / "c.bin", dtype=np.float32), M, N, m, n)
     xq = pack.unpack_a(np.fromfile(out / "a.bin", dtype=np.uint8), M, K, m, k).astype(np.float64)
-    wq = pack.unpack_b(np.fromfile(out / "b.bin", dtype=np.uint8), N, K, n, k).astype(np.float64)
+    unb = pack.unpack_b_mx4 if meta.get("mx4") else pack.unpack_b
+    wq = unb(np.fromfile(out / "b.bin", dtype=np.uint8), N, K, n, k).astype(np.float64)
     ref_q = xq @ wq.T
     ref = x.astype(np.float64) @ w.astype(np.float64).T
 
@@ -141,6 +156,7 @@ def main() -> int:
     ap.add_argument("--k", type=int, default=64)
     ap.add_argument("--n", type=int, default=128)
     ap.add_argument("--repeat", type=int, default=5)
+    ap.add_argument("--mx4", action="store_true", help="B as MXFP4 (a GB_B=mx4 build)")
     a = ap.parse_args()
     if a.mode == "make":
         make(a)

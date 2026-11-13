@@ -91,6 +91,42 @@ def pack_b_group(w: np.ndarray, k: int = 64) -> np.ndarray:
     return np.ascontiguousarray(e.transpose(3, 0, 4, 1, 2, 5)).reshape(-1)
 
 
+MX4_TILE = 4352
+# the mx4 nibble's code (twice the e2m1 level), indexed by the nibble: gemv_q4/mx4_codes.h
+MX4_CODE = np.array([0, 1, 2, 3, 4, 6, 8, 12, -12, 0, -8, -6, -4, -3, -2, -1], np.int8)
+
+
+def pack_b_mx4(v: np.ndarray, e: np.ndarray, n: int = 128, k: int = 64, cols: int = COLS) -> np.ndarray:
+    """MXFP4 [N, K] as mx4 nibble values v (int8, mx4_codes.h) and e8m0 block exponents e (uint8 [N, K/32]) ->
+    GB_B=mx4's B, bytes [N/n * K/k * 4352], the tiles in pack_b's order. A tile (mx4_b.cc): x = e + 5 per
+    (32-K block, row) as [kb32][sp][half][r], then per (sp, kb, half) 32 B of nibbles, value j = row 8 half + j/8 of
+    the pair sp, k = 8 kb + j % 8 -- the bfp16 sub-tile mm_paired pops there, exactly (q = code, x = e + 5)."""
+    N, K = v.shape
+    assert n == 128 and k == 64 and N % (n * cols) == 0 and K % k == 0 and e.shape == (N, K // 32)
+    nk, ng = K // k, N // n
+    x = (e.astype(np.int64) + 5).astype(np.uint8).reshape(ng, 8, 2, 8, nk, 2)              # g sp half r kc kb32
+    x = x.transpose(0, 4, 5, 1, 2, 3).reshape(ng, nk, 256)                                  # g kc | kb32 sp half r
+    nb = (np.asarray(v, np.int8).astype(np.uint8) & 15).reshape(ng, 8, 2, 8, nk, 8, 8)     # g sp half r kc kb kk
+    nb = nb.transpose(0, 4, 1, 5, 2, 3, 6).reshape(ng, nk, 4096, 2)                        # g kc | sp kb half r kk
+    tiles = np.concatenate([x, nb[..., 0] | (nb[..., 1] << 4)], axis=2)                    # [g, kc, 4352]
+    g = np.arange(ng)
+    order = np.argsort((g % cols) * (ng // cols) + g // cols, kind="stable")              # column c, then its groups
+    return np.ascontiguousarray(tiles[order]).reshape(-1)
+
+
+def unpack_b_mx4(buf: np.ndarray, N: int, K: int, n: int = 128, k: int = 64, cols: int = COLS) -> np.ndarray:
+    """GB_B=mx4's B bytes -> the float [N, K] the kernel multiplies (each value code * 2^(x - 133))."""
+    nk, ng = K // k, N // n
+    t = np.asarray(buf, np.uint8).reshape(cols, ng // cols, nk, MX4_TILE)
+    t = t.transpose(1, 0, 2, 3).reshape(ng, nk, MX4_TILE)                                  # back to group order
+    x = t[..., :256].reshape(ng, nk, 2, 8, 2, 8).astype(np.int64)                          # g kc kb32 sp half r
+    b = t[..., 256:].reshape(ng, nk, 8, 8, 2, 8, 4)                                        # g kc sp kb half r byte
+    q = MX4_CODE[np.stack([b & 15, b >> 4], axis=-1).reshape(ng, nk, 8, 8, 2, 8, 8)]       # .. kk
+    sc = np.ldexp(1.0, x - 133).transpose(0, 1, 3, 4, 5, 2)                                # g kc sp half r kb32
+    w = q.astype(np.float64) * np.repeat(sc, 4, axis=-1).transpose(0, 1, 2, 5, 3, 4)[..., None]   # g kc sp kb half r kk
+    return w.transpose(0, 2, 4, 5, 1, 3, 6).reshape(N, K).astype(np.float32)
+
+
 def unpack_a(buf: np.ndarray, M: int, K: int, m: int = 64, k: int = 64) -> np.ndarray:
     e = buf.reshape(M // m, K // k, m // 16, k // 8, 2, 8, BLOCK_BYTES).transpose(0, 2, 4, 5, 1, 3, 6)
     return decode_blocks(e.reshape(M, K // 8, BLOCK_BYTES)).reshape(M, K)

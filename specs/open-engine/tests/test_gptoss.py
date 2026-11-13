@@ -1,12 +1,11 @@
-# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-GPTOSS, OPEN-ROPE-YARN, OPEN-ATTN-SINK
+# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-GPTOSS, OPEN-ROPE-YARN, OPEN-ATTN-SINK, OPEN-PREFILL-GPTOSS
 # (canonical spec: specs/open-engine/spec.md)
 """GPT-OSS: dense GQA attention over an MoE FFN, a 128-row sliding window on every other
 layer, YaRN RoPE, a per-head attention sink, and a bias on nearly everything.
 
-Only the derivation runs here -- a pure function over a config dict, no model and no
-hardware. `families.family_module("gptoss")` deliberately raises: the recipe would have to
-emit kernels for the clamped-SwiGLU experts and the sinks, and emitting dense kernels that
-silently drop either is worse than refusing.
+The derivation and the recipe's emission run here -- pure functions over a config dict, no
+model and no hardware: the decode route (gx_att / gptoss_route / gx_moe, the experts as mx4
+half-tiles by default) and the block prefill route (OPEN-PREFILL-GPTOSS).
 
 The fixture is gpt-oss-20b's published geometry (24 layers, 32 experts, hidden 2880, 64
 heads over 8 kv heads at head dim 64) written in the key names a container's `config.json`
@@ -190,25 +189,110 @@ def test_an_explicit_attention_factor_wins_over_the_derived_one():
     assert ModelSpec.from_hf_config({**HF_GPTOSS_20B, "rope_scaling": sc}).rope_scale() == 1.0
 
 
-# ---- the recipe refusal (the standing rule)
+# ---- the recipe (recipes/gptoss.py, OPEN-FAMILY-GPTOSS)
 
 
-def test_the_family_has_no_recipe_and_says_what_is_missing():
-    """Routing a GPT-OSS spec to the dense or MoE recipe would emit kernels that drop the
-    sink and compute the wrong FFN, and report parity while doing it."""
-    with pytest.raises(NotImplementedError) as e:
-        families.family_module("gptoss")
-    msg = str(e.value)
-    for want in ("gptoss", "sink", "clamped", "bias"):
-        assert want in msg.lower(), msg
+def _recipe():
+    from recipes import gptoss
+    return gptoss, ModelSpec.from_hf_config(HF_GPTOSS_20B)
 
 
-def test_gptoss_is_not_in_the_recipe_list():
-    """FAMILIES is the families that HAVE a recipe -- cache.py and the geometry tests walk
-    it and call family_module on every entry."""
-    assert "gptoss" not in families.FAMILIES
-    from recipes import dense as DR
-    assert "gptoss" not in DR.DENSE_FAMILIES
+def test_the_family_routes_to_its_own_recipe_not_the_dense_one():
+    """Routing a GPT-OSS spec to the dense or MoE recipe would drop the sink and compute the
+    wrong FFN; the family has its own recipe, and dense still refuses it."""
+    from recipes import dense as DR, gptoss
+    assert families.family_module("gptoss") is gptoss
+    assert "gptoss" in families.FAMILIES and "gptoss" not in DR.DENSE_FAMILIES
+    with pytest.raises(Exception, match="dense recipe given"):
+        DR._check(ModelSpec.from_hf_config(HF_GPTOSS_20B))
+
+
+def test_the_widths_pad_to_whole_k_tiles_over_eight_cores():
+    R, spec = _recipe()
+    G, L = R.geometry(spec), R.layout(spec)
+    assert (G.HID, G.HR, G.FF, G.FR) == (3072, 2880, 3072, 2880)
+    assert L.UP_BYTES == L.EXPERT_UG // 2 and L.POOL_DOWN == spec.num_experts * L.EXPERT_UG
+    assert L.POOL_ATTN == L.POOL_DOWN + spec.num_experts * L.UP_BYTES < L.POOL_BYTES < 1 << 32
+    assert L.AD_W == L.AD_XM + 2 * G.HID and L.AD_W + 32 <= L.AD_XM + G.XM_ELEMS * 4096
+
+
+def test_the_attention_core_is_built_with_the_sink_and_no_qk_norm():
+    R, spec = _recipe()
+    flags = R.attn_flags(R.geometry(spec))
+    assert "-DATTN_SINK=1" in flags and "-DATTN_QKNORM=0" in flags and "-DATTN_GATE=0" in flags
+
+
+def test_both_position_tables_turn_at_the_yarn_frequencies():
+    """GPT-OSS's sliding layers share the full layers' rotation; `rope_inv_freq(local=True)` is
+    Gemma's separate unscaled table, and using it moved the sliding layers' attention by 4%."""
+    R, spec = _recipe()
+    g = R.programs(spec)["globals"]
+    for tab in ("ptab", "ptab_local"):
+        assert g[tab]["inv_freq"] == spec.rope_inv_freq() and g[tab]["scale"] == spec.rope_scale()
+    assert g["ptab_local"]["window"] == 128 and g["ptab"]["window"] == 0
+
+
+def test_a_layer_is_two_dispatches_with_the_router_on_the_host_between():
+    R, spec = _recipe()
+    for lt in (DENSE, DENSE_LOCAL):
+        prog = R.programs(spec)["layer_types"][lt]["program"]
+        assert [s["op"] for s in prog] == ["run", "gptoss_route", "run"]
+        assert prog[1]["kernel"] == prog[2]["kernel"] == "gx_moe" and prog[1]["hidden_real"] == 2880
+
+
+def test_the_experts_stream_as_mx4_half_tiles_unless_asked_for_q8(monkeypatch):
+    """GX_MX4 (default on): the pool's experts are the GGUF's MXFP4 nibbles (2368 B a half-tile, gx_ug_mx4 /
+    gx_down_mx4), the attention stays q8; GX_MX4=0 keeps the q8 experts the first route shipped, at 5120 B."""
+    R, spec = _recipe()
+    L = R.layout(spec)
+    ops = R.pack_plan(spec)["layer_types"][DENSE]["pool"]
+    assert [o["op"] for o in ops[:2]] == ["gx_ug_mx4", "gx_down_mx4"]
+    assert L.UP_BYTES == (3072 // 64) * (3072 // 64) * R.MX_CH and L.POOL_BYTES < 600 << 20
+    b = R.builds(spec)
+    assert b["gx_moe"]["env"]["GX_MX4"] == "1" and b["gx_moe"]["build_dir"].endswith("_mx4")
+    monkeypatch.setenv("GX_MX4", "0")
+    assert R.pack_plan(spec)["layer_types"][DENSE]["pool"][0]["op"] == "gx_ug"
+    assert R.layout(spec).UP_BYTES == (3072 // 64) * (3072 // 64) * R.CH
+
+
+def test_the_block_prefill_route_is_four_gemms_two_contexts_and_the_host():
+    R, spec = _recipe()
+    prog = R.programs(spec)
+    g = prog["gptoss_prefill"]
+    assert g["t"] == 256 and (g["x"], g["y"]) == ("gp_x", "gp_y")
+    # q|k|v and o on gemm_bfp16's context, the experts on the MXFP4 variant's, re-pointed per expert
+    k = prog["kernels"]
+    assert {k[n]["context"] for n in ("gpq_qkv", "gpq_o")} == {"gpgemm"}
+    assert {k[n]["context"] for n in ("gpx_glu", "gpx_down")} == {"gpmx4"}
+    assert k["gpx_glu"]["patch"] == k["gpx_down"]["patch"] == "gxexpert" and "patch" not in k["gpq_qkv"]
+    # shapes: hi | lo stacked weights for q|k|v and o, gate | up stacked for the experts
+    assert (g["qkv"]["n"], g["qkv"]["k"], g["qkv"].get("split")) == (2 * 5120, 2880, True)
+    assert (g["o"]["n"], g["o"]["k"], g["o"].get("split")) == (2 * 3072, 4096, True)
+    assert (g["glu"]["n"], g["glu"]["k"], g["down"]["n"], g["down"]["k"]) == (6144, 2880, 3072, 2880)
+    assert g["glu"]["expert_bytes"] == 48 * 45 * 4352 and g["down"]["expert_bytes"] == 24 * 45 * 4352
+    assert prog["globals"]["gp_x"] == 256 * 4096 // 8 * 9 and prog["globals"]["gp_y"] == 256 * 10240 * 4
+    assert g["window"] == {DENSE: 0, DENSE_LOCAL: 128} and g["rope_scale"] == spec.rope_scale()
+    b = R.builds(spec)
+    assert b["gp_glu"]["env"]["GB_B"] == "mx4" and "GB_B" not in b["gp_qkv"]["env"]
+    # the experts again at 128 rows (32-row tiles, a context of its own) for the chunks that half fill 256
+    assert g["t_small"] == 128 and g["glu_small"]["w"] == "gpw_glu" and g["down_small"]["w"] == "gpw_down"
+    assert {k[n]["context"] for n in ("gpx_glu_s", "gpx_down_s")} == {"gpmx4s"} and k["gpx_glu_s"]["patch"] == "gxexpert"
+    assert (b["gp_glu_s"]["env"]["GB_M"], b["gp_glu_s"]["env"]["GB_TM"]) == ("128", "32") and g["min_prompt"] == 12
+
+
+def test_the_attention_weights_go_in_as_hi_and_lo_halves_of_one_operand(monkeypatch):
+    """bfp16 keeps 8 bits of each block of eight; Q8_0's codes are 8 bits of a block of 32, and rounding them to
+    bfp16 was the route's largest error (OPEN-PREFILL-GPTOSS). The lo copy of every op sits N / 2 rows on."""
+    R, spec = _recipe()
+    ops = R.programs(spec)["gptoss_prefill"]["weights"]["gpw_qkv"]
+    assert [(o["tensor"].split(".")[-2], o["split"], o["row0"]) for o in ops] == [
+        ("attn_q", "hi", 0), ("attn_q", "lo", 5120), ("attn_k", "hi", 4096), ("attn_k", "lo", 9216),
+        ("attn_v", "hi", 4608), ("attn_v", "lo", 9728)]
+    monkeypatch.setenv("GX_PREFILL_HILO", "0")
+    g = R.programs(spec)["gptoss_prefill"]
+    assert g["qkv"]["n"] == 5120 and "split" not in g["qkv"] and len(g["weights"]["gpw_qkv"]) == 3
+    monkeypatch.setenv("GX_PREFILL", "0")
+    assert "gptoss_prefill" not in R.programs(spec) and "gp_glu" not in R.builds(spec)
 
 
 def test_the_quant_role_table_knows_gpt_oss_tensor_names():

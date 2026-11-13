@@ -19,6 +19,10 @@ Shape constraints: M % (m * 4) == 0, N % (n * 8) == 0, K % k == 0.
 
 GB_EPI=glu: C is the H operand, silu(gate) * up as down's A (OPEN-PREFILL-BFP16-FFN). GB_A=h: A is such an H operand.
 
+GB_B=mx4: B stays MXFP4 in DDR (pack.py pack_b_mx4: 4352 B a tile instead of 9216, the tiles in pack_b's order) and
+each core converts its tile into the bfp16 one in L1 (mx4_b.cc, exact) before the same multiply: GPT-OSS's experts as
+the GGUF holds them. Plain epilogue only.
+
     GB_M=256 GB_K=2560 GB_N=4096 python open_kernels/build_design.py open_kernels/designs/gemm_bfp16/gemm_bfp16.py <out>
 """
 
@@ -39,6 +43,9 @@ from aie.utils import config as _aie_config
 
 HERE = Path(__file__).resolve().parent
 _KERNEL_SRC = HERE / "mm_bfp_acc.cc"
+_MX4_SRC = HERE / "mx4_b.cc"
+_MX4_INC = HERE.parent / "gemv_q4"           # mx4_codes.h
+MX4_TILE = 4352                              # 128 x 64 MXFP4: 256 B of exponents + 4096 B of nibbles
 _AIE_KERNELS_INC = Path(_aie_config.cxx_header_path()) / "aie_kernels"
 
 N_ROWS = 4
@@ -64,11 +71,14 @@ def gemm_bfp16(
     B: In, A: In, C: Out, *,
     gm: CompileTime[int], gk: CompileTime[int], gn: CompileTime[int],
     tm: CompileTime[int] = 64, tk: CompileTime[int] = 64, tn: CompileTime[int] = 128,
-    epi: CompileTime[str] = "", a_from: CompileTime[str] = "",
+    epi: CompileTime[str] = "", a_from: CompileTime[str] = "", b_fmt: CompileTime[str] = "",
 ):
     why = check_shape(gm, gk, gn, tm, tk, tn)
     assert why is None, why
     assert epi in ("", "glu") and a_from in ("", "h"), (epi, a_from)
+    assert b_fmt in ("", "mx4"), b_fmt
+    mx4 = b_fmt == "mx4"
+    assert not mx4 or (not epi and not a_from and tk == 64 and tn == 128), "GB_B=mx4: the plain 64 x 64 x 128 tile"
     # one row block per dispatch keeps the H slot law to (kc, row); the route's T is 256
     assert (not epi and not a_from) or gm == tm * N_ROWS, "the glu / h variants run 256 rows a dispatch"
     n_aie_rows, n_aie_cols = N_ROWS, N_COLS
@@ -76,10 +86,11 @@ def gemm_bfp16(
     r = t = 8  # the 8x8x8 bfp16 mac
 
     A_l2_ty = np.ndarray[(tm * tk // 8,), np.dtype[v8bfp16ebs8]]
-    B_l2_ty = np.ndarray[(tk * tn // 8,), np.dtype[v8bfp16ebs8]]
+    B_l2_ty = np.ndarray[(MX4_TILE,), np.dtype[np.uint8]] if mx4 else np.ndarray[(tk * tn // 8,), np.dtype[v8bfp16ebs8]]
     C_l2_ty = np.ndarray[(tm * tn * n_aie_rows,), np.dtype[np.float32]]
     A_l1_ty = np.ndarray[(tm, tk // 8), np.dtype[v8bfp16ebs8]]
     B_l1_ty = np.ndarray[(tk, tn // 8), np.dtype[v8bfp16ebs8]]
+    Bmx_l1_ty = np.ndarray[(MX4_TILE,), np.dtype[np.uint8]]
     C_l1_ty = np.ndarray[(tm, tn), np.dtype[np.float32]]
 
     flags = [f"-DDIM_M={tm}", f"-DDIM_K={tk}", f"-DDIM_N={tn}", f"-I{_AIE_KERNELS_INC}"]
@@ -87,8 +98,13 @@ def gemm_bfp16(
                                compile_flags=flags + ["-DF32_FIRST"])
     k_mid = ExternalFunction("mm_f32_mid", source_file=str(_KERNEL_SRC), arg_types=[A_l1_ty, B_l1_ty, C_l1_ty],
                              compile_flags=flags + ["-DF32_MID"])
-    k_epi = ExternalFunction("gemm_epilogue", source_file=str(_KERNEL_SRC), arg_types=[C_l1_ty, A_l1_ty, np.int32],
-                             compile_flags=flags + ["-DGLU_EPILOGUE"])
+    # (not for mx4: its workers never call it, and IRON compiles every function it is handed -- the glu body is
+    # written for the 64-row tile only)
+    k_epi = None if mx4 else ExternalFunction("gemm_epilogue", source_file=str(_KERNEL_SRC),
+                                              arg_types=[C_l1_ty, A_l1_ty, np.int32],
+                                              compile_flags=flags + ["-DGLU_EPILOGUE"])
+    k_dec = ExternalFunction("gb_mx4_b", source_file=str(_MX4_SRC), arg_types=[Bmx_l1_ty, B_l1_ty],
+                             compile_flags=flags + [f"-I{_MX4_INC}"]) if mx4 else None
 
     A_l3l2, A_l2l1, B_l3l2, B_l2l1, C_l2l3 = [], [], [], [], []
     C_l1l2 = [[None] * n_aie_cols for _ in range(n_aie_rows)]
@@ -99,7 +115,7 @@ def gemm_bfp16(
     for col in range(n_aie_cols):
         b = ObjectFifo(B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth)
         B_l3l2.append(b)
-        B_l2l1.append(b.cons().forward(obj_type=B_l1_ty, name=f"B_L2L1_{col}"))
+        B_l2l1.append(b.cons().forward(obj_type=Bmx_l1_ty if mx4 else B_l1_ty, name=f"B_L2L1_{col}"))
         # 8x8 blocks -> row-major on the way to DDR
         c = ObjectFifo(C_l2_ty, name=f"C_L2L3_{col}", depth=fifo_depth,
                        dims_to_stream=[(tm // r, r * tn), (r, t), (tn // t, r * t), (t, 1)])
@@ -137,15 +153,40 @@ def gemm_bfp16(
         in_a.release(1)
         out_c.release(1)
 
-    workers = Worker.grid(
-        n_aie_rows, n_aie_cols,
-        lambda row, col: Worker(core_fn, [A_l2l1[row].cons(), B_l2l1[col].cons(), C_l1l2[row][col].prod(),
-                                          rtps[row][col], k_first, k_mid, k_epi], stack_size=0x1000))
+    def core_mx4(in_a, in_b, out_c, rtp, bdec, first, mid, dec):
+        # each K chunk: the MXFP4 tile into bdec (the B the multiply reads), the tile released at once
+        def b_tile():
+            eb = in_b.acquire(1)
+            dec(eb, bdec)
+            in_b.release(1)
+        elem_out = out_c.acquire(1)
+        elem_a = in_a.acquire(1)
+        b_tile()
+        n_mid = rtp[0]        # after the first tiles: the sequence writes it before their fills
+        first(elem_a, bdec, elem_out)
+        in_a.release(1)
+        for _ in range_(n_mid + 1):
+            ea = in_a.acquire(1)
+            b_tile()
+            mid(ea, bdec, elem_out)
+            in_a.release(1)
+        out_c.release(1)
+
+    def worker(row, col):
+        if mx4:
+            return Worker(core_mx4, [A_l2l1[row].cons(), B_l2l1[col].cons(), C_l1l2[row][col].prod(), rtps[row][col],
+                                     Buffer(B_l1_ty, name=f"bdec_{row}_{col}"), k_first, k_mid, k_dec],
+                          stack_size=0x1000)
+        return Worker(core_fn, [A_l2l1[row].cons(), B_l2l1[col].cons(), C_l1l2[row][col].prod(),
+                                rtps[row][col], k_first, k_mid, k_epi], stack_size=0x1000)
+
+    workers = Worker.grid(n_aie_rows, n_aie_cols, worker)
 
     slot_blocks = H_SLOT_WORDS * 4 // 9                  # one H slot in bfp16 blocks
     a_elems = h_slots(gm, gk * 2, tm, tn) * slot_blocks if a_from == "h" else gm * gk // 8
     A_ty = np.ndarray[(a_elems,), np.dtype[v8bfp16ebs8]]
-    B_ty = np.ndarray[(gn * gk // 8,), np.dtype[v8bfp16ebs8]]
+    B_ty = (np.ndarray[(gn // tn * (gk // tk) * MX4_TILE,), np.dtype[np.uint8]] if mx4
+            else np.ndarray[(gn * gk // 8,), np.dtype[v8bfp16ebs8]])
     C_ty = np.ndarray[(h_slots(gm, gn, tm, tn) * H_SLOT_WORDS if epi == "glu" else gm * gn,), np.dtype[np.float32]]
 
     # A: row block rb (tm rows), then gk chunk; B: array column c, then its tn-row groups, then gk chunk. One contiguous
@@ -168,8 +209,12 @@ def gemm_bfp16(
                                        [0, n_aie_rows * slot_blocks, 128, 1]) for rb in range(gm // tm)]
     else:
         A_tiles = [lin_tap(gm * gk // 8, rb * tm * (gk // 8), tm * (gk // 8), per_col) for rb in range(gm // tm)]
-    B_tiles = [lin_tap(gn * gk // 8, c * (gn // n_aie_cols) * (gk // 8), (gn // n_aie_cols) * (gk // 8))
-               for c in range(n_aie_cols)]
+    if mx4:
+        col_bytes = gn // tn // n_aie_cols * (gk // tk) * MX4_TILE
+        B_tiles = [lin_tap(gn // tn * (gk // tk) * MX4_TILE, c * col_bytes, col_bytes) for c in range(n_aie_cols)]
+    else:
+        B_tiles = [lin_tap(gn * gk // 8, c * (gn // n_aie_cols) * (gk // 8), (gn // n_aie_cols) * (gk // 8))
+                   for c in range(n_aie_cols)]
 
     def drain_tap(col, row_base, current):
         if epi == "glu":
@@ -227,6 +272,9 @@ TILE_K = int(os.environ.get("GB_TK", 64))
 TILE_N = int(os.environ.get("GB_TN", 128))
 EPI = os.environ.get("GB_EPI", "")
 A_FROM = os.environ.get("GB_A", "")
+B_FMT = os.environ.get("GB_B", "")
 
 DESIGN = gemm_bfp16
 SPECIALIZE = {"gm": M, "gk": K, "gn": N, "tm": TILE_M, "tk": TILE_K, "tn": TILE_N, "epi": EPI, "a_from": A_FROM}
+if B_FMT:                     # only when set, so every bfp16 build keeps its key
+    SPECIALIZE["b_fmt"] = B_FMT
