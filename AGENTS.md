@@ -72,6 +72,11 @@ step through `OFLM_ENV_DUMP=1`, which makes `env.sh` print its variables as
 
 ## The production bar for a supported model
 
+Every PR that adds or changes support for a model also updates its entry in
+`src/model_list.json`: the entry exists, names the files the engine loads, and
+states the real quant, family and context length. A model with no correct
+registry entry is not supported, whatever the engine can do.
+
 A top-tier supported model ships finished and production-ready. Before you
 export its kernel set as done, or open an issue or PR that calls it supported,
 show each of these with measurements:
