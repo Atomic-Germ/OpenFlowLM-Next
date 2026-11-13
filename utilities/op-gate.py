@@ -87,6 +87,7 @@ NOT_AUTOMATED = {
     "short_conv": "no fixture; (3, 2048) came from an oflm serve run (OPEN-SHORT-CONV-KERNEL)",
     "router": "no per-geometry fixture",
     "moe": "no per-geometry fixture (whole-layer MoE block only)",
+    "attn_gemma4": "the E2B / E4B kinds are validated by OPEN-FAMILY-GEMMA4's replica slice, not a per-shape fixture",
 }
 
 

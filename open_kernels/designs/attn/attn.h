@@ -33,7 +33,9 @@
 // Elements: the attention core's fifo element is ONE cache-row half, E_A = KVH * HD bf16
 // bytes (1 KB for the 27B, 2 KB for Qwen3-4B). So a q / k / v / gate element of fp32 heads
 // carries kHPE = KVH/2 heads, an og element kHPO = KVH heads, and a cache row is two elements
-// (K_t, V_t). meta = two elements: [qn bf16[HD] @0 | kn @HD*2 | sinks bf16[NH] @4*HD, only
+// (K_t, V_t). With ONE kv head (ATTN_KVH 1) a row half cannot hold an fp32 head, so the
+// element is the whole cache row [K_t | V_t] = HD * 4 bytes: one head per q / k / v element,
+// one element per cached row. meta = two elements: [qn bf16[HD] @0 | kn @HD*2 | sinks bf16[NH] @4*HD, only
 // with ATTN_SINK] (per layer) and the position
 // record [int32 pos @0 | int32 nf @4 | cos f32[ROT/2] @512 | sin f32[ROT/2] @512 + 2*ROT]
 // (ptab row pos; nf = the number of cache rows streamed). pb (int32[4]) = [pos, nf, rows seen]:
@@ -87,6 +89,15 @@
 #ifndef ATTN_PTAB_SPLIT
 #define ATTN_PTAB_SPLIT 0    // 1: the position record is wider than a fifo element, so cos / sin
 #endif                       // arrive in a second one (Qwen2.5-3B: a 1024 B record, 512 B elements)
+#ifndef ATTN_PTAB_CS_OFF
+#define ATTN_PTAB_CS_OFF 512 // the record offset of [cos | sin]; an element boundary when 512 would straddle two
+#endif
+#ifndef ATTN_KV_SHARED
+#define ATTN_KV_SHARED 0     // 1: a KV-shared layer at one kv head reads this position's row back as one element
+#endif
+#ifndef ATTN_NORM_SHARED
+#define ATTN_NORM_SHARED 0   // 1: the q/k norms and the v norm share one noinline 1/rms (Gemma 4 E-series program memory)
+#endif
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
@@ -185,12 +196,20 @@ static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW
 #else
 #define ATTN_QT float
 #endif
+#if ATTN_KVH == 1
+static constexpr unsigned kEA = kHD * 4;      // one fifo element: a whole KV cache row, one fp32 head
+static constexpr unsigned kHPE = 1;
+static constexpr unsigned kHPO = 2;
+static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kNH % kHPO == 0,
+              "attn.h: HD a multiple of 32, rotary dim a multiple of 32 within HD, an even head count");
+#else
 static constexpr unsigned kEA = kKVH * kHD * 2;   // one fifo element: half a KV cache row
 static constexpr unsigned kHPE = kKVH / 2;    // fp32 heads per element
 static constexpr unsigned kHPO = kKVH;        // bf16 og heads per element
 static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
               kNH % kHPO == 0 && kKVH % kHPE == 0,
               "attn.h: HD a multiple of 32, rotary dim a multiple of 32 within HD, an even kv-head count that divides NH");
+#endif
 // ATTN_SCALE replaces 1/sqrt(HD) outright: Gemma 4 scores with 1.0 (its q_norm / k_norm carry
 // the scale), at head dims 256 AND 512. A power of two, so it takes the scale-in-q path below.
 #ifdef ATTN_SCALE
@@ -428,13 +447,22 @@ static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *_
 #endif
   // cos[ROT/2] then sin[ROT/2], one contiguous 4 * ROT block at record offset 512. On a
   // family whose element is narrower than the record that block sits in a later element,
-  // which the design hands over as m2 (the recipe checks it does not straddle two).
-#if ATTN_PTAB_SPLIT
-  const float *c = (const float *)(m2 + 512 % kEA);
+  // which the design hands over as m2 (the recipe checks it does not straddle two) -- except
+  // with one kv head, where the block runs from m1 into m2.
+#if ATTN_PTAB_SPLIT && ATTN_KVH == 1
+  static_assert(kEA % 128 == 0 && 512 + 4 * kRot <= 2 * kEA, "attn.h: the record is two elements");
+  for (unsigned j = 0; j < kRot; j += kV) {
+    const unsigned o = 512 + 4 * j;    // a 32-lane vector never crosses the element boundary
+    aie::store_v(cs + j, aie::load_v<kV>((const float *)(o < kEA ? m1 + o : m2 + (o - kEA))));
+  }
 #else
-  const float *c = (const float *)(m1 + 512);
+#if ATTN_PTAB_SPLIT
+  const float *c = (const float *)(m2 + ATTN_PTAB_CS_OFF % kEA);
+#else
+  const float *c = (const float *)(m1 + ATTN_PTAB_CS_OFF);
 #endif
   for (unsigned j = 0; j < kRot; j += kV) aie::store_v(cs + j, aie::load_v<kV>(c + j));
+#endif
   const int32_t *p = (const int32_t *)m1;
   pb[0] = p[0];
   pb[1] = p[1];
@@ -462,12 +490,52 @@ static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *_
 #endif
 }
 
+#if ATTN_NORM_SHARED
+// 1 / rms over one head, norm_rope's arithmetic step for step: the q/k norms and the v norm
+// share this one copy, which is what keeps Gemma 4's E-series attention cores inside program memory
+__attribute__((noinline)) inline float head_rms_inv(const float *__restrict x) {
+  accf32 ss = aie::zeros<accfloat, kV>();
+  for (unsigned j = 0; j < kHD; j += kV) {
+    v32b h, l;
+    split32(aie::load_v<kV>(x + j), h, l);
+    ss = aie::mac(ss, h, h);
+    ss = aie::mac(ss, h, l);
+    ss = aie::mac(ss, h, l);
+  }
+#if ATTN_INTFP
+  const float ms = smul_rn(aie::reduce_add(ss.template to_vector<float>()), 1.0f / kHD) + ATTN_EPS;
+  const float hx = smul_rn(0.5f, ms);
+  float inv = aie::invsqrt(ms);
+  inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
+  inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
+  return inv;
+#else
+  return srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + ATTN_EPS);
+#endif
+}
+#endif
+
 // x (fp32[HD]) -> [rms_HD * w] -> rope over [0, ROT) -> dst (fp32[HD]); with ATTN_QKNORM_POST
 // the * w moves after the rotation.
 __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const bfloat16 *__restrict w,
                              const float *__restrict cs, float *__restrict dst) {
 #if !ATTN_QKNORM
   for (unsigned j = 0; j < kHD; j += kV) aie::store_v(dst + j, aie::load_v<kV>(x + j));
+#elif ATTN_NORM_SHARED
+  const float inv = head_rms_inv(x);
+  const bfloat16 ih = (bfloat16)inv;
+  const bfloat16 il = (bfloat16)(inv - (float)ih);
+  for (unsigned j = 0; j < kHD; j += kV) {
+    accf32 t = aie::zeros<accfloat, kV>();
+    t = mac_vs(t, aie::load_v<kV>(x + j), ih, il);
+#if ATTN_QKNORM_POST
+    aie::store_v(dst + j, t.template to_vector<float>());
+#else
+    accf32 u = aie::zeros<accfloat, kV>();
+    u = mac_vv(u, t.template to_vector<float>(), aie::load_v<kV>(w + j));
+    aie::store_v(dst + j, u.template to_vector<float>());
+#endif
+  }
 #else
   accf32 ss = aie::zeros<accfloat, kV>();
   for (unsigned j = 0; j < kHD; j += kV) {
@@ -655,6 +723,9 @@ static inline void attn_k_impl(const float *__restrict ke ATTN_BIAS_PARM, const 
 // straight into the bf16 cache row. The same reduction and reciprocal norm_rope uses, so the
 // v row and the k row of one head are normalised by identical arithmetic.
 static inline void rms_to_bf16_hd(const float *__restrict x, bfloat16 *__restrict dst) {
+#if ATTN_NORM_SHARED
+  const float inv = head_rms_inv(x);
+#else
   accf32 ss = aie::zeros<accfloat, kV>();
   for (unsigned j = 0; j < kHD; j += kV) {
     v32b h, l;
@@ -671,6 +742,7 @@ static inline void rms_to_bf16_hd(const float *__restrict x, bfloat16 *__restric
   inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
 #else
   const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + ATTN_EPS);
+#endif
 #endif
   const bfloat16 ih = (bfloat16)inv;
   const bfloat16 il = (bfloat16)(inv - (float)ih);

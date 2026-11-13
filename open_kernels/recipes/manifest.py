@@ -111,7 +111,13 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
     for lt, d in plan.pop("layer_types").items():
         m["layer_types"][lt]["pack"] = d
     m["pack"] = plan          # pool_bytes, chunk_bytes, lm_head {pool_bytes, ops}, embed, norm
-    if gguf:
+    if hasattr(F, "host_stages"):
+        m.update(F.host_stages(spec))       # Gemma 4 E-series: kv_source, ple, layer_scalar, logit_softcap
+    if getattr(F, "GGUF_ONLY", False):
+        # a GGUF-only family's one view is already GGUF-direct, so it is also the view swapped in for model.gguf
+        import copy
+        m["gguf"] = copy.deepcopy(m)
+    elif gguf:
         # A COMPLETE manifest for a GGUF-direct weight file: the engine parses it with
         # the same code and swaps the whole view at load. The recipe names the quant it
         # wants (gguf.py's GGUF_QUANT: the q4_1 law with GGUF-reading pack ops), and the

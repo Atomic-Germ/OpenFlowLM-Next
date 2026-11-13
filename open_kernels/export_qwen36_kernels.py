@@ -663,6 +663,8 @@ def main() -> int:
                 mine_ = json.loads(mj.read_text(encoding="utf-8"))
                 for d in (theirs, mine_):
                     d.pop("build_key", None)
+                    if isinstance(d.get("gguf"), dict):      # the nested GGUF-direct view carries one too
+                        d["gguf"].pop("build_key", None)
                 ok = theirs == mine_
                 print(f"{'same    ' if ok else 'MISMATCH'} manifest.json: {'equal apart from the build key' if ok else 'differs'}")
                 bad += not ok

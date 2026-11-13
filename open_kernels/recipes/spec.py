@@ -18,7 +18,9 @@ from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
 SHORT_CONV = "short_conv"                             # LFM2: a short depthwise causal conv INSTEAD of attention
-LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a dense layer with sliding-window attention
+# Gemma 4's KV-shared layers have no K / V of their own: they read an earlier layer's cache (gemma4.py kv_sources)
+DENSE_SHARED, DENSE_LOCAL_SHARED = "dense_shared", "dense_local_shared"
+LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV, DENSE_SHARED, DENSE_LOCAL_SHARED)   # dense_local: a dense layer with sliding-window attention
 # Adding a member here is free: `layer_types` is one field and no shipped spec uses the new
 # value, so no hash moves. Adding a dataclass FIELD is not - spec_hash() covers every field.
 
@@ -118,6 +120,9 @@ class ModelSpec:
     # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
     quant: str | dict = DEFAULT_QUANT
     extra: dict = field(default_factory=dict)   # informational (model name, source)
+    # Gemma 4 E2B / E4B (family gemma4e); dropped from to_dict() at 0 like the fields above
+    intermediate_shared: int = 0      # the KV-shared layers' FFN width (E2B doubles it); 0 = intermediate
+    ple_dim: int = 0                  # per-layer input width (hidden_size_per_layer_input); 0 = none
 
     # ---- derived
     @property
@@ -147,11 +152,11 @@ class ModelSpec:
 
     @property
     def has_dense(self) -> bool:
-        return DENSE in self.layer_types or DENSE_LOCAL in self.layer_types
+        return any(t in self.layer_types for t in (DENSE, DENSE_LOCAL, DENSE_SHARED, DENSE_LOCAL_SHARED))
 
     @property
     def has_local(self) -> bool:
-        return DENSE_LOCAL in self.layer_types
+        return DENSE_LOCAL in self.layer_types or DENSE_LOCAL_SHARED in self.layer_types
 
     @property
     def has_short_conv(self) -> bool:
@@ -416,7 +421,7 @@ class ModelSpec:
 
 
 GEMMA4_FIELDS = ("global_head_dim", "global_kv_heads", "global_rotary_dim", "attn_k_eq_v", "v_norm",
-                 "attn_scale", "final_softcap")
+                 "attn_scale", "final_softcap", "intermediate_shared", "ple_dim")
 _DEFAULTS = {f.name: f.default for f in fields(ModelSpec) if f.name in GEMMA4_FIELDS}
 
 
@@ -1751,12 +1756,6 @@ def _gemma4_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
-def _gemma4_unsupported(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
-    raise SpecError("gemma4: the E2B / E4B (model_type gemma4) are not implemented on the open "
-                    "kernels: per-layer embeddings and KV sharing across layers have no recipe. "
-                    "The 12B (gemma4_unified) is.")
-
-
 def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
     """Gemma 4 12B from the GGUF header (llama.cpp's `gemma4` arch).
 
@@ -1774,12 +1773,6 @@ def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    elpi = md.get(f"{a}.embedding_length_per_layer_input", 0)
-    skv = md.get(f"{a}.attention.shared_kv_layers", 0)
-    if elpi or skv:
-        raise SpecError(f"gemma4: embedding_length_per_layer_input={elpi} / "
-                        f"attention.shared_kv_layers={skv}: the E2B / E4B are not implemented "
-                        f"(per-layer embeddings, KV sharing across layers)")
     n = k("block_count")
     hid = k("embedding_length")
     hd = k("attention.key_length_swa")           # sliding layers' head dim (256)
@@ -1858,6 +1851,177 @@ def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
 
 
 
+def _gemma4_layer_types(kinds: list[str], shared: int) -> tuple[str, ...]:
+    """sliding / full per layer, the last `shared` of them KV-shared (no K / V of their own)."""
+    m = {"sliding_attention": (DENSE_LOCAL, DENSE_LOCAL_SHARED), "full_attention": (DENSE, DENSE_SHARED)}
+    bad = sorted({t for t in kinds if t not in m})
+    if bad:
+        raise SpecError(f"gemma4: unknown layer type(s) {bad}")
+    first = len(kinds) - shared
+    if shared < 0 or first < 1:
+        raise SpecError(f"gemma4: {shared} KV-shared layers out of {len(kinds)}")
+    lt = tuple(m[t][i >= first] for i, t in enumerate(kinds))
+    for kind, own in ((DENSE_LOCAL_SHARED, DENSE_LOCAL), (DENSE_SHARED, DENSE)):
+        if kind in lt and own not in lt[:first]:
+            raise SpecError(f"gemma4: a {kind} layer has no earlier {own} layer to share the cache of")
+    return lt
+
+
+def _gemma4e_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Gemma 4 E2B / E4B text (`gemma4` / `gemma4_text`): the 12B's attention arithmetic plus KV sharing
+    across layers and per-layer inputs. The 12B is _gemma4_hf; the 26B MoE is neither."""
+    tc = cfg.get("text_config", cfg)
+    n = _need(tc, "num_hidden_layers")
+    if tc.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
+        raise SpecError(f"gemma4: hidden_activation {tc.get('hidden_activation')!r} is not gelu_pytorch_tanh")
+    for key, why in (("enable_moe_block", "the MoE block is the 26B's"), ("attention_bias", "no projection bias")):
+        if tc.get(key):
+            raise SpecError(f"gemma4: {key} is set ({why})")
+    # "vision" makes image tokens attend both ways; text decode stays causal, and the open engine takes no images
+    if tc.get("use_bidirectional_attention") not in (None, "vision"):
+        raise SpecError("gemma4: bidirectional attention over text is not supported (text decode is causal)")
+    kvh = _need(tc, "num_key_value_heads")
+    k_eq_v = bool(tc.get("attention_k_eq_v"))
+    gkvh = int(tc.get("num_global_key_value_heads") or kvh) if k_eq_v else kvh
+    hd, ghd = _need(tc, "head_dim"), int(tc.get("global_head_dim") or _need(tc, "head_dim"))
+    rp = _need(tc, "rope_parameters")
+    full, slide = rp.get("full_attention") or {}, rp.get("sliding_attention") or {}
+    if full.get("rope_type") != "proportional" or slide.get("rope_type", "default") != "default":
+        raise SpecError(f"gemma4: rope types {full.get('rope_type')!r} / {slide.get('rope_type')!r} "
+                        f"(proportional / default only)")
+    vocab = _need(tc, "vocab_size")
+    if tc.get("vocab_size_per_layer_input", vocab) != vocab:
+        raise SpecError("gemma4: a per-layer-input vocabulary different from the main one")
+    inter = _need(tc, "intermediate_size")
+    shared = int(tc.get("num_kv_shared_layers", 0))
+    if not tc.get("hidden_size_per_layer_input"):
+        raise SpecError("gemma4e: no per-layer inputs, so not an E2B / E4B (the 12B's model_type is gemma4_unified)")
+    return ModelSpec(
+        family="gemma4e",
+        hidden=_need(tc, "hidden_size"),
+        num_layers=n,
+        layer_types=_gemma4_layer_types(list(_need(tc, "layer_types")), shared),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=_need(tc, "num_attention_heads"),
+        num_kv_heads=kvh,
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(full["rope_theta"]),
+        rope_local_theta=float(slide.get("rope_theta", 10000.0)),
+        sliding_window=int(_need(tc, "sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=inter,
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        norm_eps=float(tc.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg.get("model_type", tc.get("model_type")), "source": "hf_config"},
+        global_head_dim=ghd if ghd != hd else 0,
+        global_rotary_dim=int(float(full.get("partial_rotary_factor", 1.0)) * ghd),
+        intermediate_shared=2 * inter if (tc.get("use_double_wide_mlp") and shared) else 0,
+        ple_dim=int(tc.get("hidden_size_per_layer_input") or 0),
+        global_kv_heads=gkvh,
+        attn_k_eq_v=k_eq_v,
+        v_norm=True,
+        attn_scale=1.0,
+        final_softcap=float(tc.get("final_logit_softcapping") or 0.0),
+    )
+
+
+GEMMA4_GLOBAL_ROTARY = 0.25   # transformers' partial_rotary_factor for the full layers; llama.cpp carries it as rope_freqs
+
+
+def _gemma4e_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """llama.cpp's gemma4 keys. The global layers' rotated share is not a key: llama.cpp writes it as the
+    `rope_freqs` tensor (1 for a rotated pair, 1e30 for the rest), which a caller may pass as
+    `gemma4.rope_freqs`; without it the family's 0.25 applies. K = V (no `attn_v`) likewise: `gemma4.attention.k_eq_v`, else assumed when the two kinds' kv-head counts differ."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    pat = list(k("attention.sliding_window_pattern"))
+    if len(pat) != n:
+        raise SpecError(f"gemma4: sliding_window_pattern has {len(pat)} entries, block_count is {n}")
+    kinds = ["sliding_attention" if p else "full_attention" for p in pat]
+    shared = int(md.get(f"{a}.attention.shared_kv_layers", 0))
+    hd, ghd = int(k("attention.key_length_swa")), int(k("attention.key_length"))
+    if int(md.get(f"{a}.attention.value_length", ghd)) != ghd or int(md.get(f"{a}.attention.value_length_swa", hd)) != hd:
+        raise SpecError("gemma4: value width differs from key width")
+    rf = md.get(f"{a}.rope_freqs")
+    grot = 2 * sum(1 for f in rf if f == 1.0) if rf is not None else int(GEMMA4_GLOBAL_ROTARY * ghd)
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    ff = k("feed_forward_length")
+    ffs = list(ff) if isinstance(ff, (list, tuple)) else [ff] * n
+    if len(ffs) != n:
+        raise SpecError(f"gemma4: feed_forward_length has {len(ffs)} entries, block_count is {n}")
+    first = n - shared
+    own, sh = set(ffs[:first]), set(ffs[first:])
+    if len(own) != 1 or len(sh) > 1:
+        raise SpecError(f"gemma4: FFN widths {sorted(own | sh)} are not one per (own, shared) layer group")
+    inter = own.pop()
+    inter_sh = sh.pop() if sh else inter
+    kv = k("attention.head_count_kv")                # the 12B lists it per layer: 8 sliding, 1 global
+    kvs = [int(x) for x in kv] if isinstance(kv, (list, tuple)) else [int(kv)] * n
+    if len(kvs) != n:
+        raise SpecError(f"gemma4: head_count_kv has {len(kvs)} entries, block_count is {n}")
+    per = {t: {kvs[i] for i in range(n) if kinds[i] == t} for t in ("sliding_attention", "full_attention")}
+    if any(len(v) > 1 for v in per.values()):
+        raise SpecError(f"gemma4: kv-head counts {kvs} are not one per layer kind")
+    kvh = next(iter(per["sliding_attention"] or per["full_attention"]))
+    gkvh = next(iter(per["full_attention"] or {kvh}))
+    k_eq_v = bool(md.get(f"{a}.attention.k_eq_v", gkvh != kvh))
+    return ModelSpec(
+        family="gemma4e",
+        hidden=k("embedding_length"),
+        num_layers=n,
+        layer_types=_gemma4_layer_types(kinds, shared),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=k("attention.head_count"),
+        num_kv_heads=kvh,
+        head_dim=hd,
+        rotary_dim=int(md.get(f"{a}.rope.dimension_count_swa", hd)),
+        rope_theta=float(k("rope.freq_base")),
+        rope_local_theta=float(md.get(f"{a}.rope.freq_base_swa", 10000.0)),
+        sliding_window=int(k("attention.sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=inter,
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        # the file holds an f32: 1e-6 reads back as 9.99999997e-07, and the HF-derived spec says 1e-06
+        norm_eps=float(f"{float(md.get(f'{a}.attention.layer_norm_rms_epsilon', 1e-6)):.6g}"),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+        global_head_dim=ghd if ghd != hd else 0,
+        global_rotary_dim=grot,
+        intermediate_shared=inter_sh if inter_sh != inter else 0,
+        ple_dim=int(k("embedding_length_per_layer_input")),
+        global_kv_heads=gkvh,
+        attn_k_eq_v=k_eq_v,
+        v_norm=True,
+        attn_scale=1.0,
+        final_softcap=float(md.get(f"{a}.final_logit_softcapping", 0.0)),
+    )
+
+
+def _gemma4_any_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """llama.cpp names every Gemma 4 `gemma4`: per-layer inputs or KV sharing make it an E-series model."""
+    a = md["general.architecture"]
+    if md.get(f"{a}.embedding_length_per_layer_input", 0) or md.get(f"{a}.attention.shared_kv_layers", 0):
+        return _gemma4e_gguf(md)
+    return _gemma4_gguf(md)
+
+
 # `qwen3_5_moe_text` is the text-only derivative of the VLM `qwen3_5_moe` (Ornith-1.0-35B-A3B
 # and friends: `Qwen3_5MoeForCausalLM`, no vision_config). Every field the recipe and the
 # config check read is identical to the VLM's, so it derives through the same builder --
@@ -1871,7 +2035,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf,
                "gemma4_unified": _gemma4_hf, "gemma4_unified_text": _gemma4_hf,
-               "gemma4": _gemma4_unsupported, "gemma4_text": _gemma4_unsupported}
+               "gemma4": _gemma4e_hf, "gemma4_text": _gemma4e_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf,
                  # Qwen3-VL: the same decoder as qwen3, and its GGUF carries the same
                  # qwen3vl.* keys -- so the qwen3 builder reads it unchanged. The spec is
@@ -1886,7 +2050,7 @@ GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qw
                  "qwen2": _qwen2_gguf, "qwen2vl": _qwen2_gguf, "llama": _llama3_gguf,
                  "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf,
-                 "gemma4": _gemma4_gguf}
+                 "gemma4": _gemma4_any_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
@@ -1896,16 +2060,22 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
               _lfm2_hf: "lfm2", _gptoss_hf: "gptoss", _k2_hf: "k2",
-              _gemma4_hf: "gemma4", _gemma4_unsupported: "gemma4", _gemma4_gguf: "gemma4"}
+              _gemma4_hf: "gemma4", _gemma4_gguf: "gemma4", _gemma4_any_gguf: ("gemma4", "gemma4e"),
+              _gemma4e_hf: "gemma4e", _gemma4e_gguf: "gemma4e"}
+
+
+def _builds(f, family: str) -> bool:
+    of = _FAMILY_OF[f]
+    return family in of if isinstance(of, tuple) else of == family
 
 
 def hf_model_types(family: str) -> list[str]:
     """The config.json model_type values a family's recipe accepts."""
-    return sorted(k for k, f in HF_FAMILIES.items() if _FAMILY_OF[f] == family)
+    return sorted(k for k, f in HF_FAMILIES.items() if _builds(f, family))
 
 
 def gguf_architectures(family: str) -> list[str]:
-    return sorted(k for k, f in GGUF_FAMILIES.items() if _FAMILY_OF[f] == family)
+    return sorted(k for k, f in GGUF_FAMILIES.items() if _builds(f, family))
 
 
 # ---- the per-role weight format, derived from what the model file actually holds
@@ -1933,7 +2103,7 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
 ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
                         "shortconv.in_proj.weight": "linear",
                         "shortconv.out_proj.weight": "linear_out"}
-for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2", "gemma4"):
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2", "gemma4", "gemma4e"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 # GPT-OSS's routed experts, under the names q4nx-build writes them
 # (utilities/q4nx-build/configs/gpt-oss.json). No shared expert and no dense FFN.

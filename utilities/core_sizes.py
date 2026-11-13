@@ -1,6 +1,8 @@
 """Program memory per core, and the symbols that fill it, for an IRON build directory.
 
-    python utilities/core_sizes.py <build_dir> [--tiles 2_3,3_3,4_3,5_3] [--symbols]
+    python utilities/core_sizes.py <build_dir> [--tiles 2_3,3_3,4_3,5_3] [--symbols] [--data]
+
+`--data` adds each core's data memory: its buffers and stack plus the ELF's .data / .rodata / .bss.
 
 An AIE core has 16,384 bytes of program memory and the build fails late -- inside
 `_XAie_LoadProgMemSection` -- when a core's `.text` passes it, so the number to watch is
@@ -19,6 +21,17 @@ import sys
 from pathlib import Path
 
 PROG_MEM = 16384
+DATA_MEM = 65536
+
+
+def data_used(ld_script: str, secs: dict[str, int]) -> int:
+    """Bytes of the core's 64 KB in use: below the link script's `data` region, plus what is placed in it."""
+    import re
+    m = re.search(r"data \(!RX\) : ORIGIN = (0x[0-9A-Fa-f]+), LENGTH = (0x[0-9A-Fa-f]+)", ld_script)
+    if not m:
+        raise ValueError("no data region in the link script")
+    origin = int(m.group(1), 16)
+    return (origin & 0xFFFF) + sum(secs.get(s, 0) for s in (".data", ".rodata", ".bss"))
 
 
 def sections(elf: bytes) -> dict[str, int]:
@@ -69,6 +82,7 @@ def main() -> int:
     ap.add_argument("build")
     ap.add_argument("--tiles", default=None, help="comma-separated col_row (default: every core found)")
     ap.add_argument("--symbols", action="store_true")
+    ap.add_argument("--data", action="store_true", help="also each core's data memory (link script + ELF)")
     ap.add_argument("--top", type=int, default=25)
     a = ap.parse_args()
 
@@ -85,8 +99,14 @@ def main() -> int:
         if want and tile not in want:
             continue
         b = f.read_bytes()
-        text = sections(b).get(".text", 0)
-        print(f"core {tile}: .text {text:>6} / {PROG_MEM}   {PROG_MEM - text:>5} free")
+        secs = sections(b)
+        text = secs.get(".text", 0)
+        line = f"core {tile}: .text {text:>6} / {PROG_MEM}   {PROG_MEM - text:>5} free"
+        ld = prj / f"ldScripts_main_core_{tile}.ld.script"
+        if a.data and ld.is_file():
+            used = data_used(ld.read_text(encoding="utf-8", errors="replace"), secs)
+            line += f"   data {used:>6} / {DATA_MEM}   {DATA_MEM - used:>5} free"
+        print(line)
         if a.symbols:
             for name, size in symbols(b)[:a.top]:
                 print(f"    {size:>6}  {name}")
