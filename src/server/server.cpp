@@ -7,6 +7,7 @@
  *  \version 0.9.24
  */
 #include "server/openai_compat.hpp"
+#include "server/metrics.hpp"
 #include "server.hpp"
 #include "rest_handler.hpp"
 #include <sstream>
@@ -201,9 +202,13 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
     return false;
 }
 
-// Health probes should not produce request or connection lifecycle logs.
+// Health probes and metrics scrapes should not produce request or connection lifecycle logs.
 static bool is_healthcheck(const http::request<http::string_body>& req) {
-    return req.method() == http::verb::get && req.target() == "/api/version";
+    if (req.method() != http::verb::get) return false;
+    std::string_view target(req.target().data(), req.target().size());
+    auto qpos = target.find('?');
+    std::string_view path = (qpos == std::string_view::npos) ? target : target.substr(0, qpos);
+    return path == "/api/version" || path == "/metrics" || path == "/api/metrics";
 }
 
 ///@brief HttpSession class implementation
@@ -713,10 +718,16 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         header_print("LOG", "Error parsing request body: " + std::string(e.what()));
     }
 
-    // Route lookup
-    std::string key = std::string(req.method_string()) + " " + std::string(req.target());
+    // Route lookup (strip optional query string so /metrics?format=prometheus matches GET /metrics)
+    std::string target_str = std::string(req.target());
+    auto qpos = target_str.find('?');
+    std::string route_path = (qpos == std::string::npos) ? target_str : target_str.substr(0, qpos);
+    std::string key = std::string(req.method_string()) + " " + route_path;
     auto it = routes.find(key);
     if (it == routes.end()) {
+        // Bucket unmatched paths under one label: probes for random URLs must
+        // not grow a new series per URL.
+        oflm::metrics::Collector::instance().record_http_request("unmatched", 404);
         // No route: respond 404 synchronously.
         res.result(http::status::not_found);
         res.body() = safe_dump(json{ {"error", "Not Found"} });
@@ -726,7 +737,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
     }
 
     // Decide if this handler needs exclusive NPU access.
-    bool needs_npu = requires_npu_access(std::string(req.method_string()), std::string(req.target()));
+    bool needs_npu = requires_npu_access(std::string(req.method_string()), route_path);
 
     // Store stable pointers for deferred execution to avoid reference lifetime issues.
     auto* req_ptr = &req;
@@ -737,13 +748,17 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         auto& req_ref = *req_ptr;
         auto& res_ref = *res_ptr;
 
+        // Metrics scrapes are not counted as requests: a scraper polling
+        // /metrics every few seconds would drown out real traffic.
+        const bool is_metrics_scrape = key == "GET /metrics" || key == "GET /api/metrics";
+
         // Parse JSON request body
         json request_json;
         try {
             if (!req_ref.body().empty()) {
                 if(is_json)
                     request_json = json::parse(req_ref.body());
-                //else 
+                //else
                     //do some parse to the MultiPart request?
                     //std::map<std::string, MultipartPart> parts = parse_multipart(req_ref);
             }
@@ -756,6 +771,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
                 {"code", "invalid_value"}}} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
+
+            if (!is_metrics_scrape) {
+                oflm::metrics::Collector::instance().record_http_request(key, 400);
+            }
 
             // Only write from callback when deferred
             if (is_deferred && session) session->write_response_from_callback();
@@ -779,6 +798,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
                 {"code", "invalid_value"}}} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
+
+            if (!is_metrics_scrape) {
+                oflm::metrics::Collector::instance().record_http_request(key, 400);
+            }
 
             if (is_deferred && session) session->write_response_from_callback();
 
@@ -806,7 +829,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         register_active_request(request_id, cancellation_token);
 
         // catch is_deferred 
-        auto send_response = [res_ptr, session, this, request_id, needs_npu, is_deferred, cancellation_token](const json& response_data) {
+        auto send_response = [res_ptr, session, this, request_id, needs_npu, is_deferred, cancellation_token, key, is_metrics_scrape](const json& response_data) {
             auto& response_ref = *res_ptr;
             http::status status = http::status::ok;
 
@@ -830,6 +853,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             // guaranteed valid UTF-8.
             response_ref.body() = safe_dump(response_data);
             response_ref.set(http::field::content_type, "application/json");
+
+            if (!is_metrics_scrape) {
+                oflm::metrics::Collector::instance().record_http_request(key, static_cast<int>(status));
+            }
             response_ref.prepare_payload();
             cancellation_token->complete();
             unregister_active_request(request_id);
@@ -843,9 +870,41 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             }
         };
 
-        auto send_streaming_response = [session, this, request_id, needs_npu, cancellation_token](const json& data, bool is_final) {
+        // Raw (non-JSON) response path: for handlers whose body is not JSON,
+        // such as Prometheus text exposition.
+        auto send_raw_response = [res_ptr, session, this, request_id, needs_npu, is_deferred, cancellation_token, key, is_metrics_scrape](const std::string& body, const std::string& content_type, http::status status) {
+            auto& response_ref = *res_ptr;
+            response_ref.result(status);
+            response_ref.body() = body;
+            response_ref.set(http::field::content_type, content_type);
+
+            if (!is_metrics_scrape) {
+                oflm::metrics::Collector::instance().record_http_request(key, static_cast<int>(status));
+            }
+            response_ref.prepare_payload();
+            cancellation_token->complete();
+            unregister_active_request(request_id);
+
+            if (needs_npu) {
+                this->process_next_npu_request();
+            }
+
+            if (is_deferred && session) {
+                session->write_response_from_callback();
+            }
+        };
+
+        auto send_streaming_response = [session, this, request_id, needs_npu, cancellation_token, key, is_metrics_scrape](const json& data, bool is_final) {
             if (is_final) {
                 cancellation_token->complete();
+                // Streamed requests only have this one chance to be recorded:
+                // the status went out as 200 with the first frame. A final
+                // frame carrying an error object means the stream failed
+                // in-band (#64); count it as a 500, not a 200.
+                const bool stream_failed = data.is_object() && data.contains("error");
+                if (!is_metrics_scrape) {
+                    oflm::metrics::Collector::instance().record_http_request(key, stream_failed ? 500 : 200);
+                }
             }
 
             if (session) {
@@ -861,7 +920,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         };
 
         try {
-            it->second(req_ref, send_response, send_streaming_response, session, cancellation_token);
+            it->second(req_ref, send_response, send_streaming_response, send_raw_response, session, cancellation_token);
         }
         catch (const std::exception& e) {
             cancellation_token->complete();
@@ -872,10 +931,15 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             // client's fault (400); anything else is ours (500).
             header_print("ERROR", "Handler exception: " + std::string(e.what()));
             const json body = openai_compat::exception_body(e);
-            res_ref.result(static_cast<http::status>(openai_compat::status_for(body)));
+            const int status = openai_compat::status_for(body);
+            res_ref.result(static_cast<http::status>(status));
             res_ref.body() = safe_dump(body);
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
+
+            if (!is_metrics_scrape) {
+                oflm::metrics::Collector::instance().record_http_request(key, status);
+            }
 
             if (needs_npu) {
                 this->process_next_npu_request();
@@ -893,6 +957,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             res_ref.body() = safe_dump(json{ {"error", "Unknown handler exception"} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
+
+            if (!is_metrics_scrape) {
+                oflm::metrics::Collector::instance().record_http_request(key, 500);
+            }
 
             if (needs_npu) {
                 this->process_next_npu_request();
@@ -930,6 +998,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         });
         res.set(http::field::content_type, "application/json");
         res.prepare_payload();
+        oflm::metrics::Collector::instance().record_http_request(key, 503);
         header_print("🚫 ", "NPU busy and queue full, request denied: " + key);
         return false;
     }
@@ -959,6 +1028,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 json request_json;
@@ -972,6 +1042,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req, 
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -985,6 +1056,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -998,6 +1070,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -1008,6 +1081,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -1021,6 +1095,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -1031,6 +1106,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -1042,6 +1118,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [](const http::request<http::string_body>& req,
            std::function<void(const json&)> send_response,
            std::function<void(const json&, bool)> send_streaming_response,
+           std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
            std::shared_ptr<HttpSession> session,
            std::shared_ptr<CancellationToken> cancellation_token) {
             json response = {
@@ -1051,12 +1128,51 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
             };
             send_response(response);
         });
+
+    // Prometheus text exposition (/metrics) and plain JSON summary (/api/metrics).
+    // OTLP is a push protocol; nothing scrapes OTLP/JSON with a GET, so there is
+    // no OTLP endpoint here. Scrapers that want OTLP should use /metrics with an
+    // OpenTelemetry Collector `prometheus` receiver.
+    WebServer* srv = server.get();
+    auto handle_metrics = [srv, rest_handler](const http::request<http::string_body>& req,
+           std::function<void(const json&)> send_response,
+           std::function<void(const json&, bool)> send_streaming_response,
+           std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
+           std::shared_ptr<HttpSession> session,
+           std::shared_ptr<CancellationToken> cancellation_token) {
+        // Subtract 1 from active_requests so the /metrics scrape itself is not counted as work.
+        size_t active_reqs = srv->get_active_requests();
+        if (active_reqs > 0) active_reqs -= 1;
+
+        oflm::metrics::LiveState live;
+        live.active_connections = srv->get_active_connections();
+        live.active_requests = active_reqs;
+        live.npu_available = NPUAccessManager::is_npu_available();
+        live.npu_active_requests = NPUAccessManager::get_active_npu_requests();
+        live.npu_queued_requests = srv->get_npu_queued_requests();
+        live.loaded_model = rest_handler->loaded_model_tag();
+
+        auto snap = oflm::metrics::Collector::instance().snapshot(live);
+        std::string_view target(req.target().data(), req.target().size());
+        std::string accept = std::string(req[http::field::accept]);
+
+        if (oflm::metrics::wants_json(target, accept)) {
+            send_response(oflm::metrics::render_json_summary(snap));
+        } else {
+            send_raw_response(oflm::metrics::render_prometheus(snap),
+                              "text/plain; version=0.0.4; charset=utf-8",
+                              http::status::ok);
+        }
+    };
+    server->register_handler("GET", "/metrics", handle_metrics);
+    server->register_handler("GET", "/api/metrics", handle_metrics);
     
     // Add other endpoints...
     server->register_handler("POST", "/api/pull",
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -1071,6 +1187,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 json request_json;
@@ -1081,6 +1198,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 json request_json;
@@ -1091,6 +1209,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 json request_json;
@@ -1104,6 +1223,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
                       std::function<void(const json&)> send_response,
                       std::function<void(const json&, bool)> send_streaming_response,
+                      std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                       std::shared_ptr<HttpSession> session,
                       std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;
@@ -1117,6 +1237,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 std::multimap<std::string, MultipartPart> parts = parse_multipart(req);
@@ -1137,6 +1258,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 json request_json;
@@ -1150,6 +1272,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 std::multimap<std::string, MultipartPart> parts;
@@ -1182,6 +1305,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [rest_handler](const http::request<http::string_body>& req,
             std::function<void(const json&)> send_response,
             std::function<void(const json&, bool)> send_streaming_response,
+            std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 json request_json;
@@ -1198,6 +1322,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
         [server_ptr](const http::request<http::string_body>& req,
                      std::function<void(const json&)> send_response,
                      std::function<void(const json&, bool)> send_streaming_response,
+                     std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,
                      std::shared_ptr<HttpSession> session,
                      std::shared_ptr<CancellationToken> cancellation_token) {
             json request_json;

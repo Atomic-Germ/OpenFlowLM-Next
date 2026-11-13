@@ -97,6 +97,7 @@ using RequestHandler = std::function<void(
     const http::request<http::string_body>& req,
     std::function<void(const json&)> send_response,
     std::function<void(const json&, bool)> send_streaming_response,  // data, is_final
+    std::function<void(const std::string&, const std::string&, http::status)> send_raw_response,  // body, content_type, status
     std::shared_ptr<HttpSession> session,  // for streaming support
     std::shared_ptr<CancellationToken> cancellation_token  // for cancellation support
 )>;
@@ -138,6 +139,10 @@ public:
     size_t get_active_requests() const { 
         std::lock_guard<std::mutex> lock(active_requests_mutex_);
         return active_requests_.size(); 
+    }
+    size_t get_npu_queued_requests() {
+        std::lock_guard<std::mutex> lock(npu_queue_mutex_);
+        return npu_request_queue_.size();
     }
 
 private:
