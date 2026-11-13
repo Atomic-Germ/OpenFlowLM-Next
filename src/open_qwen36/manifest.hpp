@@ -25,8 +25,11 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | std_perm_gguf | std_fuse | q8_perm | expert_stripes | expert_stripes_gguf | expert_down | expert_down_gguf | put | conv_transpose | lmhead_q8 | transpose | transpose_banked
+    std::string op;                          ///< std_perm | std_perm_gguf | std_fuse | q8_perm | expert_stripes | expert_stripes_gguf | expert_down | expert_down_gguf | put | conv_transpose | lmhead_q8 | transpose | transpose_banked | gx_q8 | gx_ug | gx_down | gx_ug_mx4 | gx_down_mx4 | gx_lmhead | gp_bfp16 | gp_mx4
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
+    /// gx_q8 / gx_ug (GPT-OSS, OPEN-FAMILY-GPTOSS): the per-row f32 bias that rides in each
+    /// k-tile-0 half-tile's pad (gemv_q8.h GEMV_Q8_PAD_BIAS); "" = none
+    std::string bias, up_bias, gate_bias;
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity
     uint64_t nch = 0, in_dim = 0, chunk0 = 0;                          ///< std_perm / q8_perm; in_dim also:
@@ -76,8 +79,15 @@ struct PackOp {
 
 /// One verb of a layer type's (or the tail's) program.
 struct Step {
-    std::string op;                          ///< run | moeroute2
+    std::string op;                          ///< run | moeroute2 | gptoss_route
     std::string kernel;
+    /// gptoss_route (GPT-OSS): the router on the host between the attention and MoE dispatches.
+    /// It reads xm (bf16 [hidden_real] at act a_xm), takes the top experts of `router` (F32
+    /// [experts][hidden_real]) + `router_bias`, softmaxes the chosen logits, writes the weights
+    /// (f32[8] at a_w) and their weighted `down_bias` rows (f32 at a_bsum), and points `kernel`'s
+    /// routed fills (moeroute2's table) at the chosen experts.
+    uint64_t a_xm = 0, a_w = 0, a_bsum = 0, hidden_real = 0;
+    std::string router, router_bias, down_bias;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
     std::string fmt;                         ///< run, block route: "" = the q4_1 / bf16 GEMMs, "bfp16" = gemm_bfp16
@@ -285,6 +295,40 @@ struct RowGlobal {
     uint64_t switch_row = kSwitchNever;
 };
 
+/// GPT-OSS's block prefill (OPEN-PREFILL-GPTOSS, recipes/gptoss.py prefill_route): the whole prompt
+/// through each layer before the next, its four projections as whole-array GEMMs of `t` tokens a
+/// dispatch -- q|k|v and o on gemm_bfp16 (the GGUF's Q8_0 rows as bfp16), each routed expert's
+/// gate|up and down on its MXFP4 variant (GB_B=mx4: the GGUF's own nibbles, converted on the core),
+/// one dispatch per (expert, t of its tokens) re-pointed at the expert by the gxexpert patch -- and
+/// the norms, rotation, attention (with the learned sinks), router and SwiGLU on the host.
+struct GptossGemm {
+    std::string kernel;          ///< its instruction stream; args (w, x, y)
+    std::string w;               ///< the per-layer weight buffer (GptossPrefill::weights)
+    uint64_t n = 0, k = 0;       ///< the B operand's rows (padded to the GEMM's tiling) and K
+    uint64_t expert_bytes = 0;   ///< glu / down: one expert's B, the gxexpert patch's stride
+    /// q|k|v / o: the weight is stacked [bfp16(W) ; bfp16(W - bfp16(W))] (gp_bfp16 split hi / lo), n rows in
+    /// all, and the host sums column c with column c + n / 2 -- Q8_0's codes to ~2^-16 instead of bfp16's 2^-8
+    bool split = false;
+};
+struct GptossPrefill {
+    uint64_t t = 0;                                       ///< tokens a dispatch takes (its M); 0 = no route
+    uint64_t min_prompt = 0;                              ///< the shortest prompt the route beats one token a step on
+    GptossGemm qkv, o, glu, down;
+    /// the experts again at t_small rows a dispatch (smaller tiles: their own core program and context), for the
+    /// chunk of an expert's tokens that fills half of t_small or less; t_small 0 = none
+    uint64_t t_small = 0;
+    GptossGemm glu_small, down_small;
+    std::string x, y;                                     ///< the A / C globals every step shares
+    std::map<std::string, std::vector<PackOp>> weights;   ///< per-layer buffers: gp_bfp16 / gp_mx4 ops
+    std::map<std::string, std::string> tensors;           ///< role -> GGUF tensor name with {l}
+    std::map<std::string, uint64_t> window;               ///< layer type -> sliding window rows (0 = all)
+    uint64_t hidden_real = 0, ff_real = 0, nh = 0, kvh = 0, hd = 0, experts = 0, topk = 0;
+    double eps = 1e-5, rope_scale = 1.0;                  ///< RMSNorm eps; YaRN's attention factor on cos / sin
+    double alpha = 1.702, limit = 7.0;                    ///< the clamped SwiGLU's
+    std::vector<double> inv_freq;                         ///< per rotary pair (YaRN's, both layer types)
+    bool present() const { return t != 0; }
+};
+
 struct Manifest {
     int version = 0;
     std::string family, spec_hash, build_key;
@@ -321,6 +365,7 @@ struct Manifest {
     std::map<std::string, LayerType> layer_types;
     std::vector<Step> tail;
     RowsDesc rows;
+    GptossPrefill gptoss;                             ///< OPEN-PREFILL-GPTOSS, when the set carries it
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;

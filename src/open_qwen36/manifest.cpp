@@ -41,6 +41,9 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.tensor = j.value("tensor", "");
     p.up = j.value("up", "");
     p.gate = j.value("gate", "");
+    p.bias = j.value("bias", "");
+    p.up_bias = j.value("up_bias", "");
+    p.gate_bias = j.value("gate_bias", "");
     p.dst = j.value("dst", 0ull);
     p.cap = j.value("cap", 0ull);
     p.nch = j.value("nch", 0ull);
@@ -85,8 +88,8 @@ PackOp parse_op(const json& j, const std::string& where) {
         fail(where, p.op + " " + p.tensor + ": div_running names a per-layer {j} tensor, on a put");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
-    if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
-        fail(where, p.op + " " + p.tensor + ": split must be hi or lo, on a std_perm");
+    if (!p.split.empty() && ((p.op != "std_perm" && p.op != "gp_bfp16") || (p.split != "hi" && p.split != "lo")))
+        fail(where, p.op + " " + p.tensor + ": split must be hi or lo, on a std_perm or gp_bfp16");
     // The same fields pools::apply needs, checked here so a bad manifest is named
     // at load rather than surfacing as a "pools:" error part-way through packing.
     auto need_all = [&](std::initializer_list<std::pair<const char*, uint64_t>> fs) {
@@ -95,11 +98,15 @@ PackOp parse_op(const json& j, const std::string& where) {
     };
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_gemm" ||
         p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "expert_down_gguf" ||
-        p.op == "conv_transpose" ||
-        p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
+        p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked" ||
+        p.op == "gx_q8" || p.op == "gx_down" || p.op == "gx_down_mx4" || p.op == "gx_lmhead" || p.op == "gp_bfp16") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
-    } else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf") {
+    } else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf" || p.op == "gx_ug" || p.op == "gx_ug_mx4") {
         if (p.up.empty() || p.gate.empty()) fail(where, p.op + " without up / gate");
+    } else if (p.op == "gp_mx4") {
+        // the experts' down (one tensor) or their gate | up (both, the gate rows first)
+        if (p.tensor.empty() == (p.up.empty() || p.gate.empty()))
+            fail(where, "gp_mx4 takes a tensor (down) or up and gate (gate | up), not both or neither");
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
@@ -116,6 +123,12 @@ PackOp parse_op(const json& j, const std::string& where) {
     else if (p.op == "put") need_all({{"cap", p.cap}});
     else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}, {"in_dim", p.in_dim}});
     else if (p.op == "conv_transpose") need_all({{"taps", p.taps}, {"groups", p.groups}, {"width", p.width}});
+    else if (p.op == "gx_q8" || p.op == "gx_lmhead") need_all({{"rows", p.rows}, {"in_dim", p.in_dim}});
+    else if (p.op == "gp_bfp16") need_all({{"n_total", p.n_total}, {"in_dim", p.in_dim}});
+    else if (p.op == "gp_mx4")
+        need_all({{"experts", p.experts}, {"n_total", p.n_total}, {"in_dim", p.in_dim}, {"expert_bytes", p.expert_bytes}});
+    else if (p.op == "gx_ug" || p.op == "gx_down" || p.op == "gx_ug_mx4" || p.op == "gx_down_mx4")
+        need_all({{"experts", p.experts}, {"rows", p.rows}, {"in_dim", p.in_dim}, {"expert_bytes", p.expert_bytes}});
     return p;
 }
 
@@ -142,6 +155,15 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
                 fail(where, "run " + st.kernel + ": epi glu / a h are bfp16 step options");
         } else if (st.op == "moeroute2") {
             st.act_off = get<uint64_t>(s, "act_off", where);
+        } else if (st.op == "gptoss_route") {
+            st.a_xm = get<uint64_t>(s, "a_xm", where);
+            st.a_w = get<uint64_t>(s, "a_w", where);
+            st.a_bsum = get<uint64_t>(s, "a_bsum", where);
+            st.hidden_real = get<uint64_t>(s, "hidden_real", where);
+            st.router = get<std::string>(s, "router", where);
+            st.router_bias = get<std::string>(s, "router_bias", where);
+            st.down_bias = get<std::string>(s, "down_bias", where);
+            if (!st.hidden_real) fail(where, "gptoss_route without hidden_real");
         } else {
             fail(where, "unknown program op '" + st.op + "'");
         }
@@ -157,8 +179,8 @@ void check_step(const Manifest& m, const Step& s, const std::string& where, cons
     if (it == m.kernels.end()) fail(where, std::string(what) + " names unknown kernel " + s.kernel);
     if (!it->second.weight_component.empty())
         fail(where, std::string(what) + ": low-weight kernel cannot be a standalone program step");
-    if (s.op == "moeroute2" && it->second.patch != "moeroute2")
-        fail(where, std::string(what) + ": moeroute2 on kernel " + s.kernel + ", whose patch is '" +
+    if ((s.op == "moeroute2" || s.op == "gptoss_route") && it->second.patch != "moeroute2")
+        fail(where, std::string(what) + ": " + s.op + " on kernel " + s.kernel + ", whose patch is '" +
                         (it->second.patch.empty() ? std::string("none") : it->second.patch) + "'");
 }
 
@@ -286,7 +308,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         " needs the attnpos or attnrows patch table, rb 1 and 2, 4 or 8 rows an element");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
-            d.patch != "attnrows")
+            d.patch != "attnrows" && d.patch != "gxexpert")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
@@ -295,6 +317,76 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             (d.weight_component != "bf16_residual" || m.version < 4 || !d.patch.empty()))
             fail(where, "unsupported kernel weight_component or manifest version: " + k);
         m.kernels[k] = d;
+    }
+    if (j.contains("gptoss_prefill")) {
+        const json& g = j["gptoss_prefill"];
+        const std::string gw = where + " gptoss_prefill";
+        GptossPrefill& p = m.gptoss;
+        p.t = get<uint64_t>(g, "t", gw);
+        if (p.t == 0 || p.t % 256) fail(gw, "t " + std::to_string(p.t) + " is not a positive multiple of 256");
+        p.x = get<std::string>(g, "x", gw);
+        p.y = get<std::string>(g, "y", gw);
+        p.min_prompt = g.value("min_prompt", 0ull);
+        for (const auto& [name, ops] : need(g, "weights", gw).items()) {
+            if (!ops.is_array() || ops.empty()) fail(gw, "weights." + name + " is not a list of pack ops");
+            for (const auto& o : ops) {
+                PackOp op = parse_op(o, gw + ".weights." + name);
+                if (op.op != "gp_bfp16" && op.op != "gp_mx4") fail(gw, "weights." + name + ": " + op.op + " is not a gp_ op");
+                p.weights[name].push_back(std::move(op));
+            }
+        }
+        auto gemm = [&](const char* key, bool expert) {
+            const json& s = need(g, key, gw);
+            const std::string sw = gw + "." + key;
+            GptossGemm o;
+            o.kernel = get<std::string>(s, "kernel", sw);
+            o.w = get<std::string>(s, "w", sw);
+            o.n = get<uint64_t>(s, "n", sw);
+            o.k = get<uint64_t>(s, "k", sw);
+            o.split = s.value("split", false);
+            if (o.split && (expert || o.n % 2048)) fail(sw, "split is for q|k|v / o with whole tiles in each half");
+            auto kd = m.kernels.find(o.kernel);
+            if (kd == m.kernels.end()) fail(sw, "kernel " + o.kernel + " is not declared");
+            if ((kd->second.patch == "gxexpert") != expert)
+                fail(sw, "kernel " + o.kernel + (expert ? " lacks" : " carries") + " the gxexpert patch");
+            if (!p.weights.count(o.w)) fail(sw, "weight " + o.w + " is not among gptoss_prefill.weights");
+            if (expert) {
+                o.expert_bytes = get<uint64_t>(s, "expert_bytes", sw);
+                for (const PackOp& op : p.weights[o.w])
+                    if (op.op != "gp_mx4" || op.expert_bytes != o.expert_bytes)
+                        fail(sw, "weight " + o.w + " is not gp_mx4 experts of " + std::to_string(o.expert_bytes) + " B");
+            }
+            return o;
+        };
+        p.qkv = gemm("qkv", false);
+        p.o = gemm("o", false);
+        p.glu = gemm("glu", true);
+        p.down = gemm("down", true);
+        if (g.contains("t_small")) {
+            p.t_small = get<uint64_t>(g, "t_small", gw);
+            if (p.t_small == 0 || p.t_small % 128 || p.t_small >= p.t) fail(gw, "t_small is not a multiple of 128 below t");
+            p.glu_small = gemm("glu_small", true);
+            p.down_small = gemm("down_small", true);
+        }
+        for (const auto& [role, name] : need(g, "tensors", gw).items()) p.tensors[role] = name.get<std::string>();
+        for (const char* role : {"attn_norm", "post_norm", "q_bias", "k_bias", "v_bias", "o_bias", "sinks", "router",
+                                 "router_bias", "gate_bias", "up_bias", "down_bias"})
+            if (!p.tensors.count(role)) fail(gw, std::string("tensors lacks ") + role);
+        for (const auto& [lt, w] : need(g, "window", gw).items()) p.window[lt] = w.get<uint64_t>();
+        p.hidden_real = get<uint64_t>(g, "hidden_real", gw);
+        p.ff_real = get<uint64_t>(g, "ff_real", gw);
+        p.nh = get<uint64_t>(g, "heads", gw);
+        p.kvh = get<uint64_t>(g, "kv_heads", gw);
+        p.hd = get<uint64_t>(g, "head_dim", gw);
+        p.experts = get<uint64_t>(g, "experts", gw);
+        p.topk = get<uint64_t>(g, "topk", gw);
+        p.eps = get<double>(g, "eps", gw);
+        p.rope_scale = g.value("rope_scale", 1.0);
+        p.alpha = g.value("alpha", 1.702);
+        p.limit = g.value("limit", 7.0);
+        p.inv_freq = need(g, "inv_freq", gw).get<std::vector<double>>();
+        if (p.inv_freq.size() * 2 != p.hd || p.nh % p.kvh || p.topk == 0 || p.topk > p.experts)
+            fail(gw, "the attention / routing geometry does not hang together");
     }
     if (j.contains("rows")) {
         const json& r = j["rows"];
@@ -806,6 +898,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             fail(where, "global " + k + " is neither a size nor {per_row}");
         }
     }
+    if (m.gptoss.present())
+        for (const std::string& b : {m.gptoss.x, m.gptoss.y})
+            if (!m.globals.count(b)) fail(where + " gptoss_prefill", "global " + b + " is not declared");
     // the globals come after the layer types, so the batched expert kernel's x / h / y are checked here
     for (const auto& [name, t] : m.layer_types)
     for (const GemmBlockProgram* g : routes(t)) {

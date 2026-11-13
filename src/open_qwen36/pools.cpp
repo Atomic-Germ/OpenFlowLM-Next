@@ -444,8 +444,11 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
                 std::memcpy(dst, src, n);
                 break;
             }
-            if (n != 2 * bytes) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
-            for (size_t i = 0; i < bytes / 2; ++i) {
+            // A slot wider than the tensor is a width padded past the model's (GPT-OSS: 2880 values in a
+            // 3072-lane norm): the values, then bf16 zeros. Wider tensors than slots still refuse.
+            if (n > 2 * bytes || n % 4) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
+            if (n < 2 * bytes) std::memset(dst + n / 2, 0, bytes - n / 2);
+            for (size_t i = 0; i < n / 4; ++i) {
                 float v;
                 std::memcpy(&v, src + 4 * i, 4);
                 const uint16_t b = f32_to_bf16(div == 1.0 ? v : static_cast<float>(v / div));
@@ -569,9 +572,189 @@ void bfp16_dit_pack(const uint8_t* src, size_t rows, size_t cols, uint8_t* dst) 
         }
 }
 
+// ---- GPT-OSS (OPEN-FAMILY-GPTOSS): GGUF Q8_0 / MXFP4 -> the q8 GEMV's half-tiles, and Q8_0 -> the
+// f32-scale lm_head chunks. recipes/gptoss_pack.py writes the same bytes (tests/test_gptoss_pack.py).
+//
+// half-tile, 16 rows x 256 K, 5120 B: bf16 scale[kb*16 + r] at [0:256), int8 code[k*16 + r] at
+// [256:4352), f32 bias[r] at [4352:4416) on k-tile-0 half-tiles only (gemv_q8.h GEMV_Q8_PAD_BIAS);
+// a 64-row band is K/64 half-tiles, half-tile c the rows' part c % 4 and k-tile c / 4. Rows and
+// columns past the tensor's are zero. Q8_0: code = q, scale = bf16(fp16 d), round to nearest even.
+// MXFP4: code = 2x the e2m1 level (KVALUES, an integer), scale = 2^(e-128), exact in bf16.
+namespace {
+constexpr size_t GX_TILE = 5120;
+constexpr size_t GX_BIAS = 4352;
+constexpr size_t GX_HEAD = 9216;
+constexpr int8_t GX_KVALUES[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
+float e8m0_half(uint8_t e) {
+    const uint32_t u = e < 2 ? (0x00200000u << e) : (static_cast<uint32_t>(e - 1) << 23);
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+
+void gx_tiles(const uint8_t* src, bool mxfp4, size_t rows, size_t cols, size_t rows_pad, size_t cols_pad,
+              const float* bias, uint8_t* out) {
+    if (rows > rows_pad || cols > cols_pad || rows_pad % 64 || cols_pad % 256 || cols % 32)
+        fail("gx tiles: [" + std::to_string(rows) + ", " + std::to_string(cols) + "] does not pad to [" +
+             std::to_string(rows_pad) + ", " + std::to_string(cols_pad) + "]");
+    const size_t nkt = cols_pad / 256, nb = rows_pad / 64, bpr = cols / 32, bb = mxfp4 ? 17 : 34;
+#pragma omp parallel for schedule(dynamic)
+    for (long long bl = 0; bl < static_cast<long long>(nb); ++bl) {
+        const size_t b = static_cast<size_t>(bl);
+        for (size_t kt = 0; kt < nkt; ++kt)
+            for (size_t part = 0; part < 4; ++part) {
+                uint8_t* t = out + ((b * nkt + kt) * 4 + part) * GX_TILE;
+                std::memset(t, 0, GX_TILE);
+                for (size_t r = 0; r < 16; ++r) {
+                    const size_t row = 64 * b + 16 * part + r;
+                    if (row >= rows) continue;
+                    for (size_t kb = 0; kb < 8; ++kb) {
+                        const size_t blk = kt * 8 + kb;
+                        if (blk >= bpr) continue;
+                        const uint8_t* B = src + (row * bpr + blk) * bb;
+                        float scale;
+                        if (mxfp4) {
+                            scale = e8m0_half(B[0]);
+                        } else {
+                            uint16_t h;
+                            std::memcpy(&h, B, 2);
+                            scale = fp16_to_f32(h);
+                        }
+                        const uint16_t sb = bf16_rne(scale);
+                        std::memcpy(t + 2 * (kb * 16 + r), &sb, 2);
+                        for (size_t i = 0; i < 32; ++i) {
+                            const int8_t code = mxfp4 ? GX_KVALUES[i < 16 ? (B[1 + i] & 15) : (B[1 + i - 16] >> 4)]
+                                                      : static_cast<int8_t>(B[2 + i]);
+                            t[Q8H_SCALES + (kb * 32 + i) * 16 + r] = static_cast<uint8_t>(code);
+                        }
+                    }
+                    if (kt == 0 && bias) std::memcpy(t + GX_BIAS + 4 * r, bias + row, 4);
+                }
+            }
+    }
+}
+
+// mx4 half-tile (gemv_mx4.h): the experts' MXFP4 kept as nibbles, 16 rows x 256 K in 2368 B --
+// four 64-K groups g of 576 B (bf16 scale[kb' * 16 + r] for blocks 2g + kb' in 64 B, then each
+// block's 256 B of nibbles: four 8-K octets, 32 B for rows 0..7 then 32 B for rows 8..15, nibble
+// j of a half -- byte j / 2, low nibble first -- being k = j / 8, row = j % 8), then f32 bias[16]
+// at 2304 on k-tile 0. A nibble is the e2m1 code re-signed for the kernel's decode
+// (GX_MX4_NIB: p, -p for a negative, -8 for -12); the scale is MXFP4's 2^(e-128) as in gx_tiles.
+constexpr size_t GX_MX4_TILE = 2368;
+constexpr size_t GX_MX4_BIAS = 2304;
+constexpr uint8_t GX_MX4_NIB[16] = {0, 1, 2, 3, 4, 5, 6, 7, 0, 15, 14, 13, 12, 11, 10, 8};
+
+void gx_mx4_tiles(const uint8_t* src, size_t rows, size_t cols, size_t rows_pad, size_t cols_pad, const float* bias,
+                  uint8_t* out) {
+    if (rows > rows_pad || cols > cols_pad || rows_pad % 64 || cols_pad % 256 || cols % 32)
+        fail("gx mx4 tiles: [" + std::to_string(rows) + ", " + std::to_string(cols) + "] does not pad to [" +
+             std::to_string(rows_pad) + ", " + std::to_string(cols_pad) + "]");
+    const size_t nkt = cols_pad / 256, nb = rows_pad / 64, bpr = cols / 32;
+#pragma omp parallel for schedule(dynamic)
+    for (long long bl = 0; bl < static_cast<long long>(nb); ++bl) {
+        const size_t b = static_cast<size_t>(bl);
+        for (size_t kt = 0; kt < nkt; ++kt)
+            for (size_t part = 0; part < 4; ++part) {
+                uint8_t* t = out + ((b * nkt + kt) * 4 + part) * GX_MX4_TILE;
+                std::memset(t, 0, GX_MX4_TILE);
+                for (size_t r = 0; r < 16; ++r) {
+                    const size_t row = 64 * b + 16 * part + r;
+                    if (row >= rows) continue;
+                    for (size_t kb = 0; kb < 8; ++kb) {
+                        const size_t blk = kt * 8 + kb;
+                        if (blk >= bpr) continue;
+                        const uint8_t* B = src + (row * bpr + blk) * 17;
+                        uint8_t* g = t + (kb / 2) * 576;
+                        const uint16_t sb = bf16_rne(e8m0_half(B[0]));
+                        std::memcpy(g + 2 * ((kb % 2) * 16 + r), &sb, 2);
+                        uint8_t* nib = g + 64 + (kb % 2) * 256 + (r / 8) * 32;
+                        for (size_t i = 0; i < 32; ++i) {
+                            const uint8_t n = i < 16 ? (B[1 + i] & 15) : (B[1 + i - 16] >> 4);
+                            const size_t j = (i % 8) * 8 + r % 8;          // k = 8 oc + i % 8, oc = i / 8
+                            nib[(i / 8) * 64 + j / 2] |= static_cast<uint8_t>(GX_MX4_NIB[n] << (4 * (j % 2)));
+                        }
+                    }
+                    if (kt == 0 && bias) std::memcpy(t + GX_MX4_BIAS + 4 * r, bias + row, 4);
+                }
+            }
+    }
+}
+
+size_t gx_band_bytes(size_t cols_pad, size_t tile = GX_TILE) { return cols_pad / 64 * tile; }
+
+// The block prefill's expert GEMM B (OPEN-PREFILL-GPTOSS; gemm_bfp16 GB_B=mx4, mx4_b.cc and pack.py
+// pack_b_mx4): per expert an N x K operand in gemm_bfp16's tile order -- array column c, its n-groups
+// c, c + 8, ..., each group's K / 64 tiles -- each tile 128 rows x 64 k in 4352 B: x = e + 5 per
+// (32-K block, row) as [kb32][sp][half][r] (row 16 sp + 8 half + r), then per (sp, kb, half) 32 B of
+// re-signed nibbles, value j = row 16 sp + 8 half + j / 8, k = 8 kb + j % 8 (byte j / 2, low nibble
+// first). `row_of(n)` names the source row of B row n, or -1 for a zero row.
+constexpr size_t GP_MX4_TILE = 4352;
+
+template <class RowOf>
+void gp_mx4_pack(const uint8_t* src, size_t cols, size_t N, size_t K, RowOf row_of, uint8_t* dst) {
+    const size_t nk = K / 64, ng = N / 128, per_col = ng / 8, bpr = cols / 32;
+#pragma omp parallel for schedule(dynamic)
+    for (long long gl = 0; gl < static_cast<long long>(ng); ++gl) {
+        const size_t g = static_cast<size_t>(gl);
+        for (size_t kc = 0; kc < nk; ++kc) {
+            uint8_t* t = dst + (((g % 8) * per_col + g / 8) * nk + kc) * GP_MX4_TILE;
+            std::memset(t, 0, GP_MX4_TILE);
+            for (size_t rr = 0; rr < 128; ++rr) {
+                const long src_row = row_of(g * 128 + rr);
+                if (src_row < 0) continue;
+                const size_t sp = rr / 16, half = (rr / 8) % 2, r = rr % 8;
+                for (size_t kb32 = 0; kb32 < 2; ++kb32) {
+                    const size_t blk = kc * 2 + kb32;
+                    if (blk >= bpr) continue;
+                    const uint8_t* B = src + (static_cast<size_t>(src_row) * bpr + blk) * 17;
+                    t[(kb32 * 8 + sp) * 16 + half * 8 + r] = static_cast<uint8_t>(B[0] + 5);
+                    uint8_t v[32];                     // value i of the block: qs[i] & 15, value i + 16: qs[i] >> 4
+                    for (size_t i = 0; i < 16; ++i) {
+                        v[i] = GX_MX4_NIB[B[1 + i] & 15];
+                        v[i + 16] = GX_MX4_NIB[B[1 + i] >> 4];
+                    }
+                    // the row's 8 values of each 8-K block are 4 whole bytes of its 32-B run (row r at bytes 4r..4r+3)
+                    for (size_t kq = 0; kq < 4; ++kq) {
+                        uint8_t* o = t + 256 + (((sp * 8 + kb32 * 4 + kq) * 2 + half) * 32) + r * 4;
+                        for (size_t m = 0; m < 4; ++m)
+                            o[m] = static_cast<uint8_t>(v[kq * 8 + 2 * m] | (v[kq * 8 + 2 * m + 1] << 4));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A GGUF tensor of `type` and the shape the op expects ([experts,] rows, cols), and its block bytes.
+const GgufFile& gx_gguf(const WeightFile& m, const std::string& name, GgufFile::Type type, size_t* rows,
+                        size_t* cols, size_t experts) {
+    const auto* g = dynamic_cast<const GgufFile*>(&m);
+    if (!g) fail(name + ": the gx ops read a GGUF");
+    const auto& t = g->tensor(name);
+    if (t.type != type)
+        fail(name + " is " + GgufFile::type_name(t.type) + ", the plan wants " + GgufFile::type_name(type));
+    if (t.dims.size() != (experts ? 3u : 2u) || (experts && t.dims[2] != experts))
+        fail(name + ": not a " + std::string(experts ? "[experts, rows, cols]" : "[rows, cols]") + " tensor");
+    *cols = t.dims[0];
+    *rows = t.dims[1];
+    return *g;
+}
+
+/// An F32 bias, as floats ([rows] or [experts, rows]).
+std::vector<float> gx_bias(const WeightFile& m, const std::string& name, size_t values) {
+    const auto* g = dynamic_cast<const GgufFile*>(&m);
+    if (!g || g->tensor(name).type != GgufFile::Type::F32) fail(name + ": a gx bias must be a GGUF F32 tensor");
+    std::vector<float> v(values);
+    std::memcpy(v.data(), raw(m, name, values * 4), values * 4);
+    return v;
+}
+}  // namespace
+
 uint64_t op_bytes(const PackOp& op, size_t chunk_bytes) {
     if (op.op == "bfp16_dit") return op.nch * 9216;      // a 32 x 256 chunk's 8192 values at 9 bits
-    if (op.op == "bfp16_gemm") return op.n_total * op.in_dim / 8 * BFP16_BLOCK_BYTES;
+    if (op.op == "bfp16_gemm" || op.op == "gp_bfp16") return op.n_total * op.in_dim / 8 * BFP16_BLOCK_BYTES;
+    if (op.op == "gp_mx4") return op.experts * op.expert_bytes;
     return op.op == "bf16_gemm" ? op.nch * 2 * 8192 : op.nch * chunk_bytes;
 }
 
@@ -1283,6 +1466,179 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         for (uint64_t g = 0; g < groups; ++g)
             for (uint64_t t = 0; t < taps; ++t)
                 std::memcpy(dst + op.dst + (g * taps + t) * width * 2, src + (t * groups * width + g * width) * 2, width * 2);
+    } else if (op.op == "gx_q8") {
+        // GPT-OSS's attention projections: Q8_0 [out, in] -> half-tiles, the bias in the pad
+        const std::string name = with_layer(op.tensor, layer);
+        size_t rows, cols;
+        gx_gguf(m, name, GgufFile::Type::Q8_0, &rows, &cols, 0);
+        const size_t nbytes = op.rows / 64 * gx_band_bytes(op.in_dim);
+        bounds(op, nbytes, dst_bytes);
+        std::vector<float> bias;
+        if (!op.bias.empty()) bias = gx_bias(m, with_layer(op.bias, layer), rows);
+        gx_tiles(raw(m, name, rows * cols / 32 * 34), false, rows, cols, op.rows, op.in_dim,
+                 bias.empty() ? nullptr : bias.data(), dst + op.dst);
+    } else if (op.op == "gx_ug" || op.op == "gx_down" || op.op == "gx_ug_mx4" || op.op == "gx_down_mx4") {
+        // GPT-OSS's routed experts, MXFP4 [E, rows, cols]: expert e at dst + e * expert_bytes, as q8
+        // half-tiles or (_mx4) as the GGUF's own nibbles in mx4 half-tiles. gx_ug interleaves up and
+        // gate per band, [band][up | gate], the order gx_moe's cores stream them in.
+        const bool ug = op.op == "gx_ug" || op.op == "gx_ug_mx4";
+        const bool mx4 = op.op == "gx_ug_mx4" || op.op == "gx_down_mx4";
+        const std::string un = with_layer(ug ? op.up : op.tensor, layer);
+        size_t rows, cols;
+        gx_gguf(m, un, GgufFile::Type::MXFP4, &rows, &cols, op.experts);
+        const size_t per = rows * cols / 32 * 17, band = gx_band_bytes(op.in_dim, mx4 ? GX_MX4_TILE : GX_TILE);
+        const size_t nb = op.rows / 64;
+        auto tiles = [&](const uint8_t* s, const float* bias, uint8_t* d) {
+            if (mx4) gx_mx4_tiles(s, rows, cols, op.rows, op.in_dim, bias, d);
+            else gx_tiles(s, true, rows, cols, op.rows, op.in_dim, bias, d);
+        };
+        const size_t one = nb * band * (ug ? 2 : 1);
+        if (one > op.expert_bytes) fail(op.op + " " + un + ": an expert is " + std::to_string(one) + " B, its slot " +
+                                        std::to_string(op.expert_bytes));
+        bounds(op, (op.experts - 1) * op.expert_bytes + one, dst_bytes);
+        const uint8_t* us = raw(m, un, op.experts * per);
+        const uint8_t* gs = nullptr;
+        std::vector<float> ub, gb;
+        if (ug) {
+            const std::string gn = with_layer(op.gate, layer);
+            size_t gr, gc;
+            gx_gguf(m, gn, GgufFile::Type::MXFP4, &gr, &gc, op.experts);
+            if (gr != rows || gc != cols) fail(op.op + ": " + un + " and " + gn + " differ in shape");
+            gs = raw(m, gn, op.experts * per);
+            if (!op.up_bias.empty()) ub = gx_bias(m, with_layer(op.up_bias, layer), op.experts * rows);
+            if (!op.gate_bias.empty()) gb = gx_bias(m, with_layer(op.gate_bias, layer), op.experts * rows);
+        } else if (!op.bias.empty()) {
+            fail(op.op + " " + un + ": the down bias is the route's (bsum), not the pool's");
+        }
+        std::vector<uint8_t> tu(nb * band), tg(ug ? nb * band : 0);
+        for (uint64_t e = 0; e < op.experts; ++e) {
+            uint8_t* d = dst + op.dst + e * op.expert_bytes;
+            if (!ug) {
+                tiles(us + e * per, nullptr, d);
+                continue;
+            }
+            tiles(us + e * per, ub.empty() ? nullptr : ub.data() + e * rows, tu.data());
+            tiles(gs + e * per, gb.empty() ? nullptr : gb.data() + e * rows, tg.data());
+            for (size_t b = 0; b < nb; ++b) {
+                std::memcpy(d + 2 * b * band, tu.data() + b * band, band);
+                std::memcpy(d + (2 * b + 1) * band, tg.data() + b * band, band);
+            }
+        }
+    } else if (op.op == "gp_bfp16") {
+        // the block prefill's attention projections (OPEN-PREFILL-GPTOSS): a GGUF tensor's rows (its
+        // own blocks, Q8_0 exactly, GgufFile::embed_row) as rows [row0, row0 + rows) of an n_total-row
+        // gemm_bfp16 B operand of K = in_dim -- bfp16_gemm's law with K any multiple of the 64-wide
+        // tile, not of a q4 chunk's 256
+        const std::string name = with_layer(op.tensor, layer);
+        const Bfp16Tiling t;
+        const auto* g = dynamic_cast<const GgufFile*>(&m);
+        if (!g) fail("gp_bfp16 " + name + " reads a GGUF");
+        const GgufFile::TensorInfo& ti = g->tensor(name);
+        const size_t rows = ti.dims.size() >= 2 ? ti.dims[1] : 1u;
+        if (ti.dims.empty() || ti.dims[0] != op.in_dim || op.in_dim % t.k || op.row0 % t.n ||
+            op.row0 + rows > op.n_total || op.n_total % (t.n * t.cols))
+            fail("gp_bfp16 " + name + ": [" + std::to_string(rows) + ", " + std::to_string(ti.dims.empty() ? 0 : ti.dims[0]) +
+                 "] at row " + std::to_string(op.row0) + " does not tile an [" + std::to_string(op.n_total) + ", " +
+                 std::to_string(op.in_dim) + "] operand");
+        bounds(op, op_bytes(op, ch), dst_bytes);
+        uint8_t* out = dst + op.dst;
+#pragma omp parallel
+        {
+            std::vector<float> w(op.in_dim);
+#pragma omp for
+            for (long long rr = 0; rr < static_cast<long long>(rows); ++rr) {
+                const size_t r = static_cast<size_t>(rr);
+                g->embed_row(name, r, op.in_dim, w.data());
+                uint8_t* row = out + bfp16_b_offset(op.row0 + r, 0, op.n_total, op.in_dim, t);
+                for (size_t cb = 0; cb < op.in_dim / 8; ++cb) {
+                    float* b = w.data() + cb * 8;
+                    if (op.split == "lo") {
+                        // what bfp16 leaves of the block: the hi half's remainder, encoded in its own block
+                        uint8_t hi[BFP16_BLOCK_BYTES];
+                        bfp16_encode_block(b, hi);
+                        const float sc = std::ldexp(1.0f, static_cast<int>(hi[0]) - 133);
+                        for (size_t i = 0; i < 8; ++i) b[i] -= static_cast<float>(static_cast<int8_t>(hi[1 + i])) * sc;
+                    }
+                    bfp16_encode_block(b, row + bfp16_b_row_block(0, cb, t));
+                }
+            }
+        }
+    } else if (op.op == "gp_mx4") {
+        // the block prefill's routed experts (OPEN-PREFILL-GPTOSS): MXFP4 [E, rows, cols] as gemm_bfp16 GB_B=mx4
+        // operands of n_total x in_dim, expert e at dst + e * expert_bytes. gate | up: B rows [0, rows) are the
+        // gate's, [n_total / 2, n_total / 2 + rows) the up's; down: rows [0, rows). Every other row is zero.
+        const bool glu = op.tensor.empty();
+        const std::string gn = with_layer(glu ? op.gate : op.tensor, layer);
+        size_t rows, cols;
+        gx_gguf(m, gn, GgufFile::Type::MXFP4, &rows, &cols, op.experts);
+        const size_t N = op.n_total, K = op.in_dim, per = rows * cols / 32 * 17;
+        if (N % 1024 || K % 64 || K < cols || (glu ? 2 * rows > N : rows > N) ||
+            N / 128 * (K / 64) * GP_MX4_TILE > op.expert_bytes)
+            fail("gp_mx4 " + gn + ": [" + std::to_string(rows) + ", " + std::to_string(cols) + "] experts do not fit a " +
+                 std::to_string(N) + " x " + std::to_string(K) + " operand in " + std::to_string(op.expert_bytes) + " B");
+        bounds(op, op.experts * op.expert_bytes, dst_bytes);
+        const uint8_t* gs = raw(m, gn, op.experts * per);
+        const uint8_t* us = nullptr;
+        if (glu) {
+            const std::string un = with_layer(op.up, layer);
+            size_t ur, uc;
+            gx_gguf(m, un, GgufFile::Type::MXFP4, &ur, &uc, op.experts);
+            if (ur != rows || uc != cols) fail("gp_mx4: " + gn + " and " + un + " differ in shape");
+            us = raw(m, un, op.experts * per);
+        }
+        for (uint64_t e = 0; e < op.experts; ++e) {
+            uint8_t* d = dst + op.dst + e * op.expert_bytes;
+            if (!glu) {
+                gp_mx4_pack(gs + e * per, cols, N, K, [&](size_t n) { return n < rows ? static_cast<long>(n) : -1L; }, d);
+                continue;
+            }
+            // one operand from two tensors: pack the gate's rows, then the up's into the second half of a copy, and
+            // merge (each tile row is wholly one tensor's, so OR-ing the zeroed rows of the other in is exact)
+            std::vector<uint8_t> tmp(N / 128 * (K / 64) * GP_MX4_TILE);
+            gp_mx4_pack(gs + e * per, cols, N, K, [&](size_t n) { return n < rows ? static_cast<long>(n) : -1L; }, d);
+            gp_mx4_pack(us + e * per, cols, N, K,
+                        [&](size_t n) { return n >= N / 2 && n - N / 2 < rows ? static_cast<long>(n - N / 2) : -1L; },
+                        tmp.data());
+            for (size_t i = 0; i < tmp.size(); ++i) d[i] |= tmp[i];
+        }
+    } else if (op.op == "gx_lmhead") {
+        // the head, Q8_0 [vocab, hidden] -> lm_head_q8.h's f32-scale chunks (32 rows x 256 K, 9216 B):
+        // f32 scale[kb*32 + r] at [0:1024), code[(r/16)*4096 + k*16 + r%16] at [1024:9216); 128-row
+        // bands of 4 quarters x K/256 k-tiles, chunk c of a band the quarter c % 4 and k-tile c / 4
+        const std::string name = with_layer(op.tensor, layer);
+        size_t rows, cols;
+        gx_gguf(m, name, GgufFile::Type::Q8_0, &rows, &cols, 0);
+        if (rows > op.rows || cols > op.in_dim || op.rows % 128 || op.in_dim % 256 || cols % 32)
+            fail("gx_lmhead " + name + ": [" + std::to_string(rows) + ", " + std::to_string(cols) +
+                 "] does not pad to [" + std::to_string(op.rows) + ", " + std::to_string(op.in_dim) + "]");
+        const size_t nB = op.rows / 128, nkt = op.in_dim / 256, bpr = cols / 32;
+        bounds(op, nB * nkt * 4 * GX_HEAD, dst_bytes);
+        const uint8_t* src = raw(m, name, rows * cols / 32 * 34);
+        uint8_t* out = dst + op.dst;
+#pragma omp parallel for schedule(dynamic)
+        for (long long Bl = 0; Bl < static_cast<long long>(nB); ++Bl) {
+            const size_t B = static_cast<size_t>(Bl);
+            for (size_t kt = 0; kt < nkt; ++kt)
+                for (size_t q = 0; q < 4; ++q) {
+                    uint8_t* c = out + ((B * nkt + kt) * 4 + q) * GX_HEAD;
+                    std::memset(c, 0, GX_HEAD);
+                    for (size_t r = 0; r < 32; ++r) {
+                        const size_t row = 128 * B + 32 * q + r;
+                        if (row >= rows) continue;
+                        for (size_t kb = 0; kb < 8; ++kb) {
+                            const size_t blk = kt * 8 + kb;
+                            if (blk >= bpr) continue;
+                            const uint8_t* b = src + (row * bpr + blk) * 34;
+                            uint16_t h;
+                            std::memcpy(&h, b, 2);
+                            const float d = fp16_to_f32(h);
+                            std::memcpy(c + 4 * (kb * 32 + r), &d, 4);
+                            for (size_t i = 0; i < 32; ++i)
+                                c[1024 + (r / 16) * 4096 + (kb * 32 + i) * 16 + r % 16] = b[2 + i];
+                        }
+                    }
+                }
+        }
     } else {
         fail("unknown pack op " + op.op);
     }

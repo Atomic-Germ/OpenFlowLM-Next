@@ -236,7 +236,8 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // measured the flat block at 33.47 s against 425.5 ms/token + 156 ms
             // sequential, a crossing of ~78 with the first clear win at 92 (0.85).
             const size_t block_loop_crossover = prefill::kDenseBlockLoop;
-            size_t min_prompt = block_loop_crossover;
+            // GPT-OSS's kernel set carries its own measured crossover (~12 tokens).
+            size_t min_prompt = core_->gptoss_prefill_ok() ? core_->block_prefill_min() : block_loop_crossover;
             if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
             // Diagnostic: which route this request took, and how the prompt was cut. A
             // test must not infer this from elapsed time -- a short sequential prompt and
