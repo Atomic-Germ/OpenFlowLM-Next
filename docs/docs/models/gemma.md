@@ -83,10 +83,16 @@ container -- a GGUF install of Gemma 4 has no working vision path today. See the
 oflm run gemma4-it:e2b
 ```
 
-> ⚠️ **Gemma 4 E2B and E4B have no open kernels.** Those tags dispatch
-> entirely to the closed `gemma4e_npu` engine -- per-layer embeddings and
-> cross-layer KV sharing are not built here. The **12B** text decoder runs on the
-> open kernels (two dense geometries); see the
+> ⚠️ **Open kernels: text only, from Google's GGUF.** This tag runs FLM's
+> `.q4nx` container on the closed `gemma4e_npu` engine, which handles text,
+> images and audio. For text on the open kernels, install Google's QAT GGUF and
+> run the tag `oflm-add` prints:
+>
+> ```shell
+> oflm-add google/gemma-4-E2B-it-qat-q4_0-gguf
+> ```
+>
+> That install refuses images and audio. See the
 > [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 🖼️ **Note:** In CLI mode, attach an image with:
@@ -125,6 +131,9 @@ oflm run gemma4-it:e2b
 ```shell
 oflm run gemma4-it:e4b
 ```
+
+⚠️ **Open kernels:** as for E2B, text only, from Google's GGUF:
+`oflm-add google/gemma-4-E4B-it-qat-q4_0-gguf`, then run the tag it prints.
 
 🖼️ **Note:** In CLI mode, attach an image with:
 
