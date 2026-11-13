@@ -53,13 +53,15 @@ oflm run gemma3:4b
 /input "file/to/image.jpg" describe this image.
 ```
 
-⚠️ **The Gemma 3 family runs on the legacy closed engine only.** No open Gemma 3
-kernel set was ever built, so there is no open path for `gemma3:4b`,
-`medgemma:4b`, `medgemma1.5:4b` or `translategemma:4b`; the closed `gemma_npu`
-DLL is kept solely as the explicit `OFLM_GEMMA_ENGINE=closed` escape hatch (it
-serves text and images). OFLM does not fall back to it automatically — set the
-env var or don't expect a Gemma 3 4B to run. Gemma 4 (12B) is the fully-open
-Gemma path. See the
+✅ **Text runs on the open Gemma 3 kernels by default.** The open `gemma3` set
+(4B and 12B geometries; no 1B) ships with the app, so `gemma3:4b`,
+`medgemma:4b`, `medgemma1.5:4b` and `translategemma:4b` run open unless the
+open engine refuses to serve them. Vision/audio still needs the closed
+`gemma_npu` DLL, and there is no automatic fallback — set
+`OFLM_GEMMA_ENGINE=closed` to run the legacy closed engine for text and images.
+Gemma 4 (12B) runs open for text in this build; its image path needs the
+closed `gemma4_12b_npu` engine, which only reads the upstream `.q4nx`
+container -- a GGUF install of Gemma 4 has no working vision path today. See the
 [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---

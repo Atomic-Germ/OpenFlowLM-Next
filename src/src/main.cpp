@@ -30,6 +30,7 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <cstdio>
 #include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
@@ -547,29 +548,67 @@ static int print_quick_start() {
               << "including fine-tunes and community quants. An unknown tag is a\n"
               << "refusal with instructions, never a silent substitute.\n\n";
 
-    try {
-        const auto merged = oflm::config::load_merged_registry_quiet();
+    // The breadth, from the kernel tree this build actually ships -- the same
+    // roots `oflm add` links from. The manifest's own family string groups
+    // each set, so this cannot name something the package does not carry,
+    // nor stay silent about one it does.
+    {
         std::map<std::string, std::vector<std::string>> by_family;
-        if (merged.contains("models"))
-            for (const auto& [type, sizes] : merged["models"].items())
-                for (const auto& [size, info] : sizes.items())
-                    by_family[type].push_back(size);
-        if (!by_family.empty()) {
-            std::cout << "What this build knows (family : sizes):\n\n";
-            for (auto& [family, sizes] : by_family) {
-                std::sort(sizes.begin(), sizes.end());
+        std::error_code ec;
+        for (const std::string& root : utils::xclbin_roots()) {
+            const std::filesystem::path xdir = std::filesystem::path(root) / "xclbins";
+            if (!std::filesystem::is_directory(xdir, ec)) continue;
+            try {
+                for (const auto& entry : std::filesystem::directory_iterator(xdir)) {
+                    const std::filesystem::path open_dir = entry.path() / "open_kernels";
+                    if (!std::filesystem::is_directory(open_dir, ec)) continue;
+                    std::string family;
+                    const std::filesystem::path manifest = open_dir / "manifest.json";
+                    if (std::filesystem::is_regular_file(manifest, ec)) {
+                        std::ifstream f(manifest);
+                        const nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+                        if (j.is_object()) family = j.value("family", std::string());
+                    }
+                    if (family.empty() && std::filesystem::is_regular_file(open_dir / "whisper_kernels.json", ec))
+                        family = "whisper";
+                    if (family.empty() && std::filesystem::is_regular_file(open_dir / "diffusion_kernels.json", ec))
+                        family = "flux2-klein";
+                    if (family.empty() && std::filesystem::is_directory(open_dir / "npu_matmul_f32", ec))
+                        family = "embeddinggemma";
+                    if (family.empty()) family = "other";
+                    std::string label = entry.path().filename().string();
+                    if (label.size() > 5 && label.compare(label.size() - 5, 5, "-NPU2") == 0)
+                        label.resize(label.size() - 5);
+                    by_family[family].push_back(label);
+                }
+            } catch (const std::filesystem::filesystem_error& e) {
+                std::fprintf(stderr, "[OFLM] Warning: cannot scan %s: %s\n", xdir.c_str(), e.what());
+            }
+        }
+        if (by_family.empty()) {
+            std::cout << "(the open kernel tree was not found -- `oflm add` fetches\n"
+                      << " kernels for a model at install time)\n\n";
+        } else {
+            std::cout << "What this machine can run (open kernel sets `oflm` found --\n"
+                      << "shipped with this build, or linked by `oflm add`):\n\n";
+            for (auto& [family, labels] : by_family) {
+                std::sort(labels.begin(), labels.end());
+                labels.erase(std::unique(labels.begin(), labels.end()), labels.end());
                 std::string line = "  " + family;
-                while (line.size() < 22) line.push_back(' ');
-                for (size_t i = 0; i < sizes.size(); ++i) {
+                while (line.size() < 16) line.push_back(' ');
+                for (size_t i = 0; i < labels.size(); ++i) {
                     if (i) line += "  ";
-                    line += sizes[i];
+                    line += labels[i];
                 }
                 std::cout << line << "\n";
             }
-            std::cout << "\n";
+            std::cout << "\n"
+                      << "Any GGUF whose geometry matches a set above runs on it via oflm add --\n"
+                      << "fine-tunes and community quants included. Distills inherit their base\n"
+                      << "recipe: deepseek-r1:8b on Llama-3.1-8B, deepseek-r1-0528:8b on Qwen3-8B.\n"
+                      << "FLUX.2-klein-9B loads but currently renders garbled images -- 4B is the\n"
+                      << "working one.\n\n";
         }
-    } catch (const std::exception& e) {
-        std::cerr << "[OFLM] Warning: " << e.what() << std::endl;
     }
     std::cout << "oflm help             full command reference\n"
               << "oflm list             what is installed on this machine\n"
