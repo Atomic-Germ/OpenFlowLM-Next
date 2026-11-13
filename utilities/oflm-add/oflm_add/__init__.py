@@ -2546,7 +2546,7 @@ def link_whisper_set(model_dir, system_prefixes, model_name, force=False, quiet=
                 "xclbin root; the engine cannot transcribe without it. Build it with "
                 "open_kernels/export_whisper_kernels.py.")
         return
-    _link_one(str(model_dir), "open_kernels", str(src), force, quiet)
+    _link_one(Path(model_dir), "open_kernels", str(src), force, quiet)
 
 
 def build_entry(base_entry, dir_name, files, size):
@@ -4418,12 +4418,22 @@ def main():
             required = ["config.json", "model.safetensors", "tokenizer.json",
                         "tokenizer_config.json"]
     else:
+        whisper_open = (whisper_model and not gguf_mode
+                        and (target / "model.open.safetensors").is_file()
+                        and (target / "weights_manifest.json").is_file()
+                        and (target / "generation_config.json").is_file())
         required = (["model.gguf", "tokenizer.json", "tokenizer_config.json",
                      "generation_config.json"]   # whisper: the hf-decode protocol needs it
                     if gguf_mode and whisper_model
+                    else [] if whisper_open
                     else ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode
                     else REQUIRED_FILES)
     missing = [f for f in required if not (target / f).is_file()]
+    if (not gguf_mode and whisper_model
+            and missing == ["model.q4nx"]
+            and (target / "model.open.safetensors").is_file()
+            and (target / "weights_manifest.json").is_file()):
+        missing = []
     if gguf_mode:
         # GGUF-quant repos (mradermacher etc.) often ship only the GGUF: take the
         # tokenizer/config files from the original model the README names.
