@@ -70,6 +70,26 @@ variables it exported, so the discovery stays in one place. The two stay in
 step through `OFLM_ENV_DUMP=1`, which makes `env.sh` print its variables as
 `KEY=VALUE` lines instead of its report.
 
+## The production bar for a supported model
+
+A top-tier supported model ships finished and production-ready. Before you
+export its kernel set as done, or open an issue or PR that calls it supported,
+show each of these with measurements:
+
+- Prefill uses the block route (usually). State the reason for any exception.
+- Decode and prefill are near optimal. Profile them and name what is left.
+- No unusual context-length limits. Test up to the model's real context, not
+  only the 4096 default.
+- Everything runs on the NPU (usually). Name each host stage and its cost.
+- Speculative decoding was explored: MTP, DFlash, DFlash2, prompt lookup or
+  another drafter. Ship one, or reject it with the measured reason. We
+  generally want one.
+- `oflm add` and `oflm serve` run the model, not only a CLI harness.
+- The model ships quantized, usually q4. Prefer Unsloth's GGUFs when the
+  engine supports their quant types; state the reason for any other source.
+
+If an item is not done, the PR stays a draft and lists the item.
+
 ## Git rules for agents
 
 **Never use `git add -A`, `git add .`, or `git add --all`.** Stage the
