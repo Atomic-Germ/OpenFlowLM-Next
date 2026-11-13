@@ -62,7 +62,7 @@ one of them is built from source here.
 | **Gemma 4** | `gemma4-it:12b` | ✅ **open** | — | The 12B runs on the open kernels (two dense geometries: sliding-window layers + global layers with proportional RoPE). |
 | **Gemma 4** | `gemma4-it:e2b`, `gemma4-it:e4b` | ❌ **closed** | ❌ closed | Per-layer embeddings and KV sharing across layers have no open recipe yet; they dispatch to the closed `gemma4e_npu` engine. |
 | **GPT-OSS** | `gpt-oss:20b`, `gpt-oss-sg:20b` | ❌ **closed** | — | No open design: the MoE experts need a clamped SwiGLU plus bias-carrying projections that no current design has room for. |
-| **Whisper** | `whisper-v3:turbo` | ⚙️ closed | ❌ closed | The published container ships only `model.q4nx`, so the open Whisper path is never selected for it. The open kernels exist in-tree and serve whisper GGUFs. |
+| **Whisper** | `whisper-v3:turbo` | ⚙️ closed | — | The published container ships only `model.q4nx`, so the closed engine is what upstream gets. `q4nx-build --open-whisper` builds the open path from the same checkpoint, and `oflm add <dir>` installs it as a new tag running on the NPU — see [the Whisper card](/docs/models/whisper/#installing-the-open-whisper-build). |
 | **FLUX.2 klein** | `flux2-klein:4b`, any `FLUX.2-klein-*` GGUF | ✅ **open** | — | Black Forest Labs' flow-matching diffusion transformer runs on the open kernels end to end; `oflm add` installs it directly from a GGUF repo. |
 | DeepSeek-R1 (distills) | `deepseek-r1:8b`, `deepseek-r1-0528:8b` | ✅ open *(via the base recipe)* | — | These are **distills of Qwen3-8B and Llama-3.1-8B**, so they reuse the `qwen3` and `llama3` recipes respectively rather than having one of their own. |
 | EmbeddingGemma | `embed-gemma:300m` | ⚙️ CPU by default | — | Ships unquantized; NPU matmul is opt-in, not the default. |
@@ -176,6 +176,25 @@ do not ingest it — but asking for nothing picks the best thing available.
 Supported quants (for the chat kernels): `Q4_1`, `Q4_0`, `Q6_K`, `Q8_0`,
 `Q5_K`, `Q4_K`, `IQ4`. Embedding encoders accept a wider set (F16/BF16/F32
 included). Conversions of other quants are done on the way in.
+
+**Quants: what they cost and what they don't.** For a text model installed
+from a GGUF, quant choice affects only (a) size on disk and (b) the time
+`oflm add` and the first load spend in packing — *not* output quality. All
+quants land in the same q4_1 pool law, so the same weights produce the same
+attention. Load-time difference is real (measured: same model, same answer
+text, 56 s on a 6B-ish Q6_K vs 10 s on a Q4_1, at the same resident memory) —
+the choice is about install convenience, not the running model. The
+`Q4_1` family of quants is preferred because it is what the NPU packers read
+most directly; a repo's `Q4_1` that turns out to contain a stray tensor the
+packers reject (e.g. an embedding row in `Q5_0`) makes the installer fall
+through to the next compatible quant in the repo — nothing is wrong with the
+model, only with the file.
+
+The other engines work like this too, with different trade-offs: the
+diffusion checkpoint is chosen by resolution and edit profile rather than
+quant (f16 and q4_1 are quality-equivalent for the bundle layout), and
+the embedding encoders run bf16 directly because they were designed as
+reference fidelity, not speed.
 
 The shipped `model_list.json` is a suggestion list for `oflm list` and
 `oflm pull`, not a gate — the geometry decides.

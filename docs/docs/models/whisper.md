@@ -15,11 +15,32 @@ parent: Models
 - **Max Output Length:** 448 tokens (fixed)
 - **Maximum Encoder Window:** 30 seconds of audio (1500 frames)
 
-> ⚠️ **The shipped `whisper-v3:turbo` container runs the closed engine.** It ships
-> only `model.q4nx`; the open Whisper path needs both `model.open.safetensors`
-> and a kernel set, which the published container does not have. Its decoder also
-> runs entirely on the host in fp32 -- the open Whisper README makes no NPU
-> performance claim for it.
+> ⚠️ **Two engines ship one model.** The upstream `whisper-v3:turbo` container
+> runs the closed engine (it ships only `model.q4nx`). The open Whisper path
+> (`open_whisper`, this repository) runs the same model on the NPU — it is built
+> straight from the HuggingFace checkpoint by `q4nx-build --open-whisper` and
+> installed with `oflm add <local-dir>`.
+
+## Installing the open Whisper build
+
+```shell
+q4nx-build --open-whisper -i openai/whisper-large-v3-turbo -o Whisper-V3-Turbo-OpenNPU2
+oflm add Whisper-V3-Turbo-OpenNPU2 --name whisper-open:turbo
+```
+
+That writes `model.open.safetensors` and `weights_manifest.json` from the
+source checkpoint, registers a tag, and links the shipped `whisper_gemm` kernel
+set. Running it uses the open engine:
+
+```shell
+oflm run gemma3:4b --asr 1 --asrmodel whisper-open:turbo
+```
+
+The open engine runs the encoder on the NPU via the shipped `whisper_gemm`
+set (`xclbins/Whisper-V3-Turbo-NPU2/open_kernels`) and talks to
+`/v1/audio/transcriptions` the same as the closed one. The closed engine is
+still there for the shipped container; the open build does not replace any
+install, it just adds a new tag you can choose.
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 
