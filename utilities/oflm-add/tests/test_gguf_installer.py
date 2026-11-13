@@ -986,10 +986,10 @@ def test_the_two_family_maps_keep_their_own_spellings():
     assert oflm_add.family_from_config_dict({"model_type": "k2_horizon"}) == "k2"
     assert oflm_add.GGUF_ARCH_FAMILIES["hunyuan-dense"] == "hunyuan"
     assert oflm_add.family_from_config_dict({"model_type": "hunyuan_v1_dense"}) == "hunyuan"
-    # Gemma 4's open kernels serve the 12B's gemma4_unified(_text) only; the E2B/E4B stay refused
+    # Gemma 4: the 12B's gemma4_unified(_text) is gemma4, the E2B/E4B's plain gemma4 model_type is gemma4e
     assert oflm_add.GGUF_ARCH_FAMILIES["gemma4"] == "gemma4"
     assert oflm_add.family_from_config_dict({"model_type": "gemma4_unified"}) == "gemma4"
-    assert "gemma4" not in oflm_add.CONFIG_MODEL_FAMILIES
+    assert oflm_add.CONFIG_MODEL_FAMILIES["gemma4"] == "gemma4e"
     # a GGUF arch must not resolve through the config table and vice versa
     assert "hunyuan_v1_dense" not in oflm_add.GGUF_ARCH_FAMILIES
 
@@ -1435,3 +1435,68 @@ def test_explicit_family_keeps_same_kernel_resolution_as_inferred(tmp_path, monk
     assert f"gguf kernels   : {fake_kdir}" in out_explicit
     assert "xclbin source  : Qwen3-4B-NPU2" in out_auto
     assert "xclbin source  : Qwen3-4B-NPU2" in out_explicit
+
+
+# Traces: OPEN-FAMILY-GEMMA4 (canonical spec: specs/open-engine/spec.md)
+def test_google_names_its_gguf_with_an_it_suffix():
+    """Google ships gemma-4-E4B_q4_0-it.gguf beside the vision projector: the quant sits before "-it"."""
+    chosen, refused = oflm_add.choose_gguf_file(["gemma-4-E4B_q4_0-it.gguf", "gemma-4-E4B-it-mmproj.gguf"])
+    assert chosen == "gemma-4-E4B_q4_0-it.gguf"
+    assert oflm_add.gguf_quant_of(chosen) == "Q4_0"
+    assert "gemma-4-E4B-it-mmproj.gguf" in refused
+    assert oflm_add.gguf_quant_of("Model-Q4_0_4_4-it.gguf") is None     # the Q4_0_4_4 trap still refuses
+
+
+def test_verify_choice_lets_the_embeddings_be_coarser(tmp_path):
+    """Google's QAT file keeps its two embedding tables at Q6_K over Q4_0 layers; a file with no Q4_0 at all is refused."""
+    ok_file = tmp_path / "ok.gguf"
+    ok_file.write_bytes(_gguf_bytes(_llama_kv(), [("blk.0.attn_q.weight", 2, [32, 32]),
+                                                  ("token_embd.weight", 14, [256, 4]),
+                                                  ("per_layer_token_embd.weight", 14, [256, 4])]))
+    ok, note = oflm_add.verify_gguf_choice(str(ok_file), "ok.gguf", "Q4_0")
+    assert ok, note
+    bad_file = tmp_path / "bad.gguf"
+    bad_file.write_bytes(_gguf_bytes(_llama_kv(), [("blk.0.attn_q.weight", 14, [256, 4])]))
+    ok, note = oflm_add.verify_gguf_choice(str(bad_file), "bad.gguf", "Q4_0")
+    assert not ok
+
+
+def test_gemma4_e_series_routes_to_gemma4e(tmp_path):
+    """The E2B / E4B are the gemma4e adapter by name, by config.json and by GGUF content; the 12B stays gemma4."""
+    for name in ("gemma-4-E4B-it-qat-q4_0-gguf", "Gemma4-E2B-it-GGUF"):
+        assert oflm_add.derive_family({}, name) == "gemma4e", name
+    assert oflm_add.family_from_config_dict({"model_type": "gemma4"}) == "gemma4e"
+    assert oflm_add.family_from_config_dict({"model_type": "gemma4_unified"}) == "gemma4"
+
+    def gguf(name, ple):
+        p = tmp_path / name
+        p.write_bytes(_gguf_bytes([("general.architecture", (8, "gemma4")),
+                                   ("gemma4.embedding_length_per_layer_input", (4, ple))]))
+        return str(p)
+
+    assert oflm_add.family_from_gguf_arch(gguf("e4b.gguf", 256)) == "gemma4e"
+    assert oflm_add.family_from_gguf_arch(gguf("12b.gguf", 0)) == "gemma4"
+
+
+def test_a_gemma4e_gguf_install_is_registered_text_only():
+    """The official gemma4-it entry advertises images and audio; a GGUF install carries the text model only."""
+    base = {"name": "Gemma4-E4B-IT-NPU2", "vlm": True, "asr": True,
+            "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+            "details": {"family": "gemma4e"}}
+    e = oflm_add.build_entry(base, "Gemma4-E4B-it-GGUF",
+                             ["config.json", "model.gguf", "tokenizer.json", "tokenizer_config.json"], 4_000_000_000)
+    assert e["vlm"] is False and e["asr"] is False
+    assert e["label"] == ["reasoning", "tool-calling"]
+    assert base["vlm"] is True and "vision" in base["label"]                  # the curated entry is untouched
+
+
+def test_a_local_install_takes_the_token_ids_from_its_own_generation_config(tmp_path):
+    """Google's tokenizer_config.json names <bos> but no ids; oflm exits at load without them."""
+    src, target = tmp_path / "src", tmp_path / "target"
+    src.mkdir()
+    target.mkdir()
+    (target / "tokenizer_config.json").write_text(json.dumps({"bos_token": "<bos>", "eos_token": "<eos>"}))
+    (src / "generation_config.json").write_text(json.dumps({"bos_token_id": 2, "eos_token_id": [1, 106, 50]}))
+    oflm_add.normalize_tokenizer_config(target, str(src), [])
+    cfg = json.loads((target / "tokenizer_config.json").read_text(encoding="utf-8"))
+    assert cfg["bos_token_id"] == 2 and set(cfg["eos_token_id"]) >= {1, 106, 50}
