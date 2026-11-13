@@ -167,6 +167,8 @@ public:
     /// Pack every layer's pools and consts straight into resident device
     /// buffers. Minutes on first touch of a 22 GB file, ~1 min warm.
     void load_weights(const std::function<void(int done, int total)>& progress = {});
+    /// The weight file a Core reads from `model_dir`: model.gguf only when no model.q4nx is there.
+    static bool reads_gguf(const std::string& model_dir);
 
     /// Start a new context: zero the linear states, position 0.
     void reset();
@@ -399,8 +401,10 @@ public:
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
 
-    /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
+    /// One cached row of an attention layer's K or V (bf16, kv_row_bytes(layer) / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
+    /// A layer's own KV cache row in bytes; Gemma 4's global layers are wider than layout.kv_row.
+    size_t kv_row_bytes(int layer) const { return types_.at(static_cast<size_t>(layer))->state_row; }
 
     const WeightFile& file() const { return *file_; }
 
@@ -416,6 +420,9 @@ private:
         size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
         std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
+        std::vector<stream_patch::FwPatch> fw;      ///< fawpos: the K / V fills and the cores' position RTPs
+        size_t fw_hd = 0, fw_kv_ld = 0;
+        size_t fw_pos0 = ~size_t{0}, fw_win = ~size_t{0};   ///< fawpos: what the instruction BO holds now
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         std::map<int, xrt::run> runs;        ///< per layer: the decode walk's commands, built once and restarted
         uint32_t* iw() { return instr->map<uint32_t*>(); }
@@ -512,6 +519,12 @@ private:
     size_t prep_pos0_ = 0;       ///< its first position
     std::map<std::tuple<int, size_t, size_t>, xrt::bo> kv_sub_;   ///< (layer, block, pos0) -> the cache rows the block writes
     layer_major::Force layer_major_force_ = layer_major::Force::Auto; ///< OFLM_OPEN_LAYER_MAJOR, as the operator set it
+    /// Gemma 4 E-series block attention: 2 auto (the default, and OFLM_OPEN_ATTN_WIDE=auto): the host's while a block ends
+    /// at or before attn_wide_after_ tokens (OFLM_OPEN_ATTN_WIDE_AFTER, default 4096), fa_wide past it; never fa_wide on a
+    /// model without per-layer inputs. 1 fa_wide always (=1); 0 the host's always (OFLM_OPEN_ATTN_WIDE set to anything else).
+    int attn_wide_mode_ = 2;
+    size_t attn_wide_after_ = 4096;
+    bool attn_wide_loaded() const { return attn_wide_mode_ == 1 || (attn_wide_mode_ == 2 && w_ && w_->ple.present()); }
     bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count
@@ -602,6 +615,18 @@ private:
     std::vector<float> logits_host_;
     double rows_ms_ = 0;
     RowsPhase rows_phase_;
+    // Gemma 4's per-layer inputs (manifest `ple`), host-resident f32 because they run between dispatches
+    struct PleWeights {
+        std::vector<float> model_proj, model_norm, scalar;
+        std::vector<std::vector<float>> gate, proj, norm;
+    };
+    PleWeights ple_w_;
+    std::vector<float> ple_in_;                ///< [L * dim]: this token's per-layer inputs
+    void ple_load();
+    /// This token's per-layer inputs from its id and its scaled embedding `emb` (hidden).
+    void ple_prepare(size_t token, const float* emb);
+    /// After layer l's dispatch: xres += rms(proj(gelu(gate(xres)) * ple_l)) * norm, then *= scalar.
+    void ple_layer(int l);
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the
@@ -784,6 +809,11 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     void step_host_decode(int token, const float* x, bool want_logits);
     /// The route a step at the current position takes (internal convenience).
     inline bool decode_step_is_host() const { return decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_)) == "host"; }
+    /// Gemma 4's block (kind gemma4, OPEN-PREFILL-G4): every layer's GEMMs on the NPU, attention and the per-layer
+    /// inputs' elementwise stages on the host. ple is [T, layers * dim], the block's per-layer inputs.
+    void step_block_gemma4(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    void gemma4_layer(int l, std::vector<double>& xres, size_t T, size_t t_real, const std::vector<float>& ple);
+    void ple_block(const std::vector<int>& ids, const std::vector<double>& xres, size_t T, std::vector<float>& out);
     /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
     void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
     /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the

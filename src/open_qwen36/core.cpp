@@ -184,13 +184,18 @@ nlohmann::json derive_config(const GgufFile& g) {
         if (g.kv_has(arch + "." + k) && !g.kv_str(arch + "." + k).empty()) c[key] = u(k);
     };
     c["num_attention_heads"] = u("attention.head_count");
-    c["num_key_value_heads"] = u("attention.head_count_kv");
+    // the Gemma 4 12B lists head_count_kv per layer, an array this reader skips: the gemma4 branch reads its k projections
+    if (arch != "gemma4" || !g.kv_str(arch + ".attention.head_count_kv").empty())
+        c["num_key_value_heads"] = u("attention.head_count_kv");
     // A dense arch has feed_forward_length; a MoE has expert_feed_forward_length and no
     // dense FFN at all. Requiring the dense key refused Qwen3.6-35B-A3B at load ("no
     // metadata key qwen35moe.feed_forward_length") although the install was complete.
     // The open engine reads the FFN width from the manifest's `moe` block, so this is
     // informational: fill it from the expert width when that is what the file has.
-    if (g.kv_has(arch + ".feed_forward_length"))
+    // Gemma 4 E2B lists one FFN width per layer, an array this reader skips: layer 0's tensor says it.
+    if (g.kv_has(arch + ".feed_forward_length") && g.kv_str(arch + ".feed_forward_length").empty())
+        c["intermediate_size"] = g.tensor("blk.0.ffn_up.weight").dims.at(1);
+    else if (g.kv_has(arch + ".feed_forward_length"))
         c["intermediate_size"] = u("feed_forward_length");
     else if (g.kv_has(arch + ".expert_feed_forward_length"))
         c["intermediate_size"] = u("expert_feed_forward_length");
@@ -210,11 +215,41 @@ nlohmann::json derive_config(const GgufFile& g) {
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
         c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
+    if (arch == "gemma4") {
+        // key_length is the global layers' width; transformers' head_dim is the sliding one
+        c["head_dim"] = u("attention.key_length_swa");
+        c["global_head_dim"] = u("attention.key_length");
+        c["hidden_size_per_layer_input"] =
+            g.kv_has(arch + ".embedding_length_per_layer_input") ? u("embedding_length_per_layer_input") : 0;
+        c["final_logit_softcapping"] = g.kv_f64(arch + ".final_logit_softcapping");
+        if (!c.contains("num_key_value_heads")) {
+            // a global layer's q is head_count x key_length wide; one without attn_v is K = V
+            const uint64_t nh = u("attention.head_count"), hd = u("attention.key_length_swa"),
+                           ghd = u("attention.key_length"), n = u("block_count");
+            for (uint64_t l = 0; l < n; ++l) {
+                const std::string b = "blk." + std::to_string(l) + ".";
+                if (!g.has(b + "attn_k.weight")) continue;
+                const bool glob = g.tensor(b + "attn_q.weight").dims.at(1) == nh * ghd;
+                const uint64_t kv = g.tensor(b + "attn_k.weight").dims.at(1) / (glob ? ghd : hd);
+                if (!glob) {
+                    c["num_key_value_heads"] = kv;
+                } else if (!c.contains("num_global_key_value_heads")) {
+                    c["num_global_key_value_heads"] = kv;
+                    c["attention_k_eq_v"] = !g.has(b + "attn_v.weight");
+                }
+            }
+        }
+    }
     return c;
 }
 
 void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
+}
+
+bool Core::reads_gguf(const std::string& model_dir) {
+    const fs::path md(model_dir);
+    return fs::exists(md / "model.gguf") && !fs::exists(md / "model.q4nx");
 }
 
 Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
@@ -275,7 +310,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     const bool have_gguf = fs::exists(md / "model.gguf");
     if (!have_q4nx && !have_gguf)
         throw std::runtime_error("open_qwen36: neither model.q4nx nor model.gguf in " + cfg_.model_dir);
-    gguf_ = have_gguf && !have_q4nx;
+    gguf_ = reads_gguf(cfg_.model_dir);
     w_ = gguf_ ? man_.gguf.get() : &man_;
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
@@ -522,6 +557,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // the glue follows the route (OPEN-PREFILL-GLUE-PREP): on with the bfp16 route unless OFLM_OPEN_PREFILL_PREP=0
     attn_prep_on_ = prefill_route_ == "bfp16";
     if (const char* env = std::getenv("OFLM_OPEN_PREFILL_PREP")) attn_prep_on_ = std::string(env) == "1";
+    if (const char* env = std::getenv("OFLM_OPEN_ATTN_WIDE")) attn_wide_mode_ = std::string(env) == "1" ? 1 : std::string(env) == "auto" ? 2 : 0;
+    if (const char* env = std::getenv("OFLM_OPEN_ATTN_WIDE_AFTER")) attn_wide_after_ = static_cast<size_t>(std::strtoull(env, nullptr, 10));
     for (int l = 0; l < nl_; ++l) {
         for (const auto& s : types_[l]->program) wanted[s.kernel] = true;
         // an A/B arm with the host attention does not register the attention context at all
@@ -540,6 +577,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& s : types_[l]->gemm_block.ffn_program) wanted[s.kernel] = true;
         for (const auto& [high, low] : types_[l]->gemm_block.low_kernels) wanted[low] = true;
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted[types_[l]->gemm_block.attn_kernel] = true;
+        if (attn_wide_loaded() && types_[l]->gemm_block.attn_wide.present()) wanted[types_[l]->gemm_block.attn_wide.kernel] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_s) wanted[k] = true;
@@ -553,6 +591,16 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
+    // a kind's position table can be narrower than the layout's (the 12B: 2048 global, 4096 sliding)
+    for (int l = 0; l < nl_; ++l)
+        for (const auto& s : types_[l]->program) {
+            auto k = kerns_.find(s.kernel);
+            if (k == kerns_.end() || k->second.patch != "attnpos") continue;
+            for (const auto& a : s.args) {
+                auto g = w_->per_row_globals.find(a);
+                if (g != w_->per_row_globals.end()) k->second.geom.ptab_row = g->second.per_row;
+            }
+        }
     logits_host_.assign(w_->vocab, 0.f);
 
     // 0167/#32: the GEMM-route block size every loaded layer type agrees on.
@@ -709,6 +757,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
              any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") :
              any_dense ? "not in this kernel set (one dxB dispatch a token)" :
                          "not in this kernel set (attention on the host)"));
+    if (gemm_block_t_ && types_[0]->gemm_block.kind == "gemma4")
+        log(std::string("gemma4 block attention: ") + (types_[0]->gemm_block.attn_wide.present()
+                ? (attn_wide_mode_ == 1 ? "fa_wide on the NPU (OFLM_OPEN_ATTN_WIDE=1)" : attn_wide_mode_ == 0 ? "the host (OFLM_OPEN_ATTN_WIDE is set to neither auto nor 1)"
+                   : attn_wide_loaded() ? "the host up to " + std::to_string(attn_wide_after_) + " tokens, fa_wide on the NPU past them (auto, the default; OFLM_OPEN_ATTN_WIDE=1 forces fa_wide, anything else but auto the host)"
+                   : "the host (auto picks fa_wide only on a model with per-layer inputs)") : "the host (no fa_wide in this set)"));
     if (gemm_block_t_)
         // Three different facts, said separately: whether the set CAN run layer-major, what
         // the operator asked for, and -- absent a request -- what the automatic rule says.
@@ -979,6 +1032,10 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.geom.rb = d.rb;
         k.geom.kvslice = d.kvslice;
         k.attn_rows = stream_patch::attn_rows_table(k.words, name, static_cast<uint32_t>(man_.rows.l), k.geom);
+    } else if (d.patch == "fawpos") {
+        k.fw = stream_patch::fw_table(k.words, name, d.fw_hd, d.fw_kv_ld, d.fw_passes);
+        k.fw_hd = d.fw_hd;
+        k.fw_kv_ld = d.fw_kv_ld;
     }
 }
 
@@ -1145,6 +1202,27 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": q_norm / k_norm is not [" +
                                                  std::to_string(ab.hd) + "], the head dim the attention products were built for");
                 }
+            } else if (lt.gemm_block.kind == "gemma4") {
+                // the block route's host stages read the sandwich norms and the q / k norms from the file by name
+                const GemmBlockProgram& gb = lt.gemm_block;
+                auto norm = [&](const char* suffix, size_t n) {
+                    std::vector<float> v = file_->bf16(const_tensor(lt, suffix, l));
+                    if (v.size() != n)
+                        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + suffix + " has " +
+                                                 std::to_string(v.size()) + " values, the route wants " + std::to_string(n));
+                    return v;
+                };
+                const std::vector<float> a = norm(".attn_norm.weight", w_->hidden), b = norm(".post_attention_norm.weight", w_->hidden);
+                ln_w_bf16_[l].resize(w_->hidden);
+                post_ln_w_bf16_[l].resize(w_->hidden);
+                for (size_t i = 0; i < w_->hidden; ++i) {
+                    ln_w_bf16_[l][i] = f32_to_bf16(a[i]);
+                    post_ln_w_bf16_[l][i] = f32_to_bf16(b[i]);
+                }
+                pre_ffn_w_[l] = norm(".ffn_norm.weight", w_->hidden);
+                post_ffn_w_[l] = norm(".post_ffw_norm.weight", w_->hidden);
+                hc_[l].qn = norm(".attn_q_norm.weight", gb.hd);
+                if (gb.kvw) hc_[l].kn = norm(".attn_k_norm.weight", gb.hd);
             } else {
                 // the MoE kinds' host stages read their small tensors straight from the
                 // file, by the names the consts plan carries (no consts layout knowledge here)
@@ -1247,8 +1325,13 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
             if (kd.patch == "attnpos" && kd.rb > 2) kv_slack = std::max<uint64_t>(kv_slack, kd.rb - 2);
             // a kvslice window padded to whole elements reads up to kvslice - 1 rows past its last real one
             if (kd.kvslice) kv_slack = std::max<uint64_t>(kv_slack, kd.kvslice - 1);
+            // an fa_wide pass reads whole 32-key chunks, up to 31 rows past the block
+            if (kd.patch == "fawpos") kv_slack = std::max<uint64_t>(kv_slack, 32);
         }
-        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
+        if (lt.state_kind == "kv_shared")
+            state_.push_back(state_.at(static_cast<size_t>(w_->kv_source.at(static_cast<size_t>(l)))));   // the same BO
+        else
+            state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
         // Release the file pages this layer just read. A 35B's expert tensors are ~450 MB a
         // layer; keeping all 40 layers' pages resident alongside 40 x 512 MB of pool BOs
         // (which XRT maps locked) is what took a 21.8 GB GGUF over a 46 GB box's memory and
@@ -1364,6 +1447,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 std::to_string(uno_noise_bound()) + ")");
         }
     }
+    if (w_->ple.present() || !w_->ple.scalar.empty()) ple_load();
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
     weights_loaded_ = true;
@@ -2484,6 +2568,10 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         }
         log("embed t=" + std::to_string(token) + " nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
     }
+    if (w_->ple.present()) {
+        if (x) throw std::runtime_error("open_qwen36: per-layer inputs need the token id, not an embedding");
+        ple_prepare(static_cast<size_t>(token), xres.map<float*>());
+    }
     xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
     if (mpos) {
         const double p3[3] = {static_cast<double>(mpos[0]), static_cast<double>(mpos[1]), static_cast<double>(mpos[2])};
@@ -2536,7 +2624,8 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !layer_nan_ && !deepstack;
+    const bool host_ple = !ple_w_.scalar.empty() && !w_->ple.on_npu;   // per-layer input and / or layer scalar
+    const bool pipe = submit_ahead_ > 0 && !layer_nan_ && !deepstack && !host_ple;   // both read xres between layers
     // OFLM_OPEN_PROFILE: one row per layer of this token, for at most OFLM_OPEN_PROFILE_STEPS
     // steps. A prompt is stepped and a decode loop is stepped, and the second is thousands of
     // records long, so the budget is what keeps a profile of a request's first tokens small
@@ -2575,6 +2664,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
+            if (host_ple) ple_layer(l);
             if (layer_nan_) layer_nan_check(xres, l);
             profile_layer(types_[l]->name.c_str(), l);
             continue;
@@ -2982,6 +3072,323 @@ void Core::softcap_logits() {
     if (c <= 0.0) return;
     const float cf = static_cast<float>(c), inv = static_cast<float>(1.0 / c);
     for (float& z : logits_host_) z = cf * std::tanh(z * inv);
+}
+
+namespace {
+inline double gelu_tanh(double x) { return 0.5 * x * (1.0 + std::tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))); }
+std::string at_layer(const std::string& name, int l) {
+    std::string s = name;
+    const auto p = s.find("{l}");
+    if (p != std::string::npos) s.replace(p, 3, std::to_string(l));
+    return s;
+}
+}  // namespace
+
+void Core::ple_load() {
+    const PleSpec& p = w_->ple;
+    const size_t L = w_->layers.size(), D = p.dim, H = w_->hidden;
+    auto take = [&](const std::string& name, size_t n) {
+        std::vector<float> v = file_->f32(name);
+        if (v.size() != n)
+            throw std::runtime_error("open_qwen36: " + name + " has " + std::to_string(v.size()) + " values, the per-layer inputs want " +
+                                     std::to_string(n));
+        return v;
+    };
+    ple_w_.scalar.assign(nl_, 1.f);
+    for (int l = 0; l < nl_; ++l)
+        if (!p.scalar.empty()) ple_w_.scalar[l] = take(at_layer(p.scalar, l), 1)[0];
+    if (!p.present()) {             // the 12B: the layer scalars without per-layer inputs
+        log(p.on_npu ? "layer output scalars applied in the layer programs (no per-layer inputs)"
+                     : "layer output scalars on the host (no per-layer inputs)");
+        return;
+    }
+    ple_w_.model_proj = take(p.model_proj, L * D * H);
+    ple_w_.model_norm = take(p.model_norm, D);
+    ple_in_.assign(L * D, 0.f);
+    if (p.on_npu) {
+        log("per-layer inputs: " + std::to_string(L) + " x " + std::to_string(D) + " prepared on the host, applied in the layer programs");
+        if (gemm_block_t_ && types_[0]->gemm_block.kind == "gemma4") {      // the block route applies them on the host between its GEMMs
+            ple_w_.norm.resize(nl_);
+            for (int l = 0; l < nl_; ++l) {
+                ple_w_.norm[l] = file_->bf16(at_layer(p.norm, l));
+                if (ple_w_.norm[l].size() != H) throw std::runtime_error("open_qwen36: " + at_layer(p.norm, l) + " is not [hidden]");
+            }
+        }
+        return;
+    }
+    ple_w_.gate.resize(nl_);
+    ple_w_.proj.resize(nl_);
+    ple_w_.norm.resize(nl_);
+    for (int l = 0; l < nl_; ++l) {
+        ple_w_.gate[l] = take(at_layer(p.gate, l), D * H);
+        ple_w_.proj[l] = take(at_layer(p.proj, l), H * D);
+        ple_w_.norm[l] = take(at_layer(p.norm, l), H);
+    }
+    log("per-layer inputs: " + std::to_string(L) + " x " + std::to_string(D) + " on the host (" +
+        std::to_string((ple_w_.model_proj.size() + nl_ * 2 * D * H) * 4 >> 20) + " MB f32)");
+}
+
+void Core::ple_prepare(size_t token, const float* emb) {
+    const PleSpec& p = w_->ple;
+    const size_t L = w_->layers.size(), D = p.dim, H = w_->hidden;
+    std::vector<float> tok(L * D);
+    file_->embed_row(p.embed, token, L * D, tok.data());
+    std::vector<double> proj(L * D);
+    const float* W = ple_w_.model_proj.data();
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(L * D); ++i) {
+        const float* w = W + static_cast<size_t>(i) * H;
+        double s = 0.0;
+        for (size_t k = 0; k < H; ++k) s += static_cast<double>(w[k]) * emb[k];
+        proj[static_cast<size_t>(i)] = s * p.model_proj_scale;
+    }
+    for (size_t l = 0; l < L; ++l) {
+        double ss = 0.0;
+        for (size_t j = 0; j < D; ++j) ss += proj[l * D + j] * proj[l * D + j];
+        const double inv = 1.0 / std::sqrt(ss / static_cast<double>(D) + p.eps);
+        for (size_t j = 0; j < D; ++j)
+            ple_in_[l * D + j] = static_cast<float>((proj[l * D + j] * inv * ple_w_.model_norm[j] +
+                                                     static_cast<double>(tok[l * D + j]) * p.embed_scale) * p.input_scale);
+    }
+    if (!p.on_npu) return;
+    for (int l = 0; l < nl_; ++l) {
+        const size_t off = static_cast<size_t>(types_[l]->ple_in);
+        std::memcpy(act_[l].map<uint8_t*>() + off, ple_in_.data() + static_cast<size_t>(l) * D, D * 4);
+        act_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, D * 4, off);
+    }
+}
+
+void Core::ple_layer(int l) {
+    const PleSpec& p = w_->ple;
+    const size_t D = p.dim, H = w_->hidden;
+    xrt::bo& xres = buffer("xres", 0);
+    read_back(xres, H * 4, 0);
+    float* h = xres.map<float*>();
+    if (!p.present()) {
+        const double s = ple_w_.scalar[l];
+        for (size_t i = 0; i < H; ++i) h[i] = static_cast<float>(static_cast<double>(h[i]) * s);
+        xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, H * 4, 0);
+        return;
+    }
+    std::vector<double> g(D), y(H);
+    const float* G = ple_w_.gate[l].data();
+    const float* P = ple_w_.proj[l].data();
+    const float* in = ple_in_.data() + static_cast<size_t>(l) * D;
+    // One output row per iteration, each summed in the same order as serially, so threading keeps the bits.
+#pragma omp parallel for
+    for (long long j = 0; j < static_cast<long long>(D); ++j) {
+        double s = 0.0;
+        for (size_t k = 0; k < H; ++k) s += static_cast<double>(G[j * H + k]) * h[k];
+        g[j] = gelu_tanh(s) * in[j];
+    }
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(H); ++i) {
+        double s = 0.0;
+        for (size_t j = 0; j < D; ++j) s += static_cast<double>(P[i * D + j]) * g[j];
+        y[i] = s;
+    }
+    double ss = 0.0;
+    for (size_t i = 0; i < H; ++i) ss += y[i] * y[i];
+    const double inv = 1.0 / std::sqrt(ss / static_cast<double>(H) + p.eps);
+    const double sc = ple_w_.scalar[l];
+    for (size_t i = 0; i < H; ++i)
+        h[i] = static_cast<float>((static_cast<double>(h[i]) + y[i] * inv * ple_w_.norm[l][i]) * sc);
+    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, H * 4, 0);
+}
+
+// ---- Gemma 4's block (OPEN-PREFILL-G4)
+
+void Core::ple_block(const std::vector<int>& ids, const std::vector<double>& xres, size_t T, std::vector<float>& out) {
+    const PleSpec& p = w_->ple;
+    const size_t L = w_->layers.size(), D = p.dim, H = w_->hidden;
+    std::vector<float> emb(T * H), proj(T * L * D), tok(L * D);
+    for (size_t i = 0; i < T * H; ++i) emb[i] = static_cast<float>(xres[i]);
+    host::matmul_nt(ple_w_.model_proj.data(), L * D, H, emb.data(), T, proj.data());
+    out.resize(T * L * D);
+    for (size_t t = 0; t < T; ++t) {
+        file_->embed_row(p.embed, static_cast<size_t>(ids[t]), L * D, tok.data());
+#pragma omp parallel for
+        for (long long l = 0; l < static_cast<long long>(L); ++l) {
+            const float* pr = proj.data() + t * L * D + static_cast<size_t>(l) * D;
+            double ss = 0.0;
+            for (size_t j = 0; j < D; ++j) {
+                const double v = static_cast<double>(pr[j]) * p.model_proj_scale;
+                ss += v * v;
+            }
+            const double inv = 1.0 / std::sqrt(ss / static_cast<double>(D) + p.eps);
+            for (size_t j = 0; j < D; ++j)
+                out[t * L * D + static_cast<size_t>(l) * D + j] = static_cast<float>(
+                    (static_cast<double>(pr[j]) * p.model_proj_scale * inv * ple_w_.model_norm[j] +
+                     static_cast<double>(tok[static_cast<size_t>(l) * D + j]) * p.embed_scale) * p.input_scale);
+        }
+    }
+}
+
+void Core::gemma4_layer(int l, std::vector<double>& xres, size_t T, size_t t_real, const std::vector<float>& ple) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const size_t hid = w_->hidden, qw = gb.qw, kvw = gb.kvw, ff = gb.ff, hd = gb.hd, D = gb.ple_dim;
+    const size_t L = static_cast<size_t>(nl_);
+    const bool shared = kvw == 0;
+    std::vector<float> xn;
+    rmsnorm_host(xres, T, hid, ln_w_bf16_[l], gb.eps, xn);
+    const float* y = gemm_run(gb.program[0], xn.data(), T, hid, qw + 2 * kvw, l);          // [qw + 2 kvw, T]
+    float* q = BlockScratch::fit(bs_.part[0], T * qw);
+    float* k = BlockScratch::fit(bs_.part[1], T * kvw);
+    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
+    const host::TransposePart parts[3] = {{q, 0, qw}, {k, qw, kvw}, {v, qw + kvw, kvw}};
+    host::transpose_parts(y, T, parts, shared ? 1 : 3);
+
+    auto ta = std::chrono::steady_clock::now();
+    xrt::bo& st = state_[l];
+    const size_t row = lt.state_row, pos0 = static_cast<size_t>(pos_);
+    host::G4AttnGeom g;
+    g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = gb.kvh; g.hd = hd; g.rot = gb.rot;
+    g.pos0 = pos0; g.window = gb.window; g.eps = gb.eps;
+    float* og = BlockScratch::fit(bs_.og, T * qw);
+    const double* inv_freq = w_->per_row_globals.at(gb.ptab).inv_freq.data();
+    const AttnWide& aw = gb.attn_wide;
+    const bool wide_now = host::gemma4_use_wide(attn_wide_mode_, w_->ple.present(), pos0 + t_real, attn_wide_after_);
+    if (wide_now && aw.present() && T == gb.t) {
+        // OPEN-PREFILL-ATTN-WIDE: the host norms, rotates and writes the cache rows; scores, softmax and values are one
+        // fa_wide dispatch over the cache (a shared layer's state is its source layer's buffer)
+        xrt::bo& qb = globals_.at(aw.q);
+        host::gemma4_attention_prep(g, q, shared ? nullptr : k, shared ? nullptr : v, hc_[l].qn.data(),
+                                    shared ? nullptr : hc_[l].kn.data(), inv_freq, st.map<uint16_t*>(), row / 2,
+                                    qb.map<uint16_t*>());
+        if (!shared) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, pos0 * row);
+        qb.sync(XCL_BO_SYNC_BO_TO_DEVICE, T * qw * 2, 0);
+        Kern& kw = kerns_.at(aw.kernel);
+        if (kw.fw_pos0 != pos0 || kw.fw_win != aw.window) {
+            stream_patch::fw_apply(kw.iw(), kw.fw, pos0, aw.window, kw.fw_hd, kw.fw_kv_ld);
+            kw.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            kw.fw_pos0 = pos0;
+            kw.fw_win = aw.window;
+        }
+        timing_.part0_ms += run(kw, {aw.q, "state", "state", aw.o}, l);
+        xrt::bo& ob = globals_.at(aw.o);
+        read_back(ob, T * qw * 2, 0);
+        const uint16_t* o16 = ob.map<const uint16_t*>();
+        std::fill(og, og + T * qw, 0.f);
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(t_real * qw); ++i) og[i] = bf16_to_f32(o16[i]);
+    } else {
+        const size_t lo = gb.window && pos0 + 1 > gb.window ? pos0 + 1 - gb.window : 0;
+        const size_t need = (shared ? pos0 + t_real : pos0) - lo;                           // rows the host has not written
+        if (need) read_back(st, need * row, lo * row);
+        host::gemma4_attention(g, q, shared ? nullptr : k, shared ? nullptr : v, hc_[l].qn.data(),
+                               shared ? nullptr : hc_[l].kn.data(), inv_freq, st.map<uint16_t*>(), row / 2, og);
+        if (!shared) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, pos0 * row);
+    }
+    timing_.attn_ms += ms_since(ta);
+
+    gemm(gb.program[1], og, T, qw, hid, l, bs_.d_o);
+    auto th = std::chrono::steady_clock::now();
+    std::vector<double>& rows = bs_.d_row;
+    std::vector<double>& res1 = bs_.d_res;
+    BlockScratch::fit(rows, T * hid);
+    BlockScratch::fit(res1, T * hid);
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) rows[static_cast<size_t>(i)] = bs_.d_o[static_cast<size_t>(i)];
+    std::vector<float> t_attn, xm;
+    rmsnorm_host(rows, T, hid, post_ln_w_bf16_[l], gb.eps, t_attn);
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i)
+        res1[static_cast<size_t>(i)] = xres[static_cast<size_t>(i)] + static_cast<double>(t_attn[static_cast<size_t>(i)]);
+    rmsnorm_host(res1, T, hid, pre_ffn_w_[l], gb.eps, xm);
+    timing_.tail_ms += ms_since(th);
+
+    gemm(gb.program[2], xm.data(), T, hid, ff, l, bs_.d_gate);
+    gemm(gb.program[3], xm.data(), T, hid, ff, l, bs_.d_up);
+    th = std::chrono::steady_clock::now();
+    float* h = BlockScratch::fit(bs_.d_h, T * ff);
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * ff); ++i)
+        h[i] = static_cast<float>(gelu_tanh(static_cast<double>(bs_.d_gate[static_cast<size_t>(i)])) *
+                                  static_cast<double>(bs_.d_up[static_cast<size_t>(i)]));
+    timing_.tail_ms += ms_since(th);
+    gemm(gb.program[4], h, T, ff, hid, l, bs_.d_down);
+
+    th = std::chrono::steady_clock::now();
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) rows[static_cast<size_t>(i)] = bs_.d_down[static_cast<size_t>(i)];
+    std::vector<float> t_ffn;
+    rmsnorm_host(rows, T, hid, post_ffn_w_[l], gb.eps, t_ffn);
+    std::vector<float>& xf = bs_.xn;
+    BlockScratch::fit(xf, T * hid);
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) {
+        const size_t u = static_cast<size_t>(i);
+        xres[u] = res1[u] + static_cast<double>(t_ffn[u]);
+        xf[u] = static_cast<float>(xres[u]);
+    }
+    timing_.tail_ms += ms_since(th);
+
+    const double sc = ple_w_.scalar[static_cast<size_t>(l)];
+    if (D == 0) {                                  // the 12B: no per-layer input, only the layer scalar
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(T * hid); ++i) xres[static_cast<size_t>(i)] *= sc;
+        return;
+    }
+    // the per-layer input: gate, GELU against this layer's input, projection, norm, residual, layer scalar
+    gemm(gb.program[5], xf.data(), T, hid, D, l, bs_.d_gate);
+    th = std::chrono::steady_clock::now();
+    std::vector<float> gg(T * D);
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * D); ++i) {
+        const size_t t = static_cast<size_t>(i) / D, j = static_cast<size_t>(i) % D;
+        gg[static_cast<size_t>(i)] = static_cast<float>(gelu_tanh(static_cast<double>(bs_.d_gate[static_cast<size_t>(i)])) *
+                                                        static_cast<double>(ple[t * L * D + static_cast<size_t>(l) * D + j]));
+    }
+    timing_.tail_ms += ms_since(th);
+    gemm(gb.program[6], gg.data(), T, D, hid, l, bs_.d_down);
+    th = std::chrono::steady_clock::now();
+    const std::vector<float>& pn = ple_w_.norm[static_cast<size_t>(l)];
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        const float* pr = bs_.d_down.data() + static_cast<size_t>(t) * hid;
+        double ss = 0.0;
+        for (size_t c = 0; c < hid; ++c) ss += static_cast<double>(pr[c]) * pr[c];
+        const double inv = 1.0 / std::sqrt(ss / static_cast<double>(hid) + w_->ple.eps);
+        double* xr = xres.data() + static_cast<size_t>(t) * hid;
+        for (size_t c = 0; c < hid; ++c) xr[c] = (xr[c] + static_cast<double>(pr[c]) * inv * pn[c]) * sc;
+    }
+    timing_.tail_ms += ms_since(th);
+}
+
+void Core::step_block_gemma4(const std::vector<int>& ids, size_t t_real, bool want_logits) {
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+    const size_t T = ids.size(), hid = w_->hidden;
+    std::vector<double> xres(T * hid);
+    {
+        std::vector<float> row(hid);
+        for (size_t t = 0; t < T; ++t) {
+            embedding_row(static_cast<size_t>(ids[t]), row.data());
+            for (size_t c = 0; c < hid; ++c) xres[t * hid + c] = static_cast<double>(row[c]);
+        }
+    }
+    std::vector<float> ple;
+    if (w_->ple.present()) ple_block(ids, xres, T, ple);
+    for (int l = 0; l < nl_; ++l) {
+        if (types_[l]->gemm_block.t == 0 || types_[l]->gemm_block.kind != "gemma4")
+            throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no gemma4 block route");
+        gemma4_layer(l, xres, T, t_real, ple);
+    }
+    pos_ += static_cast<int>(t_real);
+    block_logits_.clear();
+    std::vector<float> row(hid);
+    if (block_logits_all_)
+        for (size_t t = 0; t < t_real; ++t) {
+            for (size_t c = 0; c < hid; ++c) row[c] = static_cast<float>(xres[t * hid + c]);
+            tail_logits(row.data());
+            block_logits_.push_back(logits_host_);
+        }
+    if (want_logits) {
+        for (size_t c = 0; c < hid; ++c) row[c] = static_cast<float>(xres[(t_real - 1) * hid + c]);
+        tail_logits(row.data());
+    }
+    timing_.total_ms = ms_since(t0);
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
@@ -3610,6 +4017,10 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
                                  std::to_string(cfg_.max_ctx));
     for (int tok : ids)
         if (tok < 0 || static_cast<size_t>(tok) >= w_->vocab) throw std::runtime_error("open_qwen36: token id out of range");
+    if (types_[0]->gemm_block.kind == "gemma4") {
+        step_block_gemma4(ids, t_real, want_logits);
+        return;
+    }
     if (types_[0]->gemm_block.kind != "dense") {
         step_block_moe(ids, t_real, want_logits);
         return;

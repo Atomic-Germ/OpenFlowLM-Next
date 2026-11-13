@@ -272,6 +272,31 @@ void gguf_chunk(const GgufFile& g, const std::string& name, const GgufFile::Tens
             if (blk0 + kb >= nb) break;                  // padded columns stay zero
             // scales: fp16 d (and m) -> f32, plane index j = kb*32 + r
             uint16_t ud, um = 0;
+            if (kq && !f32_law) {
+                // OPEN-GGUF-BF16-POOL: requant_q4_1_chunks' law, m toward -inf and d toward +inf, so [m, m + 15d] covers the block
+                float vs[32];
+                const float* v = rd.data() + (blk0 + kb) * 32;
+                for (size_t i = 0; i < 32; ++i) vs[i] = fold ? v[i] * static_cast<float>(fold) : v[i];
+                float lo = vs[0], hi = vs[0];
+                for (size_t i = 0; i < 32; ++i) {
+                    lo = std::min(lo, vs[i]);
+                    hi = std::max(hi, vs[i]);
+                }
+                const uint16_t mu = bf16_floor(lo);
+                const float mf = bf16_to_f32(mu);
+                const uint16_t du = bf16_ceil((hi - mf) / 15.0f);
+                const float df = bf16_to_f32(du);
+                const float inv = df > 0.0f ? 1.0f / df : 0.0f;
+                std::memcpy(d + SD * (kb * 32 + r), &du, 2);
+                std::memcpy(d + M_OFF + SD * (kb * 32 + r), &mu, 2);
+                for (size_t i = 0; i < 32; ++i) {
+                    int q = static_cast<int>((vs[i] - mf) * inv + 0.5f);
+                    q = q < 0 ? 0 : q > 15 ? 15 : q;
+                    const size_t pp = rb * 4096 + (kb * 32 + i) * 16 + rl;
+                    d[CODES + (pp >> 1)] |= static_cast<uint8_t>((pp & 1) ? (q << 4) : q);
+                }
+                continue;
+            }
             if (kq) {
                 // re-quantize the block to the pool's q4_1 law (fp16 d/m, 4-bit codes)
                 float vs[32];
@@ -1080,6 +1105,11 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             bounds(op, n, dst_bytes);
             std::memcpy(dst + op.dst, src, n);
         }
+    } else if (op.op == "put_f32") {
+        const std::vector<float> v = m.f32(with_layer(op.tensor, layer));
+        if (v.size() * 4 > op.cap) fail(op.tensor + " is " + std::to_string(v.size() * 4) + " B, its slot holds " + std::to_string(op.cap));
+        bounds(op, v.size() * 4, dst_bytes);
+        std::memcpy(dst + op.dst, v.data(), v.size() * 4);
     } else if (op.op == "lmhead_q8") {
         // 128-row supertile order. nk = K / 256 k-tiles, a band is 4 row quarters x nk k-tiles,
         // and the file holds chunk (rowblock32, ktile) at rowblock32 * nk + ktile:
@@ -1319,12 +1349,13 @@ static int mrope_axis(size_t i, const std::vector<int>& section, bool interleave
 void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const double pos[3],
                        const std::vector<int>& section, bool interleaved, uint8_t* r) {
     // RoPE over the first rotary_dim dims of a head, half-split pairs (i, i + rot/2), the recipe's theta:
-    // [i32 pos | i32 nf | cos f32[rot/2] @512 | sin f32[rot/2] right after] (attn.h reads [cos | sin] at +512)
+    // [i32 pos | i32 nf | cos f32[rot/2] @cs_off | sin f32[rot/2] right after] (attn.h ATTN_PTAB_CS_OFF, 512 by default)
     // the table's own pairs and record size (Gemma 4 has two tables of different widths);
     // a table that names neither is the layout's, which is every other family
     const size_t half = (g.rotary_dim ? g.rotary_dim : m.rotary_dim) / 2;
+    const size_t cs = static_cast<size_t>(g.cs_off);
     const size_t row_bytes = g.per_row ? g.per_row : m.ptab_row;
-    if (512 + 8 * half > row_bytes) fail("the rotary dim does not fit the position record");
+    if (cs + 8 * half > row_bytes) fail("the rotary dim does not fit the position record");
     std::memset(r, 0, row_bytes);
     uint64_t start, nf64;
     stream_patch::attn_window(row, g.window, &start, &nf64);
@@ -1338,8 +1369,8 @@ void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const 
     for (size_t i = 0; i < half; ++i) {
         double ang = pos[mrope_axis(i, section, interleaved)] * freq[i];
         float c = static_cast<float>(g.scale * std::cos(ang)), s = static_cast<float>(g.scale * std::sin(ang));
-        std::memcpy(r + 512 + 4 * i, &c, 4);
-        std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
+        std::memcpy(r + cs + 4 * i, &c, 4);
+        std::memcpy(r + cs + 4 * half + 4 * i, &s, 4);
     }
 }
 
