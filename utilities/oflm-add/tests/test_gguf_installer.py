@@ -652,6 +652,53 @@ def test_gguf_repo_without_kernels_fails_directly_instead_of_q4nx_fallback(tmp_p
         raise AssertionError("missing GGUF kernels must raise SystemExit directly")
 
 
+def test_a_repo_whose_best_gguf_hides_a_bad_tensor_falls_through_to_the_next_quant(tmp_path, monkeypatch):
+    """Mungert's repo holds a q4_1.gguf whose embedding row is Q5_0 — the packers reject the
+    file wholesale, so the installer must fall through to q4_0 (everything it needs is
+    Q4_0 + Q8_0, both supported) rather than refuse the install."""
+    repo = tmp_path / "gemma-4-12B-it-GGUF"
+    repo.mkdir()
+    kv = [("general.architecture", (8, "gemma4"))]
+    # a Q4_1 file whose one row is Q5_0 type (10): the name claims Q4_1 but the
+    # tensors reject it (a single stray row is all it takes)
+    (repo / "gemma-4-12B-it-q4_1.gguf").write_bytes(
+        _gguf_bytes(kv, [("w", 3, [8, 8]), ("token_embd.weight", 10, [8, 8])]))
+    (repo / "gemma-4-12B-it-q4_0.gguf").write_bytes(
+        _gguf_bytes(kv, [("w", 2, [8, 8]), ("n", 0, [8])]))
+    chosen = []
+    monkeypatch.setattr(oflm_add, "read_gguf_inventory",
+                        oflm_add.read_gguf_inventory)
+    real_verify = oflm_add.verify_gguf_choice
+
+    def spy_verify(source, name, claimed_family):
+        note_ok, note = real_verify(source, name, claimed_family)
+        chosen.append((name, note_ok))
+        return note_ok, note
+
+    monkeypatch.setattr(oflm_add, "verify_gguf_choice", spy_verify)
+    monkeypatch.setattr(oflm_add, "tree_xclbins", lambda: tmp_path / "no_sets")
+    monkeypatch.setattr(oflm_add, "find_system_xclbin_root", lambda: tmp_path / "no_xclbins")
+    try:
+        oflm_add.main.__wrapped__ if hasattr(oflm_add.main, "__wrapped__") else None
+    except Exception:
+        pass
+    import sys as _sys
+    monkeypatch.setattr("sys.argv",
+                        ["oflm-add", str(repo), "--system-list", str(tmp_path / "list.json"),
+                         "--config", str(tmp_path / "user_list.json"),
+                         "--models-root", str(tmp_path / "models"),
+                         "--xclbin-dir", str(tmp_path / "xclbins"), "--quiet"])
+    (tmp_path / "list.json").write_text("{}")
+    try:
+        oflm_add.main()
+    except SystemExit as e:
+        pass
+    assert chosen, "verify_gguf_choice was never called"
+    assert chosen[0] == ("gemma-4-12B-it-q4_1.gguf", False)
+    assert chosen[1][0] == "gemma-4-12B-it-q4_0.gguf"
+    assert chosen[1][1] is True
+
+
 def test_quant_request_on_repo_without_matching_quant_lists_files(tmp_path, monkeypatch):
     """Asking for repo:QUANT when that quant is absent lists the available quants and files."""
     repo = tmp_path / "Some-GGUF"

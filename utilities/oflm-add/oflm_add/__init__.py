@@ -247,6 +247,46 @@ def choose_gguf_file(names, want=None, preference=None):
     return cands[0][3], refused
 
 
+def choose_gguf_candidates(names, want=None, preference=None):
+    """All compatible *.gguf candidates, best first, like choose_gguf_file.
+
+    Returns (candidates, refused) -- each candidate is (pref_index, q, suffix, name).
+    With an explicit `:QUANT` only the files matching it (exact, then family) are
+    candidates; without one everything compatible is, so the verifier can fall
+    through to the next quant when one repo's Q4_1 happens to hide a stray tensor
+    type the NPU packers reject (a single Q5_0/Q6_K embedding row)."""
+    pref = preference or GGUF_QUANT_PREFERENCE
+    refused = {}
+    cands = []
+    for n in names:
+        if not n.endswith(".gguf"):
+            continue
+        if re.search(r"-\d+-of-\d+\.gguf$", n):
+            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
+            continue
+        suffix = gguf_quant_suffix(n)
+        q = gguf_quant_family(suffix, pref)
+        if q not in pref:
+            refused[n] = ("quant " + (suffix or "unmarked") + " not supported by the open kernels (have "
+                          + "/".join(pref) + "); convert with q4nx-build")
+            continue
+        cands.append((pref.index(q), q, suffix, n))
+    cands.sort()
+    if not want:
+        return cands, refused
+    exact = [c for c in cands if c[2].upper() == want]
+    if exact:
+        return exact, refused
+    fam = gguf_quant_family(want, pref)
+    same = [c for c in cands if c[1] == fam]
+    if same:
+        return same, refused
+    have = ", ".join(sorted({c[2] for c in cands})) or "none"
+    for c in cands:
+        refused[c[3]] = f"the repo has no {want} GGUF (it has: {have})"
+    return [], refused
+
+
 def root_file_names(tree):
     """Root file names from an HF tree list or ModelScope's name-keyed dict."""
     names = tree.keys() if isinstance(tree, dict) else (e.get("path") for e in tree)
@@ -3908,11 +3948,20 @@ def main():
         except Exception:
             npue_gguf = False
     gguf_pref = NPUE_GGUF_PREFERENCE if npue_gguf else GGUF_QUANT_PREFERENCE
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names, gguf_want,
-                                               preference=gguf_pref)
-    if gguf_name is None and "model.gguf" in gguf_names and not gguf_want:
+    # Every compatible candidate in preference order, so when the best-named file
+    # turns out to hide a tensor type the NPU packers reject (a single Q5_0
+    # embedding row inside a Q4_1 elsewhere in the repo), the installer verifies
+    # the next one instead of refusing the whole install.
+    cands, gguf_refused = choose_gguf_candidates(gguf_names, gguf_want,
+                                                 preference=gguf_pref)
+    if not gguf_want and "model.gguf" in gguf_names:
         gguf_name = "model.gguf"
+        cands = [(0, "model.gguf", "", "model.gguf")] + [c for c in cands if c[3] != "model.gguf"]
         gguf_refused.pop("model.gguf", None)
+    elif cands:
+        gguf_name = cands[0][3]
+    else:
+        gguf_name = None
     if gguf_want and gguf_name is None:
         if not gguf_names:
             all_files = sorted(e.name for e in local_dir.iterdir() if e.is_file()) if local_dir else sorted(root_file_names(tree))
@@ -3944,25 +3993,38 @@ def main():
     gguf_mode = gguf_name is not None and not have_q4nx
     if gguf_mode:
         # The tensors must be what the name claims, in types the NPU packers
-        # ingest. Remote metadata is best-effort (Range); a local file is on
-        # disk, so a failed parse there refuses the file outright.
-        if local_dir:
-            gguf_source = str(local_dir / gguf_name)
-        elif cache and (cache / gguf_name).is_file():
-            # The user already has this GGUF on disk in their HF cache: verify
-            # the local file (no network round trip) and let the install copy
-            # it from there below.
-            gguf_source = str(cache / gguf_name)
-        elif modelscope:
-            domain = ms_file_tree(repo)[0]
-            gguf_source = f"https://{domain}/models/{repo}/resolve/master/{gguf_name}"
-        else:
-            gguf_source = f"https://huggingface.co/{repo}/resolve/main/{gguf_name}"
-        ok, note = verify_gguf_choice(gguf_source, gguf_name, gguf_quant_of(gguf_name))
-        if ok:
-            log(f"[INFO] {gguf_name}: {note}")
-        else:
-            raise SystemExit(f"{repo_arg}: refusing {gguf_name}: {note}")
+        # ingest. Try every compatible candidate: each repo's best-named file can
+        # still hide one stray tensor of a rejected type (a Q4_1 with a Q5_0
+        # embedding row). Remote metadata is best-effort (Range); a local file is
+        # on disk, so a failed parse there refuses the file outright.
+        def _source_for(name):
+            if local_dir:
+                return str(local_dir / name)
+            if cache and (cache / name).is_file():
+                return str(cache / name)
+            if modelscope:
+                domain = ms_file_tree(repo)[0]
+                return f"https://{domain}/models/{repo}/resolve/master/{name}"
+            return f"https://huggingface.co/{repo}/resolve/main/{name}"
+
+        gguf_source = None
+        for _, _q, _suffix, name in ([(0, "", "", gguf_name)] if gguf_name == "model.gguf"
+                                     else cands):
+            ok, note = verify_gguf_choice(_source_for(name), name,
+                                          gguf_quant_of(name, gguf_pref))
+            if ok:
+                if name != gguf_name:
+                    log(f"[INFO] {gguf_name}: refused ({note}); using {name} instead")
+                else:
+                    log(f"[INFO] {name}: {note}")
+                gguf_name, gguf_source = name, _source_for(name)
+                break
+            gguf_refused[name] = note
+            log(f"[INFO] {name}: refused ({note}); trying the next compatible quant")
+        if gguf_source is None:
+            raise SystemExit(
+                f"{repo_arg}: no compatible GGUF installs from that repository.\n"
+                + "\n".join(f"  {n}: {why}" for n, why in gguf_refused.items() if n.endswith(".gguf")))
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
