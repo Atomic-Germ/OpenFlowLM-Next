@@ -8,6 +8,7 @@
 namespace utils {
     std::string getenv_oflm(const char* oflm_name);
     std::string find_shipped_registry();
+    std::string find_shipped_registry_quiet();
     std::string find_user_settings();
     std::string get_models_directory();
 }
@@ -375,6 +376,47 @@ std::vector<std::string> migrate_legacy_user_registry(
 // ============================================================================
 // load_effective_config
 // ============================================================================
+
+// A read-only peek at the same merged overlay load_effective_config builds,
+// without the migration check's notices and writes. The splash must never
+// rewrite a user's settings.json to print itself.
+nlohmann::json load_merged_registry_quiet() {
+    nlohmann::json merged = nlohmann::json::object();
+    std::string shipped_path;
+    try {
+        shipped_path = utils::find_shipped_registry_quiet();
+    } catch (const std::exception&) {
+        return merged;
+    }
+    std::ifstream stream(shipped_path);
+    if (!stream.is_open()) return merged;
+    try {
+        merged = nlohmann::json::parse(stream);
+    } catch (const nlohmann::json::exception&) {
+        return nlohmann::json::object();
+    }
+    // User overlay: complete replacement per (family, size), as in
+    // load_effective_config. No defaults, no migration, no settings write.
+    try {
+        const std::string settings_path = utils::find_user_settings();
+        std::ifstream sstream(settings_path);
+        if (sstream.is_open()) {
+            const nlohmann::json settings = nlohmann::json::parse(sstream);
+            if (settings.contains("models")) {
+                for (const auto& [type, sizes] : settings["models"].items()) {
+                    for (const auto& [size, entry] : sizes.items()) {
+                        if (!merged.contains("models")) merged["models"] = nlohmann::json::object();
+                        if (!merged["models"].contains(type)) merged["models"][type] = nlohmann::json::object();
+                        merged["models"][type][size] = entry;
+                    }
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        // Unreadable settings: show the shipped registry rather than fail.
+    }
+    return merged;
+}
 
 EffectiveConfig load_effective_config() {
     EffectiveConfig cfg;

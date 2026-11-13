@@ -76,6 +76,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm list --quiet" << std::endl;
     std::cout << "\toflm list --filter installed" << std::endl;
     std::cout << std::endl;
+    std::cout << "Run 'oflm' with no command for the quick start, including the full family:size matrix this build serves." << std::endl;
 }
 
 
@@ -360,7 +361,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 return true;
             }
         } else {
-            std::cerr << "Error: Command is required" << std::endl;
+            std::cerr << "Error: a command is required (try \"oflm\" alone for the quick start)" << std::endl;
             return false;
         }
 

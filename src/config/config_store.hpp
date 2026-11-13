@@ -55,6 +55,12 @@ private:
 /// populates defaults_changed and affected_overrides, prints warning if changed.
 EffectiveConfig load_effective_config();
 
+/// \brief Read-only view of the merged registry (shipped model_list.json plus
+///        the user's settings.json `models` overlay), built without the
+///        migration check and without writing a byte. For UI that wants to
+///        describe what this build knows rather than run something.
+nlohmann::json load_merged_registry_quiet();
+
 /// Deep-merge overlay onto base. Objects merge recursively; arrays replace; nulls don't overwrite.
 nlohmann::json deep_merge(const nlohmann::json& base, const nlohmann::json& overlay);
 
