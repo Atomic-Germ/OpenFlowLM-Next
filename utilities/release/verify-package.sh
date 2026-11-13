@@ -147,6 +147,75 @@ has_kernels() {
     fi
 }
 
+# The devel companion (openflowlm-devel / openflowlm-dev, and the TGZ, which
+# carries every component). It is what makes the host able to build kernels,
+# so a devel package carrying only the .repo file -- or one whose payload was
+# silently reduced to nothing by an install() pattern -- has to fail here, not
+# in a user's first export run.
+check_devel() {
+    local label="$1" files="$2"
+    has_path "$label" "$files" "opt/openflowlm/share/oflm/devel/utilities/export-kernels.py" \
+                                                                     "the kernel export driver"
+    has_path "$label" "$files" "opt/openflowlm/share/oflm/devel/utilities/env.sh" \
+                                                                     "the toolchain environment"
+    has_path "$label" "$files" "opt/openflowlm/share/oflm/devel/ironvenv-requirements.txt" \
+                                                                     "the mlir-aie/Peano pins"
+    has_path "$label" "$files" "opt/openflowlm/share/oflm/devel/src/model_list.json" \
+                                                                     "env.sh's root marker"
+    has_dir  "$label" "$files" "opt/openflowlm/share/oflm/devel/open_kernels/recipes/specs" \
+                                                                     "the kernel specs"
+    has_path "$label" "$files" "opt/openflowlm/share/oflm/devel/npu_offload/gemm_rtp/export_gemm_rtp.py" \
+                                                                     "the BERT design-set driver"
+    has_dir  "$label" "$files" "opt/openflowlm/share/oflm/devel/npu_offload/m5-eltwise/kernels" \
+                                                                     "the BERT gemm kernels"
+    has_path "$label" "$files" "opt/openflowlm/share/oflm/devel/open_kernels/build_design.py" \
+                                                                     "a build_* SOURCE that the build-dir filter must not eat"
+    has_path "$label" "$files" "etc/yum.repos.d/_copr:copr.fedorainfracloud.org:abn:amd-npu.repo" \
+                                                                     "the abn/amd-npu COPR definition"
+    # An AIE core image or host object in the payload means the build-product
+    # filter in src/CMakeLists.txt stopped working; RPM's brp-strip aborts on
+    # those, so a package that has them is a package that does not build.
+    if grep -qE '\.(o|elf)$' <<<"$files"; then
+        fail "the devel payload carries build products: $(grep -E '\.(o|elf)$' <<<"$files" | head -3 | tr '\n' ' ')"
+    else
+        pass "the devel payload carries no .o/.elf build products"
+    fi
+}
+
+# The devel package pulls the toolchain from outside: the COPR on Fedora, the
+# XRT PPA packages on Ubuntu, and this exact runtime build. A devel package
+# that installs without them leaves a source tree nothing can compile against.
+check_devel_requires() {
+    local label="$1" kind="$2" pkg="$3" req want
+    case "$kind" in
+        rpm) req="$(rpm -qp --requires "$pkg" 2>/dev/null || true)" ;;
+        deb) req="$(dpkg-deb --field "$pkg" Depends 2>/dev/null || true)" ;;
+    esac
+    for want in "${DEVEL_REQUIRES[@]}"; do
+        if grep -qE "(^|[,[:space:]])${want}([[:space:],(=]|$)" <<<"$req"; then
+            pass "$label requires $want"
+        else
+            fail "$label does not require $want"
+        fi
+    done
+    if grep -qE '(^|[,[:space:]])openflowlm(-dev)?[[:space:]]*[=(]' <<<"$req"; then
+        pass "$label requires the matching runtime"
+    else
+        fail "$label does not require an exact openflowlm version; a devel payload" \
+             "from one build against another build's engine and xclbins"
+    fi
+}
+
+is_devel_pkg() {
+    case "$(basename "${1:?}")" in
+        openflowlm-devel-*|openflowlm-dev_*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+DEVEL_RPM_REQUIRES=(xrt-base xrt-npu xrt-plugin-amdxdna xrt-devel python3-xrt)
+DEVEL_DEB_REQUIRES=(libxrt-dev python3-xrt)
+
 no_backups() {
     if grep -q -- '\.bak' <<<"$2"; then
         fail "ships a .bak file: $(grep -- '\.bak' <<<"$2" | head -3 | tr '\n' ' ')" \
@@ -159,19 +228,30 @@ no_backups() {
 check_required
 
 # ------------------------------------------------------------------ the DEB
+# Every format now carries two packages (except the TGZ, which carries both
+# components in one archive). The runtime and the devel companion have disjoint
+# payloads, so the runtime's checks are wrong for the devel package and the
+# devel's are wrong for the runtime: route each file to the checks it satisfies.
 shopt -s nullglob
 for deb in "$DIR"/*.deb; do
-    echo "== $(basename "$deb")"
+    label="$(basename "$deb")"
+    echo "== $label"
     # `dpkg-deb -c` prints "path -> target" for a symlink, so cut the arrow
     # before taking the last field: ./usr/bin/oflm -> /opt/... would otherwise
     # look like a file at /opt/ and miss the PATH entry entirely.
     files="$(dpkg-deb --contents "$deb" | sed 's/ *-> .*$//' | awk '{print $NF}' | sed 's|^\./||')"
-    check_common "$(basename "$deb")" "$files"
-    if dpkg-deb --field "$deb" Depends | grep -q 'libxrt-npu2'; then
-        pass "Depends names the NPU runtime (libxrt-npu2)"
+    if is_devel_pkg "$deb"; then
+        check_devel "$label" "$files"
+        DEVEL_REQUIRES=("${DEVEL_DEB_REQUIRES[@]}")
+        check_devel_requires "$label" deb "$deb"
     else
-        fail "Depends does not name libxrt-npu2; this DEB installs on a machine" \
-             "with no NPU driver and then fails to open a device"
+        check_common "$label" "$files"
+        if dpkg-deb --field "$deb" Depends | grep -q 'libxrt-npu2'; then
+            pass "Depends names the NPU runtime (libxrt-npu2)"
+        else
+            fail "Depends does not name libxrt-npu2; this DEB installs on a machine" \
+                 "with no NPU driver and then fails to open a device"
+        fi
     fi
     if [ -n "$VERSION" ]; then
         got="$(dpkg-deb --field "$deb" Version)"
@@ -187,19 +267,35 @@ done
 
 # ------------------------------------------------------------------ the RPM
 for rpm in "$DIR"/*.rpm; do
-    echo "== $(basename "$rpm")"
+    label="$(basename "$rpm")"
+    echo "== $label"
     # rpm prints absolute paths ("/opt/..."), dpkg-deb and tar print relative
     # ones, and the needles below are relative and matched as whole lines. Left
     # unnormalised, every check in check_common fails on the RPM alone -- which
     # reads like a broken package rather than a prefix in a filename.
     files="$(rpm -qlp "$rpm" | sed 's|^/||')"
-    check_common "$(basename "$rpm")" "$files"
-    if rpm -qp --requires "$rpm" 2>/dev/null | grep -q 'libxrt_coreutil'; then
-        pass "Requires the NPU runtime (libxrt_coreutil, via AUTOREQ)"
+    if is_devel_pkg "$rpm"; then
+        check_devel "$label" "$files"
+        DEVEL_REQUIRES=("${DEVEL_RPM_REQUIRES[@]}")
+        check_devel_requires "$label" rpm "$rpm"
     else
-        fail "does NOT require libxrt_coreutil. CPACK_RPM_PACKAGE_AUTOREQ is off," \
-             "or the engine stopped linking XRT, and this RPM installs on a" \
-             "machine with no driver."
+        check_common "$label" "$files"
+        req="$(rpm -qp --requires "$rpm" 2>/dev/null || true)"
+        if grep -q 'libxrt_coreutil' <<<"$req"; then
+            pass "Requires the NPU runtime (libxrt_coreutil, via AUTOREQ)"
+        else
+            fail "does NOT require libxrt_coreutil. CPACK_RPM_PACKAGE_AUTOREQ is off," \
+                 "or the engine stopped linking XRT, and this RPM installs on a" \
+                 "machine with no driver."
+        fi
+        # The engine dlopen()s the XDNA plugin, so no NEEDED entry pulls it in
+        # and AUTOREQ cannot derive it: it has to be named explicitly.
+        if grep -q 'xrt-plugin-amdxdna' <<<"$req"; then
+            pass "Requires the XDNA plugin (xrt-plugin-amdxdna)"
+        else
+            fail "does NOT require xrt-plugin-amdxdna; oflm installs on a host" \
+                 "whose XRT has no NPU plugin and cannot open a device"
+        fi
     fi
     if [ -n "$VERSION" ]; then
         got="$(rpm -qp --qf '%{VERSION}' "$rpm")"
@@ -214,11 +310,15 @@ done
 # ------------------------------------------------------------------ the TGZ
 for tgz in "$DIR"/*.tar.gz; do
     case "$tgz" in *-nix.tar.gz) continue ;; esac   # the flake, not the payload
-    echo "== $(basename "$tgz")"
+    label="$(basename "$tgz")"
+    echo "== $label"
     # Strip CPack's top-level directory (openflowlm-<version>-Linux) so these
     # paths are comparable with the other two formats'.
     files="$(tar tzf "$tgz" | sed 's|^[^/]*/||')"
-    check_common "$(basename "$tgz")" "$files"
+    check_common "$label" "$files"
+    # With component install off for TGZ, CPack packs runtime and devel into
+    # this one archive, so both payloads must be present.
+    check_devel "$label" "$files"
 done
 
 echo

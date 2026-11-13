@@ -174,6 +174,12 @@ utilities/release/verify-prebuilts.py
 `OFLM_BUILD_KERNELS=OFF` build of `main` is correct, not a bug: the kernels
 live on the release branch, and a checkout of `main` has none. Check out the tag.
 
+A cpack run now emits **two** RPMs (`openflowlm`, `openflowlm-devel`) and two
+DEBs (`openflowlm`, `openflowlm-dev`); the script routes each to the runtime or
+devel payload checks, and checks the TGZ (which contains both components).
+Publishing is unaffected: the workflow uploads `build/packages/*` and generates
+one install line per file.
+
 ## Fixing a bad release
 
 Fix forward, never re-tag. The RPM and DEB keep the filename and version of a

@@ -15,21 +15,37 @@
 | Platform | Package | Install |
 | --- | --- | --- |
 | Fedora / RHEL | `openflowlm-<version>-1.x86_64.rpm` | `sudo dnf install ./openflowlm-<version>-1.x86_64.rpm` |
+| Fedora / RHEL (kernel builds) | `openflowlm-devel-<version>-1.x86_64.rpm` | `sudo dnf install ./openflowlm-devel-<version>-1.x86_64.rpm` |
 | Debian / Ubuntu | `openflowlm_<version>_amd64.deb` | `sudo apt install ./openflowlm_<version>_amd64.deb` |
+| Debian / Ubuntu (kernel builds) | `openflowlm-dev_<version>_amd64.deb` | `sudo apt install ./openflowlm-dev_<version>_amd64.deb` |
 | Any Linux | `openflowlm-<version>-Linux.tar.gz` | `tar xf … && sudo cp -r openflowlm-<version>-Linux/opt/openflowlm /opt/` |
 | Windows | `oflm-setup.msi` | `msiexec /i oflm-setup.msi` |
 | Nix | `openflowlm-<version>-nix.tar.gz` | `nix build "https://github.com/Atomic-Germ/OpenFlowLM-Next/releases/download/v<version>/openflowlm-<version>-nix.tar.gz#openflowlm"` |
+
+The `-devel`/`-dev` packages are optional: they carry the kernel-build
+toolchain (`env.sh`, `export-kernels.py`, the `open_kernels` and `npu_offload`
+sources) for compiling xclbin sets on the install host. They pin the matching
+runtime version, so install the runtime first or in the same transaction. The
+TGZ contains both payloads.
 
 The RPM is built on Ubuntu 24.04, so it needs **glibc 2.39 or newer** (Fedora
 41+, RHEL 10+). Older distributions: use the TGZ, which is the same tree with
 no dependency resolution.
 
-XRT (the AMD NPU runtime, `libxrt-npu2` on Debian/Ubuntu, `xrt-base` on Fedora)
-and the Ryzen AI NPU driver are **not** bundled. The packages declare the
-dependency; the driver does not have a package on every distribution, so
+XRT (the AMD NPU runtime, `libxrt-npu2` on Debian/Ubuntu, `xrt-base`/`xrt-npu`
+on Fedora) and the Ryzen AI NPU driver are **not** bundled. The packages declare
+the dependency; the driver does not have a package on every distribution, so
 install it first:
 
 <https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers>
+
+On Fedora, XRT comes from the `abn/amd-npu` COPR. Enable it **before**
+installing `openflowlm-devel`, because a package cannot enable a repository in
+the transaction that installs from it:
+
+```bash
+sudo dnf copr enable abn/amd-npu
+```
 
 Verify with:
 

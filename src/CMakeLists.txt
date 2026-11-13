@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 project(oflm LANGUAGES CXX VERSION 0.1.0)
 
+# Packaging installs in two CPack components (see "Packaging (CPack)" below):
+# `runtime` is the shipped engine and everything it needs, `devel` is the
+# kernel-build toolchain that only `openflowlm-devel` / `openflowlm-dev`
+# carries. Every install() below belongs to the runtime unless it says
+# otherwise, so name the default instead of tagging ~20 call sites.
+set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "runtime")
+
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildAcceleration.cmake")
 
 if(POLICY CMP0207)
@@ -1770,6 +1777,125 @@ esac
     ")
 endif()
 
+# ————————————————————————————————————————————————————————————
+# Development toolchain (the `devel` component -> openflowlm-devel / -dev).
+#
+# The runtime package ships what an INSTALLED oflm needs. It does not ship what
+# is needed to BUILD an xclbin set, which is what a user who wants to compile
+# kernels for their own geometry (or rebuild the shipped ones) needs. This
+# component carries it: a mirrored slice of the source tree, rooted at
+# <prefix>/share/oflm/devel, so both tools' own path discovery works with no
+# patching --
+#   * utilities/env.sh walks up from itself to a directory holding
+#     src/model_list.json (that file is part of the payload, for that reason), and
+#   * utilities/export-kernels.py takes its parent's parent as the repo root,
+#     i.e. <prefix>/share/oflm/devel, and looks for open_kernels/,
+#     npu_offload/gemm_rtp/ and ironvenv-requirements.txt below it.
+#
+# It is a mirror, not an install: the export writes build products beside the
+# sources and src/xclbins/, and the prefix is not writable for a normal user.
+# src/packaging/devel-README.md (installed as README.md in the tree) says so.
+#
+# The COPR definition travels with this package: `abn/amd-npu` is where
+# xrt-base/xrt-npu/xrt-plugin-amdxdna/xrt-devel/python3-xrt come from on
+# Fedora, and openflowlm-devel Requires all five. It uses the file name
+# `dnf copr enable abn/amd-npu` writes, so a host that already enabled the
+# COPR ends up with one definition and not two.
+# ————————————————————————————————————————————————————————————
+if(NOT WIN32)
+    set(OFLM_DEVEL_DESTINATION "${OFLM_SHARE_DESTINATION}/devel")
+    set(_oflm_repo "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+    install(FILES "${_oflm_repo}/ironvenv-requirements.txt"
+            DESTINATION "${OFLM_DEVEL_DESTINATION}"
+            COMPONENT devel)
+    install(PROGRAMS
+            "${_oflm_repo}/utilities/export-kernels.py"
+            "${_oflm_repo}/utilities/env.sh"
+            "${_oflm_repo}/utilities/env.fish"
+            DESTINATION "${OFLM_DEVEL_DESTINATION}/utilities"
+            COMPONENT devel)
+    # env.sh needs a root marker to recognise the tree it was installed into.
+    install(FILES model_list.json
+            DESTINATION "${OFLM_DEVEL_DESTINATION}/src"
+            COMPONENT devel)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/devel-README.md"
+            DESTINATION "${OFLM_DEVEL_DESTINATION}"
+            RENAME README.md
+            COMPONENT devel)
+
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/copr-abn-amd-npu.repo"
+            DESTINATION "/etc/yum.repos.d"
+            RENAME "_copr:copr.fedorainfracloud.org:abn:amd-npu.repo"
+            COMPONENT devel)
+
+    # open_kernels keeps build products BESIDE its sources
+    # (designs/<design>/build*/ holding AIE core .o/.elf images, __pycache__,
+    # .staging_*, the odd *.xclbin). None of it is an input, and an AIE .elf or
+    # .o in the package makes RPM's brp-strip abort, so copy the inputs only.
+    #
+    # A path is skipped when one of its DIRECTORY components starts with
+    # "build" (this is the exporter's own rule for a build directory, see
+    # export_qwen36_kernels.py), or when it is a cache/staging directory or a
+    # build artifact. Testing only directory components is what keeps the
+    # source files build_design.py and build_mlir.sh, which are inputs, in.
+    install(CODE "
+        set(_oflm_src \"${_oflm_repo}/open_kernels\")
+        set(_oflm_dst \"${CMAKE_INSTALL_PREFIX}/${OFLM_DEVEL_DESTINATION}/open_kernels\")
+        file(GLOB_RECURSE _oflm_files LIST_DIRECTORIES false
+             RELATIVE \"\${_oflm_src}\" \"\${_oflm_src}/*\")
+        set(_oflm_copied 0)
+        foreach(_oflm_f IN LISTS _oflm_files)
+            if(_oflm_f MATCHES \"\\\\.(pyc|xclbin|o|elf|prj)$\")
+                continue()
+            endif()
+            get_filename_component(_oflm_dir \"\${_oflm_f}\" DIRECTORY)
+            set(_oflm_skip FALSE)
+            if(_oflm_dir)
+                string(REPLACE \"/\" \";\" _oflm_parts \"\${_oflm_dir}\")
+                foreach(_oflm_p IN LISTS _oflm_parts)
+                    if(_oflm_p MATCHES \"^build\" OR
+                       _oflm_p STREQUAL \"__pycache__\" OR
+                       _oflm_p MATCHES \"^\\\\.staging\" OR
+                       _oflm_p STREQUAL \".locks\")
+                        set(_oflm_skip TRUE)
+                    endif()
+                endforeach()
+            endif()
+            if(_oflm_skip)
+                continue()
+            endif()
+            # file(COPY) creates the destination directory and keeps the source
+            # permissions (the export scripts are executable), and unlike
+            # file(INSTALL) it does not prepend \$ENV{DESTDIR} -- which is why
+            # it is in the destination here and not in the other install(CODE)
+            # blocks in this file.
+            file(COPY \"\${_oflm_src}/\${_oflm_f}\"
+                 DESTINATION \"\$ENV{DESTDIR}\${_oflm_dst}/\${_oflm_dir}\")
+            math(EXPR _oflm_copied \"\${_oflm_copied} + 1\")
+        endforeach()
+        if(_oflm_copied EQUAL 0)
+            message(FATAL_ERROR
+                \"devel payload: no kernel sources found under \${_oflm_src}\")
+        endif()
+    " COMPONENT devel)
+
+    # The BERT (embedding) design sets are built by the same export run, from
+    # npu_offload/gemm_rtp, which compiles kernels out of npu_offload/m5-eltwise.
+    # npu_offload/matmul and npu_offload/section3 are separate experiments the
+    # export never reads; they stay out.
+    install(DIRECTORY "${_oflm_repo}/npu_offload/gemm_rtp/"
+            DESTINATION "${OFLM_DEVEL_DESTINATION}/npu_offload/gemm_rtp"
+            COMPONENT devel
+            PATTERN "build" EXCLUDE PATTERN "__pycache__" EXCLUDE
+            PATTERN "*.pyc" EXCLUDE)
+    install(DIRECTORY "${_oflm_repo}/npu_offload/m5-eltwise/"
+            DESTINATION "${OFLM_DEVEL_DESTINATION}/npu_offload/m5-eltwise"
+            COMPONENT devel
+            PATTERN "build" EXCLUDE PATTERN "__pycache__" EXCLUDE
+            PATTERN "*.pyc" EXCLUDE)
+endif()
+
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.
 #   cmake --build --preset linux-package-rpm   # or -deb / -tgz
@@ -1792,6 +1918,29 @@ set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 set(CPACK_PACKAGE_RELOCATABLE OFF)
 # Keep generated packages out of the build root.
 set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
+
+# ————————————————————————————————————————————————————————————
+# Two packages per format, from one cpack run.
+#
+# `runtime` -> openflowlm  (RPM) / openflowlm  (DEB)  -- engine, xclbins, tools
+# `devel`   -> openflowlm-devel / openflowlm-dev       -- build toolchain + COPR
+#
+# The split is CPack components, not a second cpack invocation: every
+# install() above defaults to `runtime` (CMAKE_INSTALL_DEFAULT_COMPONENT_NAME)
+# and the devel block tags its own. Component install is enabled per generator
+# only for RPM and DEB; with CPACK_<GEN>_COMPONENT_INSTALL off (TGZ) CPack
+# packs all components into the one archive, which is what the tarball wants.
+#
+# CPACK_RPM_MAIN_COMPONENT names the component whose package keeps the plain
+# `openflowlm` name; every other component would otherwise be suffixed with
+# its component name.
+# ————————————————————————————————————————————————————————————
+set(CPACK_COMPONENTS_ALL "runtime;devel")
+set(CPACK_COMPONENT_RUNTIME_DISPLAY_NAME "OpenFlowLM")
+set(CPACK_COMPONENT_RUNTIME_DESCRIPTION "OpenFlowLM engine, NPU kernel sets, model registry and bundled utilities.")
+set(CPACK_COMPONENT_DEVEL_DISPLAY_NAME "OpenFlowLM development toolchain")
+set(CPACK_COMPONENT_DEVEL_DESCRIPTION
+    "Everything needed to build NPU kernel sets on the install host: env.sh, export-kernels.py, the ironvenv requirements and the open_kernels/npu_offload sources, plus the abn/amd-npu COPR definition that carries XRT on Fedora.")
 
 # Distro metadata. XRT is an external runtime dependency (see the install
 # backend above): RPM's automatic Requires: derives it from the engine .so
@@ -1825,6 +1974,22 @@ else()
 endif()
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 
+# Debian side of the component split (see "Two packages per format" above).
+# CPackDeb appends "-<component>" to the runtime package's name unless the
+# component names itself, so `runtime` names itself back to `openflowlm`.
+# CPACK_DEBIAN_ENABLE_COMPONENT_DEPENDS turns CPACK_COMPONENT_DEVEL_DEPENDS
+# into `Depends: openflowlm (= <this build's version>)`, which is the DEB
+# equivalent of the RPM's versioned Requires below.
+set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME "openflowlm")
+set(CPACK_DEBIAN_DEVEL_PACKAGE_NAME "openflowlm-dev")
+set(CPACK_DEBIAN_DEVEL_PACKAGE_SECTION "devel")
+# XRT development headers and pyxrt come from the distribution's XRT packages
+# (the XRT PPA on Ubuntu); there is no COPR on this side.
+set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS "libxrt-dev, python3-xrt")
+set(CPACK_DEBIAN_ENABLE_COMPONENT_DEPENDS ON)
+set(CPACK_COMPONENT_DEVEL_DEPENDS runtime)
+
 set(CPACK_RPM_PACKAGE_NAME "openflowlm")
 set(CPACK_RPM_PACKAGE_LICENSE "MIT")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Science")
@@ -1834,8 +1999,26 @@ set(CPACK_RPM_PACKAGE_AUTOREQ ON)
 set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 # /etc/profile.d and /usr/bin belong to the base filesystem packages; do not
-# make openflowlm claim ownership of them.
-set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
+# make openflowlm claim ownership of them. /etc/yum.repos.d is fedora-repos'.
+set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin" "/etc/yum.repos.d")
+
+# RPM side of the component split (see "Two packages per format" above).
+# CPACK_RPM_MAIN_COMPONENT keeps `openflowlm` unsuffixed; without it CPackRPM
+# would name the runtime package openflowlm-runtime.
+#
+# The devel package Requires the exact runtime build it was cut with, plus the
+# five packages the abn/amd-npu COPR provides. A package cannot enable a
+# repository in the transaction that installs from it, so the COPR has to be
+# enabled first (the .repo file this package installs keeps it enabled after
+# that, and is the same file `dnf copr enable abn/amd-npu` writes). %{version}
+# and %{release} are expanded by rpmbuild into this package's own NEVR.
+set(CPACK_RPM_COMPONENT_INSTALL ON)
+set(CPACK_RPM_MAIN_COMPONENT "runtime")
+set(CPACK_RPM_DEVEL_PACKAGE_NAME "openflowlm-devel")
+set(CPACK_RPM_DEVEL_PACKAGE_SUMMARY
+    "OpenFlowLM development toolchain (NPU kernel build sources and the abn/amd-npu COPR)")
+set(CPACK_RPM_DEVEL_PACKAGE_REQUIRES
+    "openflowlm = %{version}-%{release}, xrt-base, xrt-npu, xrt-plugin-amdxdna, xrt-devel, python3-xrt")
 
 # Generate settings registry from source code scan + settings.json
 #
