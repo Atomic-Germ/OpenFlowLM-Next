@@ -9,6 +9,10 @@ has_children: true
 
 - 📑 **Detailed model cards are available** -- explore the model families below
 - 🚀 **More models are on the way!**
+- 🔧 **A fine-tune is not a new model.** The kernels follow the model's
+  *geometry*; a fine-tune of a base architecture runs on the base's kernel
+  set. Read the [geometry vs. fine-tuning note](#geometry-is-the-unit-not-the-finetune)
+  below — it shows a 40B model running happily on a 27B set.
 - ⚠️ **Not every model runs on open kernels.** Read the
   [support-status matrix](#open-vs-closed-support-status) before you assume a
   model is covered by this repository's AIE designs.
@@ -55,15 +59,43 @@ one of them is built from source here.
 | Phi-4-mini | `phi4-mini-it:4b` | ✅ **open** | — | |
 | LFM2 / LFM2.5 | `lfm2:*`, `lfm2-trans:2.6b`, `lfm2.5-it:1.2b`, `lfm2.5-tk:1.2b` | ✅ **open** | — | Includes the WideDeltaNet recurrent-state chain. |
 | Nanbeige 4.1 | `nanbeige4.1:3b` | ✅ **open** | — | |
-| **Gemma 4** | `gemma4-it:e2b`, `gemma4-it:e4b`, `gemma4-it:12b` | ❌ **closed** | ❌ closed | **No open design exists.** These dispatch entirely to the closed `gemma4e_npu` / `gemma4_12b_npu` engines. |
+| **Gemma 4** | `gemma4-it:12b` | ✅ **open** | — | The 12B runs on the open kernels (two dense geometries: sliding-window layers + global layers with proportional RoPE). |
+| **Gemma 4** | `gemma4-it:e2b`, `gemma4-it:e4b` | ❌ **closed** | ❌ closed | Per-layer embeddings and KV sharing across layers have no open recipe yet; they dispatch to the closed `gemma4e_npu` engine. |
 | **GPT-OSS** | `gpt-oss:20b`, `gpt-oss-sg:20b` | ❌ **closed** | — | No open design: the MoE experts need a clamped SwiGLU plus bias-carrying projections that no current design has room for. |
-| **Whisper** | `whisper-v3:turbo` | ❌ **closed** | ❌ closed | The published container ships only `model.q4nx`, so the open Whisper path is never selected for it. |
+| **Whisper** | `whisper-v3:turbo` | ⚙️ closed | ❌ closed | The published container ships only `model.q4nx`, so the open Whisper path is never selected for it. The open kernels exist in-tree and serve whisper GGUFs. |
+| **FLUX.2 klein** | `flux2-klein:4b`, any `FLUX.2-klein-*` GGUF | ✅ **open** | — | Black Forest Labs' flow-matching diffusion transformer runs on the open kernels end to end; `oflm add` installs it directly from a GGUF repo. |
 | DeepSeek-R1 (distills) | `deepseek-r1:8b`, `deepseek-r1-0528:8b` | ✅ open *(via the base recipe)* | — | These are **distills of Qwen3-8B and Llama-3.1-8B**, so they reuse the `qwen3` and `llama3` recipes respectively rather than having one of their own. |
 | EmbeddingGemma | `embed-gemma:300m` | ⚙️ CPU by default | — | Ships unquantized; NPU matmul is opt-in, not the default. |
 | BERT-family encoders | `bge-*`, `all-minilm:l6-v2`, `nomic-embed-text:v1.5`, `gte-multilingual:base` | ✅ **open** | — | See below. |
 
 **Legend:** ✅ open = built from source in this repo · ❌ closed = upstream
 pre-compiled engine · ⚙️ = neither by default
+
+### Geometry is the unit, not the fine-tune
+
+The open kernels are compiled for a **geometry** (hidden width, layer count,
+head geometry, vocab, FFN width, the layer types) — not for "model X". So a
+repo that is a fine-tune of an architecture with open kernels runs on those
+kernels, with no new build, no new container, nothing but the install. And it
+does not matter whether the fine-tune's maker had AMD's attention:
+
+```shell
+oflm add mradermacher/Qwen3.8-40B-Ultimate-Heretic-Uncensored-Build2-i1-GGUF
+# [INFO] Qwen3.8-40B-...-Q4_1.gguf: 1290 tensors (qwen35), quant ['Q4_1', 'Q6_K']
+# [INFO] family 'qwen3.5' from the GGUF architecture
+# [INFO] xclbins from qwen3.8:27b (no exact size match for 40B; using 27B kernels)
+```
+
+That installs and *runs* (`oflm run qwen3.8-ultimate:40b` answers
+sensibly; it is not fast, but it is correct), because the geometry it exposes
+is the geometry of the Qwen3.8 family and the 27B set serves it. The 40B model
+has 96 layers — not the 27B's — but the **depth is the manifest's business,
+not the kernels'**: the layers each run the same kernel, and the number of
+times the loop is unrolled is a function of the model's own layer count.
+
+A fine-tune of a covered family is therefore additive: **if a recipe exists for
+the base's geometry, your fine-tune gets it for free**. A fine-tune of an
+uncovered base does not get a recipe; it gets an honest refusal by name.
 
 ### Why some families are closed
 
@@ -123,6 +155,27 @@ the tag. A fine-tune links its base model's kernels. If the size has never been
 built and you are running from a source checkout, the same command builds the
 kernel set from the spec; an installed package reports the size as one the
 release should ship.
+
+**Fine-tunes work out of the box.** There is no separate "fine-tuned model"
+path: the open kernels are compiled for a geometry, not for a model. A
+fine-tune of any covered family runs on the base set — even at a different
+depth (like the 40B linked against the 27B set; see
+[above](#geometry-is-the-unit-not-the-finetune)). The registry entry
+is per model only for the tag, not for the kernels.
+
+**Quant selection is automatic, and forgiving.** The installer starts from the
+most NPU-friendly candidate the repo carries (`Q4_1` first), verifies the
+tensor types against the packers, and *falls through to the next-best file* if
+one repo's file hides a tensor type the packers can't ingest (a `.gguf` whose
+header claims `Q4_1` but holds e.g. a `Q5_0` embedding row is refused; the
+installer tries the `q4_0`/`q4_k_s`/`q6_k`/`q8_0` file instead). If every
+compatible file fails, the error names every refusal and tells you how to fix
+it. You asked for `:Q5_0`? That means it is refused, because the open packers
+do not ingest it — but asking for nothing picks the best thing available.
+
+Supported quants (for the chat kernels): `Q4_1`, `Q4_0`, `Q6_K`, `Q8_0`,
+`Q5_K`, `Q4_K`, `IQ4`. Embedding encoders accept a wider set (F16/BF16/F32
+included). Conversions of other quants are done on the way in.
 
 The shipped `model_list.json` is a suggestion list for `oflm list` and
 `oflm pull`, not a gate — the geometry decides.
