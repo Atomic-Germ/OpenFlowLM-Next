@@ -158,6 +158,25 @@ today.
 
 ---
 
+## Recommended models
+
+> **Interim.** This table lives in the README until the project decides on a
+> permanent home for the recommended list (the
+> [support-status matrix](docs/docs/models/index.md), the
+> [benchmark pages](docs/docs/benchmarks/index.md), or the model registry).
+> Tracked in #240.
+
+A model is listed here once it meets the production bar in `AGENTS.md`: block
+prefill, near-optimal decode and prefill, tested at its real context length,
+running through `oflm add` and `oflm serve`, a speculative decoder, and
+`oflm bench` results on its benchmark page.
+
+| Model | `oflm` tag | Quant | Speculative decoding | Benchmarks |
+|---|---|---|---|---|
+| *None yet. The candidates are tracked in #240.* | | | | |
+
+---
+
 ## License
 
 - Orchestration code and CLI tools are open source under the
