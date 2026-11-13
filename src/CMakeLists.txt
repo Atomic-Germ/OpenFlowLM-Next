@@ -718,25 +718,25 @@ if(MSVC)
 endif()
 
 # Link your custom libraries (these may still be DLLs if no static versions available)
+# Fully-open families no longer ship their closed engines at all: llama_npu,
+# qwen2_npu, qwen3_npu, lfm2_npu, phi4_npu, nanbeige_npu and gemma_text_npu were
+# removed with their prebuilt binaries in the v0.1.0 open-default sweep. What is
+# linked here is closed-ADM; every remaining engine library is either an escape
+# hatch for an unserved operation (gemma_npu/gemma4_12b_npu for images, the VL
+# DSOs for the same, whisper_npu) or has no open design yet (gemma4e_npu,
+# gpt_oss_npu).
 target_link_libraries(oflm PUBLIC
     q4_npu_eXpress
-    llama_npu
-    qwen2_npu
     qwen2vl_npu
-    qwen3_npu
     qwen3vl_npu
     qwen3_5vl_npu
     qwen3_5_omni_npu
     qwen3_6_moe_npu
     gemma_npu
-    gemma_text_npu
     gemma4e_npu
     gemma4_12b_npu
     gpt_oss_npu
     whisper_npu
-    lfm2_npu
-    phi4_npu
-    nanbeige_npu
     dequant
     gemm
     lm_head
@@ -1385,6 +1385,35 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
     install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}"
         PATTERN "*/open_kernels/build" EXCLUDE
         PATTERN "*/open_kernels/build/*" EXCLUDE)
+    # The derivative tags share their family bundle -- the kernels are geometry,
+    # not weights, and each derivative's closed bundle was byte-identical to it.
+    # Those closed bundles are removed, so resolve the derivative's own
+    # <root>/xclbins/<name> to the family set with a symlink created at install
+    # time (one copy of the kernels ships, not two). Kernel discovery wants
+    # exactly <root>/xclbins/<name>/open_kernels.
+    foreach(_pair IN ITEMS
+        "Qwen3-4B-Instruct-2507-NPU2=Qwen3-4B-NPU2"   # qwen3-it:4b
+        "Qwen3-4B-Thinking-2507-NPU2=Qwen3-4B-NPU2"   # qwen3-tk:4b
+        "Deepseek-R1-Distill-Llama-8B-NPU2=Llama-3.1-8B-NPU2"  # deepseek-r1:8b
+        "DeepSeek-R1-0528-Qwen3-8B-NPU2=Qwen3-8B-NPU2"         # deepseek-r1-0528:8b
+        "LFM2-2.6B-Transcript-NPU2=LFM2-2.6B-NPU2"             # lfm2-trans:2.6b
+        "LFM2.5-1.2B-NPU2=LFM2-1.2B-NPU2"             # lfm2.5-it:1.2b
+        "LFM2.5-1.2B-Thinking-NPU2=LFM2-1.2B-NPU2"    # lfm2.5-tk:1.2b
+        )
+        string(REPLACE "=" ";" _pair_list "${_pair}")
+        list(GET _pair_list 0 _dst)
+        list(GET _pair_list 1 _src)
+        # $DESTDIR-aware like every other install(CODE) here: CPack stages into a
+        # staging root, not the configured prefix, and escaping the real prefix
+        # into the staging area is what DESTDIR is for.
+        install(CODE "execute_process(
+            COMMAND \"${CMAKE_COMMAND}\" -E create_symlink \"${_src}\"
+                    \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${OFLM_SHARE_DESTINATION}/xclbins/${_dst}\"
+            RESULT_VARIABLE _oflm_symlink_rc)
+            if(NOT _oflm_symlink_rc EQUAL 0)
+                message(FATAL_ERROR \"could not link the kernel set ${_dst} for ${_src} into the package tree\")
+            endif()")
+    endforeach()
 endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3

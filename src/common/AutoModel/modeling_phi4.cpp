@@ -23,13 +23,11 @@ void Phi4::load_model(std::string model_path, json model_info, int default_conte
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // model_type == phi4
-        this->lm_engine = std::make_unique<phi4_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Phi-4 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_PHI4_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_PHI4_ENGINE=closed requested, but this build ships no closed Phi-4 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     
     this->lm_engine->clear_context();

@@ -26,13 +26,11 @@ void LFM2::load_model(std::string model_path, json model_info, int default_conte
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        this->lm_engine = std::make_unique<lfm2_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-
-        this->lm_engine->load_weights(*this->q4nx);
-
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed LFM2 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_LFM2_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_LFM2_ENGINE=closed requested, but this build ships no closed LFM2 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -318,10 +316,11 @@ void LFM2_5_TK::load_model(std::string model_path, json model_info, int default_
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        this->lm_engine = std::make_unique<lfm2_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        this->q4nx.reset();
+        // The closed LFM2 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_LFM2_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_LFM2_ENGINE=closed requested, but this build ships no closed LFM2 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -380,19 +379,9 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
 
     this->profiler_list[TKOEN_ENCODE_TIME].stop(tokens.size());
 
-    // hardware
-    int restore_idx = -1;
-    lfm2_npu *lfm2_engine = dynamic_cast<lfm2_npu*>(this->lm_engine.get());
-    // The closed engine keeps its own prefix cache (checkpoint / restore). The OPEN engine
-    // has no such handle -- this cast is null for it -- and _shared_insert drives its cache
-    // itself, so the closed pair is only touched when the closed engine is what is running.
-    // Dereferencing it anyway is what made a GGUF install of this family run its layers and
-    // then never answer: the cast returned null and checkpoint() was called on it.
-    if (lfm2_engine && meta_info.restore_allowed) {
-        restore_idx = lfm2_engine->restore();
-        this->total_tokens = restore_idx;
-        this->token_history = checkpoint_his; // restore the token history to be consistent with the restored KV cache, which is crucial for correct functioning of _shared_insert's prefix-matching logic
-    }
+    // No prefix-cache restore here. The closed LFM2 engine was the only one with a
+    // checkpoint/restore handle and it has been removed from this build; the open
+    // engine drives its own cache through _shared_insert below.
 
     // Remove the starting reasoning placeholder appended by the chat template: "<think>\n" -> token ids 151667 708.
     size_t n = tokens.size();
@@ -401,7 +390,6 @@ bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
     bool success = this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
 
     checkpoint_his = token_history;
-    int checkpoint_idx = lfm2_engine ? lfm2_engine->checkpoint() : -1;
 
     return success;
 }

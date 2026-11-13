@@ -50,20 +50,13 @@ Source: "oflm.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Required DLL
 
 Source: "libcurl.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "llama_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gemma_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "gemma_text_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gpt_oss_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "lfm2_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "phi4_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "qwen2_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "qwen2vl_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "qwen3_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "qwen3vl_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "qwen3_5vl_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "qwen3_5_omni_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "qwen3_6_moe_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "nanbeige_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gemma4e_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gemma4e_12b_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "lm_head.dll"; DestDir: "{app}"; Flags: ignoreversion

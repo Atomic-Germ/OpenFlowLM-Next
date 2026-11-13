@@ -22,12 +22,11 @@ void Llama3::load_model(std::string model_path, json model_info, int default_con
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // model_type == llama
-        this->lm_engine = std::make_unique<llama_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Llama 3 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_LLAMA_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_LLAMA_ENGINE=closed requested, but this build ships no closed Llama 3 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
 
     this->lm_engine->clear_context();
@@ -113,12 +112,11 @@ void DeepSeek_r1_8b::load_model(std::string model_path, json model_info, int def
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // model_type == llama
-        this->lm_engine = std::make_unique<llama_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Llama 3 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_LLAMA_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_LLAMA_ENGINE=closed requested, but this build ships no closed Llama 3 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);

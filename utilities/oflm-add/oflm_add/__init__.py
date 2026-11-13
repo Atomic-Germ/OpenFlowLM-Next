@@ -614,7 +614,7 @@ FAMILY_ALIASES = [
     # 2560). It aliased onto llama3 because nothing served it; leaving that
     # would route a Granite directory to the Llama 3 AutoModel, whose sampler
     # defaults and chat-template probe are the wrong ones -- and the closed
-    # llama_npu refuses hidden_size 2560 outright.
+    # The (since-removed) closed llama_npu refused hidden_size 2560 outright.
     ("granite", "granite"),
     ("hunyuan", "hunyuan"),
     ("crow", "qwen3.5"),

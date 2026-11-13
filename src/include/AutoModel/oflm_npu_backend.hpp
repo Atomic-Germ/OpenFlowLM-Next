@@ -17,7 +17,7 @@
 namespace oflm::backend {
 
 /// \brief the default backend for an OpenFlowLM NPU engine
-/// \tparam Engine the concrete engine type, e.g. phi4_npu
+/// \tparam Engine the concrete engine type, e.g. qwen3vl_npu
 /// \note load_weights is called on Engine*, not on causal_lm*. The pure virtual
 ///       stays in the frozen causal_lm.hpp for ABI, but nothing here depends on
 ///       it, so a backend whose engine loads its weights some other way is under

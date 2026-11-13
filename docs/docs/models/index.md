@@ -52,15 +52,25 @@ legacy escape hatch, not as an automatic path, and it is not built from source h
 Note the closed engine reads the upstream `.q4nx` container, so it cannot serve a
 GGUF-installed model at all.
 
+In this build, the closed engines for the fully-open families are **removed
+entirely**: Llama 3, Qwen 2.5, Qwen 3 (plus the `-it:4b` / `-tk:4b` derivative
+tags), LFM2/LFM2.5, Phi-4-mini, Nanbeige, Gemma 3 1B (text) and the DeepSeek-R1
+distill tags (which run on the Llama-3.1-8B and Qwen3-8B open bundles). Their
+prebuilt kernels and standalone engine test projects are gone with them. What
+remains closed is exactly the escape hatches for unserved operations: the VL/omni
+engines (images, omni), `gemma_npu` (Gemma 3 vision, used via
+`OFLM_GEMMA_ENGINE=closed`), `gemma4_12b_npu` (Gemma 4 12B vision), `gemma4e_npu`
+and `gpt_oss_npu` (no open design yet), and `whisper_npu`.
+
 | Family | Tags | Text | Vision / Audio | Notes |
 |---|---|---|---|---|
-| Qwen 3 / 3.5 / 3.6-MoE | `qwen3:*`, `qwen3-it:4b`, `qwen3-tk:4b`, `qwen3.5:*`, `qwen3.6-moe:35b-a3b` | ✅ **open** | ❌ closed | The open engine has **no vision path** -- passing an image selects the closed engine even when the text path runs open. |
+| Qwen 3 / 3.5 / 3.6-MoE | `qwen3:*`, `qwen3-it:4b`, `qwen3-tk:4b`, `qwen3.5:*`, `qwen3.6-moe:35b-a3b` | ✅ **open** | ❌ closed | Text is open (the VL/omni engines can serve VL models via their mmproj weights; otherwise `OFLM_*_ENGINE=closed`). The `qwen3-it:4b` / `qwen3-tk:4b` derivative tags resolve into the `Qwen3-4B-NPU2` open bundle at install time. |
 | Qwen 2.5 / 2.5-VL | `qwen2.5-it:3b`, `qwen2.5vl-it:3b` | ✅ open | ❌ closed | |
 | Qwen 3-VL | `qwen3vl-it:4b` | ✅ open | ❌ closed | |
 | LLaMA 3 | `llama3.1:8b`, `llama3.2:1b`, `llama3.2:3b` | ✅ **open** | — | |
-| Gemma 3 (text) | `gemma3:1b` | ✅ **open** | — | |
-| Gemma 3 (multimodal) | `gemma3:4b` | ✅ open | ❌ closed | Images always need the closed `gemma_npu` DLL. |
-| MedGemma, TranslateGemma | `medgemma:4b`, `medgemma1.5:4b`, `translategemma:4b` | ✅ open | ❌ closed | Same `gemma3` family, same image caveat. |
+| Gemma 3 (text) | `gemma3:1b` | ❌ **not available** | — | No open set was ever built for the 1B class, and the closed `gemma_text_npu` engine has been removed. Not runnable in this build. |
+| Gemma 3 (multimodal) | `gemma3:4b` | ❌ closed (`OFLM_GEMMA_ENGINE=closed`) | ❌ closed | No open set was ever built for the 4B class either; the closed `gemma_npu` DLL is kept only as the explicit `OFLM_GEMMA_ENGINE=closed` escape hatch (text and vision). |
+| MedGemma, TranslateGemma | `medgemma:4b`, `medgemma1.5:4b`, `translategemma:4b` | ❌ closed (`OFLM_GEMMA_ENGINE=closed`) | ❌ closed | Same `gemma3` family, same situation. |
 | Phi-4-mini | `phi4-mini-it:4b` | ✅ **open** | — | |
 | LFM2 / LFM2.5 | `lfm2:*`, `lfm2-trans:2.6b`, `lfm2.5-it:1.2b`, `lfm2.5-tk:1.2b` | ✅ **open** | — | Includes the WideDeltaNet recurrent-state chain. |
 | Nanbeige 4.1 | `nanbeige4.1:3b` | ✅ **open** | — | |
@@ -69,7 +79,7 @@ GGUF-installed model at all.
 | **GPT-OSS** | `gpt-oss:20b`, `gpt-oss-sg:20b` | ❌ **closed** | — | No open design: the MoE experts need a clamped SwiGLU plus bias-carrying projections that no current design has room for. |
 | **Whisper** | `whisper-v3:turbo` | ✅ **open** | — | From this repository, the open engine is the default. `oflm add <whisper repo>` builds the open container from the base checkpoint (or reads a llm.cpp-layout GGUF directly) and registers `whisper-v3:turbo`; the closed container is still available via `OFLM_WHISPER_ENGINE=closed`. See [the Whisper card](/docs/models/whisper/#installing-the-open-whisper-build). |
 | **FLUX.2 klein** | `flux2-klein:4b`, any `FLUX.2-klein-*` GGUF | ✅ **open** | — | Black Forest Labs' flow-matching diffusion transformer runs on the open kernels end to end; `oflm add` installs it directly from a GGUF repo. |
-| DeepSeek-R1 (distills) | `deepseek-r1:8b`, `deepseek-r1-0528:8b` | ✅ open *(via the base recipe)* | — | These are **distills of Qwen3-8B and Llama-3.1-8B**, so they reuse the `qwen3` and `llama3` recipes respectively rather than having one of their own. |
+| DeepSeek-R1 (distills) | `deepseek-r1:8b`, `deepseek-r1-0528:8b` | ✅ open *(via the base recipe)* | — | These are **distills of Llama-3.1-8B and Qwen3-8B**, so they run the `llama3` / `qwen3` recipe and their open kernel bundles. The derivative tags resolve into the family bundle at install time (`xclbins/Deepseek-R1-Distill-Llama-8B-NPU2` → `Llama-3.1-8B-NPU2`, `DeepSeek-R1-0528-Qwen3-8B-NPU2` → `Qwen3-8B-NPU2`). |
 | EmbeddingGemma | `embed-gemma:300m` | ⚙️ CPU by default | — | Ships unquantized; NPU matmul is opt-in, not the default. |
 | BERT-family encoders | `bge-*`, `all-minilm:l6-v2`, `nomic-embed-text:v1.5`, `gte-multilingual:base` | ✅ **open** | — | See below. |
 

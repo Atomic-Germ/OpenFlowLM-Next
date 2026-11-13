@@ -19,8 +19,14 @@ parent: Models
 ▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-oflm run gemma3:1b
+oflm run gemma3:1b   # NOT RUNNABLE in this build -- see the note below
 ```
+
+> ⚠️ **gemma3:1b is unavailable.** No open Gemma 3 kernel set was ever built for
+> the 1B class, and the closed `gemma_text_npu` engine has been removed. There
+> is no engine path for this tag in this build; it remains listed only because
+> the registry has not been pruned yet. Use Gemma 3 4B via
+> `OFLM_GEMMA_ENGINE=closed` (see below) or a Gemma 4 model instead.
 
 ---
 
@@ -47,13 +53,13 @@ oflm run gemma3:4b
 /input "file/to/image.jpg" describe this image.
 ```
 
-⚠️ **Images require the closed engine, opted into explicitly.** The open Gemma 3
-kernels cover the text path only, and OFLM no longer falls back to the closed
-engine automatically: text runs open, and if the open engine cannot serve an image
-request it errors rather than swapping engines. Set `OFLM_GEMMA_ENGINE=closed` to
-run the legacy closed `gemma_npu` DLL for both text and images. This applies to
-every multimodal Gemma-family model -- `gemma3:4b`, `medgemma:4b`,
-`medgemma1.5:4b` and `translategemma:4b` all share the `gemma3` recipe. See the
+⚠️ **The Gemma 3 family runs on the legacy closed engine only.** No open Gemma 3
+kernel set was ever built, so there is no open path for `gemma3:4b`,
+`medgemma:4b`, `medgemma1.5:4b` or `translategemma:4b`; the closed `gemma_npu`
+DLL is kept solely as the explicit `OFLM_GEMMA_ENGINE=closed` escape hatch (it
+serves text and images). OFLM does not fall back to it automatically — set the
+env var or don't expect a Gemma 3 4B to run. Gemma 4 (12B) is the fully-open
+Gemma path. See the
 [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
