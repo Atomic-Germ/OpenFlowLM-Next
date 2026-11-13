@@ -43,9 +43,14 @@ has_children: true
 OpenFlowLM replaces FastFlowLM's pre-compiled kernels with open AIE designs built
 from source in [`open_kernels/`](https://github.com/Atomic-Germ/OpenFlowLM/tree/main/open_kernels)
 and [`npu_offload/`](https://github.com/Atomic-Germ/OpenFlowLM/tree/main/npu_offload).
-That coverage is **not complete**. Where no open design exists, OFLM dispatches to
-the closed engine `.so`/`.dll` that upstream ships. Both paths run on the NPU; only
-one of them is built from source here.
+That coverage is **not complete**. Open is the default and there is **no silent
+fallback to the closed engine**: if the open kernels for a model are not installed,
+OFLM refuses and tells you to `oflm add` it. The closed `.so`/`.dll` upstream ships is
+reachable only by explicitly setting the family's engine switch
+(`OFLM_<FAMILY>_ENGINE=closed`, e.g. `OFLM_QWEN3_ENGINE=closed`) -- it exists as a
+legacy escape hatch, not as an automatic path, and it is not built from source here.
+Note the closed engine reads the upstream `.q4nx` container, so it cannot serve a
+GGUF-installed model at all.
 
 | Family | Tags | Text | Vision / Audio | Notes |
 |---|---|---|---|---|

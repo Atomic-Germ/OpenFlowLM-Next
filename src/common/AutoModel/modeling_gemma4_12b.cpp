@@ -24,9 +24,8 @@ void Gemma4_12B::load_model(std::string model_path, json model_info, int default
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The open kernels when installed for this model (text only: the decoder runs there, the
-    // image and audio towers do not yet), the closed gemma4_12b_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_GEMMA4_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA4_ENGINE", "Gemma 4 12B");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);

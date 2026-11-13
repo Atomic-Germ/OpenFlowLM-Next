@@ -185,17 +185,19 @@ protected:
 					const nlohmann::json& resolved_settings = nlohmann::json::object());
 	nlohmann::json _shared_setup_tokenizer(std::string model_path);
 
-	/// \brief Pick the engine for this model: the open one (open_qwen36/, the
-	///        open XDNA2 kernel set under xclbins/<model>/open_kernels) whenever
-	///        it is installed for this model, the family's closed DLL otherwise.
-	///        `env_var`=open|closed overrides the choice; =open with no kernels
-	///        installed is an error rather than a silent fall back to the DLL.
+	/// \brief Pick the engine for this model.
+	///        The open kernels (open_qwen36/, xclbins/<model>/open_kernels) are the
+	///        default and the only automatic choice. `env_var`=open|closed overrides:
+	///        =open requires kernels (error otherwise); =closed opts INTO the legacy
+	///        closed engine. When neither is set and no kernels are installed, this
+	///        throws -- there is deliberately no automatic fallback to the closed DLL,
+	///        and a GGUF install never has one.
 	///        The open engine is text only -- images still need the closed one.
 	/// \param env_var name of the environment variable that overrides the choice
 	///        (OFLM_QWEN3_ENGINE, OFLM_LLAMA_ENGINE, ... -- one per architecture)
 	/// \param family_label the family name printed in the "on the open kernels" line
-	/// \return the loaded open engine, or nullptr when the caller should build
-	///         its own closed engine
+	/// \return the loaded open engine, or nullptr when the caller must build the
+	///         closed engine (which happens only when `env_var`=closed was set)
 	std::unique_ptr<causal_lm> _shared_select_open_engine(const char* env_var, const std::string& family_label);
 
 	/// \brief Insert tokens into the model

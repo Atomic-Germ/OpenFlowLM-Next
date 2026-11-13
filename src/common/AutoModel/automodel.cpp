@@ -44,26 +44,24 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
     if (!use_open) {
-        // A GGUF INSTALL HAS NO CLOSED PATH AT ALL: the closed engine reads a .q4nx container,
-        // and a GGUF model ships model.gguf instead. Falling through to it is not a fallback,
-        // it is a guaranteed failure several layers down ("Failed to open file: ...
-        // model.safetensors" from a family whose loader expects one) -- so say what is
-        // actually wrong, here, once.
-        std::error_code ec;
-        const bool gguf_install =
-            std::filesystem::is_regular_file(std::filesystem::path(this->lm_config->model_path) / "model.gguf", ec) &&
-            !std::filesystem::is_regular_file(std::filesystem::path(this->lm_config->model_path) / "model.q4nx", ec);
-        if (gguf_install)
-            throw std::runtime_error(
-                "this model was installed from a GGUF and no open kernel set serves it (" +
-                this->lm_config->model_name + "); the closed engine reads a .q4nx container, so "
-                "there is nothing for it to load. Reinstall with `oflm add`, or check that the "
-                "kernel set the install linked is present.");
-        // Name the engine: a closed-engine crash otherwise reads as an open-kernel bug (#215).
-        header_print("OFLM", family_label + " on the closed engine ("
-                     + (kernels.empty() ? "no open kernels installed for " + this->lm_config->model_name
-                                        : std::string(env_var) + "=" + sel) + ")");
-        return nullptr;
+        if (sel == "closed") {
+            // Explicit request for the legacy closed engine: still valid (kept only as a
+            // legacy escape hatch). Logged every time so the console names the engine.
+            header_print("OFLM", family_label + " on the closed engine ("
+                         + std::string(env_var) + "=closed)");
+            return nullptr;
+        }
+        // There is deliberately NO automatic fallback to the closed engine any more. A user
+        // who reads only the logs must not see a closed-engine call dressed up as an open one
+        // (#215), and a GGUF install cannot use the closed engine at all: it reads a .q4nx
+        // container while the GGUF install ships model.gguf. So refuse, and name the two real
+        // fixes: install the open kernels, or opt into the legacy engine explicitly.
+        throw std::runtime_error(
+            "no open kernel set installed for " + this->lm_config->model_name +
+            "; the closed engine is not used automatically any more.\n"
+            "  - Install the open kernels for this model with `oflm add`, OR\n"
+            "  - Set " + std::string(env_var) + "=closed to run the legacy closed engine instead."
+        );
     }
     header_print("OFLM", family_label + " on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);

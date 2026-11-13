@@ -16,8 +16,8 @@ void Phi4::load_model(std::string model_path, json model_info, int default_conte
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
-    // The engine: the open kernels when installed for this model, the closed
-    // DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_PHI4_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_PHI4_ENGINE", "Phi-4");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);

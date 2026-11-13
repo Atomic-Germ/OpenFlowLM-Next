@@ -19,8 +19,8 @@ void Qwen3_6_MOE::load_model(std::string model_path, json model_info, int defaul
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when installed for this model, the closed
-    // qwen3_6_moe_npu DLL otherwise. See AutoModel::_shared_select_open_engine.
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN36_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN36_ENGINE", "Qwen3.6-MoE");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);

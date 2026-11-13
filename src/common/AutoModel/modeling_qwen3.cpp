@@ -1,4 +1,4 @@
-﻿/// \file deepseek.cpp
+/// \file deepseek.cpp
 /// \brief deepseek class
 /// \author OpenFlowLM Team
 /// \date 2025-09-01
@@ -17,8 +17,8 @@ void Qwen3::load_model(std::string model_path, json model_info, int default_cont
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when installed for this model, the closed
-    // qwen3_npu DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -320,9 +320,8 @@ void Qwen3_IT::load_model(std::string model_path, json model_info, int default_c
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // Qwen3 dense, same as Qwen3: the open kernels when installed for this
-    // model, the closed qwen3_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3-IT");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -477,9 +476,8 @@ void Qwen3_TK::load_model(std::string model_path, json model_info, int default_c
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // Qwen3 dense, same as Qwen3: the open kernels when installed for this
-    // model, the closed qwen3_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3-TK");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -705,9 +703,8 @@ void DeepSeek_r1_0528_8b::load_model(std::string model_path, json model_info, in
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // A Qwen3 dense distill, so the same choice as Qwen3: the open kernels when
-    // installed for this model, the closed qwen3_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "DeepSeek-R1-0528");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);

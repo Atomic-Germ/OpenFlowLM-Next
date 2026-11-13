@@ -15,8 +15,8 @@ void Llama3::load_model(std::string model_path, json model_info, int default_con
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when installed for this model, the closed
-    // llama_npu DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_LLAMA_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "Llama 3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -106,9 +106,8 @@ void DeepSeek_r1_8b::load_model(std::string model_path, json model_info, int def
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // A Llama 3.1 8B distill, so the same choice as Llama3: the open kernels
-    // when installed for this model, the closed llama_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_LLAMA_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "DeepSeek-R1");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);

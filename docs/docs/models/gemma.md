@@ -47,10 +47,13 @@ oflm run gemma3:4b
 /input "file/to/image.jpg" describe this image.
 ```
 
-⚠️ **Images require the closed engine.** The open Gemma 3 kernels cover the text
-path only. This applies to every multimodal Gemma-family model -- `gemma3:4b`,
-`medgemma:4b`, `medgemma1.5:4b` and `translategemma:4b` all share the `gemma3`
-recipe and all route images to the closed `gemma_npu` DLL. See the
+⚠️ **Images require the closed engine, opted into explicitly.** The open Gemma 3
+kernels cover the text path only, and OFLM no longer falls back to the closed
+engine automatically: text runs open, and if the open engine cannot serve an image
+request it errors rather than swapping engines. Set `OFLM_GEMMA_ENGINE=closed` to
+run the legacy closed `gemma_npu` DLL for both text and images. This applies to
+every multimodal Gemma-family model -- `gemma3:4b`, `medgemma:4b`,
+`medgemma1.5:4b` and `translategemma:4b` all share the `gemma3` recipe. See the
 [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---

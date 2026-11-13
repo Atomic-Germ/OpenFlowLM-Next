@@ -1,4 +1,4 @@
-﻿/// \file lfm2.cpp
+/// \file lfm2.cpp
 /// \brief lfm2 class
 /// \author OpenFlowLM Team
 /// \date 2025-09-04
@@ -19,8 +19,8 @@ void LFM2::load_model(std::string model_path, json model_info, int default_conte
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when a set is installed for this model, the closed
-    // DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_LFM2_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_LFM2_ENGINE", "LFM2");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -308,8 +308,8 @@ void LFM2_5_TK::load_model(std::string model_path, json model_info, int default_
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when a set is installed for this model, the closed DLL
-    // otherwise -- the same contract LFM2 follows. Without this the Thinking family had no
+    // The engine: the open kernels when a set is installed for this model; the closed DLL
+    // only via OFLM_LFM2_ENGINE=closed -- the same contract LFM2 follows. Without this the Thinking family had no
     // open path at all, so a GGUF install of it took the closed engine and died on
     // "Failed to open file: <model>/model.safetensors" (there is no safetensors; the
     // weights are model.gguf). One implementation, two adapters (AutoModel's docstring).
