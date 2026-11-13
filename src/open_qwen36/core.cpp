@@ -341,7 +341,9 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // which is exactly the case since the section moved to the q4_1 law -- so a GGUF
     // model then packed through `std_perm` and died with "lm_head.weight is not in a
     // q4nx container".
-    if (gguf_ && w_ && !want_f32) {
+    // A GGUF-only set (Gemma 4 E-series) has one view, already GGUF-direct: there is no base to merge, and
+    // the merge would drop its block prefill route.
+    if (gguf_ && w_ && !want_f32 && !man_.reads_gguf_only()) {
         Manifest& m = *man_.gguf;
         const Manifest& b = man_;
         auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
