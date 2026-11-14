@@ -53,6 +53,7 @@ inline const float* bfp16_c_row(const float* c, size_t M, size_t N, const Bfp16T
 
 struct DeltaGeom {
     bool conv_f32 = false; ///< FP32 history; legacy BF16 is the default
+    bool key_head_tiled = true; ///< modulo mapping; manifests select grouped for legacy exports
     size_t T = 0, t_real = 0, hid = 0;
     size_t key_heads = 0, value_heads = 0, head_dim = 0, taps = 0;
     size_t lanes = 0;       ///< columns of the packed alpha / beta projection (the value heads, padded)
@@ -65,6 +66,7 @@ struct DeltaGeom {
 /// replays forwards from it, so it is the tape's business to keep it rather than the caller's.
 struct DeltaTape {
     bool conv_f32 = false;             ///< the history format of the recorded block
+    bool key_head_tiled = true;        ///< must match the mapping used to record the block
     std::vector<uint16_t> conv_state0;  ///< [taps-1, nch] bf16: the conv state the block started from
     std::vector<float> conv_state0_f32; ///< FP32 history instead, when conv_f32; the unused vector is empty
     std::vector<float> S0;              ///< [value_heads, s_rows, head_dim]: the S it started from

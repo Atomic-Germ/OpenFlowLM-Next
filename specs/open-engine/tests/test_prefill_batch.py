@@ -30,6 +30,7 @@ def _run(kernel, w, x, y):
 def test_the_35b_linear_layer_type_carries_the_route(m):
     gb = m["layer_types"][LINEAR]["gemm_block"]
     assert gb["kind"] == "linear" and gb["t"] == T and gb["eps"] == 1e-6
+    assert gb["key_head_mapping"] == "tiled"
     # qkv | z fused (8192 + 4096 rows of K 2048), then out (2048 rows of K 4096); the MoE block,
     # shared expert included, stays on lx1 one token at a time
     assert gb["program"] == [

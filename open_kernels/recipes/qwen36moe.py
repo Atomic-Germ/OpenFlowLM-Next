@@ -1444,6 +1444,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
                         run(2 * hid, vw, "gout_w") if split else run(hid, vw, "gout_w", w)], **m0,
             "weights": w,
             "qkv_dim": nch, "vw": vw, "key_heads": spec.lin_key_heads, "value_heads": spec.lin_value_heads,
+            "key_head_mapping": "tiled",
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
             **({"out_split": True} if split else {}),
             "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,

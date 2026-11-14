@@ -186,6 +186,7 @@ struct GemmBlockProgram {
     uint64_t norm_groups = 1;
     // linear: the fused qkv width, the value width, the DeltaNet geometry, the state layout
     uint64_t qkv_dim = 0, vw = 0, key_heads = 0, value_heads = 0, head_dim = 0, conv_kernel = 0;
+    bool key_head_tiled = false;  ///< absent mapping preserves pre-GGUF grouped kernel exports
     // linear: the out projection's GEMM returns 2 x hidden rows, the hi and lo halves of a q8
     // weight's exact q4_1 split, and the host adds them (OPEN-PREFILL-BATCH)
     bool out_split = false;
