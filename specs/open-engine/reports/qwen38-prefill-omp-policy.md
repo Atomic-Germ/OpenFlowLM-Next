@@ -1,183 +1,158 @@
-# Qwen3.8-27B: apply the OpenMP wait policy before runtime initialization
+# Qwen3.8-27B: OpenMP startup policy
 
-## Status after the 2026-11-14 main merge
+## Scope and export compatibility
 
-**Draft: the startup-policy implementation is preserved, but the merged runtime
-does not pass numerical regression with the previously accepted kernel export.**
-The performance and full-model acceptance below apply to the November 11 tree;
-they are not acceptance evidence for the merged runtime.
+The current merged runtime passes PR #2 acceptance on the existing export.
+The source includes upstream `9b1409d3`, export-compatibility fix `1448fc65`,
+and acceptance driver `4573739c`. No kernel rebuild or model repacking is used.
 
-The merge of upstream `9b1409d3` preserves model-scoped policy selection, explicit
-environment overrides, opt-out and failure handling. The CMake conflict was
-resolved by retaining `omp_policy.cpp` alongside the relocated GGUF reader.
-Standalone/private build paths, trace anchors and nested-manifest checks were
-updated for upstream's new source layout and recipe representation.
+PR #2 installs the Linux default `OMP_WAIT_POLICY=PASSIVE` before libgomp reads
+its environment. Explicit policies and `OFLM_OPEN_OMP_PASSIVE=0` take precedence.
+The backend-independent helper re-execs once with the original arguments;
+failed setup or exec restores the previously absent environment and reports the
+error. Windows retains its delay-loaded vcomp path. Commands initially selecting
+another model and HRX builds do not select this Linux optimization.
 
-A fresh four-layer NPU comparison at 257 prompt tokens and two generated tokens
-failed the unchanged 0.9999 logit cosine gate: prompt-last **0.992549563**, next
-decode **0.981242017**. Conv/recurrent/KV state also differs. The two greedy IDs
-still match, demonstrating why token equality alone cannot accept this merge.
-The retained kernels are unchanged. Upstream changed the host DeltaNet key-head
-selection from `h / (value_heads / key_heads)` to `h % key_heads`, and changed
-the kernel source/reference correspondingly; an existing compiled export still
-contains the earlier mapping.
+The policy is process-wide. A server started without Qwen3.8 does not acquire it
+when a later request selects Qwen3.8; a server started with Qwen3.8 retains it when
+switching models. This is not dynamic per-request OpenMP tuning.
 
-A separate diagnostic build restores only the three host mapping expressions.
-With the same inputs and kernels it reproduces the accepted logits and state
-**byte for byte**. This isolates the compatibility issue; the diagnostic is not
-installed as production and does not validate a newly compiled kernel export.
-Before submission, resolve the mapping/export compatibility explicitly and rerun
-the numerical, full-depth and resident-server acceptance. Do not weaken gates or
-reuse old performance results as acceptance for new arithmetic.
+The DeltaNet host/kernel interface declares `key_head_mapping` in the linear
+`gemm_block`:
 
-Post-merge checks: full Python suite **2582 passed, 172 skipped**, including the
-companion-manifest regression; standalone CMake **5/5 passed**. The Docker app
-and all CTest executables were rebuilt: **30 passed, 2 skipped**.
-Updated test results and command logs are
-retained under `Models/qwen38-27b/main-merge-20261114/` (including both NPU
-comparisons). No new kernel export or full-model NPU run was performed for this
-merge.
+- Absent or `grouped`: value head `h` reads `h / (value_heads / key_heads)`,
+  preserving existing compiled exports.
+- `tiled`: value head `h` reads `h % key_heads`, matching current upstream kernels.
+  Current recipes emit it in both Q4NX and GGUF views.
+- Unknown mappings and invalid head ratios are refused. Prefill and rollback use
+  the same field, and rollback refuses a tape recorded with a different mapping.
 
-## Purpose
+No arithmetic, precision, weights, buffer ABI, or route threshold changes for an
+existing export. An unmarked export compiled with modulo-head kernels must be
+re-exported with `tiled` declared, not silently relabelled as a grouped binary.
+Host tests cover both mappings, scalar-reference agreement and every rollback
+prefix. Hardware results here accept the retained grouped export, not a newly
+compiled tiled export.
 
-Linux libgomp reads its environment before application static constructors.
-Setting `OMP_WAIT_POLICY` from the old constructor therefore changed the value
-printed by the engine without applying that default at runtime initialization.
-PR #2 moves the Linux default to an early self-exec, before model/device access.
+## Machine and measurement method
 
-## Implementation and compatibility
+Measured on 2026-11-14: AMD Ryzen AI 9 365 / NPU Strix, 20 OpenMP threads,
+Linux 7.0.0-43-generic, glibc 2.43, GCC 15.2.0, CPU governor `powersave`.
+Host XRT 2.26.0 (`e9db9ab15f10173f8d2fc93ff92ab4c7eb09d2e6`), amdxdna
+2.26.0_20260817, NPU firmware 1.1.2.64. NPU power mode is externally observed
+`default`; CLI `--pmode none` leaves it unchanged. Background desktop/services
+remain active. Observed one-minute host load ranges are 1.55–5.22, 1.30–11.07
+and 0.58–8.85 for the 256/512/1024-token campaigns. Per-run load, available
+memory and ACPI temperatures are retained. ACPI temperature is not NPU die
+temperature. No competing NPU context is observed before the correctness campaign;
+the shared validation lock serializes resident jobs.
 
-- The backend-independent helper is `src/open_qwen36/omp_policy.cpp`; the app
-  does not include the XRT-only `core.hpp` just to reach it. HRX builds compile
-  the helper but do not select this optimization.
-- The shipped app selects the policy only for a registry entry with family
-  `qwen3.5` and a `Qwen3.8-` model name, for `run`, `serve` and `bench`. Other
-  models, including Whisper, retain their existing OpenMP behavior. The
-  standalone CLI calls the helper directly for controlled engine measurements.
-- The Linux constructor leaves the environment untouched. An explicit
-  `OMP_WAIT_POLICY`, including `ACTIVE`, takes precedence and skips re-exec.
-- Otherwise startup sets `PASSIVE` and re-execs the same binary with its original
-  arguments. `OFLM_OPEN_OMP_PASSIVE=0` opts out; `OFLM_OPEN_OMP_REEXEC` is a
-  diagnostic guard. Successful exec does not return or change the process ID.
-- Failed environment setup or exec prints a diagnostic. A failed exec restores
-  the previously absent policy/guard instead of reporting an unapplied policy.
-- Windows retains its delay-loaded vcomp initialization; the POSIX header is
-  guarded. A host test covers that branch, not a native MSVC build.
-- Kernel arithmetic, weights, ABI, routing thresholds and state layouts are
-  unchanged. The selected policy is process-wide only for the Qwen3.8 command.
+Standalone and Docker production binaries are built fresh from the current
+production sources. `build-identity.json` binds binaries and source hashes;
+benchmark results bind model, manifest and kernel hashes. SHA-256 identities:
 
-Executable tests compile and run the production helper and its test driver.
-They cover explicit policies, opt-out, the guard, arguments, one re-exec, model
-selection and an injected exec failure. Linux/libgomp tests skip when that
-capability is absent. The benchmark runner imports its POSIX lock only in
-hardware modes, so its pure summary/parser tests remain portable.
+| Artifact | SHA-256 |
+|---|---|
+| Current standalone CLI | `c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad` |
+| Production app | `577b925ab182e948c510e4bd4bdef8076510a7a47baf5078327bb13c71af4339` |
+| Retained pre-merge accepted CLI | `7b5b5aa650279d144f45855b2f103d2fa7ee9c849e17c6fe181606d311df3b6f` |
+| Existing Q4NX model (19,844,633,616 bytes) | `1f78e62b723f66ad540e8a35a5cb31de67e2ae48c3a58e226873eefa10b349a9` |
+| Existing kernel manifest | `744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee` |
 
-## Measurement method
+Performance compares **the same current CLI** with the policy opted out and
+enabled, isolating the optimization from upstream runtime changes. Both arms
+name source commit `4573739c`. Each prompt size uses one warm-up pair, followed
+by five measured pairs in alternating order. Prompts have fixed IDs; every run
+generates 16 tokens. Profiling is off. The driver records both source commits,
+binary/model/kernel hashes, commands, arm-specific opt-out values, full logs and
+peak process RSS.
 
-The repeatable driver is `utilities/prefill-block/omp_policy.py`. Its modes share
-existing profile provenance, CLI, server and state-comparison helpers.
+Engine prefill excludes model loading; decode excludes prefill. These timings
+are not HTTP time to first streamed token. Acceptance requires all five prefill
+pairs to improve, identical generated IDs, and at most 3% median decode/RSS
+regression. Five paired wins give a one-sided sign-test probability of 1/32
+under no improvement; numerical oracle thresholds remain unchanged.
 
-The full-model benchmark compares a fresh control build from `7f227b15` with the
-PR #2 implementation at `78c41524` plus the review fixes committed as `9f8415c9`.
-It excludes one warm-up pair, then runs five measured pairs in alternating order
-at each of 256, 512 and 1024 prompt tokens, generating 16 tokens per run.
-Profiling is disabled. Engine prompt-ingestion time excludes model loading;
-decode time excludes prefill. This is not HTTP time to first streamed token.
+## Acceptance results
 
-The runner records the requested source commits, current source commit and dirty
-state, both binary hashes, model/kernel hashes, commands, complete logs,
-generated token IDs, per-run host conditions, observed NPU power mode and peak
-process RSS. `--pmode none` deliberately retains the observed `default` mode; it
-does not claim successful performance-mode configuration. Available ACPI
-temperatures are recorded separately from the unavailable NPU temperature.
-
-Host: AMD Ryzen AI 9 365 / NPU Strix, 20 OpenMP threads, Linux 7.0.0-42-generic,
-glibc 2.43, CPU governor `powersave`. Both arms use the same 19,844,633,616-byte
-Q4NX model and existing paired-prefill kernel export. Exact artifact hashes are
-in each benchmark's `result.json`.
-
-Acceptance requires five faster prefill pairs with identical output IDs, and
-median decode time and peak process RSS increases no greater than 3%. With five
-wins, the one-sided paired sign-test probability under no improvement is 1/32.
-This performance criterion does not alter any numerical oracle threshold.
-
-## Validation results
-
-All three five-pair campaigns passed on 2026-11-11. Values are medians, with the
-minimum–maximum range in parentheses.
+All three campaigns pass. Values are medians with min–max ranges; each row has
+five measured pairs. Before/after mean policy off/on on the same binary.
 
 | Prompt | Before prefill | After prefill | Change | Before decode | After decode |
 |---|---:|---:|---:|---:|---:|
-| 256 | 34.658 s (34.567–34.945) | 29.374 s (29.304–29.498) | **−15.25%** | 453 ms (451–454) | 455 ms (454–457) |
-| 512 | 69.595 s (69.573–69.945) | 58.675 s (58.612–58.799) | **−15.69%** | 460 ms (459–461) | 460 ms (459–460) |
-| 1024 | 139.888 s (139.254–140.838) | 119.087 s (118.889–119.250) | **−14.87%** | 474 ms (474) | 474 ms (471–475) |
+| 256 | 34.384 s (34.049–34.477) | 29.713 s (29.207–29.739) | **−13.58%** | 460 ms (453–464) | 461 ms (456–462) |
+| 512 | 68.749 s (68.644–69.081) | 59.731 s (58.666–59.929) | **−13.12%** | 466 ms (462–472) | 466 ms (462–476) |
+| 1024 | 138.536 s (138.188–138.704) | 120.869 s (120.858–120.974) | **−12.75%** | 481 ms (475–488) | 486 ms (479–488) |
 
-Every prefill pair improved and all 16 generated IDs matched in every pair.
-Median peak process RSS changed by −0.0019%, +0.0009% and +0.0026% respectively.
-There is no demonstrated decode or peak-RSS regression in these samples.
+Every measured prefill pair improves and every 16-token trajectory matches.
+Median peak process RSS changes are +0.00006%, −0.00081% and +0.00091%, at
+approximately 34,278,000 KiB in either arm. Median decode changes are +0.22%,
+0% and +1.04%, within the unchanged 3% acceptance bound.
 
-The shipped `oflm run` completed policy-disabled/enabled resident sessions with
-one warm-up and three requests separated by `/clear`. Engine prompt lengths were
-72, 264, 520 and 1032 tokens. All four answers matched, with 16 text tokens each.
-Single-session timings are a cross-check, not statistical performance evidence.
+Correctness and integration on the current binaries:
 
-The four-layer boundary matrix passed at 95/96/97, 255/256/257 and 511/512/513
-prompt tokens. The full 64-layer, 256-token prefill plus 16-token decode control
-also passed. Both required the existing numerical oracle and exact before/after
-logits and state bytes.
+- Four layers, 95/96/97, 255/256/257 and 511/512/513 prompt tokens plus two
+  generated tokens: all nine cases pass the existing numerical gates and exact
+  before/after logits and all requested layer-state bytes.
+- All 64 layers, 256-token prompt plus 16-token greedy continuation: **147/147
+  checks pass** against the retained pre-merge accepted CLI. All **112 state
+  slices** (conv/recurrent state for 48 linear layers and KV for 16 attention
+  layers) and prompt/decode logits are byte-identical. No old result is relabelled.
+- Production CLI: policy-off/on sessions each have a warm-up and three requests
+  separated by `/clear`; all four answers match. Actual engine prompts are 72,
+  264, 520 and 1032 tokens. This is integration evidence, not repeated TTFT timing.
+- Production server: seven alternating 272/528-token requests return complete,
+  identical responses on repeat. Maximum per-prompt RSS growth from the warmed
+  baseline is **0.6722% / 0.0064%**. RSS samples and responses are retained.
 
-The production server completed seven alternating 272/528-engine-token requests.
-Repeated responses were identical and complete. After both prompt sizes had
-allocated once, maximum RSS growth from each prompt's warmed baseline was 0.44%
-and 0.21%. Process RSS does not include all driver-owned NPU allocations.
+Host gates: **2586 Python tests passed, 172 skipped**; standalone CTest **5/5**;
+production Docker build passes, Docker CTest **30 passed, 2 skipped**. The direct
+host fixture also passes both head mappings and rollback tests. Settings registry
+regeneration passes in a scratch merge with actual upstream commit `9b1409d3`.
+Skipped tests are not counted as passes.
 
-Host validation on the acceptance tree:
-
-- `OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -m pytest -q specs/`:
-  **2534 passed, 172 skipped**.
-- Production Docker build: `cmake --build build --target oflm -j 4` passed;
-  `ctest --test-dir build --output-on-failure`: **29 passed, 2 skipped**.
-- Fresh standalone control and candidate CLI builds passed.
-- Native Windows build: **NOT MEASURED**.
-
-Retained evidence: `Models/qwen38-27b/pr2-acceptance/`. Each benchmark directory
-contains its samples and artifact identities; `boundaries/`, `full-state/`,
-`production/` and `server-v2/` contain the correctness and integration results.
+**NOT MEASURED:** native Windows build, HTTP streaming TTFT, approximately-4K
+context decode, total driver-owned NPU memory, and freshly rebuilt tiled kernels.
+These results establish the scheduling change on the existing grouped export;
+they do not add model support or establish new context/numerical capabilities.
 
 ## Reproduction
 
+Evidence root: `Models/qwen38-27b/pr2-ready-20261114/`. Raw artifacts remain local;
+this report records their identities and measured summaries. Always use fresh
+output directories and avoid other NPU jobs or memory-intensive host workloads.
+
 ```bash
 source utilities/env.sh
-utilities/prefill-block/build-cli.sh Models/qwen38-27b/pr2-acceptance/after-build
+ROOT=Models/qwen38-27b/pr2-ready-20261114
+MODEL=oflm-data/models/Qwen3.8-27B-NPU2
+KERNELS=Models/qwen38-27b/production-v2/kernels-model
+utilities/prefill-block/build-cli.sh "$ROOT/build"
+CLI="$ROOT/build/open_qwen36_cli"
+
+for N in 256 512 1024; do
+  OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
+    --before "$CLI" --after "$CLI" \
+    --before-commit 4573739c --after-commit 4573739c \
+    --model "$MODEL" --kernels "$KERNELS" \
+    --tokens "$N" --out "$ROOT/benchmark-$N"
+done
 
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
-  --before Models/qwen38-27b/pr2-acceptance/before-build/open_qwen36_cli \
-  --after Models/qwen38-27b/pr2-acceptance/after-build/open_qwen36_cli \
-  --before-commit 7f227b15 --after-commit 78c41524 \
-  --model oflm-data/models/Qwen3.8-27B-NPU2 \
-  --kernels Models/qwen38-27b/production-v2/kernels-model \
-  --tokens 256 --out Models/qwen38-27b/pr2-acceptance/benchmark
-# Repeat with fresh output directories and --tokens 512 / 1024.
+  --check boundaries --before /path/to/accepted/open_qwen36_cli --after "$CLI" \
+  --model "$MODEL" --kernels "$KERNELS" --generate 2 \
+  --lengths 95 96 97 255 256 257 511 512 513 --out "$ROOT/boundaries-all-state"
+# Repeat with --layers 64 --generate 16 --lengths 256 --out "$ROOT/full-state".
 
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
-  --check production --after build/src/oflm \
-  --out Models/qwen38-27b/pr2-acceptance/production
-
+  --check production --after build/src/oflm --out "$ROOT/production"
 OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
-  --check boundaries \
-  --before Models/qwen38-27b/pr2-acceptance/before-build/open_qwen36_cli \
-  --after Models/qwen38-27b/pr2-acceptance/after-build/open_qwen36_cli \
-  --generate 2 --lengths 95 96 97 255 256 257 511 512 513 \
-  --out Models/qwen38-27b/pr2-acceptance/boundaries
-# Full-depth state control: same command with --layers 64 --generate 16 --lengths 256.
-
-OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/prefill-block/omp_policy.py \
-  --check server --after build/src/oflm \
-  --out Models/qwen38-27b/pr2-acceptance/server-v2
+  --check server --after build/src/oflm --out "$ROOT/server"
 ```
 
-Use fresh output directories. Production checks use the registered `qwen3.8:27b`
-model; standalone checks accept explicit model/kernel paths. A shared NPU lock
-serializes resident runs. No newly compiled kernel export is used for this change.
-For a fresh checkout, build the control from `7f227b15` in a separate worktree
-and substitute its CLI path. The example control path is a retained local build.
+The state control is the retained accepted pre-merge CLI identified above; build
+that version (`9f8415c9`) in a separate worktree when reproducing without local
+artifacts. The policy-only benchmark needs no historical binary. Production
+checks use the registered `qwen3.8:27b` model; standalone modes accept explicit
+paths. Process RSS is not total driver-owned NPU allocation. The startup opt-out
+changes no arithmetic, weights, route or state ABI.
