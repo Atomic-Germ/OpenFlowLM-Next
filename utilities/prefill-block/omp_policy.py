@@ -105,12 +105,14 @@ def benchmark(a, out):
             order = ('before', 'after') if rep % 2 == 0 else ('after', 'before')
             for arm in order:
                 tag = f'{rep}-{arm}'
+                env = clean_env()
+                env['OFLM_OPEN_OMP_PASSIVE'] = '0' if arm == 'before' else '1'
                 cmd = [str(getattr(a, arm)), '--model', str(a.model), '--kernels', str(a.kernels),
                        '--ids-file', str(ids_file), '--max-ctx', '4096', '--layers', '64',
                        '--max-tokens', str(a.generate), '--gemm-block', '--block-major', '--pmode', 'none', '--quiet']
                 before = P.conditions()
                 r = subprocess.run(['/usr/bin/time', '-f', '%M', '-o', str(out / f'{tag}.rss'), *cmd],
-                                   env=clean_env(), capture_output=True, text=True, timeout=1800)
+                                   env=env, capture_output=True, text=True, timeout=1800)
                 log = r.stdout + '\n' + r.stderr
                 (out / f'{tag}.log').write_text(log)
                 if r.returncode:
@@ -124,6 +126,7 @@ def benchmark(a, out):
                 if power['mode'] != result['power']['mode']:
                     raise ValueError('NPU power mode changed during comparison')
                 row = dict(rep=rep, warmup=rep < 0, arm=arm, command=cmd,
+                           omp_passive=env['OFLM_OPEN_OMP_PASSIVE'],
                            prefill_ms=float(prefill[1]), decode_ms=float(decode[1]), ids=tokens,
                            rss_kib=int((out / f'{tag}.rss').read_text()),
                            conditions_before=before, conditions_after=P.conditions(), power_after=power)
@@ -186,8 +189,15 @@ def clean_env_from(env):
     return {k: v for k, v in env.items() if k not in
             ('OMP_WAIT_POLICY', 'OFLM_OPEN_OMP_REEXEC', 'OFLM_OPEN_OMP_PASSIVE',
              'OFLM_OPEN_PROFILE', 'OFLM_OPEN_PROFILE_STEPS',
-             'OFLM_OPEN_PREFILL_ROLES', 'OFLM_OPEN_PREFILL_ROLE_MODE')}
+              'OFLM_OPEN_PREFILL_ROLES', 'OFLM_OPEN_PREFILL_ROLE_MODE')}
 
+
+def boundary_slices(layers, end_position):
+    slices = O.stage_state_specs('dnet', layers=layers, tokens=end_position)
+    slices.update(O.stage_state_specs('attn', layers=layers, tokens=end_position))
+    if set(slices) != set(range(layers)):
+        raise ValueError('state comparison requires every requested layer')
+    return slices
 
 
 def boundaries(a, out):
@@ -196,7 +206,7 @@ def boundaries(a, out):
     O.MODEL, O.KERNELS = a.model, a.kernels
     for n in a.lengths:
         ids = O.fixture(n, seed=26026)
-        slices = T.state_slices(a.layers, n + a.generate)
+        slices = boundary_slices(a.layers, n + a.generate)
         records = {}
         for arm in ('before', 'after'):
             O.CLI = getattr(a, arm)

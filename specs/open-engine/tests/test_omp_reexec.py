@@ -18,6 +18,11 @@ def startup(tmp_path_factory):
     if not compiler:
         pytest.skip("g++ with libgomp required")
     work = tmp_path_factory.mktemp("omp-startup")
+    probe = subprocess.run([compiler, '-x', 'c++', '-fopenmp', '-', '-o', str(work/'probe')],
+                           input='#include <omp.h>\nint main() { omp_display_env(0); }\n',
+                           capture_output=True, text=True)
+    if probe.returncode:
+        pytest.skip(f"libgomp development support unavailable: {probe.stderr.strip()}")
     binary = work / "startup"
     failure = work / "startup-failure"
     for output, flags in ((binary, []), (failure, ["-DOFLM_OMP_POLICY_FAIL_EXEC"])):
@@ -28,8 +33,7 @@ def startup(tmp_path_factory):
             str(ROOT / "src/open_qwen36/omp_policy_test.cpp"),
             "-o", str(output),
         ], capture_output=True, text=True)
-        if result.returncode:
-            pytest.skip(f"g++ with libgomp required: {result.stderr.strip()}")
+        assert result.returncode == 0, result.stderr
     return binary, failure
 
 
@@ -74,6 +78,11 @@ def test_failed_exec_reports_error_and_restores_environment(startup):
     assert result.stdout.count("ENTER\n") == 1
     assert "POLICY=<unset>\nGUARD=<unset>\n" in result.stdout
     assert "re-exec" in result.stderr and "Permission denied" in result.stderr
+
+
+def test_model_selection_is_qwen38_only(startup):
+    result = subprocess.run([str(startup[0]), 'model'], capture_output=True, text=True, check=True)
+    assert 'PASS: model selection' in result.stdout
 
 
 def test_windows_helper_does_not_reexec(tmp_path):

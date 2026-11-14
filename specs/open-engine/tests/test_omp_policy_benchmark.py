@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,6 +66,44 @@ def test_source_provenance_records_both_requested_commits(monkeypatch):
 def test_missing_or_duplicate_repetition_rejected():
     rows = samples(); rows[-1]['rep'] = 0
     with pytest.raises(ValueError): M.summary(rows)
+
+
+def test_same_binary_benchmark_changes_only_the_policy(tmp_path, monkeypatch):
+    pytest.importorskip('fcntl', reason='hardware driver uses POSIX locking')
+    a = SimpleNamespace(tokens=2, generate=2, reps=5, before=tmp_path/'cli',
+                        after=tmp_path/'cli', before_commit='same', after_commit='same',
+                        model=tmp_path, kernels=tmp_path)
+    monkeypatch.setattr(M.O, 'LOCK', tmp_path/'lock')
+    monkeypatch.setattr(M.O, 'fixture', lambda *args, **kwargs: [1, 2])
+    monkeypatch.setattr(M.P, 'provenance', lambda *args: {})
+    monkeypatch.setattr(M.P, 'conditions', lambda: {})
+    monkeypatch.setattr(M, 'source_provenance', lambda *args: {})
+    monkeypatch.setattr(M, 'platform', lambda: dict(mode='default'))
+    policies = []
+    def invoke(command, *, env, **kwargs):
+        policy = env['OFLM_OPEN_OMP_PASSIVE']
+        policies.append(policy)
+        assert 'OMP_WAIT_POLICY' not in env
+        Path(command[4]).write_text('1000')
+        ms = 100 if policy == '0' else 85
+        return subprocess.CompletedProcess(command, 0, stdout=(
+            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr='')
+    monkeypatch.setattr(M.subprocess, 'run', invoke)
+    result = M.benchmark(a, tmp_path)
+    assert result['verdict'] == 'PASS'
+    assert policies == ['1', '0', '0', '1', '1', '0', '0', '1', '1', '0', '0', '1']
+    assert all(row['omp_passive'] == ('0' if row['arm'] == 'before' else '1')
+               for row in result['rows'])
+
+
+def test_boundary_state_coverage_includes_every_layer(monkeypatch):
+    monkeypatch.setattr(M.O, '_LAYER_KINDS', ['linear'] * 3 + ['full'] + ['linear'] * 3 + ['full'])
+    slices = M.boundary_slices(8, 273)
+    assert set(slices) == set(range(8))
+    assert [s[0] for s in slices[0]] == ['conv', 'S']
+    assert slices[7] == [('kv', 0, 273 * M.O.KV_ROW_BYTES)]
+    with pytest.raises(ValueError, match='every requested layer'):
+        M.boundary_slices(9, 273)
 
 
 def test_production_outputs_exclude_following_status_and_streamed_turn():
