@@ -2,12 +2,12 @@
 
 You can install or request toolchain components
 
-Each time you build a new set of xclbins and libraries, document your process and create a new skill file for the next to build on.
+Each time you build a new kernel set, record what is durable in `open-kernel-families` (or the relevant pipeline skill). Do not create a per-model or per-size skill: a new size is a spec, and the pipeline already runs it.
 
 Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.
 
-The new format Q4NX models for this will be located on huggingface `Atomic-Germ/*-nB-OpenNPU2`, each will need a builder in q4nx-build as they gain xclbin support. Family xclbins will be distributed with the application, and a converted model ships with the rest. Each model links to a family xclbin, regardless of fine-tuning or derivitive models. The purpose of this is to allow quick additions of new but shape-identical models without updates needed, distributed through `oflm-add` to install and link properly.
+Q4NX models (`Atomic-Germ/*-nB-OpenNPU2` on Hugging Face) are deprecated: the existing ones keep working, but new models load from GGUF and get no q4nx-build builder. Family xclbins will be distributed with the application, and a converted model ships with the rest. Each model links to a family xclbin, regardless of fine-tuning or derivitive models. The purpose of this is to allow quick additions of new but shape-identical models without updates needed, distributed through `oflm-add` to install and link properly.
 
 As you encounter closed-source requirements, note them and replace with "not implemented" messaging before coding a replacement.
 
@@ -15,9 +15,9 @@ When investigating pre-compiled xclbins and libraries, save any useful tools you
 
 The `oflm-test` tool at `utilities/oflm-test` is capable of running a full test suite for `--llm`, `--vision`, `--embed`, or `--tools`.
 
-The `q4nx-build` tool at `utilities/q4nx-build` should always be in-sync with the expected formats of the models as each gains support, there should be no manual steps left. If unavoidable, the user should always recieve instruction for it.
+The `q4nx-build` tool at `utilities/q4nx-build` is kept only for the existing q4nx models. Do not add builders or formats to it for new models. Installing a model should leave no manual steps; if one is unavoidable, the user should always receive instruction for it.
 
-For each successfully packed model, create or update a skill to ensure the next agent does not need to reproduce research for the next addition.
+For each successfully packed model, update `open-kernel-pipeline` / `open-kernel-families` with anything the next agent would otherwise have to rediscover. The goal is that adding a model needs only two facts: the family has support, and a repo exists with weights.
 
 Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
       system clang/clang++. It can be found in:
@@ -69,6 +69,42 @@ alone.
 variables it exported, so the discovery stays in one place. The two stay in
 step through `OFLM_ENV_DUMP=1`, which makes `env.sh` print its variables as
 `KEY=VALUE` lines instead of its report.
+
+## The production bar for a supported model
+
+Do not add q4nx support for any model: q4nx is being deprecated. New support
+loads the model from GGUF.
+
+Every PR that adds or changes support for a model also updates its entry in
+`src/model_list.json`: the entry exists, names the files the engine loads, and
+states the real quant, family and context length. A model with no correct
+registry entry is not supported, whatever the engine can do.
+
+A top-tier supported model ships finished and production-ready. Before you
+export its kernel set as done, or open an issue or PR that calls it supported,
+show each of these with measurements:
+
+- Prefill uses the block route (usually). State the reason for any exception.
+- Decode and prefill are near optimal. Profile them and name what is left.
+- No unusual context-length limits. Test up to the model's real context, not
+  only the 4096 default.
+- Everything runs on the NPU (usually). Name each host stage and its cost.
+- Speculative decoding was explored: MTP, DFlash, DFlash2, prompt lookup or
+  another drafter. Ship one, or reject it with the measured reason. We
+  generally want one.
+- `oflm add` and `oflm serve` run the model, not only a CLI harness.
+- The model ships quantized, usually q4. Prefer Unsloth's GGUFs when the
+  engine supports their quant types; state the reason for any other source.
+- Benchmarks are recorded: `oflm bench` results (prefill and decode against
+  context length, with the machine and stack named) on the model's page in
+  `docs/docs/benchmarks/`, and a row in the README's "Recommended models"
+  table.
+- Most of the model's own features are exposed: its vision and audio towers,
+  MTP heads (as the drafter), reasoning and tool calling, and for image models
+  every supported resolution and image editing. Name each feature left out
+  and the reason.
+
+If an item is not done, the PR stays a draft and lists the item.
 
 ## Git rules for agents
 
@@ -269,9 +305,14 @@ Adding a setting is documented in `src/create_new_model.md`.
     <location>.agents/skills/npu_offload_pipeline.md</location>
   </skill>
   <skill>
-    <name>open-granite-kernels</name>
-    <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
-    <location>.agents/skills/open-granite-kernels/SKILL.md</location>
+    <name>open-kernel-pipeline</name>
+    <description>The one-command path from weights to a running model (geometry -> family -> spec -> kernel set -> link -> pack). Use when adding a model or size, when `oflm add` refuses a geometry, when deciding whether a change is a spec, recipe, or design change, or when rebuilding and shipping kernel sets.</description>
+    <location>.agents/skills/open-kernel-pipeline/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-kernel-families</name>
+    <description>Reference for the open-kernel family recipes and designs (dense, qwen35, qwen36moe, lfm2), their specs and geometry traps. Use when a build in one family fails, when adding a size whose geometry is unusual, or when touching recipes/*.py or designs/dense|layer_x.</description>
+    <location>.agents/skills/open-kernel-families/SKILL.md</location>
   </skill>
   <skill>
     <name>open-wide-deltanet-ab</name>

@@ -13,11 +13,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <random>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 #include "open_qwen36/pools.hpp"
+#include "open_qwen36/q4nx_file.hpp"
 
 namespace fs = std::filesystem;
 
@@ -259,6 +264,128 @@ uint32_t f32_bits(float f) {
     return u;
 }
 
+/// A GGUF of arbitrary tensors (the MoE test needs 3-D expert tensors and a 2-D router;
+/// write_gguf above is fixed at three tensors).
+struct SynthTensor {
+    std::string name;
+    std::vector<uint64_t> dims;                  // fastest first, as GGUF stores them
+    uint32_t type;
+    std::vector<uint8_t> bytes;
+};
+
+std::string write_gguf_tensors(const fs::path& dir, const std::string& file,
+                               const std::vector<SynthTensor>& ts) {
+    std::vector<uint8_t> f;
+    f.insert(f.end(), {'G', 'G', 'U', 'F'});
+    put_u32(f, 3);
+    put_u64(f, ts.size());
+    put_u64(f, 1);
+    put_kv_str(f, "general.architecture", "qwen35moe");
+    for (const auto& t : ts) {
+        put_str(f, t.name);
+        put_u32(f, static_cast<uint32_t>(t.dims.size()));
+        for (uint64_t d : t.dims) put_u64(f, d);
+        put_u32(f, t.type);
+        put_u64(f, 0);                            // patched below
+    }
+    const auto align32 = [](size_t n) { return (n + 31) / 32 * 32; };
+    const size_t data_off = align32(f.size());
+    std::vector<uint64_t> offs;
+    uint64_t rel = 0;
+    for (const auto& t : ts) {
+        offs.push_back(rel);
+        rel = align32(rel + t.bytes.size());
+    }
+    // walk the header to the offset field of each tensor info
+    size_t p = 4 + 4 + 8 + 8;
+    {
+        uint64_t ln;
+        uint32_t ty;
+        std::memcpy(&ln, f.data() + p, 8);
+        p += 8 + ln;
+        std::memcpy(&ty, f.data() + p, 4);
+        p += 4;
+        if (ty == 8) {
+            std::memcpy(&ln, f.data() + p, 8);
+            p += 8 + ln;
+        } else {
+            p += 4;
+        }
+    }
+    for (size_t i = 0; i < ts.size(); ++i) {
+        uint64_t ln;
+        uint32_t nd;
+        std::memcpy(&ln, f.data() + p, 8);
+        p += 8 + ln;
+        std::memcpy(&nd, f.data() + p, 4);
+        p += 4 + 8 * nd + 4;
+        std::memcpy(f.data() + p, &offs[i], 8);
+        p += 8;
+    }
+    while (f.size() < data_off) f.push_back(0);
+    for (size_t i = 0; i < ts.size(); ++i) {
+        while (f.size() < data_off + offs[i]) f.push_back(0);
+        f.insert(f.end(), ts[i].bytes.begin(), ts[i].bytes.end());
+    }
+    const fs::path out = dir / file;
+    std::ofstream of(out, std::ios::binary);
+    of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
+    return out.string();
+}
+
+/// The q4_1 value a pool chunk holds at (row r, column k), in the bf16-scale law (5120 B).
+float pool_q4_1_value(const uint8_t* d, size_t r, size_t k) {
+    const size_t kb = k / 32;
+    uint16_t db, mb;
+    std::memcpy(&db, d + 2 * (kb * 32 + r), 2);
+    std::memcpy(&mb, d + 512 + 2 * (kb * 32 + r), 2);
+    const size_t p0 = (r / 16) * 4096 + k * 16 + (r % 16);
+    const uint8_t byte = d[1024 + (p0 >> 1)];
+    const uint8_t nib = (p0 & 1) ? byte >> 4 : byte & 0xF;
+    return nib * bf16_to_f32(db) + bf16_to_f32(mb);
+}
+
+/// The same value from a Q4_1 source block, with the fp16 scales rounded to bf16 exactly
+/// as the packer writes them into a 5120-byte chunk. (The 6144 f32 law is bit-exact; the
+/// q4_1 law the GGUF-direct MoE uses is the one with this one rounding.)
+float source_q4_1_value(const Blocks& b, size_t row, size_t col) {
+    const size_t nb = b.cols / 32;
+    const uint8_t* p = b.bytes.data() + (row * nb + col / 32) * b.blk;
+    uint16_t dh, mh;
+    std::memcpy(&dh, p, 2);
+    std::memcpy(&mh, p + 2, 2);
+    const float d = bf16_to_f32(f32_to_bf16(fp16_to_f32(dh)));
+    const float m = bf16_to_f32(f32_to_bf16(fp16_to_f32(mh)));
+    const uint8_t byte = p[4 + (col % 16)];
+    const uint8_t q = (col % 32 < 16) ? (byte & 0xF) : (byte >> 4);
+    return d * q + m;
+}
+
+// A container in memory: just the tensors' bytes, as a .q4nx stores small weights (bf16 or f32).
+class MemFile : public WeightFile {
+public:
+    std::map<std::string, std::vector<uint8_t>> t;
+    bool has(const std::string& name) const override { return t.count(name) != 0; }
+    const uint8_t* raw(const std::string& name, size_t* nbytes) const override {
+        const auto& b = t.at(name);
+        if (nbytes) *nbytes = b.size();
+        return b.data();
+    }
+    void embed_row(const std::string&, size_t, size_t, float*) const override { throw std::logic_error("unused"); }
+    std::vector<float> bf16(const std::string&) const override { throw std::logic_error("unused"); }
+    std::vector<float> f32(const std::string&) const override { throw std::logic_error("unused"); }
+    const TensorMeta& meta(const std::string&) const override { throw std::logic_error("unused"); }
+    void bf16_row(const std::string&, size_t, size_t, float*) const override { throw std::logic_error("unused"); }
+    void drop_pages() override {}
+};
+
+template <typename T>
+std::vector<uint8_t> bytes_of(const std::vector<T>& v) {
+    std::vector<uint8_t> b(v.size() * sizeof(T));
+    std::memcpy(b.data(), v.data(), b.size());
+    return b;
+}
+
 }  // namespace
 
 int main() {
@@ -359,6 +486,136 @@ int main() {
         if (bad0) return 1;
     }
 
+    // ---- expert_stripes_gguf / expert_down_gguf: 3-D [in, n, experts] sources
+    {
+        const unsigned hid = 512, ff = 256, E = 3;
+        const unsigned ns = ff / 128, ncol = hid / 256;
+        Blocks up = make_blocks(ff * E, hid, "Q4_1", rng);      // dims [hid, ff, E]
+        Blocks gate = make_blocks(ff * E, hid, "Q4_1", rng);
+        Blocks down = make_blocks(hid * E, ff, "Q4_1", rng);    // dims [ff, hid, E]
+        GgufFile gm(write_gguf_tensors(dir, "test-moe.gguf",
+            {{"blk.0.ffn_up_exps.weight", {hid, ff, E}, 3, up.bytes},
+             {"blk.0.ffn_gate_exps.weight", {hid, ff, E}, 3, gate.bytes},
+             {"blk.0.ffn_down_exps.weight", {ff, hid, E}, 3, down.bytes}}));
+
+        // the container's MoE names (model.layer.{l}., not the dense model.layers.{l}.)
+        // must resolve to llama.cpp's *_exps / *_shexp tensors
+        if (GgufFile::gguf_name("model.layer.0.mlp.up_exps_proj.weight") != "blk.0.ffn_up_exps.weight" ||
+            GgufFile::gguf_name("model.layer.0.mlp.share_down_exps_proj.weight") != "blk.0.ffn_down_shexp.weight" ||
+            GgufFile::gguf_name("model.layer.0.moe_router.weight") != "blk.0.ffn_gate_inp.weight" ||
+            GgufFile::gguf_name("model.layer.0.shared_expert_gate.weight") != "blk.0.ffn_gate_inp_shexp.weight") {
+            std::printf("FAIL MoE name map\n");
+            return 1;
+        }
+
+        const size_t stripe = static_cast<size_t>(128) * hid / 8192 * 5120;
+        const size_t B = static_cast<size_t>(hid) * ff / 8192 * 5120;
+        PackOp es;
+        es.op = "expert_stripes_gguf";
+        es.up = "model.layer.0.mlp.up_exps_proj.weight";
+        es.gate = "model.layer.0.mlp.gate_exps_proj.weight";
+        es.in_dim = hid;
+        es.experts = E;
+        es.stripes = ns;
+        es.stripe_bytes = stripe;
+        std::vector<uint8_t> sp(E * 2 * ns * stripe, 0);
+        pools::apply(es, gm, 0, sp.data(), sp.size(), 5120);
+        size_t bads = 0;
+        for (unsigned e = 0; e < E; ++e)
+            for (unsigned k = 0; k < ns; ++k) {
+                const uint8_t* ud = sp.data() + (2 * ns * e + 2 * k) * stripe;
+                const uint8_t* gd = ud + stripe;
+                for (size_t c = 0; c < stripe / 5120; ++c) {
+                    const size_t tp = ncol * (c % 4) + c / 4;
+                    const size_t row0 = e * ff + k * 128 + 32 * (tp / ncol);
+                    const size_t col0 = 256 * (tp % ncol);
+                    for (size_t r = 0; r < 32; ++r)
+                        for (size_t kk = 0; kk < 256; ++kk) {
+                            const size_t row = row0 + r, col = col0 + kk;
+                            if (f32_bits(pool_q4_1_value(ud + c * 5120, r, kk)) !=
+                                f32_bits(source_q4_1_value(up, row, col))) ++bads;
+                            if (f32_bits(pool_q4_1_value(gd + c * 5120, r, kk)) !=
+                                f32_bits(source_q4_1_value(gate, row, col))) ++bads;
+                        }
+                }
+            }
+        std::printf("%s expert_stripes_gguf (%zu values differ)\n", bads ? "FAIL" : "ok", bads);
+        if (bads) return 1;
+
+        PackOp ed;
+        ed.op = "expert_down_gguf";
+        ed.tensor = "model.layer.0.mlp.down_exps_proj.weight";
+        ed.experts = E;
+        ed.expert_bytes = B;
+        std::vector<uint8_t> dp(E * B, 0);
+        pools::apply(ed, gm, 0, dp.data(), dp.size(), 5120);
+        size_t badd = 0;
+        const size_t nchd = B / 5120;
+        for (unsigned e = 0; e < E; ++e)
+            for (size_t c = 0; c < nchd; ++c) {
+                const size_t rt = 4 * (c / 8) + (c % 4), cg = (c / 4) % 2;
+                const size_t fc = 2 * rt + cg;
+                const size_t row0 = e * hid + 32 * fc;    // ncol == 1 (ff == 256)
+                for (size_t r = 0; r < 32; ++r)
+                    for (size_t kk = 0; kk < 256; ++kk)
+                        if (f32_bits(pool_q4_1_value(dp.data() + e * B + c * 5120, r, kk)) !=
+                            f32_bits(source_q4_1_value(down, row0 + r, kk))) ++badd;
+            }
+        std::printf("%s expert_down_gguf (%zu values differ)\n", badd ? "FAIL" : "ok", badd);
+        if (badd) return 1;
+    }
+
+    // ---- embed_row over a 3-D expert tensor: a flat row past the first expert
+    {
+        const unsigned cols = 256, n = 4, E = 2;
+        Blocks ex = make_blocks(n * E, cols, "Q8_0", rng);
+        GgufFile ge(write_gguf_tensors(dir, "test-exps.gguf",
+            {{"blk.0.ffn_up_exps.weight", {cols, n, E}, 8, ex.bytes}}));
+        std::vector<float> row(cols);
+        ge.embed_row("model.layer.0.mlp.up_exps_proj.weight", n + 2, cols, row.data());
+        size_t bad = 0;
+        for (unsigned i = 0; i < cols; ++i)
+            if (f32_bits(row[i]) != f32_bits(ex.values[(n + 2) * cols + i])) ++bad;
+        std::printf("%s embed_row 3-D expert (row past the first expert)\n", bad ? "FAIL" : "ok");
+        if (bad) return 1;
+    }
+
+    // ---- transpose from a GGUF f16 tensor (the MoE router): decode, don't reinterpret
+    {
+        const unsigned E = 4, hid = 64;
+        std::vector<uint8_t> f16(static_cast<size_t>(E) * hid * 2);
+        std::vector<float> vals(static_cast<size_t>(E) * hid);
+        for (size_t i = 0; i < vals.size(); ++i) {
+            const float v = -2.f + 4.f * static_cast<float>(rng() % 1000) / 1000.f;
+            const uint16_t h = f32_to_f16(v);    // truncating, so the decode is what we compare
+            std::memcpy(f16.data() + 2 * i, &h, 2);
+            vals[i] = fp16_to_f32(h);
+        }
+        GgufFile gr(write_gguf_tensors(dir, "test-router.gguf",
+            {{"blk.0.ffn_gate_inp.weight", {hid, E}, 1, f16}}));   // [E, hid] rows
+        PackOp rt;
+        rt.op = "transpose";
+        rt.tensor = "model.layer.0.moe_router.weight";
+        rt.rows = E;
+        rt.cols = hid;
+        rt.elem = 2;
+        std::vector<uint8_t> out(static_cast<size_t>(E) * hid * 2, 0);
+        pools::apply(rt, gr, 0, out.data(), out.size(), 5120);
+        bool bad = false;
+        for (unsigned r = 0; r < E && !bad; ++r)
+            for (unsigned c = 0; c < hid && !bad; ++c) {
+                uint16_t got;
+                std::memcpy(&got, out.data() + 2 * (c * E + r), 2);
+                if (f32_bits(bf16_to_f32(got)) !=
+                    f32_bits(bf16_to_f32(f32_to_bf16(vals[r * hid + c])))) {
+                    std::printf("FAIL transpose f16 router [%u,%u]\n", r, c);
+                    bad = true;
+                }
+            }
+        std::printf("%s transpose GGUF f16 (router)\n", bad ? "FAIL" : "ok");
+        if (bad) return 1;
+    }
+
     // ---- pack_norm: f32 -> bf16 (RNE)
     {
         std::vector<uint8_t> nb(norm.size() * 2);
@@ -375,6 +632,78 @@ int main() {
             }
         }
         std::printf("ok    pack_norm f32 -> bf16 (RNE)\n");
+    }
+
+    // ---- lmhead_q8 from a raw GGUF Q8_0 head: 128-row bands, K tiles, then four 32-row
+    // quarters; each fp16 scale widened exactly and rounded to bf16, codes copied. The second
+    // pass gives every block a subnormal scale (exponent 0, mantissa 1..1023), which a pure
+    // Q8_0 head quantized from BF16 has wherever a block's amax < 127 * 2^-14.
+    {
+        const Blocks head = make_blocks(256, 512, "Q8_0", rng);
+        Blocks sub = head;
+        for (size_t b = 0; b < sub.bytes.size() / 34; ++b) {
+            const uint16_t h = static_cast<uint16_t>(1 + (b * 37) % 0x3FF);
+            std::memcpy(sub.bytes.data() + b * 34, &h, 2);
+        }
+        PackOp h;
+        h.op = "lmhead_q8";
+        h.tensor = "model.embed_tokens.weight";
+        h.in_dim = 512;
+        h.chunk_bytes = 8704;
+        for (const auto& [label, src] : {std::pair<const char*, const Blocks*>{"normal", &head},
+                                         std::pair<const char*, const Blocks*>{"subnormal", &sub}}) {
+            GgufFile q8(write_gguf_tensors(dir, std::string("test-q8-head-") + label + ".gguf",
+                                           {{"token_embd.weight", {512, 256}, 8, src->bytes}}));
+            std::vector<uint8_t> hp(16 * 8704, 0);
+            pools::apply(h, q8, 0, hp.data(), hp.size(), 6144);
+            size_t bad_scale = 0, bad_code = 0;
+            for (size_t band = 0; band < 2; ++band)
+                for (size_t kt = 0; kt < 2; ++kt)
+                    for (size_t quarter = 0; quarter < 4; ++quarter)
+                        for (size_t row = 0; row < 32; ++row)
+                            for (size_t kb = 0; kb < 8; ++kb) {
+                                const size_t logical = band * 128 + quarter * 32 + row;
+                                const uint8_t* raw = src->bytes.data() + (logical * 16 + kt * 8 + kb) * 34;
+                                uint16_t half;
+                                std::memcpy(&half, raw, 2);
+                                const float value = fp16_to_f32(half);
+                                uint32_t bits;
+                                std::memcpy(&bits, &value, 4);
+                                const uint16_t want = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+                                const uint8_t* chunk = hp.data() + ((band * 2 + kt) * 4 + quarter) * 8704;
+                                uint16_t got;
+                                std::memcpy(&got, chunk + 2 * (kb * 32 + row), 2);
+                                bad_scale += got != want;
+                                for (size_t k = 0; k < 32; ++k) {
+                                    const size_t off = (row / 16) * 4096 + kb * 512 + k * 16 + row % 16;
+                                    bad_code += chunk[512 + off] != raw[2 + k];
+                                }
+                            }
+            std::printf("%s lmhead_q8 GGUF Q8_0, %s fp16 scales (%zu scales, %zu codes differ)\n",
+                        bad_scale || bad_code ? "FAIL" : "ok   ", label, bad_scale, bad_code);
+            if (bad_scale || bad_code) return 1;
+        }
+    }
+
+    // ---- pack_norm with div_running's product (Gemma 4's layer_output_scale). The same case,
+    // and the same expected bits, as test_gemma4.py's test_put_div_running_matches_pools_cpp.
+    {
+        const std::vector<uint16_t> norm16 = {0x3F80, 0x3FC0, 0xC030, 0x3DCD, 0x4049, 0x3F81};
+        const std::vector<uint16_t> want = {0x4099, 0x40E5, 0xC152, 0x3EF4, 0x4170, 0x409A};
+        MemFile mf;
+        mf.t["norm"] = bytes_of(norm16);
+        mf.t["scale.0"] = bytes_of(std::vector<uint16_t>{0x3F33});   // bf16
+        mf.t["scale.1"] = bytes_of(std::vector<float>{0.3f});         // f32
+        double div = 1.0;
+        for (int j = 0; j < 2; ++j) div *= pools::scalar_value(mf, "scale." + std::to_string(j));
+        std::vector<uint16_t> got(norm16.size());
+        pools::pack_norm(mf, "norm", got.size() * 2, reinterpret_cast<uint8_t*>(got.data()), div);
+        if (got != want) {
+            for (size_t i = 0; i < got.size(); ++i)
+                std::printf("FAIL pack_norm div[%zu]: got %04x want %04x\n", i, got[i], want[i]);
+            return 1;
+        }
+        std::printf("ok    pack_norm divided by the running scale product\n");
     }
 
     // ---- embed_row (Q8_0, bit-exact)

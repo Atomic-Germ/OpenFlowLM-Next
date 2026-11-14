@@ -36,6 +36,7 @@ import hashlib
 import inspect
 import json
 import sys
+import functools
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -44,8 +45,13 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+# The pipeline's own modules live in open_kernels/. In a source checkout that is
+# <repo>/open_kernels (two levels up from utilities/dit-chain); in an INSTALLED tree the
+# converter sits at share/oflm/dit-chain and the modules at share/oflm/open_kernels (one
+# level up). parents[2] alone resolved to share/ once installed, which is why a fresh RPM
+# failed with "No module named 'klein_pipeline'".
+ROOT = next(c for c in (HERE.parent, HERE.parents[1]) if (c / "open_kernels").is_dir())
 sys.path.insert(0, str(ROOT / "open_kernels"))
 sys.path.insert(0, str(ROOT / "open_kernels" / "harness"))
 sys.path.insert(0, str(HERE))
@@ -60,8 +66,12 @@ def model_dir() -> Path:
                               "--FLUX.2-klein-4B/snapshots/*"))[0])
 
 
-def _pack_one(sub: str, name: str, cache: str, ckpt: str) -> tuple[str, float]:
+def _pack_one(sub: str, name: str, cache: str, ckpt: str, family: str | None = None) -> tuple[str, float]:
     t0 = time.time()
+    # A pool worker is a fresh interpreter: klein_pipeline starts at its DEFAULT shape, so a
+    # 9B pack would build 4B-shaped specs and fail the shape assert. Activate the family here.
+    if family and family in kp.SHAPES:
+        kp.set_shape(kp.SHAPES[family])
     specs = kp.dit_weight_specs() if sub == "transformer" else kp.te_weight_specs()
     K, N, build = specs[name]
     st = SafeTensors(Path(ckpt) / sub)
@@ -90,9 +100,13 @@ def pack_fingerprint(ckpt: Path) -> str:
     return h.hexdigest()
 
 
-def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None) -> dict[str, tuple[Path, int]]:
+def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None,
+                  only: tuple[str, ...] = ("transformer", "text_encoder"),
+                  family: str | None = None) -> dict[str, tuple[Path, int]]:
     """{name: (file, bytes)} for every DiT and text-encoder GEMM weight, packing the missing.
-    ckpt: the checkpoint directory (default: the HF cache's snapshot)."""
+    ckpt: the checkpoint directory (default: the HF cache's snapshot).
+    only: which halves to pack -- a bundle whose DiT came from a GGUF packs the text
+    encoder here and the DiT elsewhere (export_bundle._pack_dit_from_gguf)."""
     ckpt = ckpt or model_dir()
     cache.mkdir(parents=True, exist_ok=True)
     stamp, fp = cache / "provenance.txt", pack_fingerprint(ckpt)
@@ -101,15 +115,18 @@ def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None) -> dict[str,
         for p in cache.glob("*.bin"):
             p.unlink()
     stamp.write_text(fp + "\n")
-    want = {n: ("transformer", K * N * 9 // 8) for n, (K, N, _) in kp.dit_weight_specs().items()}
-    want |= {n: ("text_encoder", K * N * 9 // 8) for n, (K, N, _) in kp.te_weight_specs().items()}
+    want = {}
+    if "transformer" in only:
+        want |= {n: ("transformer", K * N * 9 // 8) for n, (K, N, _) in kp.dit_weight_specs().items()}
+    if "text_encoder" in only:
+        want |= {n: ("text_encoder", K * N * 9 // 8) for n, (K, N, _) in kp.te_weight_specs().items()}
     todo = [n for n, (_, nb) in want.items()
             if not (cache / f"{n}.bin").exists() or (cache / f"{n}.bin").stat().st_size != nb]
     if todo:
         print(f"packing {len(todo)} weights -> {cache} ({jobs} processes)", flush=True)
         t0 = time.time()
         with ProcessPoolExecutor(jobs) as ex:
-            for i, (n, s) in enumerate(ex.map(_pack_one, [want[n][0] for n in todo], todo,
+            for i, (n, s) in enumerate(ex.map(functools.partial(_pack_one, family=family), [want[n][0] for n in todo], todo,
                                               [str(cache)] * len(todo), [str(ckpt)] * len(todo))):
                 if i % 20 == 0 or i == len(todo) - 1:
                     print(f"  [{i + 1}/{len(todo)}] {n} {s:.1f} s", flush=True)

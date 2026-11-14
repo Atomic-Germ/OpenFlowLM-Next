@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <functional>
 #include <limits>
 #include <map>
@@ -23,6 +24,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
 #endif
 
 #include "xrt/experimental/xrt_ext.h"
@@ -174,9 +177,35 @@ nlohmann::json derive_config(const GgufFile& g) {
         c["vocab_size"] = u("vocab_size");
     else
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
+    // A per-layer value is an ARRAY in the metadata (Gemma 4's head_count_kv is 8 on sliding
+    // layers, 1 on full ones) and reads back as ""; it has no single value to derive, so it is
+    // left to config.json, and check_model refuses by name if nothing supplies it.
+    auto scalar = [&](const char* key, const std::string& k) {
+        if (g.kv_has(arch + "." + k) && !g.kv_str(arch + "." + k).empty()) c[key] = u(k);
+    };
     c["num_attention_heads"] = u("attention.head_count");
     c["num_key_value_heads"] = u("attention.head_count_kv");
-    c["intermediate_size"] = u("feed_forward_length");
+    // A dense arch has feed_forward_length; a MoE has expert_feed_forward_length and no
+    // dense FFN at all. Requiring the dense key refused Qwen3.6-35B-A3B at load ("no
+    // metadata key qwen35moe.feed_forward_length") although the install was complete.
+    // The open engine reads the FFN width from the manifest's `moe` block, so this is
+    // informational: fill it from the expert width when that is what the file has.
+    if (g.kv_has(arch + ".feed_forward_length"))
+        c["intermediate_size"] = u("feed_forward_length");
+    else if (g.kv_has(arch + ".expert_feed_forward_length"))
+        c["intermediate_size"] = u("expert_feed_forward_length");
+    // The MoE block's geometry, for a GGUF with no config.json at all (the hub's config
+    // is merged over this and wins where it has the key). `full_attention_interval` is
+    // what check_model derives `layer_types` from when the file has no such list.
+    if (g.kv_has(arch + ".expert_count") && u("expert_count") > 0) {
+        c["num_experts"] = u("expert_count");
+        c["num_experts_per_tok"] = u("expert_used_count");
+        c["moe_intermediate_size"] = u("expert_feed_forward_length");
+    }
+    if (g.kv_has(arch + ".full_attention_interval"))
+        c["full_attention_interval"] = u("full_attention_interval");
+    if (g.kv_has(arch + ".ssm.time_step_rank"))
+        c["linear_num_value_heads"] = u("ssm.time_step_rank");
     if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
@@ -251,6 +280,126 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
                                  "(manifest.json has no gguf section; re-export the kernels)");
+    // ---- a GGUF runs on the q4_1 twin by DEFAULT.
+    //
+    // The GGUF-direct design gave each set an f32-scale twin so a GGUF's weights
+    // could be packed with their block scales widened EXACTLY to f32. Measured on
+    // the NPU, that twin is not reliable: with weights that pack byte-identically
+    // to a container's chunks (verified: 0/5120 bytes differ for gemma3-4b's
+    // layer-0 q_proj, consts 0/24576), the f32 twin turns layer 0 into all-NaN for
+    // gemma3-4b and Nanbeige, while the q4_1 twin reproduces the container's own
+    // per-layer numbers to ~4 significant figures. qwen3 and llama3.2 work on
+    // either. The q4_1 twin is also what every shipped q4nx container runs, so a
+    // GGUF on it is numerically the same model those containers serve.
+    //
+    // OFLM_GGUF_POOL_F32=1 opts back into the f32 twin -- the probe that isolates
+    // the f32-scale chunk handling from everything else. The two sections' pack ops
+    // pair one to one (same tensors, same chunk counts -- only the byte offsets move
+    // with the law), so each op takes the base section's geometry under the GGUF
+    // packing kind, and the base section's chunk / pool / lx / ax: the packed slots
+    // land where the q4_1 designs read them.
+    const bool want_f32 = [] { const char* f = std::getenv("OFLM_GGUF_POOL_F32"); return f && *f && *f != '0'; }();
+    // The section must ALWAYS be merged for a GGUF, even though it now names the same
+    // chunk law and kernels as the base: its pack ops are the GGUF-reading ones
+    // (`std_perm_gguf`), and the base's are the container's (`std_perm`). An earlier
+    // shortcut here compared chunk_bytes and skipped the merge when they matched --
+    // which is exactly the case since the section moved to the q4_1 law -- so a GGUF
+    // model then packed through `std_perm` and died with "lm_head.weight is not in a
+    // q4nx container".
+    if (gguf_ && w_ && !want_f32) {
+        Manifest& m = *man_.gguf;
+        const Manifest& b = man_;
+        auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
+                        const std::string& lt) {
+            if (go.size() != bo.size())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt +
+                                         ": the sections' pack ops do not pair (" +
+                                         std::to_string(go.size()) + " vs " + std::to_string(bo.size()) + ")");
+            for (size_t i = 0; i < go.size(); ++i) {
+                if (go[i].tensor != bo[i].tensor)
+                    throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " op " + std::to_string(i) +
+                                             ": tensors differ (" + go[i].tensor + " vs " + bo[i].tensor + ")");
+                // Only the projection pairs move: the base's std_perm becomes the
+                // GGUF-reading kind under the base's geometry. The ops whose kind
+                // is NOT a chunk law question (put, conv, lm head...) stay exactly
+                // as the GGUF section has them -- they work there today.
+                if (bo[i].op != "std_perm" || go[i].op != "std_perm_gguf") continue;
+                go[i].nch = bo[i].nch;
+                go[i].in_dim = bo[i].in_dim;
+                go[i].chunk0 = bo[i].chunk0;
+                go[i].dst = bo[i].dst;
+                go[i].split.clear();
+                go[i].via.clear();
+            }
+        };
+        for (auto& [lt, g] : m.layer_types) {
+            const auto it = b.layer_types.find(lt);
+            if (it == b.layer_types.end())
+                throw std::runtime_error("OFLM_GGUF_POOL_Q41: layer type " + lt + " is not in the base section");
+            const LayerType& bl = it->second;
+            merge(g.pool, bl.pool, lt);
+            merge(g.consts, bl.consts, lt);
+            g.consts_bytes = bl.consts_bytes;
+            g.act_bytes = bl.act_bytes;
+            g.state_kind = bl.state_kind;
+            g.state_bytes = bl.state_bytes;
+            g.state_row = bl.state_row;
+            g.program = bl.program;                  // the base builds' step
+            g.gemm_block = GemmBlockProgram{};       // the q4nx prefill route stays off for a GGUF
+        }
+        m.chunk_bytes = b.chunk_bytes;
+        m.pool_bytes = b.pool_bytes;
+        // the decode builds: name lx / ax through the base section's kernels;
+        // the head (lm) and the norm (ln) stay the GGUF section's f32 ones
+        // the kernels to swap are whatever the LAYER programs name -- derived,
+        // not a list: the steps' kernels pair one to one across the sections,
+        // and anything else (the tail's norm and head, the prefill GEMM route
+        // this section does not have) stays what the GGUF section names. When a
+        // name exists in both sections and its context differs, it drives the
+        // pool slot law, so it takes the base section's build.
+        std::set<std::string> swap_names;
+        for (const auto& name_step : m.layer_types)
+            for (const auto& s : name_step.second.program)
+                swap_names.insert(s.kernel);
+        for (const std::string& n : swap_names) {
+            const auto kt = m.kernels.find(n);
+            if (kt == m.kernels.end()) continue;
+            const auto bt = b.kernels.find(n);
+            if (bt == b.kernels.end()) continue;
+            m.contexts[bt->second.context] = b.contexts.at(bt->second.context);
+            kt->second = bt->second;             // the base's context and instruction stream
+        }
+        // ---- the HEAD is part of the law too. It stays "lm" in the kernels map but
+        // the two sections name different BUILDS there (lm_head_q4_f32 vs lm_head_q4),
+        // and its pack op carries the chunk geometry -- so swap the build, the op's
+        // geometry and the pool size, or the bisect runs a q4_1-packed head through
+        // the f32 kernel and every answer is garbage for a reason that is not the
+        // layer path. The globals come along: `lmpool` is the head pool's offset, so
+        // it (and everything after it) moves with the law.
+        {
+            const auto kg = m.kernels.find("lm");
+            const auto kb = b.kernels.find("lm");
+            if (kg != m.kernels.end() && kb != b.kernels.end()) {
+                m.contexts[kb->second.context] = b.contexts.at(kb->second.context);
+                kg->second = kb->second;
+            }
+            if (m.lmhead_ops.size() == b.lmhead_ops.size()) {
+                for (size_t i = 0; i < m.lmhead_ops.size(); ++i) {
+                    m.lmhead_ops[i].nch = b.lmhead_ops[i].nch;
+                    m.lmhead_ops[i].in_dim = b.lmhead_ops[i].in_dim;
+                    m.lmhead_ops[i].chunk0 = b.lmhead_ops[i].chunk0;
+                    m.lmhead_ops[i].dst = b.lmhead_ops[i].dst;
+                }
+            }
+            m.lmhead_pool_bytes = b.lmhead_pool_bytes;
+            m.lmhead_chunk_bytes = b.lmhead_chunk_bytes;
+            m.globals = b.globals;
+        }
+        merged_q41_ = true;
+        log("GGUF weights on the q4_1 twin (chunk " +
+            std::to_string(m.chunk_bytes) + ", pool " + std::to_string(m.pool_bytes >> 20) + " MB) "
+            "; OFLM_GGUF_POOL_F32=1 runs the f32-scale twin instead");
+    }
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
     // there); anything GGUF does not carry is refused with its name.
@@ -262,6 +411,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        // A MULTIMODAL config wraps the text tower: hidden_size, layer_types,
+        // full_attention_interval ... live under `text_config` (gemma4_unified, Qwen3.8's
+        // wrapper) and the top level carries the vision keys. The checks below are
+        // top-level, and the GGUF's derived metadata fills only what it has (it has no
+        // layer_types), so an empero-ai/Qwen3.8-4B install failed with "config.json lacks
+        // 'layer_types'" although the tower's config had it all along. Lift the tower's
+        // keys where the top level has none; the wrapper stays intact.
+        for (const char* wrapper : {"text_config", "llm_config", "language_config"}) {
+            auto it = j.find(wrapper);
+            if (it == j.end() || !it->is_object()) continue;
+            for (auto& [key, value] : it->items())
+                if (!j.contains(key)) j[key] = value;
+            break;
+        }
         if (gguf_) {
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())
@@ -273,7 +436,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
-    w_->check_model(j, md.filename().string());
+    // A GGUF's config.json is the hub's (if the repo had one) or derived from the
+    // file: its general.architecture is the authority on which model this is, not a
+    // model_type string, so that one key is not compared for a GGUF.
+    w_->check_model(j, md.filename().string(), /*model_type=*/!gguf_);
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
@@ -500,6 +666,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_READ_FENCE")) g_read_fence = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_STEP_TRACE")) step_trace_ = std::atoi(env);
+    if (const char* env = std::getenv("OFLM_OPEN_LAYER_NAN")) layer_nan_ = std::atoi(env) != 0;
     if (const char* env = std::getenv("OFLM_OPEN_SPIN_US")) spin_us_ = std::atoi(env);
     if (const char* env = std::getenv("OFLM_OPEN_RUN_REUSE")) run_reuse_ = std::atoi(env) != 0;
     // OPEN-DECODE-PIPELINE. Level 1 keeps the next layer's first dispatch in flight behind
@@ -796,7 +963,12 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.moe2 = stream_patch::moe2_table(k.words, name, g);
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
-        k.geom = w_->attn;
+        // Gemma 4's two layer types have different attention geometry; patch each kernel with its own rows.
+        stream_patch::AttnGeometry g = w_->attn;
+        g.kv_row = d.kv_row;
+        g.ptab_row = d.ptab_row;
+        k.attn = stream_patch::attn_table(k.words, name, g);
+        k.geom = g;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
         k.geom.kvslice = d.kvslice;
@@ -810,8 +982,52 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     }
 }
 
+Core::HostArena::~HostArena() {
+#ifndef _WIN32
+    if (p) ::munmap(p, n);
+#endif
+}
+
+Core::HostArena& Core::HostArena::operator=(HostArena&& o) noexcept {
+    if (this == &o) return *this;
+#ifndef _WIN32
+    if (p) ::munmap(p, n);
+#endif
+    p = o.p;
+    n = o.n;
+    o.p = nullptr;
+    o.n = 0;
+    return *this;
+}
+
+xrt::bo Core::device_bo(size_t bytes) {
+    const size_t n = padup(bytes);
+#ifndef _WIN32
+    // The BOs xrt::ext::bo(dev, size) creates are shmem-backed. A 35B's 40 x 512 MB
+    // expert pools exhaust that heap while the box still has 24 GB free -- the
+    // driver's mmap then fails with ENOMEM inside drm_gem_shmem_mmap, which reads
+    // as "cannot allocate memory" at the 40th layer. Ordinary process memory
+    // registered as a userptr BO is not on the shmem heap, and the NPU reads it
+    // through the same HMM path; the pages are pinned, so nothing is copied.
+    if (n >= (1u << 20)) {
+        void* p = ::mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (p == MAP_FAILED)
+            throw std::runtime_error("open_qwen36: cannot reserve " + std::to_string(n >> 20) +
+                                     " MB of host memory for a device buffer");
+        host_arenas_.emplace_back(p, n);
+        try {
+            return xrt::ext::bo(*dev_, p, n);
+        } catch (...) {
+            host_arenas_.pop_back();
+            throw;
+        }
+    }
+#endif
+    return xrt::ext::bo(*dev_, n);
+}
+
 xrt::bo Core::alloc(size_t bytes, const uint8_t* init, size_t init_bytes) {
-    xrt::bo bo = xrt::ext::bo(*dev_, padup(bytes));
+    xrt::bo bo = device_bo(bytes);
     auto* m = bo.map<uint8_t*>();
     std::memset(m, 0, padup(bytes));
     if (init) std::memcpy(m, init, init_bytes);
@@ -823,6 +1039,8 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     auto t0 = std::chrono::steady_clock::now();
     pools_.clear(); consts_.clear(); act_.clear(); state_.clear(); globals_.clear();
     gemm_w_.clear(); hc_.clear();
+    lora_.clear(); lora_none_ = xrt::bo();
+    host_arenas_.clear();   // the BOs above are gone; the pages they pinned can go
     ln_w_bf16_.clear(); post_ln_w_bf16_.clear(); pre_ffn_w_.clear(); post_ffn_w_.clear();
     pools_.reserve(nl_); consts_.reserve(nl_); act_.reserve(nl_); state_.reserve(nl_);
     if (gemm_block_t_) {
@@ -844,7 +1062,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             if (from == "pack") {
                 size_t bytes = 0;
 for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::op_bytes(o, w_->chunk_bytes));
-                xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
+                xrt::bo w = device_bo(bytes);
                 std::memset(w.map<uint8_t*>(), 0, padup(bytes));
                 for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, w_->chunk_bytes);
                 w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
@@ -860,7 +1078,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                                              " are not contiguous -- the route needs one memcpy per weight buffer");
                 total += bytes;
             }
-            xrt::bo w = xrt::ext::bo(*dev_, padup(total));
+            xrt::bo w = device_bo(total);
             std::memcpy(w.map<uint8_t*>(), host + off0, total);
             w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             v[l] = std::move(w);
@@ -868,16 +1086,30 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
     };
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
-        xrt::bo pool = xrt::ext::bo(*dev_, w_->pool_bytes);
+        xrt::bo pool = device_bo(w_->pool_bytes);
         uint8_t* pool_host = pool.map<uint8_t*>();
         pools::pack_pool(*w_, lt, *file_, l, pool_host);
+        // Bring-up probe (OFLM_OPEN_DUMP_POOLS=<dir>): layer 0's packed pool, so it can
+        // be diffed byte-for-byte against a container's chunks for the same model. The
+        // packer agrees with its NumPy reference; this is the other end of that check --
+        // the bytes the KERNELS actually read.
+        if (const char* dp = std::getenv("OFLM_OPEN_DUMP_POOLS"); dp && *dp && l == 0) {
+            const std::string tag = gguf_ ? (merged_q41_ ? "q41" : "f32") : "q4nx";
+            std::ofstream f(std::filesystem::path(dp) / (tag + "_pool0.bin"), std::ios::binary);
+            f.write(reinterpret_cast<const char*>(pool_host), static_cast<std::streamsize>(w_->pool_bytes));
+        }
         build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
-        xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
+        xrt::bo c = device_bo(lt.consts_bytes);
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(*w_, lt, *file_, l, c_host);
+        if (const char* dp = std::getenv("OFLM_OPEN_DUMP_POOLS"); dp && *dp && l == 0) {
+            const std::string tag = gguf_ ? (merged_q41_ ? "q41" : "f32") : "q4nx";
+            std::ofstream f(std::filesystem::path(dp) / (tag + "_consts0.bin"), std::ios::binary);
+            f.write(reinterpret_cast<const char*>(c_host), static_cast<std::streamsize>(lt.consts_bytes));
+        }
         build_weights(lt, l, "consts", c_host);
         build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
@@ -920,7 +1152,12 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 HostConsts& h = hc_[l];
                 auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
                 if (!qf)
-                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
+                    // Not necessarily MoE: this branch is every layer kind the dense one above
+                    // does not cover, and a HYBRID family's twin lands here too (Qwen3.5's
+                    // linear-attention layers, OFLM_GGUF_POOL_F32). Naming the kind is the
+                    // difference between a fixable report and a wrong one.
+                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for the '" +
+                                             gb.kind + "' layer kind (only the dense one is)");
                 auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)
@@ -967,7 +1204,22 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": alpha and beta disagree on lanes");
                     h.A = file_->f32(const_tensor(lt, "ssm_a", l));
                     h.dtb = file_->f32(const_tensor(lt, "ssm_dt.bias", l));
-                    h.convw = bf("ssm_conv1d.weight");
+                    // A GGUF stores ssm_conv1d as [channels, taps] (channels-major); the host conv expects
+                    // [taps, channels] (taps-major), which the container stores natively. Transpose here so
+                    // the GGUF path matches the container path's convw layout.
+                    {
+                        std::vector<float> raw = bf("ssm_conv1d.weight");
+                        const size_t taps = gb.conv_kernel, channels = gb.qkv_dim;
+                        if (gguf_) {
+                            std::vector<float> t(taps * channels);
+                            for (size_t c = 0; c < channels; ++c)
+                                for (size_t tp = 0; tp < taps; ++tp)
+                                    t[tp * channels + c] = raw[c * taps + tp];
+                            h.convw = std::move(t);
+                        } else {
+                            h.convw = std::move(raw);
+                        }
+                    }
                     h.nw = bf("ssm_norm.weight");
                     want(h.Wb, w_->hidden * h.lanes, "ssm_beta_proj");
                     want(h.A, gb.value_heads, "ssm_a");
@@ -997,6 +1249,12 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
             if (kd.kvslice) kv_slack = std::max<uint64_t>(kv_slack, kd.kvslice - 1);
         }
         state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
+        // Release the file pages this layer just read. A 35B's expert tensors are ~450 MB a
+        // layer; keeping all 40 layers' pages resident alongside 40 x 512 MB of pool BOs
+        // (which XRT maps locked) is what took a 21.8 GB GGUF over a 46 GB box's memory and
+        // got the loader OOM-killed. Every layer reads a disjoint range, so dropping here
+        // costs nothing -- the pages are never touched again.
+        file_->drop_pages();
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
@@ -1006,7 +1264,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
     // computed, everything else zero (xres, zero, xresf, hn, logits)
     for (const auto& [name, bytes] : w_->globals) {
         if (name == "lmpool") {
-            xrt::bo lm = xrt::ext::bo(*dev_, bytes);
+            xrt::bo lm = device_bo(bytes);
             pools::pack_lmhead(*w_, *file_, lm.map<uint8_t*>());
             lm.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             globals_[name] = std::move(lm);
@@ -1094,7 +1352,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 noise_high_ = static_cast<size_t>(v);
             }
             for (int l = 0; l < nl_; ++l) {
-                xrt::bo b = xrt::ext::bo(*dev_, man_.rows.lora_pool_bytes);
+                xrt::bo b = device_bo(man_.rows.lora_pool_bytes);
                 std::memset(b.map<uint8_t*>(), 0, man_.rows.lora_pool_bytes);
                 for (const PackOp& o : man_.rows.lora_pack)
                     pools::apply(o, uno, l, b.map<uint8_t*>(), man_.rows.lora_pool_bytes, w_->chunk_bytes);
@@ -2162,6 +2420,31 @@ void Core::write_record(size_t row, const double pos[3]) {
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
 }
 
+void Core::layer_nan_check(xrt::bo& xres, int layer) {
+    xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+    const float* x = xres.map<float*>();
+    int nnan = 0;
+    float mx = 0.f;
+    for (size_t i = 0; i < w_->hidden; ++i) {
+        if (!std::isfinite(x[i])) ++nnan;
+        else mx = std::max(mx, std::fabs(x[i]));
+    }
+    char detail[24] = "";
+    if (nnan == 0 && mx < 1.f) std::snprintf(detail, sizeof detail, " (small)");
+    log("layer " + std::to_string(layer) + " (" + types_[layer]->name + ") xres nan=" +
+        std::to_string(nnan) + " maxabs=" + std::to_string(mx) + detail);
+    // bring-up (OFLM_OPEN_LAYER_DUMP=<prefix>): also write the layer's xres row
+    // as raw f32 hidden floats, one file per (step, layer) — the step index is
+    // the dump sequence, so the first prompt token's layer 0 is _0_l0 etc.
+    if (const char* pfx = std::getenv("OFLM_OPEN_LAYER_DUMP")) {
+        char path[512];
+        std::snprintf(path, sizeof path, "%s_%zu_l%d.bin", pfx, dump_seq_++, layer);
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(x), w_->hidden * 4);
+        f.close();
+    }
+}
+
 void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                      const float* deepstack, int n_deepstack) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
@@ -2253,7 +2536,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !deepstack;
+    const bool pipe = submit_ahead_ > 0 && !layer_nan_ && !deepstack;
     // OFLM_OPEN_PROFILE: one row per layer of this token, for at most OFLM_OPEN_PROFILE_STEPS
     // steps. A prompt is stepped and a decode loop is stepped, and the second is thousands of
     // records long, so the budget is what keeps a profile of a request's first tokens small
@@ -2292,6 +2575,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
+            if (layer_nan_) layer_nan_check(xres, l);
             profile_layer(types_[l]->name.c_str(), l);
             continue;
         }
@@ -2406,6 +2690,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         xrt::bo& lg = buffer("logits", 0);
         read_back(lg, w_->vocab * 4, 0);
         std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+        softcap_logits();
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
@@ -2686,7 +2971,17 @@ void Core::tail_logits(const float* row) {
     xrt::bo& lg = buffer("logits", 0);
     read_back(lg, w_->vocab * 4, 0);
     std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+    softcap_logits();
     timing_.lmhead_ms = ms_since(t1);
+}
+
+// Gemma 4's final_logit_softcapping: c * tanh(z / c), on the host, on the real logits. Monotone,
+// so a greedy argmax is the same with or without it; sampling at temperature is not.
+void Core::softcap_logits() {
+    const double c = w_->final_logit_softcapping;
+    if (c <= 0.0) return;
+    const float cf = static_cast<float>(c), inv = static_cast<float>(1.0 / c);
+    for (float& z : logits_host_) z = cf * std::tanh(z * inv);
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
@@ -2849,7 +3144,10 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
         }
 
     // Phase A (per token, disjoint cache rows): rope q into Q, rope k and round
-    // it into the bf16 cache row, round v likewise. Padding tokens are computed
+    // it into the bf16 cache row, round v likewise. The manifest's pairing law:
+    // half-split pairs (i, i + half) by default; an interleaved family
+    // (rope_pairing "interleaved" -- llama.cpp's NORM layout) pairs (2i, 2i + 1).
+    // Padding tokens are computed
     // too -- the NPU path dispatches them as well, and real columns never read
     // rows behind them, so the real outputs do not depend on the padding.
 #pragma omp parallel for
@@ -2861,19 +3159,23 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
             for (size_t i = 0; i < half; ++i) {
                 const double a = static_cast<double>(p) * inv_freq[i];
                 const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-                const float x1 = qh[i], x2 = qh[i + half];
-                qh[i] = x1 * c - x2 * s;
-                qh[i + half] = x2 * c + x1 * s;
+                const size_t b1 = w_->rope_interleaved ? 2 * i : i;
+                const size_t b2 = w_->rope_interleaved ? b1 + 1 : i + half;
+                const float x1 = qh[b1], x2 = qh[b2];
+                qh[b1] = x1 * c - x2 * s;
+                qh[b2] = x2 * c + x1 * s;
             }
         }
         for (size_t h = 0; h < kvh; ++h)
             for (size_t i = 0; i < half; ++i) {
                 const double a = static_cast<double>(p) * inv_freq[i];
                 const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
-                const float x1 = y_qkv3[(qw + h * hd + i) * T + tk];
-                const float x2 = y_qkv3[(qw + h * hd + i + half) * T + tk];
-                K[p * kvw + h * hd + i] = x1 * c - x2 * s;
-                K[p * kvw + h * hd + i + half] = x2 * c + x1 * s;
+                const size_t b1 = w_->rope_interleaved ? 2 * i : i;
+                const size_t b2 = w_->rope_interleaved ? b1 + 1 : i + half;
+                const float x1 = y_qkv3[(qw + h * hd + b1) * T + tk];
+                const float x2 = y_qkv3[(qw + h * hd + b2) * T + tk];
+                K[p * kvw + h * hd + b1] = x1 * c - x2 * s;
+                K[p * kvw + h * hd + b2] = x2 * c + x1 * s;
             }
         for (size_t j = 0; j < kvw; ++j) {
             const float vj = y_qkv3[(qw + kvw + j) * T + tk];
@@ -2955,7 +3257,8 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     timing_.state_ms += ms_since(tt);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
-    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
+    g.pos0 = pos0; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
+    g.kv_pair = w_->attn_kv_pair;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
     host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
@@ -4384,7 +4687,8 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
+    g.pos0 = pos0; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
+    g.kv_pair = w_->attn_kv_pair;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
     if (attn_block_on_ && gb.attn_block.present() && !g.kv_pair) {
@@ -4776,7 +5080,7 @@ void Core::layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, s
     auto geom = [&](size_t b) {
         host::AttnGeom g;
         g.T = T; g.t_real = std::min(T, N - b * T); g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-        g.pos0 = pos0 + b * T; g.eps = gb.eps;
+        g.pos0 = pos0 + b * T; g.eps = gb.eps; g.rope_il = w_->rope_interleaved;
         return g;
     };
     // each block's attention window is explicit, so later blocks' K / V rows in the map change nothing

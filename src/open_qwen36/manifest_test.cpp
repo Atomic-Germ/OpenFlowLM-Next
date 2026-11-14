@@ -849,6 +849,22 @@ int main(int argc, char** argv) {
                   g.kernels.at("dxB").context == g.kernels.at("dxB_local").context,
                   "gemma3: dxB / dxB_local share a stream and context, own windows");
             check(g.contexts.size() == 5, "gemma3: kernels (dx/ln/lm plus the route's dxa and gemm)");
+            {
+                // The vocabulary is a PACKING fact, not geometry: the head is compiled for
+                // the set's 262208 padded rows and the pack zero-fills the rest, so the
+                // same model's GGUF (llama.cpp writes its own 262144) must load -- and a
+                // head wider than the set's rows must not.
+                json ok = matching_config(g);
+                g.check_model(ok, "gemma3");
+                json narrow = ok;
+                narrow["vocab_size"] = 262144;
+                g.check_model(narrow, "gemma3");
+                check(true, "gemma3: a head narrower than the set's padded rows is accepted");
+                json wide = ok;
+                wide["vocab_size"] = 262272;
+                refused(g, wide, "wider than the kernel set's head",
+                        "gemma3: a head wider than the set's rows is refused");
+            }
             refused_manifest(argv[3], "not the attention-only", "gemma3: an attn_kernel sharing dx's stream (dx_local) is refused",
                              [](json& j) { j["layer_types"]["dense_local"]["gemm_block"]["attn_kernel"] = "dx_local"; });
             uint64_t s0, n0, s1, n1;
@@ -1148,20 +1164,20 @@ int main(int argc, char** argv) {
             check(!why.empty() && why.find("'" + f.family + "'") != std::string::npos,
                   "host attention: " + f.family + " is refused by name");
             if (f.family == "qwen3") {
-                // Manifest owns its optional alternate route with unique_ptr.
-                // Reload independent fixtures rather than copying that ownership.
-                auto k2_fixture = [&]() {
-                    Manifest k = Manifest::load(argv[i]);
-                    k.family = "k2";
-                    return k;
+                // Manifest is move-only since #180 (its gguf view): each case
+                // re-derives its own K2 base from the file instead of copying.
+                auto fresh_k = [&] {
+                    Manifest m = Manifest::load(argv[i]);
+                    m.family = "k2";
+                    return m;
                 };
-                Manifest k = k2_fixture();
+                Manifest k = fresh_k();
                 check(k.host_attention_refusal().empty(), "host attention: K2's shape (qwen3_4b's geometry, family k2) is accepted");
-                Manifest half = k2_fixture();
+                Manifest half = fresh_k();
                 half.rotary_dim = half.rotary_dim / 2;
                 check(half.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with a partial rotation is refused on geometry");
-                Manifest odd = k2_fixture();
+                Manifest odd = fresh_k();
                 const size_t hd = odd.hf_config_check["head_dim"].get<size_t>() - 1;
                 odd.hf_config_check["head_dim"] = hd;
                 odd.rotary_dim = hd;
@@ -1172,7 +1188,7 @@ int main(int argc, char** argv) {
                 }
                 check(odd.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest with an odd head_dim is refused on geometry");
-                Manifest wide = k2_fixture();
+                Manifest wide = fresh_k();
                 wide.layer_types.begin()->second.gemm_block.qw += 1;
                 check(wide.host_attention_refusal().find("geometry") != std::string::npos,
                       "host attention: a K2 manifest whose layer qw disagrees with heads * head_dim is refused");

@@ -1,4 +1,4 @@
-﻿/// \file deepseek.cpp
+/// \file deepseek.cpp
 /// \brief deepseek class
 /// \author OpenFlowLM Team
 /// \date 2025-09-01
@@ -17,26 +17,25 @@ void Qwen3::load_model(std::string model_path, json model_info, int default_cont
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when installed for this model, the closed
-    // qwen3_npu DLL otherwise (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // lm_config->get<std::string>("model_type", "") == qwen3
-        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Qwen3 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_QWEN3_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_QWEN3_ENGINE=closed requested, but this build ships no closed Qwen3 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
 
     this->enable_think = (model_info["size"] == 600000000)? false : true;
-    this->enable_tool = (model_info["size"] > 1700000000)? true : false;
+    this->enable_tool = true;
 
     sampler_config config;
     config.top_k = 40;
@@ -320,20 +319,18 @@ void Qwen3_IT::load_model(std::string model_path, json model_info, int default_c
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // Qwen3 dense, same as Qwen3: the open kernels when installed for this
-    // model, the closed qwen3_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3-IT");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // lm_config->get<std::string>("model_type", "") == qwen3
-        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Qwen3 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_QWEN3_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_QWEN3_ENGINE=closed requested, but this build ships no closed Qwen3 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -477,20 +474,18 @@ void Qwen3_TK::load_model(std::string model_path, json model_info, int default_c
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // Qwen3 dense, same as Qwen3: the open kernels when installed for this
-    // model, the closed qwen3_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3-TK");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // lm_config->get<std::string>("model_type", "") == qwen3
-        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Qwen3 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_QWEN3_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_QWEN3_ENGINE=closed requested, but this build ships no closed Qwen3 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -705,20 +700,18 @@ void DeepSeek_r1_0528_8b::load_model(std::string model_path, json model_info, in
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // A Qwen3 dense distill, so the same choice as Qwen3: the open kernels when
-    // installed for this model, the closed qwen3_npu DLL otherwise
-    // (AutoModel::_shared_select_open_engine).
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN3_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "DeepSeek-R1-0528");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
     else {
-        this->q4nx = std::make_unique<Q4NX>(this->model_path);
-        // model_type == llama
-        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-        this->lm_engine->load_weights(*this->q4nx);
-        //free the q4nx
-        this->q4nx.reset();
+        // The closed Qwen3 engine is removed from this build entirely
+        // (the open kernels are the only engine). This branch fires only when
+        // OFLM_OFLM_QWEN3_ENGINE was set to 'closed', and names the one remaining remedy.
+        throw std::runtime_error(
+            "OFLM_QWEN3_ENGINE=closed requested, but this build ships no closed Qwen3 engine; the open kernels are the only engine -- install them with `oflm add`");
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -747,6 +740,8 @@ std::string DeepSeek_r1_0528_8b::apply_chat_template(nlohmann::ordered_json& mes
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -759,7 +754,7 @@ bool DeepSeek_r1_0528_8b::insert(chat_meta_info_t& meta_info, lm_uniform_input_t
         return false;
     }
     if (!input.messages.empty()) { // already a formated messages, usually from REST API
-        templated_text = this->apply_chat_template(input.messages);
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;

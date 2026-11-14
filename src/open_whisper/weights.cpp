@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "nlohmann/json.hpp"
+#include "gguf/gguf_file.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
 namespace ow {
@@ -156,6 +157,157 @@ Weights::Weights(const std::string &model_dir, int64_t tile_k, int64_t tile_n,
 
   xkv_B = load_tiled(f, "dec.xkv.B", D, 2 * NDEC * D, tile_k, tile_n, mac_s, mac_t);
   xkv_bias = load_f32(f, "dec.xkv.bias", {static_cast<size_t>(2 * NDEC * D)});
+}
+
+namespace {
+
+// ggml stores a matmul weight [in, out] with `in` fastest; GgufFile::f32_all()
+// returns it as HF-natural row-major [out, in]. The encoder's B operand is
+// W^T = [in, out], so transpose; the host decoder keeps [out, in] as-is.
+std::vector<float> transpose_2d(const std::vector<float>& flat, int64_t rows, int64_t cols) {
+  if (static_cast<int64_t>(flat.size()) != rows * cols)
+    throw std::runtime_error("whisper gguf: expected " + std::to_string(rows * cols) +
+                             " values, got " + std::to_string(flat.size()));
+  std::vector<float> out(static_cast<size_t>(rows * cols));
+  for (int64_t r = 0; r < rows; ++r)
+    for (int64_t c = 0; c < cols; ++c)
+      out[static_cast<size_t>(c * rows + r)] = flat[static_cast<size_t>(r * cols + c)];
+  return out;
+}
+
+// The conv stem: ggml [kernel=3, C_in, C_out] (kernel fastest) -> the
+// container's im2col operand [3*C_in, C_out] with K tap-major
+// (K = tap * C_in + channel), exactly conv_b() in q4nx-build/open_whisper.py.
+std::vector<float> conv_operand(const std::vector<float>& flat, int64_t C_in, int64_t C_out) {
+  std::vector<float> out(static_cast<size_t>(3 * C_in * C_out));
+  for (int64_t o = 0; o < C_out; ++o)
+    for (int64_t c = 0; c < C_in; ++c)
+      for (int64_t k = 0; k < 3; ++k)
+        out[static_cast<size_t>((k * C_in + c) * C_out + o)] =
+            flat[static_cast<size_t>(k + 3 * c + 3 * C_in * o)];
+  return out;
+}
+
+// One [IN, OUT] tileable B operand from a gguf matmul weight.
+std::vector<float> matmul_B(const open_qwen36::GgufFile& gf, const std::string& name,
+                            int64_t IN, int64_t OUT) {
+  return transpose_2d(gf.f32_all(name), OUT, IN);
+}
+
+// qkv / xkv: `names` matrices of [IN, OUT] B operands concatenated along OUT.
+std::vector<float> fused_B(const open_qwen36::GgufFile& gf, const std::vector<std::string>& names,
+                           int64_t IN, int64_t OUT) {
+  const int64_t N = OUT * static_cast<int64_t>(names.size());
+  std::vector<float> out(static_cast<size_t>(IN * N));
+  int64_t col = 0;
+  for (const auto& n : names) {
+    const std::vector<float> t = matmul_B(gf, n, IN, OUT);
+    for (int64_t r = 0; r < IN; ++r)
+      for (int64_t c = 0; c < OUT; ++c)
+        out[static_cast<size_t>(r * N + col + c)] = t[static_cast<size_t>(r * OUT + c)];
+    col += OUT;
+  }
+  return out;
+}
+
+// A fused bias: `names` give the non-zero halves; the rest are zeros. Each entry
+// is [OUT] and the result is [names.size() * OUT]. `zeros` marks a name that is
+// an implicit all-zero vector (qkv's k third, xkv's k half).
+std::vector<float> fused_bias(const open_qwen36::GgufFile& gf,
+                              const std::vector<std::pair<std::string, bool>>& names,
+                              int64_t OUT) {
+  std::vector<float> out(static_cast<size_t>(OUT * names.size()), 0.0f);
+  int64_t col = 0;
+  for (const auto& [n, is_zero] : names) {
+    if (!is_zero) {
+      const std::vector<float> b = gf.f32_all(n);
+      if (static_cast<int64_t>(b.size()) != OUT)
+        throw std::runtime_error("whisper gguf: bias '" + n + "' is " +
+                                 std::to_string(b.size()) + ", expected " + std::to_string(OUT));
+      for (int64_t i = 0; i < OUT; ++i) out[static_cast<size_t>(col + i)] = b[static_cast<size_t>(i)];
+    }
+    col += OUT;
+  }
+  return out;
+}
+
+int64_t gguf_dim(const open_qwen36::GgufFile& gf, const char* key) {
+  if (!gf.kv_has(key))
+    throw std::runtime_error(std::string("whisper GGUF: missing metadata '") + key + "'");
+  return static_cast<int64_t>(gf.kv_u64(key));
+}
+
+}  // namespace
+
+Weights Weights::from_gguf(const open_qwen36::GgufFile& gf, int64_t tile_k, int64_t tile_n,
+                           int64_t mac_s, int64_t mac_t) {
+  // Geometry from the GGUF's own metadata -- refuse anything but
+  // whisper-large-v3-turbo's shape, the only one the kernel set serves.
+  auto eq = [&](const char* key, int64_t want) {
+    const int64_t got = gguf_dim(gf, key);
+    if (got != want)
+      throw std::runtime_error(std::string("whisper GGUF: '") + key + "' is " +
+                               std::to_string(got) + ", this engine only implements " +
+                               std::to_string(want));
+  };
+  eq("stt.whisper.encoder.d_model", Geometry::d_model);
+  eq("stt.whisper.encoder.n_layers", Geometry::n_enc);
+  eq("stt.whisper.encoder.n_heads", Geometry::n_heads);
+  eq("stt.whisper.encoder.ffn_dim", Geometry::ffn);
+  eq("stt.whisper.encoder.num_mel_bins", Geometry::n_mel);
+  eq("stt.whisper.decoder.d_model", Geometry::d_model);
+  eq("stt.whisper.decoder.n_layers", Geometry::n_dec);
+
+  Weights w(tile_k, tile_n, mac_s, mac_t);
+  const int64_t D = Geometry::d_model, FFN = Geometry::ffn;
+  const int64_t NDEC = Geometry::n_dec;
+
+  auto tile = [&](const std::vector<float>& B, int64_t K, int64_t N) {
+    return tile_b(B.data(), K, N, tile_k, tile_n, mac_s, mac_t);
+  };
+
+  w.conv1_B = tile(conv_operand(gf.f32_all("enc.conv.0.weight"), Geometry::n_mel, D),
+                   3 * Geometry::n_mel, D);
+  w.conv1_bias = gf.f32_all("enc.conv.0.bias");
+  w.conv2_B = tile(conv_operand(gf.f32_all("enc.conv.1.weight"), D, D), 3 * D, D);
+  w.conv2_bias = gf.f32_all("enc.conv.1.bias");
+  w.pos = gf.f32_all("enc.pos_emb.weight");          // ggml [d, pos] -> [pos, d] already
+  w.ln_w = gf.f32_all("enc.final_norm.weight");
+  w.ln_b = gf.f32_all("enc.final_norm.bias");
+
+  w.layers.resize(static_cast<size_t>(Geometry::n_enc));
+  for (int64_t i = 0; i < Geometry::n_enc; ++i) {
+    auto& L = w.layers[static_cast<size_t>(i)];
+    const std::string p = "enc.blocks." + std::to_string(i) + ".";
+    L.qkv_B = tile(fused_B(gf, {p + "attn.q.weight", p + "attn.k.weight", p + "attn.v.weight"},
+                           D, D),
+                   D, 3 * D);
+    L.qkv_bias = fused_bias(gf, {{p + "attn.q.bias", false}, {"", true}, {p + "attn.v.bias", false}}, D);
+    L.o_B = tile(matmul_B(gf, p + "attn.out.weight", D, D), D, D);
+    L.o_bias = gf.f32_all(p + "attn.out.bias");
+    L.fc1_B = tile(matmul_B(gf, p + "ffn.fc1.weight", D, FFN), D, FFN);
+    L.fc1_bias = gf.f32_all(p + "ffn.fc1.bias");
+    L.fc2_B = tile(matmul_B(gf, p + "ffn.fc2.weight", FFN, D), FFN, D);
+    L.fc2_bias = gf.f32_all(p + "ffn.fc2.bias");
+    L.ln1_w = gf.f32_all(p + "norm_attn.weight");
+    L.ln1_b = gf.f32_all(p + "norm_attn.bias");
+    L.ln2_w = gf.f32_all(p + "norm_ffn.weight");
+    L.ln2_b = gf.f32_all(p + "norm_ffn.bias");
+  }
+
+  std::vector<std::string> xnames;
+  std::vector<std::pair<std::string, bool>> xbias;
+  for (int64_t l = 0; l < NDEC; ++l) {
+    const std::string p = "dec.blocks." + std::to_string(l) + ".";
+    xnames.push_back(p + "cross_attn.k.weight");
+    xnames.push_back(p + "cross_attn.v.weight");
+    xbias.emplace_back("", true);
+    xbias.emplace_back(p + "cross_attn.v.bias", false);
+  }
+  w.xkv_B = tile(fused_B(gf, xnames, D, D), D, 2 * NDEC * D);
+  w.xkv_bias = fused_bias(gf, xbias, D);
+
+  return w;
 }
 
 }  // namespace ow

@@ -7,20 +7,85 @@
 
 ## OpenFlowLM -- open NPU kernels for Ryzen™ AI
 
-A community fork of [FastFlowLM](https://github.com/ROCm/FastFlowLM) that
-replaces the closed NPU kernels with open ones, built from source in this
-repository.
+The open, NPU-first runtime for **AMD Ryzen™ AI** (XDNA2: Strix, Strix Halo,
+Kraken and Gorgon Point) -- the open replacement for FastFlowLM, built from
+source in this repository.
 
 📦 **The only out-of-box, NPU-first runtime built exclusively for Ryzen™ AI.**  
 🤝 **A familiar single-command CLI -- deeply optimized for NPUs.**  
 ✨ **From Idle Silicon to Instant Power -- OpenFlowLM Makes Ryzen™ AI Shine.**
 
-> OpenFlowLM (OFLM) supports all Ryzen™ AI Series chips with XDNA2 NPUs (Strix, Strix Halo, Kraken, and Gorgon Point).
-Run LLMs, embedding models and MoE models on **AMD Ryzen™ AI NPUs** -- no GPU
-required.
+Run language models, embedding models, MoE models, speech-to-text and
+**diffusion** on **AMD Ryzen™ AI NPUs** -- no GPU required. Any model from
+Hugging Face in a compatible format can be installed with one command and run
+with one command:
+
+```
+oflm add mradermacher/gemma-4-12B-it-i1-GGUF
+oflm run gemma-4-it:12b
+```
 
 > Supports Ryzen™ AI chips with XDNA2 NPUs (Strix, Strix Halo, Kraken and
 > Gorgon Point).
+
+---
+
+## Why this exists
+
+[FastFlowLM](https://github.com/ROCm/FastFlowLM) began as open source. AMD then
+acquired it, and everything AIE went closed -- the NPU kernels, the `.xclbin`
+binaries, and the `model.q4nx` container were stripped from the repository.
+What remained was a runtime whose own issues thread documents why that was a
+problem:
+
+- [#246 — Adding own models](https://github.com/ROCm/FastFlowLM/issues/246):
+  a user asked for a way to install their own GGUF model, and AMD's answer was
+  *kernels are model-specific; we offer a paid conversion service.* The thread
+  and the model-request issues are full of people blocked on exactly that.
+- [#828 — Status of the official gguf → q4nx conversion tool announced in
+  v0.9.26](https://github.com/ROCm/FastFlowLM/issues/828): FastFlowLM announced
+  the tool in January 2026, never shipped it, and pointed a paying user at a
+  closed-source environment instead.
+- [#219 — Fine-tuned model support?](https://github.com/ROCm/FastFlowLM/issues/219):
+  a user asks for LoRA fine-tunes on the NPU; no supported answer existed.
+- [#690 — Let the open source community support you](https://github.com/ROCm/FastFlowLM/issues/690):
+  the direct plea to stop, and the history of how it broke. This repo is the
+  answer to it (and [#712](https://github.com/ROCm/FastFlowLM/issues/712) shows
+  a model running on the open kernels after the closed path hit a 42-layer
+  dispatch wall).
+- [#502 — Support for coder model](https://github.com/ROCm/FastFlowLM/issues/502)
+  shows how the model-support gap played out: users were handed closed
+  alternatives one request at a time, per model.
+
+This project is the other path: kernels that are **not** model-specific, a
+container anybody can inspect, and no paid conversion step. The interesting
+findings along the way:
+
+- **`model.q4nx` is a rearranged Q4_1**, not a new format -- worked out by
+  reading the file, and that's what
+  [`q4nx-build`](https://github.com/Atomic-Germ/q4nx-build) is built on.
+- **Kernels are architecture-specific, not model-specific** -- a shared recipe
+  derives a schedule from the model's own geometry, which is what
+  [`utilities/oflm-add`](utilities/oflm-add) builds on (one tuned recipe per
+  family, one installed kernel set per geometry).
+- **Any compatible model from Hugging Face can run.** `oflm add <repo>` picks
+  the right quant, derives the family and geometry from the file itself, links
+  a kernel set, and writes the tag. No allow-list, no container conversion,
+  no manual steps.
+
+The goal is the boringly simple one: `oflm add user/repo` → `oflm run tag`,
+the way llama.cpp works, except on the NPU -- with diffusion (FLUX.2 klein),
+speech-to-text (Whisper), embeddings and chat all living in the same tool.
+
+OpenFlowLM is built and maintained by the community — primarily
+[Atomic-Germ](https://github.com/Atomic-Germ) (this fork and the `oflm add`
+toolchain), with major contributions from
+[vegah](https://github.com/vegah) (the openGranite and Gemma 4 kernels, and
+the GGUF-direct work) and [Cyronius](https://github.com/Cyronius) (kernel
+review and fixes across the board). If you are the FastFlowLM maintainer and
+want to land this work back upstream, the invite stands — it is
+[the outcome
+this fork was made for](https://github.com/ROCm/FastFlowLM/issues/690).
 
 ---
 
@@ -28,19 +93,28 @@ required.
 
 - **Open kernels.** `open_kernels/` holds the AIE designs the engine
   dispatches -- source, not pre-compiled binaries. Ten model families run on a
-  shared recipe that works each model's shape out of its own `config.json`:
+  shared recipe that works each model's shape out of its own geometry:
   Qwen3.6-MoE, Qwen3.5, Qwen3, Qwen2.5, Llama 3, Gemma 3, Phi-3/4, LFM2,
-  HunYuan and Granite.
-- **A second embedding backend.** Six encoder models beyond the one upstream
-  ships, through [`src/open_npue/`](src/open_npue/).
-- **GGUF and Q4_K containers**, so models are not confined to one weight format.
+  HunYuan and Granite. Gemma 4's 12B text decoder is here too.
+- **`oflm add` -- install any compatible model in one command.** The weights
+  are the authority: the tool derives the family and geometry from the file
+  itself (header, not filename), links a kernel set built for that geometry,
+  writes the tag, and gets out of the way. No allow-list, no paid conversion
+  step, no lockfile.
+- **GGUF-direct.** A plain GGUF repository works out of the box -- quant
+  picked for compatibility first (`Q4_1`), others converted on the way in.
+- **More than chat.** Speech-to-text (Whisper), embeddings and reranking
+  (six BERT-family encoders through [`src/open_npue/`](src/open_npue/)), and
+  FLUX.2 klein diffusion -- all in the same runtime and CLI, not bolt-ons.
+- **No `model_list.json` requirement.** The shipped list is a display offer;
+  it is not a gate. `oflm add` installs per the geometry the model declares,
+  and anything else the upstream tool can't describe stays refused by name.
 - **Built from source.** Use CMake presets for building; see
   [docs/BUILD.md](docs/BUILD.md).
 
-Not every model runs on open kernels. Vision, audio and the Gemma 4, GPT-OSS
-and Whisper families have no open design yet and dispatch to the closed engine
-binaries. See [the support-status matrix](docs/docs/models/index.md) for exactly
-what is open today.
+Not every model runs on open kernels -- see
+[the support-status matrix](docs/docs/models/index.md) for exactly what is open
+today.
 
 ---
 
@@ -56,13 +130,16 @@ what is open today.
 2. **Build it** -- [docs/BUILD.md](docs/BUILD.md). The build system handles
     both the executable and kernel exports via CMake presets.
 
-3. **Run it:**
+3. **Install and run any compatible model:**
 
    ```powershell
-   oflm run llama3.2:1b
+   oflm add mradermacher/gemma-4-12B-it-i1-GGUF   # or any fine-tune on the hub
+   oflm run gemma-it:12b
    ```
 
-   or serve an OpenAI-compatible API:
+   `oflm add` points the tag at a kernel set for the model's own geometry —
+   no conversion, no registration with anyone else's list. Or serve an
+   OpenAI-compatible API:
 
    ```powershell
    oflm serve

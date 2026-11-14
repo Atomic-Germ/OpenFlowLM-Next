@@ -1,5 +1,9 @@
 # NPU Offload Pipeline Skill
 
+> **Current path:** use `open-kernel-pipeline` and `open-kernel-families`.
+> This file is the historical EmbeddingGemma bring-up and toolchain record;
+> its manual steps are not the way to add a model or a size.
+
 **Purpose**: Reusable workflow for offloading dense GEMM operations from transformer models to AMD NPU2 via mlir-aie/iron, with validated CPU reference comparison.
 
 ---

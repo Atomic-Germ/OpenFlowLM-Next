@@ -822,38 +822,56 @@ before the `flm` -> `oflm` rename keeps working. `OFLM_OPEN_KERNELS_DIR` is the
 exception: the open engine reads it with plain `getenv`, so
 `FLM_OPEN_KERNELS_DIR` does nothing.
 
-### 📦 Add a Converted Model (`oflm add`)
+### 📦 Add a Model (`oflm add`)
 
-Register a pre-converted Q4NX model that is not in the shipped registry. This
-is the supported way to install a model you packed yourself with `q4nx-build`,
-or one published under a HuggingFace repo that is not yet in `model_list.json`:
+Install a model from a HuggingFace or ModelScope repo, a URL, a local
+directory, or a local GGUF file. The command reads the weights, derives the
+geometry, links a family kernel set, registers the tag, and the first run packs
+whatever container the engine needs. No manual conversion or manifest edit.
 
 ```shell
-oflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3
+oflm add Qwen/Qwen3.5-4B-GGUF
+oflm add mradermacher/Some-Model-i1-GGUF:Q4_K_M
+oflm add ./local-model.gguf
+oflm add <repo> --dry-run
 ```
+
+A GGUF install keeps the file's own geometry and tensor types: the header is
+the authority, not the repo name or `config.json`. Supported quants are Q4_1,
+Q4_0, Q6_K, Q8_0, Q5_K, Q4_K and IQ4; anything else is refused with the quant
+named. A repo that ships both a `.q4nx` and a GGUF installs the `.q4nx`.
+
+A fine-tune or derivative links its base model's kernels. If the size has never
+been built and `oflm` is running from a source checkout, `oflm add` writes the
+spec and builds the kernel set itself; an installed package reports the size as
+one the release should ship.
 
 | flag | meaning |
 |---|---|
-| `--tag NAME` | local tag to register under (e.g. `mymodel:3b`) |
-| `--family NAME` | kernel family to link the xclbins from (required unless `--xclbin-dir` is given) |
-| `--config FILE` | a `model_list.json` entry to use verbatim instead of generating one |
-| `--models-root DIR` | install into this model store instead of the default |
-| `--xclbin-dir DIR` | take the xclbins from here instead of resolving by family |
-| `--xclbin-from REF` | source the family xclbins from another local model |
-| `--system-list` | also register the tag in the system `model_list.json` |
-| `--modelscope` | pull weights from ModelScope instead of HuggingFace |
-| `--open-kernels DIR` | point the tag at a locally exported open-kernel set |
-| `--no-xclbin` | register the weights without any xclbins |
-| `--no-verify` | skip the post-install verification pass |
+| `--tag NAME` / `--name NAME` | local tag (default: derived from the repo and the model's own numbers) |
+| `--family NAME` | override the family when the content names nothing; not normally needed |
+| `--dry-run` | print the plan, change nothing |
+| `--text-only` | GGUF installs only: do not fetch the vision projector |
+| `--mmproj REPO` | take the vision projector from another repo |
+| `--open-kernels DIR` | point at a locally exported open-kernel set |
+| `--xclbin-from REF` | link a named set's xclbins |
+| `--xclbin-dir DIR` | take the xclbins from here |
+| `--no-xclbin` | install the weights without linking kernels |
+| `--config FILE` | the `settings.json` to update |
+| `--models-root DIR` | install into another model store |
+| `--modelscope` | pull from ModelScope instead of HuggingFace |
+| `--no-verify` | skip sha256 verification |
 | `--force` | overwrite an existing installation |
-| `--dry-run` | print what would happen, change nothing |
+| `--quiet` / `--verbose` | less output / show passed-over GGUF candidates |
 
-Every shape-identical model links to a **family** xclbin, so adding a new model
-of an existing shape needs no kernel work:
+The shipped `model_list.json` is a suggestion list for `oflm list` and
+`oflm pull`; it is not a gate. `oflm add` records the tag in
+`settings.json`, and that is what `run`, `serve` and `list` read.
 
-```shell
-oflm add Someone/Nanbeige4.1-3B-finetune-OpenNPU2 --family nanbeige --tag nanbeige-ft:3b
-```
+Embedding models work the same way. An `NpuEmbeddings` GGUF (`bert` /
+`nomic-bert`) is staged into a checkpoint and packed to `.npue` on first load;
+`embed-gemma` reads the GGUF through the existing bf16 kernels. Nomic declares
+named task prompts, so pass `--prompt-name` when serving it.
 
 ### 🏷️ Print the Version
 

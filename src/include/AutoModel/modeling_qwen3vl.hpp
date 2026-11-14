@@ -33,6 +33,14 @@ private:
     
     int image_pre_resize = 0;
 
+    /// The image preprocessing constants (config.json vision_config), read at
+    /// load_model so preprocess_image is the same code on either engine, and so a
+    /// GGUF install's HF-shaped vision_config overrides the Qwen3-VL defaults.
+    struct {
+        unsigned patch = 16, merge = 2, spatial_merge = 2, shortest_edge = 65536, longest_edge = 16777216, temporal = 2;
+        float rescale = 0.00392156862745098f, mean = 0.5f, stdv = 0.5f;
+    } vision_;
+
     int debug_count= 0;
     void smart_resize(
     int height, int width,

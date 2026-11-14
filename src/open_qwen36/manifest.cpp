@@ -7,6 +7,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <set>
+#include <unordered_set>
 #include <stdexcept>
 #include <utility>
 
@@ -45,6 +46,8 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.nch = j.value("nch", 0ull);
     p.in_dim = j.value("in_dim", 0ull);
     p.chunk0 = j.value("chunk0", 0ull);
+    p.qgate_rows = j.value("qgate_rows", 0ull);
+    p.qgate_gate = j.value("qgate_gate", false);
     p.src_dim = j.value("src_dim", 0ull);
     p.rg = j.value("rg", 0ull);
     p.experts = j.value("experts", 0ull);
@@ -61,11 +64,25 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.dst_rows = j.value("dst_rows", 0ull);
     p.split = j.value("split", "");
     p.via = j.value("via", "");
+    p.fold = j.value("fold", 1.0);
+    if (p.fold != 1.0 && p.op != "std_perm_gguf")
+        fail(where, p.op + " " + p.tensor + ": fold is a std_perm_gguf field (the GGUF packer applies it)");
+    if (!(p.fold > 0.0) || !std::isfinite(p.fold))
+        fail(where, p.op + " " + p.tensor + ": fold must be a positive, finite scale");
     p.row0 = j.value("row0", 0ull);
     p.n_total = j.value("n_total", 0ull);
     p.glu = j.value("glu", "");
     if (!p.glu.empty() && (p.op != "bfp16_gemm" || (p.glu != "gate" && p.glu != "up")))
         fail(where, p.op + " " + p.tensor + ": glu must be gate or up, on a bfp16_gemm");
+    p.div_running = j.value("div_running", "");
+    // Gemma 4's layer_output_scale fold: the engine carries the residual divided by the
+    // running product of this scalar (see recipes/gemma4.py's comment on the fold). It is
+    // only legal on a put of a post-norm: the fold divides the weights so later readers
+    // see the unscaled numbers; any other op would get a silently different arithmetic.
+    // The {j} placeholder makes the per-layer semantics explicit: layer j of this model
+    // divides by the product of s_0..s_{layer-1}, computed at pack time.
+    if (!p.div_running.empty() && (p.op != "put" || p.div_running.find("{j}") == std::string::npos))
+        fail(where, p.op + " " + p.tensor + ": div_running names a per-layer {j} tensor, on a put");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
@@ -77,11 +94,12 @@ PackOp parse_op(const json& j, const std::string& where) {
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_gemm" ||
-        p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "conv_transpose" ||
+        p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "expert_down_gguf" ||
+        p.op == "conv_transpose" ||
         p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
-    } else if (p.op == "expert_stripes") {
-        if (p.up.empty() || p.gate.empty()) fail(where, "expert_stripes without up / gate");
+    } else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf") {
+        if (p.up.empty() || p.gate.empty()) fail(where, p.op + " without up / gate");
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
@@ -91,8 +109,10 @@ PackOp parse_op(const json& j, const std::string& where) {
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
         need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
-    else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
-    else if (p.op == "expert_down") need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
+    else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf")
+        need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
+    else if (p.op == "expert_down" || p.op == "expert_down_gguf")
+        need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
     else if (p.op == "put") need_all({{"cap", p.cap}});
     else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}, {"in_dim", p.in_dim}});
     else if (p.op == "conv_transpose") need_all({{"taps", p.taps}, {"groups", p.groups}, {"width", p.width}});
@@ -192,7 +212,16 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.rope_theta = get<double>(lay, "rope_theta", lw);
     m.rope_inv_freq = get<std::vector<double>>(lay, "rope_inv_freq", lw);
     if (m.rope_inv_freq.size() != m.rotary_dim / 2) fail(lw, "rope_inv_freq has " + std::to_string(m.rope_inv_freq.size()) + " values, the rotary dim wants " + std::to_string(m.rotary_dim / 2));
+    // The pairing law the cos / sin table does not carry (it is pair-ordered either way).
+    // Absent on manifests written before llama-family GGUF-direct: half-split (Qwen / neox).
+    const std::string pairing = lay.value("rope_pairing", std::string("half-split"));
+    if (pairing != "half-split" && pairing != "interleaved")
+        fail(lw, "rope_pairing " + pairing + " is neither half-split nor interleaved");
+    m.rope_interleaved = pairing == "interleaved";
     m.rout_idx_off = lay.value("rout_idx_off", 1024ull);
+    m.final_logit_softcapping = lay.value("final_logit_softcapping", 0.0);
+    if (m.final_logit_softcapping < 0.0 || !std::isfinite(m.final_logit_softcapping))
+        fail(lw, "final_logit_softcapping must be finite and non-negative");
     m.has_moe = lay.contains("moe");
     // Declared by a recipe whose block loop has been measured correct on this very set
     // (Phase 28: the Qwen3.8-27B recipe). Absent is read as "not declared", which keeps
@@ -241,6 +270,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         d.rb = v.value("rb", 1ull);
+        d.kv_row = v.value("kv_row", static_cast<uint64_t>(m.kv_row));
+        d.ptab_row = v.value("ptab_row", static_cast<uint64_t>(m.ptab_row));
+        if (!d.kv_row || !d.ptab_row) fail(where, "kernel " + k + ": a zero kv_row / ptab_row");
         // attn_stepb*.cc build RB 2 and 4 only; any other count would pad the stream for
         // rows the kernel never takes, and the core waits on its fifo forever
         if (d.rb != 1 && d.rb != 2 && d.rb != 4)
@@ -755,14 +787,18 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             rg.inv_freq = v.value("inv_freq", m.rope_inv_freq);
             rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
-            if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            rg.rotary_dim = v.value("rotary_dim", static_cast<uint64_t>(m.rotary_dim));
+            if (rg.inv_freq.size() != rg.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            if (512 + 8 * (rg.rotary_dim / 2) > rg.per_row)
+                fail(where, "global " + k + ": " + std::to_string(rg.rotary_dim) + " rotated dims do not fit a " +
+                     std::to_string(rg.per_row) + "-byte record");
             const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
             if (has_long != has_switch)
                 fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
             if (has_long) {
                 rg.long_inv_freq = v["long_inv_freq"].get<std::vector<double>>();
                 rg.switch_row = v["switch_row"].get<uint64_t>();
-                if (rg.long_inv_freq.size() != m.rotary_dim / 2)
+                if (rg.long_inv_freq.size() != rg.rotary_dim / 2)
                     fail(where, "global " + k + ": long_inv_freq has " + std::to_string(rg.long_inv_freq.size()) + " values");
             }
             m.per_row_globals[k] = rg;
@@ -847,8 +883,16 @@ std::vector<std::string> Manifest::files() const {
     for (const auto& [k, v] : contexts) f.push_back(v);
     for (const auto& [k, v] : kernels) f.push_back(v.insts);
     if (gguf) {
+        // The GGUF view shares the builds with the main view (it only swaps the
+        // pack ops), so most of these are the same paths again. A file named
+        // twice is still one file; dedupe, keeping first-seen order.
         auto nested = gguf->files();
         f.insert(f.end(), nested.begin(), nested.end());
+        std::vector<std::string> seen;
+        std::unordered_set<std::string> have;
+        for (auto& s : f)
+            if (have.insert(s).second) seen.push_back(std::move(s));
+        return seen;
     }
     return f;
 }
@@ -877,34 +921,78 @@ std::string Manifest::host_attention_refusal() const {
     return "";
 }
 
-void Manifest::check_model(const json& config, const std::string& where) const {
+void Manifest::check_model(const json& config, const std::string& where, bool model_type) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
     auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };
+    // A VLM config nests the text tower's fields under "text_config" (Qwen3.5's
+    // published form: the model_type says qwen3_5, the tower says qwen3_5_text).
+    // The recipes read both forms, so the check does too: the field is looked up
+    // at the top level first, then in the text tower.
+    const json* text = (config.contains("text_config") && config["text_config"].is_object())
+                           ? &config["text_config"] : nullptr;
+    auto find = [&](const std::string& key) -> const json* {
+        if (config.contains(key)) return &config[key];
+        if (text && text->contains(key)) return &(*text)[key];
+        return nullptr;
+    };
     for (const auto& [key, want] : hf_config_check.items()) {
+        const json* got_ptr = find(key);
         if (key == "model_type") {
-            if (!config.contains(key)) lacks(key);
+            if (!model_type) continue;                 // a GGUF's arch is not a model_type
+            if (!got_ptr) lacks(key);
             bool ok = false;
-            for (const auto& t : want) ok |= (config[key] == t);
-            if (!ok) fail(where, "config.json model_type " + config[key].dump() + " is not one this kernel set serves (" + want.dump() + ")");
+            for (const auto& t : want) ok |= (*got_ptr == t);
+            if (!ok) fail(where, "config.json model_type " + got_ptr->dump() + " is not one this kernel set serves (" + want.dump() + ")");
         } else if (key == "layer_types") {
             std::vector<std::string> got;
-            if (config.contains("layer_types")) {
-                got = config["layer_types"].get<std::vector<std::string>>();
-            } else if (config.contains("full_attention_interval") && config.contains("num_hidden_layers")) {
-                int iv = config["full_attention_interval"].get<int>(), n = config["num_hidden_layers"].get<int>();
-                if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
-                for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+            if (got_ptr) {
+                got = got_ptr->get<std::vector<std::string>>();
             } else {
-                lacks("layer_types");
+                const json* iv_j = find("full_attention_interval");
+                const json* n_j = find("num_hidden_layers");
+                if (iv_j && n_j) {
+                    int iv = iv_j->get<int>(), n = n_j->get<int>();
+                    if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
+                    for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+                } else {
+                    lacks("layer_types");
+                }
             }
             if (got != want.get<std::vector<std::string>>())
                 fail(where, "config.json layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
+        } else if (key == "vocab_size") {
+            // The head kernel is COMPILED for the set's row count (its bands and their
+            // split), and the pack zero-fills the rows past the model's own
+            // (pools.cpp: "padded rows: zeroed scales/codes"). So a set built from a
+            // container whose vocabulary was padded serves a model whose head is
+            // narrower -- a GGUF of the same family, where llama.cpp writes the
+            // model's own token count (Gemma 3 4B: 262144 against the set's 262208).
+            // Wider is still a refusal: those rows are not in the kernels.
+            if (!got_ptr) lacks(key);
+            const size_t got = got_ptr->get<size_t>(), rows = want.get<size_t>();
+            if (got > rows)
+                fail(where, "config.json vocab_size " + std::to_string(got) +
+                                " is wider than the kernel set's head (" + std::to_string(rows) +
+                                " rows; the set cannot carry rows it was not built for)");
         } else {
             // an absent key means its default when the manifest names one (Phi-3's optional
             // fields); the comparison is the same either way, so the check stays two-way
-            const bool present = config.contains(key);
+            const bool present = got_ptr != nullptr;
             if (!present && !hf_config_defaults.contains(key)) lacks(key);
-            const json& got = present ? config[key] : hf_config_defaults[key];
+            const json& got = present ? *got_ptr : hf_config_defaults[key];
+            // A key whose value can legitimately be written two ways: Granite's
+            // attention_multiplier is folded into q_proj at conversion (a container
+            // says 1/sqrt(HD)) and NOT folded in a raw GGUF (it says the original).
+            // The kernel set serves both -- the plan folds the GGUF's weights at pack
+            // time -- so the check accepts any value the manifest lists.
+            if (want.is_array()) {
+                bool any = false;
+                for (const auto& w : want) any |= (got == w);
+                if (!any)
+                    fail(where, "config.json " + key + " = " + got.dump() +
+                                     " is none of the values this kernel set accepts (" + want.dump() + ")");
+                continue;
+            }
             if (got != want)
                 fail(where, "config.json " + key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
                                  ", the kernel set was built for " + want.dump());

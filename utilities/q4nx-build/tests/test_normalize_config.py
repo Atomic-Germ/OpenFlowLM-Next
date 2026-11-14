@@ -61,9 +61,16 @@ def test_invalid_container_or_geometry_leaves_config_untouched(tmp_path, bad):
 
 
 def test_cli_normalizes_without_starting_conversion(tmp_path, monkeypatch):
+    import q4nx
     from q4nx import cli
     fixture(tmp_path)
-    monkeypatch.setattr(cli, 'create_converter', lambda *a: pytest.fail('conversion started'))
+    # `create_converter` is a lazily-resolved *package* attribute (PEP 562 in
+    # q4nx/__init__.py), not a name on q4nx.cli; cli.main() brings it in with a
+    # local `from q4nx import create_converter`. Patch the package so that import
+    # picks up the stub. raising=False skips the getattr() that would otherwise
+    # pull in the whole converter stack (torch/gguf) just to run this test.
+    monkeypatch.setattr(q4nx, 'create_converter',
+                        lambda *a, **k: pytest.fail('conversion started'), raising=False)
     assert cli.main(['--normalize-config', '-i', str(tmp_path)]) == 0
     assert 'text_config' not in json.loads((tmp_path / 'config.json').read_text())
 

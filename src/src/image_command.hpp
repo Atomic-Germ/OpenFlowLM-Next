@@ -103,6 +103,12 @@ inline int run(const program_args_t& a, model_list& models, ModelDownloader& dow
             return 1;
         }
     }
+    // --steps: 0 means the bundle's own count. Anything else is checked by the engine, which
+    // knows what the bundle can derive (a 1-step bundle cannot be asked for 8).
+    if (a.image_steps < 0 || a.image_steps > 50) {
+        header_print("ERROR", "--steps must be 0 (the model's own count) or 1..50");
+        return 1;
+    }
     std::string out = a.image_out.empty() ? "oflm-" + std::to_string(seed) + ".png" : a.image_out;
     std::string format = open_diffusion::format_for_path(out);
     if (format.empty()) {
@@ -140,9 +146,10 @@ inline int run(const program_args_t& a, model_list& models, ModelDownloader& dow
     std::optional<open_diffusion::Engine> engine;
     if (edit) {
         engine.emplace(model_dir, kernels);
-        engine->select(size, 0, true);
+        engine->select(size, a.image_steps, true);
     } else {
-        engine.emplace(model_dir, kernels, size);    // the size known up front: see engine.hpp
+        engine.emplace(model_dir, kernels);          // the size known up front: see engine.hpp
+        engine->select(size, a.image_steps);
     }
     open_diffusion::Engine& eng = *engine;
     eng.set_tokens(open_diffusion::prompt_ids(tok, eng.prompt_template(), a.image_prompt, eng.max_tokens()));
@@ -171,7 +178,8 @@ inline int run(const program_args_t& a, model_list& models, ModelDownloader& dow
         std::snprintf(line, sizeof line, "%.1f s on the NPU (text %.2f, steps %.2f, vae %.2f)",
                       t.total_s, text, steps, vae);
     header_print("OFLM", "Wrote " + fs::absolute(out).string());
-    header_print("OFLM", "Seed " + std::to_string(seed));
+    header_print("OFLM", "Seed " + std::to_string(seed) + ", " + std::to_string(eng.steps()) +
+                             " denoising step(s) at " + std::to_string(size) + "x" + std::to_string(size));
     header_print("OFLM", std::string(line));
     return 0;
 }
