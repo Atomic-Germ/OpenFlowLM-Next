@@ -5,6 +5,11 @@ description: AMD NPU2 Iron/mlir-aie kernel compilation, XCLBIN and closed-librar
 
 # NPU Offload Pipeline
 
+> **Current path:** use `open-kernel-pipeline` and `open-kernel-families`.
+> This skill is the historical EmbeddingGemma bring-up and toolchain record;
+> its manual steps are not the way to add a model or a size. The one-command
+> path derives the geometry, builds the set, and gates the points.
+
 Read these project references before changing NPU kernels or model engines:
 
 1. `../npu_offload_pipeline.md` contains the full proven EmbeddingGemma

@@ -1,11 +1,15 @@
-# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-GRANITE (canonical spec: specs/open-engine/spec.md)
+# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-GRANITE, OPEN-DECODE-STREAM, OPEN-DECODE-ONE-CONTEXT-DENSE (canonical spec: specs/open-engine/spec.md)
 """IBM Granite 4.2 3B on the dense recipe: spec derivation (HF and GGUF), the
 four scalar multipliers and why the recipe may ignore them, the 3B's layout
 (head_dim 64 at hidden 2560 -- the point every shipped design refused), and the
 manifest."""
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
+import dataclasses
+
 import pytest
 
 from recipes import dense as DR
@@ -21,6 +25,10 @@ HF_GRANITE_42_3B = {
     "num_attention_heads": 40, "num_key_value_heads": 8, "head_dim": 64, "rms_norm_eps": 1e-05,
     "rope_theta": 10000000.0, "vocab_size": 100352, "tie_word_embeddings": False, "rope_scaling": None,
     "attention_multiplier": 0.125, "embedding_multiplier": 1.0, "residual_multiplier": 1.0,
+    # what q4nx-build records beside a folded container: the value BEFORE the fold.
+    # Without it the spec cannot know how to scale a raw GGUF's q_proj, so the set
+    # would serve the container and not the GGUF.
+    "q4nx_folded_multipliers": {"attention_multiplier": 0.015625},
     "logits_scaling": 1.0,
 }
 GGUF_GRANITE_42_3B = {
@@ -46,14 +54,25 @@ def test_spec_from_hf_and_gguf_agree():
     assert da == db
 
 
-def test_unfolded_multipliers_are_refused_by_name():
-    """The whole reason Granite fits: attn.h hard-codes 1/sqrt(HD), so the
-    recipe accepts a FOLDED container and must refuse an unfolded one loudly
-    rather than run it and return plausible garbage."""
-    with pytest.raises(SpecError, match=r"attention_multiplier 0\.015625 != head_dim\*\*-0\.5"):
-        ModelSpec.from_hf_config(dict(HF_GRANITE_42_3B, attention_multiplier=0.015625))
-    with pytest.raises(SpecError, match="UNFOLDED"):
-        ModelSpec.from_gguf_metadata(dict(GGUF_GRANITE_42_3B, **{"granite.attention.scale": 0.015625}))
+def test_an_unfolded_attention_multiplier_is_folded_at_pack_time():
+    """attn.h hard-codes 1/sqrt(HD), so a FOLDED container runs as-is and an
+    UNFOLDED model (a raw GGUF: llama.cpp does not fold) is folded by the PACKER:
+    the spec records the original multiplier and the plan puts `fold` on the q_proj
+    op, which only the GGUF reader applies. Refusing instead would have kept every
+    Granite GGUF off the engine for no reason.
+
+    The other three multipliers still have no fold path, so they stay refused."""
+    from recipes import dense as D
+    unfolded = ModelSpec.from_hf_config(dict(HF_GRANITE_42_3B, attention_multiplier=0.015625))
+    assert unfolded.extra["granite_attention_multiplier"] == 0.015625
+    plan = D.pack_plan(unfolded)
+    one = plan.get("one") or plan["layer_types"]["dense"]
+    q = next(o for o in one["pool"] if "q_proj" in o["tensor"])
+    assert q.get("fold") in (None, 0.125), q          # only on the GGUF-reading op
+    gguf_plan = D.pack_plan(dataclasses.replace(unfolded, quant="q4_1_f32"))
+    gone = gguf_plan.get("one") or gguf_plan["layer_types"]["dense"]
+    qg = next(o for o in gone["pool"] if "q_proj" in o["tensor"])
+    assert qg["op"] == "std_perm_gguf" and qg["fold"] == 0.125
     for name in ("embedding_multiplier", "residual_multiplier", "logits_scaling"):
         with pytest.raises(SpecError, match=f"{name} 2.0 != 1.0"):
             ModelSpec.from_hf_config(dict(HF_GRANITE_42_3B, **{name: 2.0}))
@@ -116,8 +135,9 @@ def test_3b_layout_and_manifest():
     assert m["family"] == "granite" and len(m["layout"]["rope_inv_freq"]) == 32
     chk = m["hf_config_check"]
     assert chk["head_dim"] == 64 and chk["intermediate_size"] == 8192
-    # The engine refuses an unfolded container at LOAD too, not just here.
-    assert chk["attention_multiplier"] == 0.125
+    # Both spellings are accepted at LOAD: this set serves a folded container AND a
+    # raw (unfolded) GGUF, whose q_proj the packer scales by the plan's `fold`.
+    assert chk["attention_multiplier"] == [0.125, 0.015625]
     consts = m["layer_types"][DENSE]["pack"]["consts"]
     assert [o["tensor"].split(".")[-2] for o in consts] == ["input_layernorm", "post_attention_layernorm"]
     assert m["builds"]["dx"]["build_dir"] == "dense/build_granite_h2560"
@@ -126,10 +146,39 @@ def test_3b_layout_and_manifest():
 def test_one_dispatch_per_layer():
     """Our own tuned Granite kernels ran a layer in four dispatches at
     1744.7 us; the dense recipe's program is one step per layer plus a
-    per-token ln + lm_head tail."""
+    per-token tail."""
     prog = DR.programs(ModelSpec.from_hf_config(HF_GRANITE_42_3B))
     assert [s["kernel"] for s in prog["layer_types"][DENSE]["program"]] == ["dx"]
-    assert [s["kernel"] for s in prog["tail"]] == ["ln", "lm"]
+    assert [s["kernel"] for s in prog["tail"]] == ["dxh"]
+
+
+def test_one_context_tail(monkeypatch):
+    """OPEN-DECODE-ONE-CONTEXT-DENSE: the norm + head are dx's second stream, in dx's context; the
+    GGUF-direct section (f32-scale pools) keeps the ln + lm_head tail in their own contexts."""
+    monkeypatch.delenv("DX_ONECTX", raising=False)
+    spec = ModelSpec.from_hf_config(HF_GRANITE_42_3B)
+    prog = DR.programs(spec)
+    assert prog["kernels"]["dxh"] == {"context": "dx", "insts": "dxh/insts.bin", "build": "dxh"}
+    assert prog["tail"] == [{"op": "run", "kernel": "dxh", "args": ["lmpool", "xres", "normw", "logits", "hn", "zero"]}]
+    assert prog["globals"]["hn"] == 8192                       # the head's x fill reads two whole 4 KB elements
+    assert [s["kernel"] for s in prog["gguf"]["tail"]] == ["ln", "lm"]
+    assert DR.builds(spec)["dxh"] == {"design": "dense/dx.py", "build_dir": "dense/build_granite_h2560_head",
+                                      "env": {"DX_HEAD": "1"}}
+    monkeypatch.setenv("DX_ONECTX", "0")
+    assert [s["kernel"] for s in DR.programs(spec)["tail"]] == ["ln", "lm"]
+
+
+def test_stream_knobs_are_granite_q4_1_only(monkeypatch):
+    """OPEN-DECODE-STREAM: Granite's q4_1 dx gets the memtile ring and the early weight issue; its f32-scale
+    twin and every other dense family build what they built before."""
+    for v in ("DX_WRING", "DX_WORDER"):
+        monkeypatch.delenv(v, raising=False)
+    spec = ModelSpec.from_hf_config(HF_GRANITE_42_3B)
+    assert DR.stream_knobs(spec) == (DR.WRING_DEPTH, True)
+    assert DR.stream_knobs(dataclasses.replace(spec, quant="q4_1_f32")) == (0, False)
+    assert DR.stream_knobs(dataclasses.replace(spec, family="qwen3")) == (0, False)
+    monkeypatch.setenv("DX_WRING", "0")
+    assert DR.stream_knobs(spec) == (0, True)
 
 
 def test_rope_is_the_plain_unscaled_table():

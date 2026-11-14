@@ -3,11 +3,13 @@
 //
 #include "engine_adapter.hpp"
 
+#include <filesystem>
 #include <stdexcept>
 #include <vector>
 
 #include "decoder.hpp"
 #include "encoder.hpp"
+#include "gguf/gguf_file.hpp"
 #include "kernels.hpp"
 
 namespace open_whisper {
@@ -27,7 +29,13 @@ OpenWhisperEngine::OpenWhisperEngine(const std::string &model_dir,
     : kernels_dir_(ow::KernelSet::resolve_dir(kernels_dir_hint, model_dir)),
       vocab_padded_(vocab_padded),
       encoder_(std::make_unique<ow::Encoder>(model_dir, kernels_dir_hint)),
-      decoder_(std::make_unique<ow::Decoder>(model_dir)) {
+      decoder_([&]() -> std::unique_ptr<ow::Decoder> {
+        if (std::filesystem::is_regular_file(model_dir + "/model.gguf")) {
+          open_qwen36::GgufFile gf(model_dir + "/model.gguf");
+          return std::make_unique<ow::Decoder>(ow::Decoder::from_gguf(gf));
+        }
+        return std::make_unique<ow::Decoder>(model_dir);
+      }()) {
   // Both sides pad "51866 real tokens" up to a multiple of 32, independently:
   // Whisper_Config::from_pretrained does it from config.json's vocab_size,
   // DecoderGeometry::vocab_padded is a compile-time constant this decoder

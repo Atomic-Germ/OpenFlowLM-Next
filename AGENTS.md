@@ -2,12 +2,12 @@
 
 You can install or request toolchain components
 
-Each time you build a new set of xclbins and libraries, document your process and create a new skill file for the next to build on.
+Each time you build a new kernel set, record what is durable in `open-kernel-families` (or the relevant pipeline skill). Do not create a per-model or per-size skill: a new size is a spec, and the pipeline already runs it.
 
 Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.
 
-The new format Q4NX models for this will be located on huggingface `Atomic-Germ/*-nB-OpenNPU2`, each will need a builder in q4nx-build as they gain xclbin support. Family xclbins will be distributed with the application, and a converted model ships with the rest. Each model links to a family xclbin, regardless of fine-tuning or derivitive models. The purpose of this is to allow quick additions of new but shape-identical models without updates needed, distributed through `oflm-add` to install and link properly.
+Q4NX models (`Atomic-Germ/*-nB-OpenNPU2` on Hugging Face) are deprecated: the existing ones keep working, but new models load from GGUF and get no q4nx-build builder. Family xclbins will be distributed with the application, and a converted model ships with the rest. Each model links to a family xclbin, regardless of fine-tuning or derivitive models. The purpose of this is to allow quick additions of new but shape-identical models without updates needed, distributed through `oflm-add` to install and link properly.
 
 As you encounter closed-source requirements, note them and replace with "not implemented" messaging before coding a replacement.
 
@@ -15,9 +15,9 @@ When investigating pre-compiled xclbins and libraries, save any useful tools you
 
 The `oflm-test` tool at `utilities/oflm-test` is capable of running a full test suite for `--llm`, `--vision`, `--embed`, or `--tools`.
 
-The `q4nx-build` tool at `utilities/q4nx-build` should always be in-sync with the expected formats of the models as each gains support, there should be no manual steps left. If unavoidable, the user should always recieve instruction for it.
+The `q4nx-build` tool at `utilities/q4nx-build` is kept only for the existing q4nx models. Do not add builders or formats to it for new models. Installing a model should leave no manual steps; if one is unavoidable, the user should always receive instruction for it.
 
-For each successfully packed model, create or update a skill to ensure the next agent does not need to reproduce research for the next addition.
+For each successfully packed model, update `open-kernel-pipeline` / `open-kernel-families` with anything the next agent would otherwise have to rediscover. The goal is that adding a model needs only two facts: the family has support, and a repo exists with weights.
 
 Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
       system clang/clang++. It can be found in:
@@ -69,6 +69,42 @@ alone.
 variables it exported, so the discovery stays in one place. The two stay in
 step through `OFLM_ENV_DUMP=1`, which makes `env.sh` print its variables as
 `KEY=VALUE` lines instead of its report.
+
+## The production bar for a supported model
+
+Do not add q4nx support for any model: q4nx is being deprecated. New support
+loads the model from GGUF.
+
+Every PR that adds or changes support for a model also updates its entry in
+`src/model_list.json`: the entry exists, names the files the engine loads, and
+states the real quant, family and context length. A model with no correct
+registry entry is not supported, whatever the engine can do.
+
+A top-tier supported model ships finished and production-ready. Before you
+export its kernel set as done, or open an issue or PR that calls it supported,
+show each of these with measurements:
+
+- Prefill uses the block route (usually). State the reason for any exception.
+- Decode and prefill are near optimal. Profile them and name what is left.
+- No unusual context-length limits. Test up to the model's real context, not
+  only the 4096 default.
+- Everything runs on the NPU (usually). Name each host stage and its cost.
+- Speculative decoding was explored: MTP, DFlash, DFlash2, prompt lookup or
+  another drafter. Ship one, or reject it with the measured reason. We
+  generally want one.
+- `oflm add` and `oflm serve` run the model, not only a CLI harness.
+- The model ships quantized, usually q4. Prefer Unsloth's GGUFs when the
+  engine supports their quant types; state the reason for any other source.
+- Benchmarks are recorded: `oflm bench` results (prefill and decode against
+  context length, with the machine and stack named) on the model's page in
+  `docs/docs/benchmarks/`, and a row in the README's "Recommended models"
+  table.
+- Most of the model's own features are exposed: its vision and audio towers,
+  MTP heads (as the drafter), reasoning and tool calling, and for image models
+  every supported resolution and image editing. Name each feature left out
+  and the reason.
+
+If an item is not done, the PR stays a draft and lists the item.
 
 ## Git rules for agents
 
@@ -133,14 +169,150 @@ Adding a setting is documented in `src/create_new_model.md`.
 
 <available_skills>
   <skill>
+    <name>open-qwen38-post-prefill-reset</name>
+    <description>Build and audit repeated resident short requests against the fresh FP32 post-output baseline.</description>
+    <location>.agents/skills/open-qwen38-post-prefill-reset/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-post-prefill-validation</name>
+    <description>Validate standard FP32 post-output prefill with fresh shared-CLI controls and independent all-layer gates.</description>
+    <location>.agents/skills/open-qwen38-post-prefill-validation/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-post-output-integration</name>
+    <description>Build standard FP32 DeltaNet post-output kernels and validate scratch compatibility, resources and full-depth decode.</description>
+    <location>.agents/skills/open-qwen38-post-output-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-shared-post-output</name>
+    <description>Build shared BF16/FP32 post-output specializations and verify full-lx binary identity before production ABI promotion.</description>
+    <location>.agents/skills/open-qwen38-shared-post-output/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-production-validation</name>
+    <description>Build capture-only shared-runtime CLIs and audit all-layer paired prefill and resident reset against the standard export.</description>
+    <location>.agents/skills/open-qwen38-prefill-production-validation/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-paired-prefill-production</name>
+    <description>Build and validate the standard paired-prefill kernel export and shared manifest-v4 runtime.</description>
+    <location>.agents/skills/open-qwen38-paired-prefill-production/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-runtime</name>
+    <description>Build shared paired prefill runtime with manifest-v4 validation and exact four-product sums.</description>
+    <location>.agents/skills/open-qwen38-prefill-runtime/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-post-output</name>
+    <description>Build private full-lx FP32 post-output/direct output preparation and validate exact causal L0 controls, state identity and independent residuals.</description>
+    <location>.agents/skills/open-qwen38-fp32-post-output/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-sequential-l0-replay</name>
+    <description>Replay production L0 over 243 causal positions with one pool, exact native controls and independent entry/state/FFN boundary checks.</description>
+    <location>.agents/skills/open-qwen38-sequential-l0-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-expanded-cli</name>
+    <description>Build combined control and expanded attention/down prefill CLIs with exact roles, pinned replay evidence and repeat capture support.</description>
+    <location>.agents/skills/open-qwen38-prefill-expanded-cli/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-attention-replay</name>
+    <description>Build paired-weight attention entry replay and compose causal paired KV, output and FFN with exact native controls.</description>
+    <location>.agents/skills/open-qwen38-prefill-attention-replay/SKILL.md</location>
+  </skill>
+
+  <skill>
+    <name>open-qwen38-prefill-down-replay</name>
+    <description>Build paired-weight FFN down replay with exact native controls, two slot placements and independent composed residual gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-down-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-combined-sublayers</name>
+    <description>Capture combined attention/DeltaNet prefixes with exact native identity and independent conditioned sublayer gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-combined-sublayers/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-combined-validation</name>
+    <description>Validate fresh paired/weighted controls, combined all-layer prefill precision and repeated resident requests after reset.</description>
+    <location>.agents/skills/open-qwen38-prefill-combined-validation/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-combined-cli</name>
+    <description>Build paired-input, weighted-FFN and combined linear QKV/Z/out CLIs with exact role guards and pinned preparation.</description>
+    <location>.agents/skills/open-qwen38-prefill-combined-cli/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-out-replay</name>
+    <description>Build paired-weight output replay with historical fixture provenance, fresh controls and independent residual gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-out-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-entry-replay</name>
+    <description>Build and validate isolated paired-weight QKV/Z entry replay with exact native controls and unchanged per-head gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-entry-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-prefix-sublayers</name>
+    <description>Capture early causal prefill projections and block state with exact weighted native controls at L34/P17, L37/P7 and L53/P17.</description>
+    <location>.agents/skills/open-qwen38-prefill-prefix-sublayers/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-weighted-sublayers</name>
+    <description>Capture weighted-candidate sublayers and distinguish propagated drift from conditioned FFN precision.</description>
+    <location>.agents/skills/open-qwen38-prefill-weighted-sublayers/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-weighted-cli</name>
+    <description>Build private paired-weight FFN CLIs and validate causal propagation with exact controls and residual tracing.</description>
+    <location>.agents/skills/open-qwen38-prefill-weighted-cli/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-ffn-replay</name>
+    <description>Compose paired-weight up/gate, native host activation and original down with exact controls and independent layer-output gates.</description>
+    <location>.agents/skills/open-qwen38-prefill-ffn-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-paired-weights</name>
+    <description>Build private paired-weight GEMM kernels and validate causal up/gate precision with byte-exact native controls.</description>
+    <location>.agents/skills/open-qwen38-prefill-paired-weights/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-upgate-replay</name>
+    <description>Replay captured hybrid up/gate with exact native controls and diagnose weight-rounding error without full-model residency.</description>
+    <location>.agents/skills/open-qwen38-prefill-upgate-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-sublayer-trace</name>
+    <description>Capture selected causal prefill sublayers and separate incoming residual drift from conditioned FFN arithmetic with exact native controls.</description>
+    <location>.agents/skills/open-qwen38-prefill-sublayer-trace/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-residual-trace</name>
+    <description>Build a private synchronized native prefill residual tracer and audit per-layer drift after byte-exact baseline logit identity.</description>
+    <location>.agents/skills/open-qwen38-prefill-residual-trace/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-prefill-host-boundaries</name>
+    <description>Build the CPU prefill bridge and validate FP32 history, paired KV and 255/256/257-token boundaries against an independent reference.</description>
+    <location>.agents/skills/open-qwen38-prefill-host-boundaries/SKILL.md</location>
+  </skill>
+  <skill>
     <name>npu_offload_pipeline</name>
     <description>End-to-end workflow for offloading dense GEMM operations to AMD NPU2 via mlir-aie/iron. Use when: compiling NPU xclbins, integrating NPU backends into embedding/LLM engines, validating NPU vs CPU reference, debugging XRT dispatch issues, or extending to new model architectures.</description>
     <location>.agents/skills/npu_offload_pipeline.md</location>
   </skill>
   <skill>
-    <name>open-granite-kernels</name>
-    <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
-    <location>.agents/skills/open-granite-kernels/SKILL.md</location>
+    <name>open-kernel-pipeline</name>
+    <description>The one-command path from weights to a running model (geometry -> family -> spec -> kernel set -> link -> pack). Use when adding a model or size, when `oflm add` refuses a geometry, when deciding whether a change is a spec, recipe, or design change, or when rebuilding and shipping kernel sets.</description>
+    <location>.agents/skills/open-kernel-pipeline/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-kernel-families</name>
+    <description>Reference for the open-kernel family recipes and designs (dense, qwen35, qwen36moe, lfm2), their specs and geometry traps. Use when a build in one family fails, when adding a size whose geometry is unusual, or when touching recipes/*.py or designs/dense|layer_x.</description>
+    <location>.agents/skills/open-kernel-families/SKILL.md</location>
   </skill>
   <skill>
     <name>open-wide-deltanet-ab</name>
@@ -151,5 +323,115 @@ Adding a setting is documented in `src/create_new_model.md`.
     <name>open-wide-deltanet-chain</name>
     <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
     <location>.agents/skills/open-wide-deltanet-chain/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-production-preflight</name>
+    <description>Normalize existing Qwen3.5-family metadata, compare Qwen3.8-27B source tensors, and build all 41 production kernel sets on Linux.</description>
+    <location>.agents/skills/open-qwen38-production-preflight/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen35-fp32-down-replay</name>
+    <description>Build and validate direct FP32 input preparation for split dense FFN, replay isolated Qwen3.8 layers and run an all-layer precision sweep without full-model residency.</description>
+    <location>.agents/skills/open-qwen35-fp32-down-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-production</name>
+    <description>Build the complete corrected Qwen3.8 export and verify full-depth decode propagation, runtime identity and split-down partials.</description>
+    <location>.agents/skills/open-qwen38-fp32-production/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen35-fp32-front-replay</name>
+    <description>Build and validate isolated FP32 norm-to-up/gate/SiLU with separate NPU projection captures and a BF16 control.</description>
+    <location>.agents/skills/open-qwen35-fp32-front-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-norm-integration</name>
+    <description>Build and validate full lx/ax FP32 norm-to-up/gate integration, widened scratch ABI and full-depth decode regression.</description>
+    <location>.agents/skills/open-qwen38-fp32-norm-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-attention-replay</name>
+    <description>Replay production gated attention with captured Q/KV/softmax boundaries and compare BF16/FP32 outputs without full-model residency.</description>
+    <location>.agents/skills/open-qwen38-attention-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-paired-kv-replay</name>
+    <description>Build and validate isolated paired-BF16 K/V attention with FP32 output, an exact BF16 control and local memory checks.</description>
+    <location>.agents/skills/open-qwen38-paired-kv-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-paired-attention-integration</name>
+    <description>Build full Qwen3.8 layers with paired KV and FP32 attention output-to-projection, then validate the new cache/scratch ABI and full-depth decode.</description>
+    <location>.agents/skills/open-qwen38-paired-attention-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-attention-entry</name>
+    <description>Build isolated full-ax FP32 entry norm and compare against a byte-exact paired-attention control with forced inputs and causal KV history.</description>
+    <location>.agents/skills/open-qwen38-fp32-attention-entry/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-entry-integration</name>
+    <description>Build and validate production FP32 attention-entry norm, its scratch/stream ABI and full-depth Qwen3.8 decode with independent projection gates.</description>
+    <location>.agents/skills/open-qwen38-fp32-entry-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-linear-entry</name>
+    <description>Build isolated full-lx FP32 norm-to-QKV/Z/alpha/beta and compare against a byte-exact production control with causal conv/recurrent state.</description>
+    <location>.agents/skills/open-qwen38-fp32-linear-entry/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-conv-history</name>
+    <description>Build isolated FP32 conv history with half-tile streams and validate causal state against a byte-exact BF16-history control.</description>
+    <location>.agents/skills/open-qwen38-fp32-conv-history/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-fp32-linear-integration</name>
+    <description>Build and validate production FP32 DeltaNet entry/history, its state ABI and host carry, and full-depth decode with independent boundary gates.</description>
+    <location>.agents/skills/open-qwen38-fp32-linear-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-recurrence-replay</name>
+    <description>Build private production-layout DeltaNet control and triple-BF16 recurrence kernels and validate causal head precision without model residency.</description>
+    <location>.agents/skills/open-qwen38-recurrence-replay/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-factored-readout</name>
+    <description>Build and validate isolated compensated factored DeltaNet readout with causal state and unchanged head precision gates.</description>
+    <location>.agents/skills/open-qwen38-factored-readout/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-factored-full-layer</name>
+    <description>Build private full-lx factored DeltaNet with shared helpers, audit compiler dependencies and resource budgets, and validate causal full-layer replay.</description>
+    <location>.agents/skills/open-qwen38-factored-full-layer/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-factored-integration</name>
+    <description>Build the production compensated factored DeltaNet export and validate all 64 layers with causal head gates and streamed weights.</description>
+    <location>.agents/skills/open-qwen38-factored-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-qkv-precision</name>
+    <description>Build isolated Q4 QKV control and consistent-sum probes, capture activation tables, and validate causal record precision without full-model residency.</description>
+    <location>.agents/skills/open-qwen38-qkv-precision/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-consistent-full-layer</name>
+    <description>Build private full-lx consistent Q4 sums and validate causal DeltaNet, Z/out projections, FFN and residuals with streamed weights.</description>
+    <location>.agents/skills/open-qwen38-consistent-full-layer/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-consistent-integration</name>
+    <description>Build production consistent Q4 sums and validate full-depth lx/ax decode, independent boundaries and resident identity/reset.</description>
+    <location>.agents/skills/open-qwen38-consistent-integration/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-ffn-projection-sweep</name>
+    <description>Build a production-arithmetic FFN probe and validate separate up/gate projections across all layers with exact norm/activation identity.</description>
+    <location>.agents/skills/open-qwen38-ffn-projection-sweep/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-qwen38-paired-prefill-input</name>
+    <description>Build private paired-BF16-input GEMM CLIs and audit full-depth causal prefill against a byte-exact control.</description>
+    <location>.agents/skills/open-qwen38-paired-prefill-input/SKILL.md</location>
   </skill>
 </available_skills>

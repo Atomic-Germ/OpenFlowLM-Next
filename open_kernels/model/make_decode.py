@@ -47,6 +47,8 @@ from recipes.load import spec_from_model_dir  # noqa: E402
 from recipes.manifest import manifest  # noqa: E402
 from recipes.spec import FULL  # noqa: E402
 from q4nx import Q4NX, f32_to_bf16  # noqa: E402
+from decode_reference import FILENAME, check_reference, save_reference  # noqa: E402
+from decode_bundle import bundle_path, load_bundle  # noqa: E402
 
 DEFAULT_MODEL_DIR = os.environ.get(
     "OFLM_MODEL_DIR", str(Path.home() / ".oflm" / "models" / "Qwen3.6-35B-A3B-NPU2"))   # OFLM's default model store
@@ -68,8 +70,14 @@ def npu_routing(out: Path, layer, t):
     return np.fromfile(p, np.float32)[256:264].view(np.int32).astype(np.int64)
 
 
-def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx: int) -> str:
+def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx: int,
+              kernel_dir: Path | None = None, capture_boundaries: bool = False) -> str:
     """The manifest's programs as harness directives."""
+    if capture_boundaries:
+        expected = [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
+                    {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}]
+        if m["tail"] != expected or m["globals"].get("hn") != m["layout"]["hidden"] * 2:
+            raise ValueError("boundary captures require the BF16 norm/LM-head tail")
     d = DESIGNS.as_posix()
     o = out.as_posix()
     lay = m["layout"]
@@ -85,10 +93,12 @@ def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx:
         if kn not in used:
             continue
         bdir = f"{d}/{m['builds'][kd['build']]['build_dir']}"
+        xclbin = f'{bdir}/final.xclbin' if kernel_dir is None else str(bundle_path(kernel_dir, m['contexts'][kd['context']]))
+        insts = f'{bdir}/insts.bin' if kernel_dir is None else str(bundle_path(kernel_dir, kd['insts']))
         if kd["context"] not in ctx_done:
-            cfg.append(f"xclbin {kd['context']} {bdir}/final.xclbin")
+            cfg.append(f"xclbin {kd['context']} {xclbin}")
             ctx_done.add(kd["context"])
-        cfg.append(f"kernelx {kn} {kd['context']} {bdir}/insts.bin")
+        cfg.append(f"kernelx {kn} {kd['context']} {insts}")
     hid = lay["hidden"]
     for name, size in m["globals"].items():
         if isinstance(size, dict):
@@ -129,8 +139,14 @@ def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx:
                     runs.append(f"dump act{l} {o}/y_rout{l}{s}.bin 4096 {step['act_off']}")
             runs.append(f"dump xres {o}/y_res{l}{s}.bin {hid * 4}")
             runs.append(f"dump act{l} {o}/y_act{l}{s}.bin {m['layer_types'][lt]['buffers']['act']}")
+            if capture_boundaries:
+                state = m["layer_types"][lt]["buffers"]["state"]
+                if state["kind"] == "linear":
+                    runs.append(f"dump state{l} {o}/y_state{l}{s}.bin {state['bytes']}")
         for step in m["tail"]:
             runs.append(f"run {step['kernel']} " + " ".join(step["args"]))
+            if capture_boundaries and step["kernel"] == "ln":
+                runs.append(f"dump hn {o}/y_norm{s}.bin {m['globals']['hn']}")
         runs.append(f"dump logits {o}/y_logits{s}.bin {m['globals']['logits']}")
     return "\n".join(cfg + runs) + "\n"
 
@@ -143,8 +159,11 @@ def main() -> int:
     ap.add_argument("--token", type=int, default=None, help="the first token id (default: the model's bos, else 248045)")
     ap.add_argument("--out", default=str(HERE / "out"))
     ap.add_argument("--pool-dir", default=None, help="where the big pools live (default <out>/pools)")
+    ap.add_argument("--kernel-dir", type=Path, help="use a compatible exported manifest and hash-verified binaries")
     ap.add_argument("--max-ctx", type=int, default=4096)
     ap.add_argument("--reuse-pools", action="store_true", help="keep pool files that already exist")
+    ap.add_argument("--capture-boundaries", action="store_true",
+                    help="dump each linear recurrent state and the BF16 final norm after each position")
     ap.add_argument("--cfg-only", action="store_true", help="only rewrite the .cfg")
     ap.add_argument("--requant", action="store_true",
                     help="force the whole run -- spec, packing plan, pools and reference -- onto the "
@@ -155,6 +174,10 @@ def main() -> int:
     ap.add_argument("--strict-routing", action="store_true",
                     help="MoE: keep the reference's own top-8 even where a previous run shows the NPU picked differently")
     a = ap.parse_args()
+    if a.layers <= 0 or a.tokens <= 0 or a.max_ctx <= 0:
+        ap.error("--layers, --tokens and --max-ctx must be positive")
+    if a.tokens > a.max_ctx:
+        ap.error("--tokens must not exceed --max-ctx")
     if a.requant:
         os.environ["OPEN_KERNELS_FORCE_Q4_1"] = "1"      # read before the spec is derived
 
@@ -166,6 +189,12 @@ def main() -> int:
     md = Path(a.model_dir)
     spec = spec_from_model_dir(md)
     m = manifest(spec, a.max_ctx)
+    if a.kernel_dir is not None:
+        try:
+            m = load_bundle(a.kernel_dir, m)
+        except (OSError, ValueError) as e:
+            ap.error(str(e))
+        print(f'kernel export: {a.kernel_dir.resolve()} (build {m["build_key"]})')
     lay = m["layout"]
     plan = {"pool_bytes": m["pack"]["pool_bytes"], "chunk_bytes": m["pack"]["chunk_bytes"],
             "layer_types": {lt: d["pack"] for lt, d in m["layer_types"].items()},
@@ -192,8 +221,13 @@ def main() -> int:
                                                 "qwen2": 151644,                  # <|im_start|>, as Qwen3
                                                 "k2": 0}[spec.family]             # <|ifm|begin_of_text|>, the template's bos
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
+    routing = "device-assisted" if spec.family == "qwen36moe" and not a.strict_routing else "independent"
+    if a.cfg_only:
+        check_reference(out, m, nl, a.tokens, tok0, routing)
 
     if not a.cfg_only:
+        # An interrupted regeneration must not leave a valid-looking old contract.
+        (out / FILENAME).unlink(missing_ok=True)
         write(out / "zero.bin", np.zeros(spec.hidden, np.float32))
         for lt, d in m["layer_types"].items():
             st = d["buffers"]["state"]
@@ -266,8 +300,10 @@ def main() -> int:
             tok = int(logits[:spec.real_vocab].argmax())
             print(f"  token {t} (position {t}): reference argmax {tok}", flush=True)
 
-    cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx)
+    cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx, kernel_dir=a.kernel_dir, capture_boundaries=a.capture_boundaries)
     (out / "run_decode.cfg").write_text(cfg, newline="\n")
+    if not a.cfg_only:
+        save_reference(out, m, nl, a.tokens, tok0, routing)
     nruns = len([r for r in cfg.splitlines() if r.startswith("run ")])
     print(f"wrote {out / 'run_decode.cfg'}: {nl} layers, {a.tokens} token(s), {nruns} runs")
     return 0

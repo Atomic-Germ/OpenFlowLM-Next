@@ -34,13 +34,13 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp ../gguf/gguf_file.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
 
-add_executable(manifest_test manifest_test.cpp manifest.cpp gguf_file.cpp q4nx_file.cpp)
-add_executable(gguf_pack_test gguf_pack_test.cpp gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+add_executable(manifest_test manifest_test.cpp manifest.cpp ../gguf/gguf_file.cpp q4nx_file.cpp)
+add_executable(gguf_pack_test gguf_pack_test.cpp ../gguf/gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp)
 foreach(t gguf_pack_test)
     target_include_directories(${t} PRIVATE ${_inc})
 endforeach()
@@ -54,9 +54,20 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# spec_lookup_test (no XRT): the lookup drafter against tests/fixtures/spec_lookup_cases.json
+add_executable(spec_lookup_test spec_lookup_test.cpp)
+target_include_directories(spec_lookup_test PRIVATE ${_inc})
+
 # block_host_test (no XRT): the block prefill's host stages against replica_block.py's fixture
 add_executable(block_host_test block_host_test.cpp block_host.cpp)
 target_include_directories(block_host_test PRIVATE ${_inc})
+
+# Keep the host's explicit multiply-then-add contract identical to the scalar
+# oracle. GCC otherwise contracts scalar tails differently from AVX2 groups.
+if(NOT MSVC)
+    set_source_files_properties(block_host.cpp block_host_test.cpp
+        PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
 
 # block_host.cpp uses AVX2/FMA intrinsics in both targets. The parent app and
 # Windows build.cmd already enable them; the standalone CMake build must too.
@@ -69,7 +80,7 @@ foreach(t open_qwen36_cli block_host_test)
     endif()
 endforeach()
 
-foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test)
+foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test spec_lookup_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -81,6 +92,8 @@ add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
 add_test(NAME GGUF-PACK COMMAND gguf_pack_test)
+add_test(NAME OPEN-SPEC-LOOKUP COMMAND spec_lookup_test
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/spec_lookup_cases.json")
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"

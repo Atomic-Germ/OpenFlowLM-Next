@@ -210,15 +210,17 @@ def _inspect_tokenizer(gf: GgufFile, rep: GGUFReport) -> None:
 #   * Layernorm weights go through std_perm_ln, which accepts BF16 / F16 / F32
 #     (pools.cpp) -- an F32 norm weight is the norm case, not a problem.
 #   * Quantized weights go through std_perm_gguf, whose allowlist is exactly
-#     Q4_0 / Q4_1 (packed) plus Q8_0 / Q4_K / Q6_K (requantized). Every other
-#     quant -- Q2_K, Q3_K, Q5_K, Q8_K, the IQ* family, Q5_0/5_1/8_1 -- is
-#     refused outright by that check.
+#     Q4_0 / Q4_1 (packed byte-exactly) plus Q8_0 / Q4_K / Q5_K / Q6_K /
+#     IQ4_NL / IQ4_XS (dequantized and requantized into the pool's q4_1 law).
+#     Every other quant -- Q2_K, Q3_K, Q8_K, Q5_0/5_1/8_1, the IQ2/IQ3 family
+#     -- is refused outright by that check.
 #
 # The original list got this backwards on both counts: it rejected Q4_0 (valid)
 # and accepted Q2_K/Q3_K/Q5_K (refused), so install planning accepted files that
 # could never load and rejected valid ones.
 _RUNTIME_FLOAT_TYPES = frozenset({"BF16", "F16", "F32"})
-_RUNTIME_QUANT_TYPES = frozenset({"Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"})
+_RUNTIME_QUANT_TYPES = frozenset({"Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K",
+                                  "IQ4_NL", "IQ4_XS"})
 _RUNTIME_TYPES = _RUNTIME_FLOAT_TYPES | _RUNTIME_QUANT_TYPES
 
 

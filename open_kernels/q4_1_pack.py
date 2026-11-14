@@ -142,6 +142,16 @@ def pack_q4_1_pool(blocks: np.ndarray, rs: int) -> np.ndarray:
     return out.reshape(-1)
 
 
+CH_Q4_0 = 4608      # a Q4_0-native chunk: the d plane and the codes, no m plane (gemv_q4.h GEMV_Q4_0_NATIVE)
+
+
+def pack_q4_0_native_pool(blocks: np.ndarray, rs: int) -> np.ndarray:
+    """GGUF Q4_0 (18 B) blocks -> 4608 B Q4_0-native chunks: pack_q4_1_pool's chunk without its m plane."""
+    assert blocks.shape[2] == Q4_0_BYTES, "a Q4_0-native pool holds Q4_0 blocks only"
+    full = pack_q4_1_pool(blocks, rs).reshape(-1, CH)
+    return np.concatenate([full[:, 0:512], full[:, 1024:]], axis=1).reshape(-1)
+
+
 def dequant_chunk(b: np.ndarray) -> np.ndarray:
     """One 5120 B pool chunk -> f32[32 rows, 256 k] (mirror of q4nx.rs dequant_q4_bytes)."""
     d = b[0:512].view(bfloat16).astype(np.float32)        # index kb*32 + r

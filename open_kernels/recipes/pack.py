@@ -146,12 +146,22 @@ def f32_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
     q = np.stack([nib & 15, nib >> 4], axis=-1).reshape(nr, nc, 2, 256, 16)                              # rb kt half k r16
     q = q.transpose(0, 2, 4, 1, 3).reshape(rows, cols).astype(np.float32)
     scale = lambda v: np.repeat(v.transpose(0, 3, 1, 2).reshape(rows, cols // 32), 32, axis=1)  # noqa: E731
-    return scale(mn) + q * scale(d)
+    return (scale(mn) + q * scale(d)).astype(np.float32)
 
 
 def bf16_of_q4_1(chunks, rows: int, cols: int) -> np.ndarray:
     """The same, as bf16 bits rounded once as the q4_1 GEMM's mac does."""
     return _bf16_rne(f32_of_q4_1(chunks, rows, cols))
+
+
+def _gemm_bfp16_pack():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "gemm_bfp16_pack", Path(__file__).resolve().parents[1] / "designs" / "gemm_bfp16" / "pack.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _dit_pack():
@@ -163,6 +173,38 @@ def _dit_pack():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def pack_bfp16_gemm(w: np.ndarray, row0: int, n_total: int, dst: np.ndarray) -> None:
+    """float32 [rows, K] -> rows [row0, row0 + rows) of the n_total-row B operand of gemm_bfp16, written into `dst`
+    (uint8, the whole weight) in place; the rows it does not write stay as `dst` holds them."""
+    bp = _gemm_bfp16_pack()
+    rows, k = w.shape
+    n, nk = bp.TILE_N, k // bp.TILE_K
+    if row0 % n or rows % n or row0 + rows > n_total or n_total % (n * bp.COLS):
+        raise ValueError(f"bfp16_gemm rows [{row0}, {row0 + rows}) of {n_total} do not tile by {n} rows x {bp.COLS} columns")
+    per_col = n_total // (n * bp.COLS)
+    tile = n * (bp.TILE_K // 8) * bp.BLOCK_BYTES
+    out = dst.reshape(bp.COLS, per_col, nk, tile)
+    for gl in range(rows // n):
+        g = row0 // n + gl
+        out[g % bp.COLS, g // bp.COLS] = bp.pack_b_group(w[gl * n:(gl + 1) * n], bp.TILE_K).reshape(nk, tile)
+
+
+def pack_bfp16_gemm_glu(w: np.ndarray, half: str, n_total: int, dst: np.ndarray) -> None:
+    """float32 [ff, K] gate or up rows into their glu_row rows of the gate|up operand in `dst` (OPEN-PREFILL-BFP16-FFN)."""
+    bp = _gemm_bfp16_pack()
+    ff, K = w.shape
+    n, kb, cols = bp.TILE_N, bp.TILE_K // 8, bp.COLS
+    if 2 * ff != n_total or ff % (n // 2) or n_total % (n * cols) or half not in ("gate", "up"):
+        raise ValueError(f"bfp16_gemm glu {half}: {ff} rows of {n_total} is not a gate|up half")
+    r = bp.glu_row(np.arange(ff), ff) + (8 if half == "up" else 0)
+    cb = np.arange(K // 8)
+    per_col, nk, g = n_total // n // cols, K // bp.TILE_K, r // n
+    tile = (((g % cols) * per_col + g // cols) * nk)[:, None] + cb[None, :] // kb
+    rr = (r % n)[:, None]
+    idx = tile * n * kb + ((rr // 16) * kb + cb[None, :] % kb) * 16 + rr % 16
+    dst.reshape(-1, bp.BLOCK_BYTES)[idx] = bp.encode_blocks(w.reshape(ff, K // 8, 8))
 
 
 def pack_bfp16_dit(w: np.ndarray) -> np.ndarray:
@@ -615,6 +657,36 @@ def _raw(m, name: str):
                        f"(a tied head must be materialised as its own q4 tensor)") from None
 
 
+def _scalar(m, name: str) -> float:
+    """One f32 or bf16 value, as pools.cpp's scalar_value reads it from a container."""
+    b = _u8(_raw(m, name))
+    if len(b) == 4:
+        return float(b.view(np.float32)[0])
+    if len(b) == 2:
+        return float(_bf16_to_f32(b.view(np.uint16))[0])
+    raise ValueError(f"{name} is {len(b)} B, not one value")
+
+
+def _div_running(op: dict, m, layer: int) -> float:
+    """put's div_running: the product, in double, of a per-layer scalar over the layers
+    before this one (Gemma 4's layer_output_scale), as pools.cpp computes it.
+
+    The point of dividing in double and rounding ONCE at the end is that a folded
+    scale costs no extra rounding; anything weaker and the container's norm stops
+    being the model it claims to be. This fold is direction-exact under RMSNorm
+    (the engine carries the residual divided by the same product, see
+    recipes/gemma4.py's comment on the layer_output_scale run) and is NOT what
+    llama.cpp computes (it multiplies the layer output instead) -- the two differ
+    by one huge positive scalar on the residual stream and nothing else."""
+    div = 1.0
+    if op.get("div_running"):
+        for j in range(layer):
+            div *= _scalar(m, op["div_running"].replace("{j}", str(j)))
+    if not (div > 0.0 and np.isfinite(div)):
+        raise ValueError(f"{_name(op, 'tensor', layer)}: div_running product {div}")
+    return div
+
+
 def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
     kind = op["op"]
     if kind == "std_perm":
@@ -680,6 +752,29 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         if op["dst"] + out.size > len(dst):
             raise ValueError(f"{kind} {name}: {out.size} B at dst {op['dst']} runs past the {len(dst)} B buffer")
         dst[op["dst"]:op["dst"] + out.size] = out
+    elif kind == "bfp16_gemm":
+        # `nch` q4_1 SOURCE chunks from `chunk0`: rows [row0, row0 + rows) of an `n_total`-row weight (OPEN-PREFILL-BFP16)
+        name = _name(op, "tensor", layer)
+        if not op.get("nch") or not op.get("in_dim") or not op.get("n_total"):
+            raise ValueError(f"{kind} {name} without nch / in_dim / n_total")
+        ncol, c0 = op["in_dim"] // 256, op.get("chunk0", 0)
+        if op["in_dim"] % 256 or op["nch"] % ncol:
+            raise ValueError(f"{kind} {name}: {op['nch']} chunks is not whole rows of a {op['in_dim']}-wide tensor")
+        rows = op["nch"] // ncol * 32
+        if _chunk_bytes_of(m, name) == Q8:
+            raise ValueError(f"{kind} {name}: the container stores this tensor at q8; only q4_1 sources are packed to bfp16")
+        sel = q4_chunks_of(m, name, _raw(m, name), c0, op["nch"])
+        if sel.shape[0] != op["nch"]:
+            raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
+        n_bytes = op["n_total"] * op["in_dim"] // 8 * 9
+        if op["dst"] + n_bytes > len(dst):
+            raise ValueError(f"{kind} {name}: {n_bytes} B at dst {op['dst']} runs past the {len(dst)} B buffer")
+        if op.get("glu"):
+            pack_bfp16_gemm_glu(f32_of_q4_1(sel, rows, op["in_dim"]), op["glu"], op["n_total"],
+                                dst[op["dst"]:op["dst"] + n_bytes])
+        else:
+            pack_bfp16_gemm(f32_of_q4_1(sel, rows, op["in_dim"]), op.get("row0", 0), op["n_total"],
+                            dst[op["dst"]:op["dst"] + n_bytes])
     elif kind == "bfp16_dit":
         # `nch` SOURCE chunks from `chunk0`, read as the q4 ops read them (OPEN-PREFILL-GEMM8)
         name = _name(op, "tensor", layer)
@@ -737,6 +832,11 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         b = _u8(_raw(m, _name(op, "tensor", layer)))
         if len(b) > op["cap"]:
             raise ValueError(f"{op['tensor']}: {len(b)} B does not fit its {op['cap']} B slot")
+        div = _div_running(op, m, layer)
+        if div != 1.0:
+            # bf16 -> divide in double -> one rounding to bf16, as pools.cpp's pack_norm
+            v = _bf16_to_f32(b.view(np.uint16)).astype(np.float64) / div
+            b = _bf16_rne(v.astype(np.float32)).view(np.uint8)
         dst[op["dst"]:op["dst"] + len(b)] = b
     elif kind == "lmhead_q8":
         # The q8 lm_head's 128-row supertile order. The file holds chunk (rowblock32, ktile) at

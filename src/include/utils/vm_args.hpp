@@ -23,9 +23,9 @@ inline void print_help(po::options_description& general) {
     std::cout << std::endl;
     std::cout << "Commands:" << std::endl;
     std::cout << "  run <model_tag>     - Run the model interactively" << std::endl;
-    std::cout << "  serve <model_tag>   - Start the  server" << std::endl;
-    std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
-    std::cout << "  add <repo>          - Install and register a converted Q4NX model" << std::endl;
+    std::cout << "  serve <model_tag>   - Start the server" << std::endl;
+    std::cout << "  pull <model_tag>    - Download curated model files if not present" << std::endl;
+    std::cout << "  add <repo>          - Install and register a model from GGUF or Q4NX repo" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
     std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
@@ -76,6 +76,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm list --quiet" << std::endl;
     std::cout << "\toflm list --filter installed" << std::endl;
     std::cout << std::endl;
+    std::cout << "Run 'oflm' with no command for the quick start, including the full family:size matrix this build serves." << std::endl;
 }
 
 
@@ -128,8 +129,14 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prefill-chunk-len,pcl", po::value<int>(&parsed_args.prefill_chunk_len)->default_value(-1),
              "Set prefill chunk length")
             ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
-             "fast (default) or lean: lean uses less memory and processes prompts more slowly, "
-             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill)")
+             "fast (default), lean or bfp16: lean uses less memory and processes prompts more slowly, "
+             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill); "
+             "bfp16 runs the dense prefill on bfp16 operands with the attention, RoPE and cache write on the NPU "
+             "(Granite 4.2 3B: about 3x faster prefill, +1.7 GiB)")
+            ("prefill-precision", po::value<std::string>(&parsed_args.prefill_precision)->default_value(""),
+             "Products per prefill projection on the open engine's block route: paired (default, the exact "
+             "four-term sum), three_term (omits only W_lo X_lo, ~2^-18 of the projection), weight_high "
+             "(drops the BF16 weight residual; measured to fail the logit gate), or single")
             ("speculative", po::bool_switch(&parsed_args.speculative),
              "Use the model's draft (Uno) pass for a lossless greedy speedup; "
              "needs a model that ships one")
@@ -160,6 +167,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Image width and height in pixels (for image command)")
             ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
              "Noise seed, for a reproducible image (for image command; default random)")
+            ("steps", po::value<int>(&parsed_args.image_steps)->default_value(0),
+             "Denoising steps (for image command; default 0 = the model's own count, "
+             "otherwise 1..50 -- a distilled model is built for a few, more is not better)")
             ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
              "Reference image to edit, .png or .jpg: the prompt says what to change (for "
              "image command; the size then defaults to the largest one not above the "
@@ -232,8 +242,23 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     std::cerr << "Error: --prefill-mode is only supported with the run, serve and bench commands!" << std::endl;
                     return false;
                 }
-                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean") {
-                    std::cerr << "Error: --prefill-mode is fast or lean, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean" &&
+                    parsed_args.prefill_mode != "bfp16") {
+                    std::cerr << "Error: --prefill-mode is fast, lean or bfp16, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                    return false;
+                }
+            }
+
+            // Same reasoning as --prefill-mode above: this picks the arithmetic of the
+            // block route the open engine loads, so only the commands that load one.
+            if (!vm["prefill-precision"].defaulted()) {
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --prefill-precision is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+                const std::string& pp = parsed_args.prefill_precision;
+                if (pp != "paired" && pp != "three_term" && pp != "weight_high" && pp != "single") {
+                    std::cerr << "Error: --prefill-precision is paired, three_term, weight_high or single, not '" << pp << "'" << std::endl;
                     return false;
                 }
             }
@@ -336,7 +361,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 return true;
             }
         } else {
-            std::cerr << "Error: Command is required" << std::endl;
+            std::cerr << "Error: a command is required (try \"oflm\" alone for the quick start)" << std::endl;
             return false;
         }
 

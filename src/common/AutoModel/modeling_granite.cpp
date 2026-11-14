@@ -5,7 +5,24 @@
 #include "config/settings_resolver.hpp"
 
 /************              Granite family            **************/
-Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") {}
+// granite-4.2's template thinks unless told otherwise, so thinking stays on until a request says "think": false
+Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") { this->enable_think = true; }
+
+bool Granite::configure_parameter(std::string parameter_name, const std::any& value) {
+    if (parameter_name == "enable_think") {
+        try {
+            this->enable_think = std::any_cast<bool>(value);
+            return true;
+        } catch (const std::bad_any_cast&) {
+            return false;
+        }
+    }
+    if (parameter_name == "toggle_think") {
+        this->enable_think = !this->enable_think;
+        return true;
+    }
+    return AutoModel::configure_parameter(parameter_name, value);
+}
 
 void Granite::load_model(std::string model_path, json model_info, int default_context_length,
                          bool enable_preemption) {
@@ -13,10 +30,10 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // The engine: the open one (open_qwen36/, the dense recipe's kernel set
-    // under xclbins/<model>/open_kernels). Unlike llama3 / qwen3 / gemma3 there
-    // is NO closed granite engine to fall back to -- llama_npu whitelists
-    // hidden_size to {2048, 3072, 4096} and refuses Granite's 2560 outright --
-    // so a missing kernel set is a named refusal, not a quiet substitution.
+    // under xclbins/<model>/open_kernels). There is NO closed granite engine to
+    // fall back to (the closed llama_npu, now removed, whitelisted hidden_size
+    // to {2048, 3072, 4096} and refused Granite's 2560 outright) -- so a missing
+    // kernel set is a named refusal, not a quiet substitution.
     // OFLM_GRANITE_ENGINE=open is accepted (and is the only value that means
     // anything) so the variable behaves like the other families'.
 #ifdef OFLM_USE_OPEN_QWEN36
@@ -24,7 +41,7 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
     const char* sel = std::getenv("OFLM_GRANITE_ENGINE");
     if (sel && std::string(sel) == "closed")
         throw std::runtime_error("OFLM_GRANITE_ENGINE=closed: not implemented -- Granite has no closed engine "
-                                 "(llama_npu refuses hidden_size 2560); build the open kernels instead");
+                                 "(the closed llama_npu refused hidden_size 2560 and has been removed); build the open kernels instead");
     if (kernels.empty())
         throw std::runtime_error("no open kernels were found for " + this->lm_config->model_name +
                                  ". Granite runs on the open kernels only: build them with "
@@ -33,7 +50,10 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
     header_print("OFLM", "Granite on the open kernels (" + kernels + ")" +
-                             (eng->uno_ok() ? "; greedy requests (top_k 1, no penalty) decode by Uno's draft pass" : ""));
+                             (eng->spec_ok() ? std::string("; greedy requests (top_k 1, no penalty) decode speculatively: "
+                                                           "prompt lookup") + (eng->uno_ok() ? ", Uno's draft pass" : "") +
+                                                   " or a plain step, each cycle (OFLM_SPEC_MODE)"
+                                             : std::string()));
     this->lm_engine = std::move(eng);
 #else
     throw std::runtime_error("Granite needs the open engine, which this build does not have "
@@ -70,6 +90,7 @@ std::string Granite::apply_chat_template(nlohmann::ordered_json& messages,
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    inputs.extra_context["enable_thinking"] = this->enable_think;
     // granite-4.2's own chat_template.jinja branches on `tools` (it emits a
     // <tools> block and changes the system turn when the list is non-empty), so
     // dropping the argument here would not fail -- it would silently produce a

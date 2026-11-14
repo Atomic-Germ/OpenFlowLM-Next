@@ -7,6 +7,7 @@
 
 #pragma once
 #include "AutoModel/automodel.hpp"
+#include "AutoModel/generation_headroom.hpp"
 #include "metrices.hpp"
 
 
@@ -28,6 +29,22 @@ private:
     int think_start_id = 248068;
     int think_end_id = 248069;
     void setup_tokenizer(std::string model_path);
+
+    /// How many cache rows `generate()` steps as a think preamble before the generation
+    /// loop's own budget guard can run: 2 when thinking (`think_start_id`, 198) and 4 when
+    /// not (`think_start_id`, 271, `think_end_id`, 271).
+    ///
+    /// This lives beside the branches it counts so the capacity guard and the preamble
+    /// cannot drift apart: `generate` refuses a prompt that leaves less than
+    /// `generation_preamble_rows() + 1` free, then advances `total_tokens` by exactly this
+    /// many once the preamble has run. Measured at ctx 512 -- prompt 507 generates and
+    /// finishes at exactly MAX_L, prompt 508 is refused. Not a setting, and it says nothing
+    /// about any model: it is this generation shape's own semantics.
+    /// The rule itself is `oflm::generation::preamble_rows()` -- a pure function tested
+    /// exhaustively by src/test/generation_headroom_test.cpp on any machine. This accessor
+    /// only supplies the branch. Kept on ONE line: the generation-metadata regression test
+    /// extracts this declaration by taking the rest of the line.
+    int generation_preamble_rows() const { return oflm::generation::preamble_rows(this->enable_think); }
     
     // Image processing functionality
     ImageReader image_reader_;

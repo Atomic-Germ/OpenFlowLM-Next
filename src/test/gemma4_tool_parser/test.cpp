@@ -41,11 +41,14 @@ static void test_nested_values() {
 }
 
 static void test_envelope_from_issue_722() {
-    // the trace from ROCm/FastFlowLM#722, verbatim shape
+    // the trace from ROCm/FastFlowLM#722, verbatim shape. The query text is an
+    // arbitrary non-ASCII string there; it is kept as one here too, because the
+    // point of the case is that a multi-byte argument survives the parser, and an
+    // ASCII-only fixture would not test that.
     auto [name, args] = gemma4_tools::parse_tool_call(
-        "call:tool_call{args:{query:\"тренировки на пресс или ноги\"},id:<|\"|>memory_search<|\"|>}");
+        "call:tool_call{args:{query:\"query in a non-ASCII script\"},id:<|\"|>memory_search<|\"|>}");
     CHECK(name == "memory_search");
-    CHECK(args == json({{"query", "тренировки на пресс или ноги"}}));
+    CHECK(args == json({{"query", "query in a non-ASCII script"}}));
 }
 
 static void test_envelope_name_arguments_variant() {

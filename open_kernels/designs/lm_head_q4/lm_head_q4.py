@@ -34,9 +34,12 @@ GEMV = HERE.parent / "gemv_q4"
 # The kernel is this design's own generated gemv_q4_gy, compiled with the f32-scale
 # define and the gemv_q4s32 symbol prefix in the f32 build.
 SCALES_F32 = int(os.environ.get("LMHEAD_SCALES_F32", 0))
-TILE_BYTES = 6144 if SCALES_F32 else 5120
+Q4_0 = int(os.environ.get("LMHEAD_Q4_0", 0))         # bytes prototype: Q4_0-native 4608 B chunks (gemv_q4.h)
+assert not (SCALES_F32 and Q4_0)
+TILE_BYTES = 6144 if SCALES_F32 else 4608 if Q4_0 else 5120
 KERNEL_SYM = "gemv_q4s32_gy" if SCALES_F32 else "gemv_q4_gy"
-KERNEL_FLAGS = ["-Os"] + (["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if SCALES_F32 else [])
+KERNEL_FLAGS = ["-Os"] + (["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if SCALES_F32 else []) + \
+    (["-DGEMV_Q4_0_NATIVE=1"] if Q4_0 else [])
 BAND_ROWS = 64
 PER_CALL = 2
 CALL_BYTES = PER_CALL * TILE_BYTES
@@ -175,5 +178,5 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
 DESIGN = lm_head_q4
 _src = b"".join([(GEMV / f).read_bytes() for f in ("gemv_q4.h", "gemv_tab.h", "gemv_q4_prep_rt.cc")]
                 + [GY.read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()]
-                + [str(SCALES_F32).encode()])
+                + [str(SCALES_F32).encode()] + ([b"q4_0"] if Q4_0 else []))
 SPECIALIZE = {"n": N, "k": K, "n_cores": N_CORES, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

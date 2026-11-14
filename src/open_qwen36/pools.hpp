@@ -81,6 +81,13 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst);
 /// q8 (code * scale) or q4_1 (m + n * d) chunks, 32-row blocks major -> the bf16 GEMM pool (twin: recipes/pack.py)
 void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint16_t* dst);
+/// q4_1 chunks ([rows, cols], 32-row blocks major) -> rows [row0, row0 + rows) of the B operand of gemm_bfp16, an
+/// `n_total`-row weight in bfp16ebs8 (bfp16.hpp; twin: open_kernels/designs/gemm_bfp16/pack.py). Rows it does not
+/// write stay as `dst` holds them: zero blocks are a zero weight.
+/// glu "gate" | "up": the rows go where bfp16_glu_row puts that half (n_total = 2 ff, row0 0)
+void bfp16_gemm_pack(const uint8_t* src, size_t rows, size_t cols, size_t row0, size_t n_total, uint8_t* dst,
+                     const std::string& glu = "");
+
 /// q4_1 chunks of a [rows, cols] projection -> dit_gemm's bfp16ebs8 B for its transpose (twin: pack.py pack_b)
 void bfp16_dit_pack(const uint8_t* src, size_t rows, size_t cols, uint8_t* dst);
 /// Bytes `op` writes at its dst: `nch` chunks of the pool's format, or of the GEMM pool it builds.
@@ -122,7 +129,11 @@ void pack_consts(const Manifest& m, const LayerType& lt, const WeightFile& f, in
 void pack_lmhead(const Manifest& m, const WeightFile& f, uint8_t* dst);
 /// A small weight (a layernorm) as bf16: the q4nx container stores it bf16, a
 /// GGUF may store f32/f16 — converted exactly as the container does.
-void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst);
+/// `div`: every value is divided by it before the one rounding to bf16 (Gemma 4's folded
+/// layer_output_scale, PackOp::div_running); 1.0 is the plain conversion, byte for byte.
+void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst, double div = 1.0);
+/// The one value of a single-element tensor (f32 / f16 / bf16), as a double.
+double scalar_value(const WeightFile& f, const std::string& name);
 /// A position record table: row p = [valid | nf | cos | sin] for the window's row counts
 /// (stream_patch::attn_window) and these RoPE frequencies, `rows` rows of m.ptab_row.
 void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* dst);

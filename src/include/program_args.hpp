@@ -27,7 +27,8 @@ struct program_args_t {
     bool json_output = false;
     int ctx_length = -1; // let model decide
     int prefill_chunk_len = -1; // let model decide
-    std::string prefill_mode = ""; // fast | lean; empty leaves OFLM_OPEN_PREFILL_MODE as it is
+    std::string prefill_mode = ""; // fast | lean | bfp16; empty leaves OFLM_OPEN_PREFILL_MODE as it is
+    std::string prefill_precision = ""; // paired | weight_high | single; empty leaves OFLM_OPEN_PREFILL_PRECISION as it is
     bool speculative = false;     // use the model's draft (Uno) pass; false leaves OFLM_SPECULATIVE as it is
 
     // handling input file
@@ -52,6 +53,7 @@ struct program_args_t {
     int image_size = 1024;
     bool image_size_given = false;    // --size was on the command line (an edit's default follows the reference)
     std::string image_seed = "";      // empty: a random 64-bit seed, printed
+    int image_steps = 0;              // --steps: 0 = the bundle's own count (1..50 otherwise)
     std::string image_ref = "";       // --image: edit this reference image (.png or .jpg)
 
     // for serve command's image endpoints (/v1/images/*)

@@ -64,7 +64,7 @@ from recipes.load import default_spec, load_spec, spec_from_model_dir  # noqa: E
 from recipes.manifest import dumps, manifest  # noqa: E402
 
 # knobs that must NOT leak in from the caller's shell
-CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
+CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC", "DX_HEAD", "GQP_WEIGHT_LOW")
 FILES = ("final.xclbin", "insts.bin")
 
 
@@ -88,29 +88,48 @@ FILES = ("final.xclbin", "insts.bin")
 KEY_FILE = ".build_key"
 
 
-def build_content_key(design: Path, out: Path, env: dict) -> str:
+def build_content_key(design: Path, out: Path, env: dict, spec: Path | None = None,
+                      extra_dirs: tuple[Path, ...] = ()) -> str:
     """Hash of everything that determines the build's output.
 
     Covers the design's source files (excluding build outputs and caches) and
     the compile-time knobs. Two builds with the same key produce the same
     xclbin, so the second one can reuse the first one's output.
+
+    The SPEC is part of it when the design is given one (`env
+    OPEN_KERNELS_SPEC`): several designs read their whole geometry from it at
+    build time (dx/dx_attn: head geometry, kv row, rope), so their SOURCE
+    bytes are identical for every spec of a family while the compiled output
+    is not. Without this, two specs that share a build dir (llama3 h2048:
+    Llama-3.2-1B and MiniCPM5-2B) also share a cache marker, and the second
+    build reuses the first one's kernels VERBATIM -- Llama-3.2-1B shipped
+    MiniCPM5-2B's head-dim-128 dx and refused to load ("unexpected kv
+    transfer at offset 4096").
     """
     h = hashlib.sha256()
-    h.update(str(out.relative_to(DESIGNS)).encode())
+    if spec is not None and spec.is_file():
+        h.update(b"\0spec=")
+        h.update(spec.read_bytes())
+        h.update(b"\0")
+    # relpath, not relative_to: a --build-root output can live outside DESIGNS.
+    h.update(os.path.relpath(out.resolve(), DESIGNS.resolve()).encode())
     h.update(b"\0")
-    for f in sorted(design.rglob("*")):
-        if not f.is_file():
+    for root in (design, *extra_dirs):
+        if not root.is_dir():
             continue
-        rel = f.relative_to(design)
-        top = rel.parts[0] if rel.parts else ""
-        if top.startswith("build") or top in ("__pycache__", ".staging", ".locks"):
-            continue
-        if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
-            continue
-        h.update(rel.as_posix().encode())
-        h.update(b"\0")
-        h.update(f.read_bytes())
-        h.update(b"\0")
+        for f in sorted(root.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(root.parent if root in extra_dirs else design)
+            top = rel.parts[0] if rel.parts else ""
+            if top.startswith("build") or top in ("__pycache__", ".staging", ".locks"):
+                continue
+            if f.suffix in (".xclbin", ".bin", ".elf", ".o", ".prj"):
+                continue
+            h.update(rel.as_posix().encode())
+            h.update(b"\0")
+            h.update(f.read_bytes())
+            h.update(b"\0")
     for k in sorted(env):
         h.update(f"{k}={env[k]}".encode())
         h.update(b"\0")
@@ -134,10 +153,13 @@ LOCKS = DESIGNS / ".locks"
 @contextlib.contextmanager
 def design_lock(out: Path):
     """Hold an exclusive cross-process lock for one build directory."""
-    LOCKS.mkdir(parents=True, exist_ok=True)
-    # The build dir is designs/<design>/<build_dir>; flatten it for the lock name.
-    key = str(out.relative_to(DESIGNS)).replace("/", "__").replace("\\", "__")
-    lock_path = LOCKS / f"{key}.lock"
+    canonical = out.resolve()
+    locks = LOCKS if canonical.is_relative_to(DESIGNS.resolve()) else canonical.parent / ".locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    # Private --build-root workspaces may be outside designs/. Hash the
+    # canonical path so aliases share a lock and long paths stay valid names.
+    key = hashlib.sha256(str(canonical).encode()).hexdigest()
+    lock_path = locks / f"{key}.lock"
     fh = open(lock_path, "a+b")
     try:
         if os.name == "nt":
@@ -277,6 +299,13 @@ def disambiguate_build_dirs(sets: dict) -> dict:
     return out
 
 
+def staging_root(spec, build_root: Path | None = None) -> Path:
+    """Keep relative design imports while isolating private compiler workspaces."""
+    suffix = "" if build_root is None else "_" + hashlib.sha256(
+        str(build_root.resolve()).encode()).hexdigest()[:16]
+    return HERE / f".staging_{spec.spec_hash()[7:26]}{suffix}"
+
+
 def stage_design_tree(stage_root: Path) -> None:
     """Copy the design sources into a per-spec stage.
 
@@ -298,9 +327,54 @@ def stage_design_tree(stage_root: Path) -> None:
         return skipped
 
     if stage_root.exists():
-        shutil.rmtree(stage_root)
+        try:
+            shutil.rmtree(stage_root)
+        except OSError as ex:
+            # The stage is named after the spec, so an earlier run that left it
+            # root-owned makes every later export of that spec fail HERE, on a
+            # PermissionError hundreds of lines above the message the log ends
+            # on. Move it out of the way instead: the name is then free, the
+            # leftover can be deleted by whoever owns it, and this run proceeds.
+            stale = stage_root.with_name(
+                f"{stage_root.name}.stale_{os.getpid()}")
+            try:
+                stage_root.rename(stale)
+            except OSError:
+                raise ex
+            print(f"warning: could not remove stale stage {stage_root} ({ex}); "
+                  f"moved it to {stale}", flush=True)
     stage_root.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(DESIGNS, stage_root, ignore=_ignore, dirs_exist_ok=True)
+
+
+def _bdir(name: str, sets: dict) -> Path:
+    return DESIGNS / sets[name]["build_dir"]
+
+
+def _snapshot(name: str, bdir: Path, stage_root: Path | None) -> Path:
+    """A private copy of the build's artifacts, taken under the design lock.
+
+    The build dirs are shared between specs (dense/build_llama3_h2048 is both
+    Llama-3.2-1B's and MiniCPM5-2B's), so a later spec's rebuild overwrites
+    final.xclbin / insts.bin in place once its marker says "not mine". A spec
+    copies its artifacts only after ALL of its sets' builds finish, so an
+    overwriting build can lose that race and the export silently SHIPS THE
+    OTHER SPEC'S xclbin -- and the per-file sha256 the manifest then records
+    blesses the wrong bytes, so every later export sees "up to date" and keeps
+    them. Found on hardware: a Llama-3.2-1B set whose dx was MiniCPM5-2B's
+    (a KV drain at row 4096 against a 2048-byte kv_row; load refused with
+    "unexpected kv transfer at offset 4096").
+
+    With stage_root=None (no staging: sequential, nothing builds alongside)
+    there is nobody to lose the race to: return bdir itself.
+    """
+    if stage_root is None:
+        return bdir
+    d = stage_root / "snapshots" / name
+    d.mkdir(parents=True, exist_ok=True)
+    for f in FILES:
+        shutil.copyfile(bdir / f, d / f)
+    return d
 
 
 def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> tuple[str, Path]:
@@ -315,7 +389,7 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
     design_path = sets[name]["design"]
     src = (stage_root / design_path) if stage_root else (DESIGNS / design_path)
 
-    out = DESIGNS / sets[name]["build_dir"]
+    out = _bdir(name, sets)
     knobs = sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
@@ -323,19 +397,24 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
     t0 = time.time()
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
-          f"{out.relative_to(HERE).as_posix()}", flush=True)
+          f"{os.path.relpath(out, HERE)}", flush=True)
     # The lock keeps two specs out of the same build dir at once: the designs
     # are shared, and build_design.py wipes its work dir before compiling.
     with design_lock(out):
         # The cache lives next to the output, so it is covered by the same lock
         # as the build: a spec that finds a current key reuses the xclbin
         # instead of rebuilding an identical one.
-        key = build_content_key(src.parent, out, knobs)
+        extra = ((src.parent.parent / "dn_glue", src.parent.parent / "dn_post")
+                 if src.name in ("lx.py", "ux.py", "mx.py") else ())
+        uses_spec = src.parent.name in ("short_conv", "dense", "dxl", "layer_x")
+        key = build_content_key(src.parent, out, knobs,
+                                spec=spec_file if uses_spec else None,
+                                extra_dirs=extra)
         marker = out / KEY_FILE
         have = all((out / f).is_file() for f in FILES)
         if have and marker.is_file() and marker.read_text(encoding="utf-8").strip() == key:
             print(f"[{name}] up to date (build key {key[:19]}), reusing", flush=True)
-            return name, out
+            return name, _snapshot(name, out, stage_root)
 
         # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
         # reports a core whose program does not fit only as an invalid ELF.
@@ -358,11 +437,12 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
             raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
                                f"Last build output:\n{detail or '(no output)'}")
         marker.write_text(key + "\n", encoding="utf-8")
+        snap = _snapshot(name, out, stage_root)
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
-    used = fullest_core(out)
+    used = fullest_core(snap)
     if used:
         print(f"[{name}] program memory: fullest core {used} of {PROGRAM_MEMORY} B ({PROGRAM_MEMORY - used} B free)")
-    return name, out
+    return name, snap
 
 
 def build(name: str, sets: dict, spec_file: Path, stage_root: Path | None = None) -> Path:
@@ -378,6 +458,7 @@ def main() -> int:
     g.add_argument("--spec", help="a ModelSpec JSON (default: recipes/specs/qwen36-35b-a3b.json)")
     ap.add_argument("--out", default=None,
                     help="destination (default src/xclbins/<model name>/open_kernels)")
+    ap.add_argument("--build-root", type=Path, help="separate compiler workspace; default: recipe build directories")
     ap.add_argument("--only", default=None, help="comma-separated subset of the recipe's kernel sets")
     ap.add_argument("--no-build", action="store_true", help="copy/hash the existing build dirs without rebuilding")
     ap.add_argument("--force", action="store_true", help="rebuild even when <out>/manifest.json has this build key")
@@ -419,6 +500,8 @@ def main() -> int:
             )
         raise
     sets = disambiguate_build_dirs(F.builds(spec))
+    if a.build_root:
+        sets = {n: dict(v, build_dir=str(a.build_root.resolve() / n)) for n, v in sets.items()}
     names = [n.strip() for n in a.only.split(",") if n.strip()] if a.only else list(sets)
     bad = [n for n in names if n not in sets]
     if bad:
@@ -464,7 +547,10 @@ def main() -> int:
     # spec's gen could overwrite the sources another spec was compiling, and
     # the xclbin that came out was silently wrong. So each spec stages its
     # own copy of the design tree and compiles from that.
-    stage_root = HERE / f".staging_{spec.spec_hash()[7:26]}"  # strip "sha256:", keep 19 chars
+    # The stage is named after the spec (and the private build root) so the
+    # audit tooling can find the tree a finished export compiled from, which
+    # also means a stage left behind by an earlier run has to be replaced.
+    stage_root = staging_root(spec, a.build_root)
 
     if not a.no_build:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)
@@ -481,12 +567,19 @@ def main() -> int:
         gen_design_dir = gen_dir.parent.relative_to(DESIGNS)
         (stage_root / gen_design_dir).mkdir(parents=True, exist_ok=True)
         gen.generate(F.recipe(spec), out=stage_root / gen_design_dir)
-    
+
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
     if a.no_build:
+        # The artifacts this export ships are the ones already in out_root --
+        # `have` verified every file is there. The design build dirs are
+        # shared between specs and another spec's build may have overwritten
+        # them since; copying from those would re-bless the other spec's
+        # bytes into this set (the copy loop records their sha256 in the
+        # toolchain record). Copying from out_root is a no-op (src == dst)
+        # that just re-hashes the shipped files.
         for n in names:
-            bdirs[n] = DESIGNS / sets[n]["build_dir"]
+            bdirs[n] = out_root / n
     else:
         workers = max(1, min(a.jobs, len(names)))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:

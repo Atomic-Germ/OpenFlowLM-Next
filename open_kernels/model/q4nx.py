@@ -116,8 +116,14 @@ def dq_chunks_q4_1(chunks):
     i = np.arange(32)[None, None, :]
     p = (r // 16) * 4096 + bc * 512 + i * 16 + (r % 16)
     j = bc * 32 + r + 0 * i
-    vals = n[:, p.reshape(-1)].reshape(nch, 32, 8, 32)
-    return vals * d[:, j.reshape(-1)].reshape(nch, 32, 8, 32) + mn[:, j.reshape(-1)].reshape(nch, 32, 8, 32)
+    # Advanced indexing puts the chunk axis at stride 4: a wide tensor's
+    # elementwise arithmetic then jumps between chunks instead of walking one.
+    # take keeps the same indices/FP32 operations in contiguous chunk order.
+    shape = (nch, 32, 8, 32)
+    vals = np.take(n, p.reshape(-1), axis=1).reshape(shape)
+    scales = np.take(d, j.reshape(-1), axis=1).reshape(shape)
+    mins = np.take(mn, j.reshape(-1), axis=1).reshape(shape)
+    return vals * scales + mins
 
 
 def dq_chunks_q8(chunks):

@@ -29,6 +29,10 @@
 
 #include "decoder_quant.hpp"
 
+namespace open_qwen36 {
+class GgufFile;
+}
+
 namespace ow {
 
 // y = x . W^T + b, W kept as bf16 [out, in] (the container's own layout, not
@@ -119,6 +123,13 @@ public:
   // recognise, or any decoder tensor missing / of the wrong shape.
   explicit Decoder(const std::string &model_dir);
 
+  // The GGUF-direct path (same pattern as the encoder): a llama.cpp `whisper`
+  // GGUF read through the shared GgufFile, mapped from its modern `dec.` names
+  // onto the container's [out, in] layout. The ggml matmul weights already
+  // arrive as [out, in] (HF-natural), so -- unlike the encoder's tiled B -- the
+  // decoder just converts f32 -> bf16 and keeps the bias/norm/embed tensors.
+  static Decoder from_gguf(const open_qwen36::GgufFile& gf);
+
   // Resets the self-attention KV cache and the position counter ONLY.
   // Cross-attention K/V (set_encoder_output()) is NOT touched: it is fixed
   // for the whole 30 s window and outlives any number of generations over it
@@ -150,6 +161,13 @@ public:
   DecoderTimers timers;
 
 private:
+  // Used by from_gguf (a static member) to build an empty Decoder it then fills.
+  Decoder() = default;
+
+  // The precision knobs + int8 quantization + scratch allocation, shared by
+  // Decoder(model_dir) and Decoder::from_gguf after the weights are in.
+  void finalize();
+
   Linear embed_tokens_;                              // [vocab, d_model] bf16, tied to the head
   std::vector<float> embed_positions_;                // [max_target_positions, d_model] f32
   std::vector<float> ln_w_, ln_b_;                    // decoder.layer_norm

@@ -18,6 +18,24 @@
       "default_value": "fast"
     },
     {
+      "key": "prefill_precision",
+      "cli_flag": "--prefill-precision",
+      "env_var": "OFLM_OPEN_PREFILL_PRECISION",
+      "description": "Products per prefill projection: paired is the exact four-term sum, three_term omits only the smallest term, weight_high drops the weight residual, single is one term",
+      "type": "enum",
+      "options": [
+        {"value": "paired", "description": "Four products per projection; the accepted route"},
+        {"value": "three_term", "description": "Three products; omits only the W_lo X_lo term, which is ~2^-18 of the projection"},
+        {"value": "weight_high", "description": "Two products; drops the BF16 weight residual. Measured to fail the logit gate on 301 of 513 positions"},
+        {"value": "single", "description": "One product; fastest, lowest precision"}
+      ],
+      "scope": "per_model",
+      "delivery": "env_var",
+      "category": "performance",
+      "reload_required": true,
+      "default_value": "paired"
+    },
+    {
       "key": "pmode",
       "cli_flag": "--pmode",
       "description": "NPU power mode",

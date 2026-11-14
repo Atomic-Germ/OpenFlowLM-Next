@@ -19,17 +19,15 @@ void ln_nr32(const float *__restrict x0, const float *__restrict x1, const bfloa
     ss = aie::mac(ss, h, l);
   }
   const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kN) + LN_EPS);
-  const bfloat16 ih = (bfloat16)inv;
-  const bfloat16 il = (bfloat16)(inv - (float)ih);
   const float *x = i ? x1 : x0;
   const bfloat16 *wh = w + (i ? kHalf : 0);
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < kHalf; j += kV) {
-    accf32 t = aie::zeros<accfloat, kV>();
-    t = mac_vv(t, aie::load_v<kV>(x + j), aie::load_v<kV>(wh + j));      // x * w  (fp32)
-    accf32 o = aie::zeros<accfloat, kV>();
-    o = mac_vs(o, t.template to_vector<float>(), ih, il);              // * inv
-    aie::store_v(y + j, o.template to_vector<float>());
+    // (x * w) * inv at full fp32: `mac_vv`/`mac_vs` reach only ~16 mantissa bits,
+    // a relative 2e-5 that this path applies to every element of the layer.
+    const v32f t = mul3bv_32(aie::load_v<kV>(x + j), aie::load_v<kV>(wh + j));
+    const v32f o = mul3_32(t, aie::broadcast<float, kV>(inv));
+    aie::store_v(y + j, o);
   }
 }
 }

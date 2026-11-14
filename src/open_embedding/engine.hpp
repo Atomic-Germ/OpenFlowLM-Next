@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "nlohmann/json.hpp"
-#include "open_qwen36/gguf_file.hpp"
+#include "gguf/gguf_file.hpp"
 #include "tokenizers_cpp.h"
 
 namespace open_embedding {

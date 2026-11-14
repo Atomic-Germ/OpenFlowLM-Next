@@ -428,6 +428,84 @@ TEST(get_merged_model_entry_not_found) {
     ASSERT_TRUE(entry.empty() || entry.is_null());
 }
 
+TEST(user_model_collision_matches_the_loaded_registry) {
+    nlohmann::json shipped = {{"models", {{"qwen3.8", {{"27b", {
+        {"name", "shipped"}, {"default_context_length", 32768}, {"url", "old"}
+    }}}}}}};
+    nlohmann::json user = {{"models", {{"qwen3.8", {{"27b", {
+        {"name", "local"}, {"default_context_length", 4096}
+    }}}}}}};
+    Fixture f(shipped, user);
+    auto cfg = oflm::config::load_effective_config();
+    auto entry = oflm::config::get_merged_model_entry(cfg, "qwen3.8:27b");
+    ASSERT_EQ(entry, cfg.merged["models"]["qwen3.8"]["27b"]);
+    ASSERT_EQ(entry["default_context_length"], 4096);
+    ASSERT_FALSE(entry.contains("url"));
+}
+
+TEST(user_model_metadata_survives_a_settings_overlay) {
+    nlohmann::json user;
+    user["models"]["local"]["27b"] = {
+        {"name", "local"}, {"default_context_length", 4096}
+    };
+    user["settings"]["local"]["27b"] = {{"prefill_mode", "lean"}};
+    Fixture f({{"models", nlohmann::json::object()}}, user);
+    auto cfg = oflm::config::load_effective_config();
+    auto entry = oflm::config::get_merged_model_entry(cfg, "local:27b");
+    ASSERT_EQ(entry, cfg.merged["models"]["local"]["27b"]);
+    ASSERT_EQ(entry["name"], "local");
+    ASSERT_EQ(entry["default_context_length"], 4096);
+}
+
+TEST(get_merged_model_entry_user_added_model_marks_itself_foreign_to_shipped_records) {
+    // A user model whose tag collides with a shipped one must not inherit the
+    // shipped model_info.json records: they describe the upstream container, not
+    // the user's install. The synthetic key can never match a shipped record.
+    oflm::config::EffectiveConfig cfg;
+    cfg.shipped_registry = {{"models", {{"whisper-v3", {{"turbo", {{"name", "shipped-whisper"}, {"default_context_length", 448}}}}}}}};
+    cfg.user_settings = {{"models", {{"whisper-v3", {{"turbo", {
+        {"name", "whisper-large-v3-turbo-GGUF"}, {"files", {"config.json", "tokenizer.json"}}
+    }}}}}}};
+
+    auto entry = oflm::config::get_merged_model_entry(cfg, "whisper-v3:turbo");
+    ASSERT_EQ(entry["name"], "whisper-large-v3-turbo-GGUF");
+    ASSERT_EQ(entry["model_info_key"], "oflm-add:whisper-large-v3-turbo-GGUF");
+}
+
+TEST(get_merged_model_entry_user_added_model_keeps_explicit_model_info_key) {
+    oflm::config::EffectiveConfig cfg;
+    cfg.shipped_registry = nlohmann::json::object();
+    cfg.user_settings = {{"models", {{"my-model", {{"1b", {
+        {"name", "my-model"}, {"model_info_key", "oflm-add:custom-key"}
+    }}}}}}};
+
+    auto entry = oflm::config::get_merged_model_entry(cfg, "my-model:1b");
+    ASSERT_EQ(entry["model_info_key"], "oflm-add:custom-key");
+}
+
+TEST(get_merged_model_entry_shipped_entry_gets_no_marker) {
+    oflm::config::EffectiveConfig cfg;
+    cfg.shipped_registry = {{"models", {{"qwen3.8", {{"27b", {{"name", "shipped"}, {"default_context_length", 8192}}}}}}}};
+    cfg.user_settings = {{"settings", {{"qwen3.8", {{"27b", {{"ctx_len", 16384}}}}}}}};
+
+    auto entry = oflm::config::get_merged_model_entry(cfg, "qwen3.8:27b");
+    ASSERT_FALSE(entry.contains("model_info_key"));
+}
+
+TEST(user_model_collision_matches_the_loaded_registry_and_marks_the_user_entry) {
+    nlohmann::json shipped = {{"models", {{"whisper-v3", {{"turbo", {
+        {"name", "shipped-whisper"}, {"default_context_length", 448}
+    }}}}}}};
+    nlohmann::json user = {{"models", {{"whisper-v3", {{"turbo", {
+        {"name", "my-whisper-gguf"}
+    }}}}}}};
+    Fixture f(shipped, user);
+    auto cfg = oflm::config::load_effective_config();
+    auto entry = oflm::config::get_merged_model_entry(cfg, "whisper-v3:turbo");
+    ASSERT_EQ(entry, cfg.merged["models"]["whisper-v3"]["turbo"]);
+    ASSERT_EQ(entry["model_info_key"], "oflm-add:my-whisper-gguf");
+}
+
 // ============================================================================
 // Main
 // ============================================================================

@@ -126,12 +126,16 @@ def test_a_record_that_does_not_tile_the_element_is_refused():
 
 def test_the_geometry_is_in_the_catalogue_now_that_hardware_has_run_it():
     """OPEN-OP-RANGE: the tuple entered when OPEN-ATTN-QKV-BIAS's compare passed on
-    Qwen2.5-3B (2026-09-12). The 3B's own intermediate, 11264, is a `gemv_q4` K; the
-    stock HF 11008 is not, and is still refused by name."""
-    from recipes.catalogue import OpRangeError
+    Qwen2.5-3B (2026-09-12).
+
+    The FF question was settled the other way round on 2026-10-26. The stock HF
+    `intermediate_size` is 11008 and that is what a GGUF carries; 11264 is the
+    q4nx converter's PAD (one extra k-tile), which only AMD's container used. Our
+    spec is now the true 11008, its `gemv_q4` K was measured on the NPU through
+    utilities/op-gate.py, and the padded container entry is gone -- so BOTH widths
+    are valid catalogue points and neither is refused."""
     DR.recipe(ModelSpec.from_hf_config({**HF_QWEN25_3B, "intermediate_size": 11264}))
-    with pytest.raises(OpRangeError, match=r"gemv_q4: K=11008"):
-        DR.recipe(ModelSpec.from_hf_config(HF_QWEN25_3B))
+    DR.recipe(ModelSpec.from_hf_config(HF_QWEN25_3B))          # 11008, the model's own
 
 
 def test_no_block_prefill_route_while_dx_attn_lacks_the_bias_and_wide_record(monkeypatch):

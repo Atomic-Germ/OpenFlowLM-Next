@@ -14,6 +14,56 @@ include(CMakeParseArguments)
 # need a device and the prebuilt engine libs, and are still built standalone
 # through their own common.mk / CMakeLists.txt.
 
+# Think-preamble headroom: MAX_L - (preamble + 1), not MAX_L - 1. Header-only, so the exact
+# refusal boundary is tested here instead of only on the NPU at context 512.
+add_executable(generation_headroom_test generation_headroom_test.cpp)
+target_include_directories(generation_headroom_test PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
+add_test(NAME generation_headroom COMMAND generation_headroom_test)
+
+# OPEN-PREFILL-BATCH provenance: the machine-readable baseline must record the SAME
+# layer-major direction the C++ decision implements. This parses the JSON and compares it
+# against `preferred()` rather than checking that a field exists.
+add_executable(layer_major_policy_consistency_test layer_major_policy_consistency_test.cpp)
+# `nlohmann/json.hpp` is vendored under src/include, which is why this needs that path and
+# not just src/: the header-only JSON reader is part of the tree, not a package.
+target_include_directories(layer_major_policy_consistency_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(layer_major_policy_consistency_test PRIVATE
+    BASELINE_JSON="${CMAKE_SOURCE_DIR}/utilities/prefill-block/qwen38-production-baseline.json")
+add_test(NAME layer_major_policy_consistency COMMAND layer_major_policy_consistency_test)
+
+# OPEN-PREFILL-BATCH thresholds: the dense block-loop crossover is 96 and layer-major's 64
+# is a different schedule's number. Header-only, so the 95/96 boundary is tested here.
+add_executable(prefill_thresholds_test prefill_thresholds_test.cpp)
+target_include_directories(prefill_thresholds_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME prefill_thresholds COMMAND prefill_thresholds_test)
+
+# OPEN-PREFILL-BATCH telemetry: `why=` must distinguish a policy choice from a recovered
+# block failure. Header-only, so the six-by-two matrix is tested without a device.
+add_executable(prefill_route_reason_test prefill_route_reason_test.cpp)
+target_include_directories(prefill_route_reason_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME prefill_route_reason COMMAND prefill_route_reason_test)
+
+# Bring-up diagnostics: an offset/length pair must not wrap into a valid range, at the signed
+# CLI boundary or at the size_t Core accessors. Header-only, so these link nothing -- a test
+# of the contract that needed a device could not run in CI.
+add_executable(buffer_range_test buffer_range_test.cpp)
+target_include_directories(buffer_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME buffer_range COMMAND buffer_range_test)
+
+add_executable(diagnostic_range_test diagnostic_range_test.cpp)
+target_include_directories(diagnostic_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME diagnostic_range COMMAND diagnostic_range_test)
+
+# OPEN-PREFILL-BATCH route policy: which prefill schedule is used, and whether an operator's
+# OFLM_OPEN_LAYER_MAJOR is honoured. Header-only, so this links nothing -- the decision is a
+# pure function and testing it needs no XRT, no weights and no device.
+add_executable(layer_major_policy_test layer_major_policy_test.cpp)
+target_include_directories(layer_major_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME layer_major_policy COMMAND layer_major_policy_test)
+
 # Settings registry tests (host-only, no NPU needed)
 add_executable(settings_registry_test settings_registry_test.cpp
     ${CMAKE_SOURCE_DIR}/src/config/settings_registry.cpp)

@@ -1,11 +1,13 @@
 /// \file manifest.cpp
 /// \brief manifest.json parsing and the model check (see manifest.hpp).
 #include "open_qwen36/manifest.hpp"
+#include "open_qwen36/prefill_precision_policy.hpp"
 
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
 #include <set>
+#include <unordered_set>
 #include <stdexcept>
 #include <utility>
 
@@ -44,6 +46,8 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.nch = j.value("nch", 0ull);
     p.in_dim = j.value("in_dim", 0ull);
     p.chunk0 = j.value("chunk0", 0ull);
+    p.qgate_rows = j.value("qgate_rows", 0ull);
+    p.qgate_gate = j.value("qgate_gate", false);
     p.src_dim = j.value("src_dim", 0ull);
     p.rg = j.value("rg", 0ull);
     p.experts = j.value("experts", 0ull);
@@ -60,6 +64,25 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.dst_rows = j.value("dst_rows", 0ull);
     p.split = j.value("split", "");
     p.via = j.value("via", "");
+    p.fold = j.value("fold", 1.0);
+    if (p.fold != 1.0 && p.op != "std_perm_gguf")
+        fail(where, p.op + " " + p.tensor + ": fold is a std_perm_gguf field (the GGUF packer applies it)");
+    if (!(p.fold > 0.0) || !std::isfinite(p.fold))
+        fail(where, p.op + " " + p.tensor + ": fold must be a positive, finite scale");
+    p.row0 = j.value("row0", 0ull);
+    p.n_total = j.value("n_total", 0ull);
+    p.glu = j.value("glu", "");
+    if (!p.glu.empty() && (p.op != "bfp16_gemm" || (p.glu != "gate" && p.glu != "up")))
+        fail(where, p.op + " " + p.tensor + ": glu must be gate or up, on a bfp16_gemm");
+    p.div_running = j.value("div_running", "");
+    // Gemma 4's layer_output_scale fold: the engine carries the residual divided by the
+    // running product of this scalar (see recipes/gemma4.py's comment on the fold). It is
+    // only legal on a put of a post-norm: the fold divides the weights so later readers
+    // see the unscaled numbers; any other op would get a silently different arithmetic.
+    // The {j} placeholder makes the per-layer semantics explicit: layer j of this model
+    // divides by the product of s_0..s_{layer-1}, computed at pack time.
+    if (!p.div_running.empty() && (p.op != "put" || p.div_running.find("{j}") == std::string::npos))
+        fail(where, p.op + " " + p.tensor + ": div_running names a per-layer {j} tensor, on a put");
     if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
@@ -70,22 +93,26 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" ||
-        p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "conv_transpose" ||
+    if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_gemm" ||
+        p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "expert_down_gguf" ||
+        p.op == "conv_transpose" ||
         p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
-    } else if (p.op == "expert_stripes") {
-        if (p.up.empty() || p.gate.empty()) fail(where, "expert_stripes without up / gate");
+    } else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf") {
+        if (p.up.empty() || p.gate.empty()) fail(where, p.op + " without up / gate");
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_dit")
         need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    else if (p.op == "bfp16_gemm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"n_total", p.n_total}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
         need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
-    else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
-    else if (p.op == "expert_down") need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
+    else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf")
+        need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
+    else if (p.op == "expert_down" || p.op == "expert_down_gguf")
+        need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
     else if (p.op == "put") need_all({{"cap", p.cap}});
     else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}, {"in_dim", p.in_dim}});
     else if (p.op == "conv_transpose") need_all({{"taps", p.taps}, {"groups", p.groups}, {"width", p.width}});
@@ -103,6 +130,16 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
             st.args = get<std::vector<std::string>>(s, "args", where);
             if (st.args.empty() || st.args.size() > 8) fail(where, "run " + st.kernel + ": " + std::to_string(st.args.size()) + " buffer args (1..8)");
             st.split = s.value("split", false);
+            st.fmt = s.value("fmt", "");
+            st.n_pad = s.value("n_pad", 0ull);
+            st.epi = s.value("epi", "");
+            st.a_from = s.value("a", "");
+            if (!st.fmt.empty() && st.fmt != "bfp16") fail(where, "run " + st.kernel + ": fmt '" + st.fmt + "' (bfp16 or nothing)");
+            if (st.fmt == "bfp16" && (st.n_pad == 0 || st.split))
+                fail(where, "run " + st.kernel + ": a bfp16 step needs n_pad and cannot be split");
+            if ((!st.epi.empty() && st.epi != "glu") || (!st.a_from.empty() && st.a_from != "h") ||
+                ((!st.epi.empty() || !st.a_from.empty()) && st.fmt != "bfp16"))
+                fail(where, "run " + st.kernel + ": epi glu / a h are bfp16 step options");
         } else if (st.op == "moeroute2") {
             st.act_off = get<uint64_t>(s, "act_off", where);
         } else {
@@ -118,6 +155,8 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
 void check_step(const Manifest& m, const Step& s, const std::string& where, const char* what) {
     auto it = m.kernels.find(s.kernel);
     if (it == m.kernels.end()) fail(where, std::string(what) + " names unknown kernel " + s.kernel);
+    if (!it->second.weight_component.empty())
+        fail(where, std::string(what) + ": low-weight kernel cannot be a standalone program step");
     if (s.op == "moeroute2" && it->second.patch != "moeroute2")
         fail(where, std::string(what) + ": moeroute2 on kernel " + s.kernel + ", whose patch is '" +
                         (it->second.patch.empty() ? std::string("none") : it->second.patch) + "'");
@@ -146,9 +185,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
     // a step is split, and an older engine refuses the set by name instead of misreading it.
     // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
-    // 4 adds bfp16_dit (OPEN-PREFILL-GEMM8), likewise.
-    if (m.version < 1 || m.version > 4)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 4)");
+    // 4 adds paired prefill products and bfp16_dit (OPEN-PREFILL-GEMM8).
+    // Older readers must neither drop the low halves nor misread the packed weights.
+    // 5 adds the bfp16_gemm pack op and the `bfp16` step format (OPEN-PREFILL-BFP16).
+    // 6 adds the glu epilogue, steps reading its H operand and the glu pack halves (OPEN-PREFILL-BFP16-FFN).
+    // 7 adds the fourth attn_fa buffer (OPEN-PREFILL-GLUE-PREP).
+    if (m.version < 1 || m.version > 7)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 7)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -169,8 +212,22 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.rope_theta = get<double>(lay, "rope_theta", lw);
     m.rope_inv_freq = get<std::vector<double>>(lay, "rope_inv_freq", lw);
     if (m.rope_inv_freq.size() != m.rotary_dim / 2) fail(lw, "rope_inv_freq has " + std::to_string(m.rope_inv_freq.size()) + " values, the rotary dim wants " + std::to_string(m.rotary_dim / 2));
+    // The pairing law the cos / sin table does not carry (it is pair-ordered either way).
+    // Absent on manifests written before llama-family GGUF-direct: half-split (Qwen / neox).
+    const std::string pairing = lay.value("rope_pairing", std::string("half-split"));
+    if (pairing != "half-split" && pairing != "interleaved")
+        fail(lw, "rope_pairing " + pairing + " is neither half-split nor interleaved");
+    m.rope_interleaved = pairing == "interleaved";
     m.rout_idx_off = lay.value("rout_idx_off", 1024ull);
+    m.final_logit_softcapping = lay.value("final_logit_softcapping", 0.0);
+    if (m.final_logit_softcapping < 0.0 || !std::isfinite(m.final_logit_softcapping))
+        fail(lw, "final_logit_softcapping must be finite and non-negative");
     m.has_moe = lay.contains("moe");
+    // Declared by a recipe whose block loop has been measured correct on this very set
+    // (Phase 28: the Qwen3.8-27B recipe). Absent is read as "not declared", which keeps
+    // layer-major -- the conservative reading, because layer_major_ok() is a capability
+    // test that most dense sets pass and nobody measured them on the block loop.
+    m.block_loop_preferred = j.value("block_loop_preferred", false);
     if (m.has_moe) {
     const json& moe = lay["moe"];
     const std::string mw = lw + ".moe";
@@ -185,6 +242,21 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.moe.share_down = get<uint64_t>(moe, "share_down", mw);
     if (m.moe.topk > 8 || m.moe.topk == 0) fail(mw, "topk " + std::to_string(m.moe.topk) + " (the router record holds 8)");
     }
+    const std::string kv_dtype = lay.value("attn_kv_dtype", "bfloat16");
+    const std::string og_dtype = lay.value("attn_output_dtype", "bfloat16");
+    const std::string entry_dtype = lay.value("attn_entry_dtype", "bfloat16");
+    if (entry_dtype != "bfloat16" && entry_dtype != "float32")
+        fail(lw, "unsupported attention entry dtype");
+    m.attn_kv_pair = kv_dtype == "bfloat16_pair";
+    if ((kv_dtype != "bfloat16" && !m.attn_kv_pair) ||
+        og_dtype != (m.attn_kv_pair ? "float32" : "bfloat16"))
+        fail(lw, "unsupported attention cache/output dtype combination");
+    const std::string linear_entry = lay.value("linear_entry_dtype", "bfloat16");
+    const std::string linear_conv = lay.value("linear_conv_dtype", "bfloat16");
+    if ((linear_entry != "bfloat16" && linear_entry != "float32") ||
+        (linear_conv != "bfloat16" && linear_conv != "float32"))
+        fail(lw, "unsupported linear entry/history dtype");
+    m.linear_conv_f32 = linear_conv == "float32";
     m.attn.kv_row = m.kv_row;
     m.attn.ptab_row = m.ptab_row;
 
@@ -198,18 +270,30 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         d.rb = v.value("rb", 1ull);
+        d.kv_row = v.value("kv_row", static_cast<uint64_t>(m.kv_row));
+        d.ptab_row = v.value("ptab_row", static_cast<uint64_t>(m.ptab_row));
+        if (!d.kv_row || !d.ptab_row) fail(where, "kernel " + k + ": a zero kv_row / ptab_row");
         // attn_stepb*.cc build RB 2 and 4 only; any other count would pad the stream for
         // rows the kernel never takes, and the core waits on its fifo forever
         if (d.rb != 1 && d.rb != 2 && d.rb != 4)
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " is not 1, 2 or 4");
         if (d.rb > 1 && d.patch != "attnpos")
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
+        // OPEN-ATTN-KVSLICE: per-core window fills of whole blocks; the stream and the kernel count the same blocks
+        d.kvslice = v.value("kvslice", 0ull);
+        if (d.kvslice && ((d.patch != "attnpos" && d.patch != "attnrows") || d.rb != 1 || (d.kvslice != 2 && d.kvslice != 4 && d.kvslice != 8)))
+            fail(where, "kernel " + k + ": kvslice " + std::to_string(d.kvslice) +
+                        " needs the attnpos or attnrows patch table, rb 1 and 2, 4 or 8 rows an element");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
             d.patch != "attnrows")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
+        d.weight_component = v.value("weight_component", "");
+        if (!d.weight_component.empty() &&
+            (d.weight_component != "bf16_residual" || m.version < 4 || !d.patch.empty()))
+            fail(where, "unsupported kernel weight_component or manifest version: " + k);
         m.kernels[k] = d;
     }
     if (j.contains("rows")) {
@@ -222,6 +306,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         m.rows.head_act_bytes = get<uint64_t>(r, "head_act_bytes", rw);
         m.rows.head_cores = get<uint64_t>(r, "head_cores", rw);
         m.rows.head_out_floats = get<uint64_t>(r, "head_out_floats", rw);
+        m.rows.head_fold = r.value("head_fold", false);
+        m.rows.mode_off = r.value("mode_off", 0ull);
+        m.rows.mode_elem = r.value("mode_elem", 0ull);
         if (m.rows.l == 0 || m.rows.l % 4) fail(rw, "l " + std::to_string(m.rows.l) + " is not a multiple of 4");
         auto rk = m.kernels.find(m.rows.kernel);
         if (rk == m.kernels.end() || rk->second.patch != "attnrows")
@@ -249,6 +336,15 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (t.state_kind == "linear") t.state_bytes = get<uint64_t>(st, "bytes", tw);
         else if (t.state_kind == "kv") t.state_row = get<uint64_t>(st, "row", tw);
         else fail(tw, "unknown state kind " + t.state_kind);
+        if (v.contains("post_output")) {
+            const auto& post = v["post_output"];
+            const auto offset = get<uint64_t>(post, "offset", tw + " post_output");
+            const auto bytes = get<uint64_t>(post, "bytes", tw + " post_output");
+            if (t.state_kind != "linear" || get<std::string>(post, "dtype", tw + " post_output") != "float32" ||
+                offset % 4096 || bytes == 0 || bytes % 4096 ||
+                offset > t.act_bytes || bytes > t.act_bytes - offset)
+                fail(tw, "invalid FP32 post_output region or scratch size");
+        }
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
         // the block prefill route, independent of the sequential `program`
@@ -277,8 +373,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         // one format per weight: the q4_1 band law, or one GEMM pool the kernel was built for
                         const std::string& kind = w.pack.front().op;
                         for (const auto& o : w.pack)
-                            if (o.op != "std_perm" && o.op != "bf16_gemm" && o.op != "bfp16_dit")
-                                fail(gw, "weight " + name + ": a packed weight is std_perm, bf16_gemm or bfp16_dit ops, not " + o.op);
+                            if (o.op != "std_perm" && o.op != "bf16_gemm" && o.op != "bfp16_dit" && o.op != "bfp16_gemm")
+                                fail(gw, "weight " + name + ": a packed weight is std_perm, bf16_gemm, bfp16_dit or bfp16_gemm ops, not " + o.op);
                         for (const auto& o : w.pack)
                             if (o.op != kind)
                                 fail(gw, "weight " + name + " mixes " + kind + " and " + o.op + " ops; the GEMM reads one format");
@@ -334,9 +430,53 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 for (const auto& kv : a.kernels_pv) kpv.push_back(kv.first);
                 if (ks != kpv) fail(aw, "kernels_s and kernels_pv cover different windows");
             }
+            if (g.kind == "dense" && gj.contains("attn_fa")) {
+                const json& fj = gj["attn_fa"];
+                const std::string fw = gw + ".attn_fa";
+                AttnFa& f = g.attn_fa;
+                f.hd = get<uint64_t>(fj, "hd", fw);
+                f.l_max = get<uint64_t>(fj, "l_max", fw);
+                f.q_head = get<uint64_t>(fj, "q_head", fw);
+                f.qsplit = fj.value("qsplit", true);
+                // the design: 64-dim heads, a 256-token block on 32 cores, 64-key chunks, at most 64 a pass
+                if (f.hd != 64 || g.t != 256 || f.l_max == 0 || f.l_max % 256 || f.l_max > 4096)
+                    fail(fw, "wants hd 64, t 256 and l_max a positive multiple of 256 up to 4096");
+                if (f.q_head != 4096 * (f.qsplit ? 9u : 5u))
+                    fail(fw, "q_head " + std::to_string(f.q_head) + " is not the record plus Q hi" +
+                                 (f.qsplit ? " and lo" : "") + " for 256 tokens of head dim 64");
+                for (const auto& [rows_s, kname] : need(fj, "kernels", fw).items()) {
+                    const size_t rows = static_cast<size_t>(std::stoull(rows_s));
+                    if (rows == 0 || rows % 256 || rows > f.l_max)
+                        fail(fw, "kernels: window " + rows_s + " is not a positive multiple of 256 within l_max");
+                    auto it = m.kernels.find(kname.get<std::string>());
+                    if (it == m.kernels.end()) fail(fw, "kernels names unknown kernel " + kname.get<std::string>());
+                    f.kernels[rows] = it->first;
+                }
+                for (size_t rows = 256; rows <= f.l_max; rows += 256)
+                    if (!f.kernels.count(rows)) fail(fw, "kernels has no stream for a window of " + std::to_string(rows));
+                if (fj.contains("prep")) {
+                    const json& pj = fj["prep"];
+                    f.prep_kernel = get<std::string>(pj, "kernel", fw + ".prep");
+                    f.prep_npad = get<uint64_t>(pj, "n_pad", fw + ".prep");
+                    if (m.version < 7) fail(fw, "prep needs manifest_version 7; an engine that reads 6 would pass the streams three buffers");
+                    if (!f.qsplit || f.prep_npad == 0 || f.prep_npad % 1024)
+                        fail(fw, "prep needs Q hi / lo and an n_pad that is a whole number of 1024 columns");
+                    if (!m.kernels.count(f.prep_kernel)) fail(fw, "prep names unknown kernel " + f.prep_kernel);
+                }
+            }
             if (g.kind == "dense") {
-                if (g.program.size() != 5)
-                    fail(gw, "a dense route has exactly 5 steps (qkv3, o, gate, up, down), has " + std::to_string(g.program.size()));
+                // 4 steps: gate|up through the glu epilogue, down reading its H operand (OPEN-PREFILL-BFP16-FFN)
+                const bool glu = g.program.size() == 4 && g.program[2].epi == "glu" && g.program[3].a_from == "h" &&
+                                 g.program[3].args.size() > 1 && g.program[2].args.size() > 2 &&
+                                 g.program[3].args[1] == g.program[2].args[2];
+                if (g.program.size() != 5 && !glu)
+                    fail(gw, "a dense route has 5 steps (qkv3, o, gate, up, down), or 4 with gate|up's glu H as down's x; has " +
+                                 std::to_string(g.program.size()));
+                for (size_t i = 0; i < g.program.size(); ++i)
+                    if ((!g.program[i].epi.empty() && !(glu && i == 2)) || (!g.program[i].a_from.empty() && !(glu && i == 3)))
+                        fail(gw, "step " + g.program[i].kernel + ": epi / a only on a 4-step route's gate|up and down");
+                if ((glu || g.program.size() == 4) && m.version < 6)
+                    fail(gw, "a glu route needs manifest_version 6; an engine that reads 5 would run it as five steps");
                 g.qw = get<uint64_t>(gj, "qw", gw);
                 g.kvw = get<uint64_t>(gj, "kvw", gw);
                 g.ff = get<uint64_t>(gj, "ff", gw);
@@ -447,6 +587,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
+                    const std::string conv_dtype = gj.value("conv_dtype", "bfloat16");
+                    if (conv_dtype != (m.linear_conv_f32 ? "float32" : "bfloat16"))
+                        fail(gw, "conv dtype disagrees with the linear state ABI");
+                    g.conv_f32 = m.linear_conv_f32;
+                    if (g.conv_kernel < 2 || g.state_s_off != (g.conv_kernel - 1) * g.qkv_dim * (g.conv_f32 ? 4 : 2) ||
+                        g.s_rows < g.head_dim || g.s_head_bytes != g.s_rows * g.head_dim * 4 ||
+                        t.state_bytes != g.state_s_off + g.value_heads * g.s_head_bytes)
+                        fail(gw, "linear state offsets/size disagree with conv dtype and recurrence geometry");
                     g.out_split = gj.value("out_split", false);
                     // the flag predates per-step `split` and means the same thing for the out step
                     if (g.out_split) g.program.at(1).split = true;
@@ -546,6 +694,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             check_split(g.program, g.weights, "program");
             check_split(g.shared_program, g.shared_weights, "shared");
             check_split(g.ffn_program, g.ffn_weights, "ffn");
+            if (gj.contains("low_kernels")) {
+                g.low_kernels = get<std::map<std::string, std::string>>(gj, "low_kernels", gw);
+                if (g.low_kernels.empty()) fail(gw, "low_kernels must be nonempty when present");
+            }
+            prefill_precision_policy::validate(m, g);
         };
         if (v.contains("gemm_block")) parse_gemm_block(v["gemm_block"], tw + " gemm_block", t.gemm_block);
         // OPEN-PREFILL-MODE: whole routes the engine may load in place of gemm_block
@@ -571,7 +724,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             for (const auto& [name, w] : *ws) {
                 if (w.from == "pack") {
                     for (const auto& o : w.pack) {
-                        if (o.op == "bf16_gemm" && m.version < 3)
+                        if (!o.glu.empty() && m.version < 6)
+                            fail(tw, "gemm_block weight " + name + " packs a glu half in a manifest_version " +
+                                         std::to_string(m.version) + " manifest; it needs version 6");
+                        else if (o.op == "bfp16_gemm" && m.version < 5)
+                            fail(tw, "gemm_block weight " + name + " packs " + o.op + " in a manifest_version " +
+                                         std::to_string(m.version) + " manifest; an engine that reads 4 cannot pack it, so it needs version 5");
+                        else if (o.op == "bf16_gemm" && m.version < 3)
                             fail(tw, "gemm_block weight " + name + " packs " + o.op + " in a manifest_version " +
                                          std::to_string(m.version) + " manifest; an engine that reads 2 cannot pack it, so it needs version 3");
                         if (o.op == "bfp16_dit" && m.version < 4)
@@ -628,14 +787,18 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             rg.inv_freq = v.value("inv_freq", m.rope_inv_freq);
             rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
-            if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            rg.rotary_dim = v.value("rotary_dim", static_cast<uint64_t>(m.rotary_dim));
+            if (rg.inv_freq.size() != rg.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            if (512 + 8 * (rg.rotary_dim / 2) > rg.per_row)
+                fail(where, "global " + k + ": " + std::to_string(rg.rotary_dim) + " rotated dims do not fit a " +
+                     std::to_string(rg.per_row) + "-byte record");
             const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
             if (has_long != has_switch)
                 fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
             if (has_long) {
                 rg.long_inv_freq = v["long_inv_freq"].get<std::vector<double>>();
                 rg.switch_row = v["switch_row"].get<uint64_t>();
-                if (rg.long_inv_freq.size() != m.rotary_dim / 2)
+                if (rg.long_inv_freq.size() != rg.rotary_dim / 2)
                     fail(where, "global " + k + ": long_inv_freq has " + std::to_string(rg.long_inv_freq.size()) + " values");
             }
             m.per_row_globals[k] = rg;
@@ -664,6 +827,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     for (const auto& o : need(need(pack, "lm_head", where), "ops", where + " pack.lm_head")) m.lmhead_ops.push_back(parse_op(o, where + " pack.lm_head"));
     if (m.lmhead_ops.empty()) fail(where, "pack.lm_head has no ops");
     m.hf_config_check = need(j, "hf_config_check", where);
+    if (m.attn_kv_pair) {
+        const size_t kw = get<size_t>(m.hf_config_check, "num_key_value_heads", where) *
+                          get<size_t>(m.hf_config_check, "head_dim", where);
+        if (!kw || m.kv_row != kw * 8) fail(lw, "paired KV row size mismatch");
+        for (const auto& [name, t] : m.layer_types)
+            if (t.state_kind == "kv" && t.state_row != m.kv_row)
+                fail(lw, "paired layer KV row size mismatch");
+    }
     if (j.contains("hf_config_defaults")) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];
@@ -712,16 +883,26 @@ std::vector<std::string> Manifest::files() const {
     for (const auto& [k, v] : contexts) f.push_back(v);
     for (const auto& [k, v] : kernels) f.push_back(v.insts);
     if (gguf) {
+        // The GGUF view shares the builds with the main view (it only swaps the
+        // pack ops), so most of these are the same paths again. A file named
+        // twice is still one file; dedupe, keeping first-seen order.
         auto nested = gguf->files();
         f.insert(f.end(), nested.begin(), nested.end());
+        std::vector<std::string> seen;
+        std::unordered_set<std::string> have;
+        for (auto& s : f)
+            if (have.insert(s).second) seen.push_back(std::move(s));
+        return seen;
     }
     return f;
 }
 
 std::string Manifest::host_attention_refusal() const {
-    if (family != "k2")
+    // Granite joins because recipes/spec.py::_granite_scale_check requires its
+    // attention_multiplier to equal head_dim**-0.5, the host's scale.
+    if (family != "k2" && family != "granite")
         return "host attention implements K2's attention (no q/k norm, no bias, no gate, no window, "
-               "full rotation) and nothing else; this kernel set is family '" + family + "'";
+               "full rotation; Granite with attention_multiplier == head_dim**-0.5) and nothing else; this kernel set is family '" + family + "'";
     auto num = [&](const char* key) -> size_t {
         return hf_config_check.contains(key) ? hf_config_check[key].get<size_t>() : 0;
     };
@@ -740,34 +921,78 @@ std::string Manifest::host_attention_refusal() const {
     return "";
 }
 
-void Manifest::check_model(const json& config, const std::string& where) const {
+void Manifest::check_model(const json& config, const std::string& where, bool model_type) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
     auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };
+    // A VLM config nests the text tower's fields under "text_config" (Qwen3.5's
+    // published form: the model_type says qwen3_5, the tower says qwen3_5_text).
+    // The recipes read both forms, so the check does too: the field is looked up
+    // at the top level first, then in the text tower.
+    const json* text = (config.contains("text_config") && config["text_config"].is_object())
+                           ? &config["text_config"] : nullptr;
+    auto find = [&](const std::string& key) -> const json* {
+        if (config.contains(key)) return &config[key];
+        if (text && text->contains(key)) return &(*text)[key];
+        return nullptr;
+    };
     for (const auto& [key, want] : hf_config_check.items()) {
+        const json* got_ptr = find(key);
         if (key == "model_type") {
-            if (!config.contains(key)) lacks(key);
+            if (!model_type) continue;                 // a GGUF's arch is not a model_type
+            if (!got_ptr) lacks(key);
             bool ok = false;
-            for (const auto& t : want) ok |= (config[key] == t);
-            if (!ok) fail(where, "config.json model_type " + config[key].dump() + " is not one this kernel set serves (" + want.dump() + ")");
+            for (const auto& t : want) ok |= (*got_ptr == t);
+            if (!ok) fail(where, "config.json model_type " + got_ptr->dump() + " is not one this kernel set serves (" + want.dump() + ")");
         } else if (key == "layer_types") {
             std::vector<std::string> got;
-            if (config.contains("layer_types")) {
-                got = config["layer_types"].get<std::vector<std::string>>();
-            } else if (config.contains("full_attention_interval") && config.contains("num_hidden_layers")) {
-                int iv = config["full_attention_interval"].get<int>(), n = config["num_hidden_layers"].get<int>();
-                if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
-                for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+            if (got_ptr) {
+                got = got_ptr->get<std::vector<std::string>>();
             } else {
-                lacks("layer_types");
+                const json* iv_j = find("full_attention_interval");
+                const json* n_j = find("num_hidden_layers");
+                if (iv_j && n_j) {
+                    int iv = iv_j->get<int>(), n = n_j->get<int>();
+                    if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
+                    for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+                } else {
+                    lacks("layer_types");
+                }
             }
             if (got != want.get<std::vector<std::string>>())
                 fail(where, "config.json layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
+        } else if (key == "vocab_size") {
+            // The head kernel is COMPILED for the set's row count (its bands and their
+            // split), and the pack zero-fills the rows past the model's own
+            // (pools.cpp: "padded rows: zeroed scales/codes"). So a set built from a
+            // container whose vocabulary was padded serves a model whose head is
+            // narrower -- a GGUF of the same family, where llama.cpp writes the
+            // model's own token count (Gemma 3 4B: 262144 against the set's 262208).
+            // Wider is still a refusal: those rows are not in the kernels.
+            if (!got_ptr) lacks(key);
+            const size_t got = got_ptr->get<size_t>(), rows = want.get<size_t>();
+            if (got > rows)
+                fail(where, "config.json vocab_size " + std::to_string(got) +
+                                " is wider than the kernel set's head (" + std::to_string(rows) +
+                                " rows; the set cannot carry rows it was not built for)");
         } else {
             // an absent key means its default when the manifest names one (Phi-3's optional
             // fields); the comparison is the same either way, so the check stays two-way
-            const bool present = config.contains(key);
+            const bool present = got_ptr != nullptr;
             if (!present && !hf_config_defaults.contains(key)) lacks(key);
-            const json& got = present ? config[key] : hf_config_defaults[key];
+            const json& got = present ? *got_ptr : hf_config_defaults[key];
+            // A key whose value can legitimately be written two ways: Granite's
+            // attention_multiplier is folded into q_proj at conversion (a container
+            // says 1/sqrt(HD)) and NOT folded in a raw GGUF (it says the original).
+            // The kernel set serves both -- the plan folds the GGUF's weights at pack
+            // time -- so the check accepts any value the manifest lists.
+            if (want.is_array()) {
+                bool any = false;
+                for (const auto& w : want) any |= (got == w);
+                if (!any)
+                    fail(where, "config.json " + key + " = " + got.dump() +
+                                     " is none of the values this kernel set accepts (" + want.dump() + ")");
+                continue;
+            }
             if (got != want)
                 fail(where, "config.json " + key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
                                  ", the kernel set was built for " + want.dump());

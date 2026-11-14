@@ -39,6 +39,57 @@ static inline void splitN(const vfN<N> &v, vbN<N> &h, vbN<N> &l) {
 static inline void split32(const v32f &v, v32b &h, v32b &l) { splitN<32>(v, h, l); }
 static inline void split16(const v16f &v, v16b &h, v16b &l) { splitN<16>(v, h, l); }
 
+// fp32 vector -> (hi, mid, lo) bf16 thirds, hi + mid + lo == v EXACTLY (24 mantissa bits).
+// Two terms only reach ~16 bits, which costs a relative 2e-5 on a 5120-wide row; a
+// normalisation whose result feeds every element of the layer cannot afford that, so
+// `mul3` below is what the norms use. Costs three MACs instead of two, and split3 one
+// extra subtract+convert over splitN.
+template <unsigned N>
+static inline void split3N(const vfN<N> &v, vbN<N> &h, vbN<N> &m, vbN<N> &l) {
+  accN<N> a;
+  a.from_vector(v);
+  h = a.template to_vector<bfloat16>();
+  accN<N> r = aie::sub(a, h);
+  m = r.template to_vector<bfloat16>();
+  l = aie::sub(r, m).template to_vector<bfloat16>();
+}
+static inline void split3_32(const v32f &v, v32b &h, v32b &m, v32b &l) { split3N<32>(v, h, m, l); }
+static inline void split3_16(const v16f &v, v16b &h, v16b &m, v16b &l) { split3N<16>(v, h, m, l); }
+
+// a(fp32 vec) * b(fp32 vec) to full fp32 precision: both split into three bf16 terms and
+// the nine products accumulated. Terms beyond hi*hi are what make this exact enough; the
+// two-term path (`fmulN`) is ~2e-5 relative and is kept for callers that can afford it.
+template <unsigned N>
+static inline vfN<N> mul3N(const vfN<N> &a, const vfN<N> &b) {
+  vbN<N> ah, am, al, bh, bm, bl;
+  split3N<N>(a, ah, am, al);
+  split3N<N>(b, bh, bm, bl);
+  accN<N> acc = aie::mul(ah, bh);
+  acc = aie::mac(acc, ah, bm);
+  acc = aie::mac(acc, ah, bl);
+  acc = aie::mac(acc, am, bh);
+  acc = aie::mac(acc, am, bm);
+  acc = aie::mac(acc, al, bh);
+  return acc.template to_vector<float>();
+}
+static inline v32f mul3_32(const v32f &a, const v32f &b) { return mul3N<32>(a, b); }
+static inline v16f mul3_16(const v16f &a, const v16f &b) { return mul3N<16>(a, b); }
+
+// a(fp32 vec) * b(bf16 vec) to full fp32 precision. `b` is exact as bf16, so only `a`
+// needs splitting: three terms reconstruct it. The two-term path (`mac_vv`) drops `al*b`,
+// a relative 2e-5 on a 5120-wide row -- which is what the norms were paying.
+template <unsigned N>
+static inline vfN<N> mul3bvN(const vfN<N> &a, const vbN<N> &b) {
+  vbN<N> ah, am, al;
+  split3N<N>(a, ah, am, al);
+  accN<N> acc = aie::mul(ah, b);
+  acc = aie::mac(acc, am, b);
+  acc = aie::mac(acc, al, b);
+  return acc.template to_vector<float>();
+}
+static inline v32f mul3bv_32(const v32f &a, const v32b &b) { return mul3bvN<32>(a, b); }
+static inline v16f mul3bv_16(const v16f &a, const v16b &b) { return mul3bvN<16>(a, b); }
+
 // acc += a(fp32 vec) * s(bf16 hi/lo scalar)
 template <unsigned N>
 static inline accN<N> mac_vs(accN<N> acc, const vfN<N> &a, bfloat16 sh, bfloat16 sl) {

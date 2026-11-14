@@ -1,0 +1,304 @@
+{
+ "tool": "prefill-block-long-context",
+ "version": 1,
+ "phase": 29,
+ "status": "PASS",
+ "outcome": "B -- attention becomes dominant; full-context escalation stopped at 4K",
+ "binary": {
+  "sha256": "158d777e4d4025df2745c4a029e3f67cdeede7e680ec4a3ed59001fb06357337",
+  "note": "rebuilt for the Phase 29 manifest capability; Phase 28's measurements used 5d50e0dd"
+ },
+ "levels": {
+  "capacity": "buffers allocate, the context object accepts the length",
+  "addressing": "RoPE / KV / position arithmetic is tested at that absolute range",
+  "end_to_end": "a real prompt of that length went through the real model and decoded",
+  "note": "the three are never collapsed; a capacity PASS is not an end-to-end claim"
+ },
+ "context_contract": {
+  "max_l_semantics": "MAX_L is the TOTAL stored sequence (prompt + generated): the generate loop is `while (total_tokens < MAX_L)`",
+  "invariant": "prompt_tokens + generated_tokens <= MAX_L",
+  "guard": "if (total_tokens + tokens.size() >= MAX_L) refuse -- consistent, not off-by-one",
+  "on_refusal": "explicit 'Max length reached, stopping prefilling' and 0 tokens prefilled; never a silent truncation",
+  "max_prompt_cli": "ctx_len - 1",
+  "max_prompt_serve": "ctx_len - 5 when the model does not think, ctx_len - 3 when it does (OBSERVED at ctx 512, Phase 31)",
+  "generation_headroom": {
+   "rule": "prompt + generation_preamble_rows() + 1 <= ctx_len",
+   "measured_by": "utilities/prefill-block/think_boundary.py --ctx 512 (both branches, both sides of the boundary)",
+   "artefact": "runs/think-boundary-512-20261103-015405/result.json",
+   "cli_default_branch": "not-thinking (need 5); `/think` toggles it on (need 3). clear_context() does not touch the toggle.",
+   "thinking_branch": {
+    "preamble_rows": 2,
+    "need": 3,
+    "last_legal_prompt_at_ctx512": 509,
+    "observed_509": "generates, one token, refused=False, ends at total == MAX_L",
+    "observed_510": "REFUSED before stepping: 'needs 3 free slots ... largest prompt that can generate is 509', headroom=2"
+   },
+   "normal_branch": {
+    "preamble_rows": 4,
+    "need": 5,
+    "last_legal_prompt_at_ctx512": 507,
+    "observed_507": "generates, one token, refused=False, ends at total == MAX_L",
+    "observed_508": "REFUSED before stepping: 'needs 5 free slots ... largest prompt that can generate is 507', headroom=4"
+   },
+   "refusal_is_pre_step": "the refused rows have no `ctx-trace step` line at all, so nothing was written to the cache",
+   "trace": "OFLM_CTX_TRACE prints the engine position before the preamble, after every preamble step, and after the first emitted token",
+   "helper": "Qwen3_5VL::generation_preamble_rows() -- guard, counter advance and the template trim all call it"
+  },
+  "why_serve_is_tighter_now_fixed": "Qwen3_5VL::generate steps a THINK PREAMBLE before any budget check: 2 tokens when enable_think (think_start_id, 198) and 4 when not (think_start_id, 271, think_end_id, 271). The shared _shared_generate path the CLI uses steps none. That is the whole difference, and it is now guarded so the request is REFUSED with the limit named instead of throwing 'position N reached the context capacity N'.",
+  "phase31_boundary_at_ctx512": {
+   "non_thinking": {
+    "507": "generates (last legal)",
+    "508": "refused, explicit",
+    "509": "refused, explicit",
+    "510": "refused, explicit"
+   },
+   "thinking": {
+    "509": "generates (last legal)",
+    "510": "refused, explicit"
+   },
+   "note": "monotone and loud in both branches; no position throw and no 'Internal error' at any length tested",
+   "artefact": "runs/think-boundary-512-20261103-015405/result.json"
+  },
+  "why_serve_is_tighter": "`_shared_insert` samples the first token as part of prefill, so `last_token` is the token AT the prompt's last position. `_shared_generate` pushes it to the history and calls forward(last_sampled_token), which consumes a position at or past MAX_L on a prompt that filled the cache. Prefilling succeeded and generation then threw. The prompt was legal by the prefill guard; the refusal happens one stage too late and is not explicit.",
+  "measured_serve": {
+   "ctx": 512,
+   "engine_509": "PASS (fresh, repeat-identical, and a following request)",
+   "engine_510": "PASS",
+   "engine_511": "prefill ok, then 'position 512 reached the context capacity 512' -> HTTP 'Internal error'",
+   "artefacts": [
+    "runs/ctx-boundary-512-20261102-185906",
+    "runs/oflm-serve-20261102-191643",
+    "runs/oflm-serve-20261102-190706"
+   ]
+  },
+  "measured_cli": "engine 511 prefills and generates at ctx 512 (runs/ctx-boundary-512-20261102-185906)",
+  "disposition": "NOT changed in Phase 29: the accounting fix touches the shared insert/generate state and was reverted rather than shipped unverified. Recorded as a Phase 30/31 candidate. Until then, a serve request must keep 2 slots of headroom: prompt <= ctx_len - 2 for any generation.",
+  "serve_vs_cli_now": "The CLI's chat turn does not step a preamble, so its own limit is ctx_len - 1. The serve path reaches Qwen3_5VL::generate, which does, so its limit is ctx_len - need. Both are now guarded and refuse explicitly; neither can reach a position throw."
+ },
+ "kv_model": {
+  "kv_row_bytes": 8192,
+  "derivation": "PAIRED cache: 4 planes of bf16 at kv_heads*head_dim = 4*256 = 1024 elements each. [K hi, K lo, V hi, V lo] per block_host.hpp:93, so 4 planes x 1024 elems x 2 B = 8192 B. An UNPAIRED cache would be 2 planes x 1024 x 2 = 4096 B (recipes/qwen36moe.py: (8 if paired else 4) * kvw).",
+  "element_storage": "bfloat16, 2 bytes per element",
+  "k_physical_stride_bytes": 4096,
+  "v_physical_stride_bytes": 4096,
+  "k_planes": "hi + lo, 2048 B each",
+  "v_planes": "hi + lo, 2048 B each",
+  "pairing_reason": "the paired route stores each K and V value twice (hi/lo residual pair) so the attention output is computed in FP32 from the pair; this is the validated wide dense Qwen attention geometry (recipes/qwen36moe.py paired_attention: qwen35, hidden 5120, 24/4/256/64)",
+  "row_layout": "off = row*kv_row + (value ? kv_row/2 : 0) -- K in the first 4096 B, V in the second (core.cpp kv_row())",
+  "padding_alignment_bytes_per_row": 0,
+  "staging_duplicate": "none: 8192 is the single production row; there is no second copy",
+  "bytes_per_token_per_full_layer": 8192,
+  "bytes_per_token_all_16_layers": 131072,
+  "linear_state_bytes_fixed": 3317760,
+  "ptab_row_bytes": 2048,
+  "container_gib": 18.48,
+  "formula": "container + 8192*16*ctx + 2048*ctx + globals + linear_state + per-layer buffers",
+  "allocated_kv": {
+   "4096": 536870912,
+   "32768": 4294967296,
+   "131072": 17179869184,
+   "262144": 34359738368
+  }
+ },
+ "host": {
+  "total_gib": 91,
+  "available_gib_at_measure": 58
+ },
+ "rows": [
+  {
+   "context_length": 4096,
+   "capacity_pass": true,
+   "addressing_pass": true,
+   "e2e_pass": true,
+   "kv_bytes": 536870912,
+   "predicted_gib": 21.48,
+   "engine_tokens_e2e": 4095,
+   "prefill_passes": 16,
+   "rss_bytes": null,
+   "ttft_ms": null,
+   "prompt_tok_s": 7.2,
+   "decode_tok_s": null,
+   "projection_ms": 400800,
+   "attention_ms": 51000,
+   "failure": null,
+   "notes": "4095 engine tokens = 15 full blocks + a padded 255 tail; 4096 engine tokens is REFUSED by a one-token off-by-one in the length guard (0 tokens prefilled)"
+  },
+  {
+   "context_length": 8192,
+   "capacity_pass": true,
+   "addressing_pass": true,
+   "e2e_pass": false,
+   "kv_bytes": 1073741824,
+   "predicted_gib": 21.99,
+   "engine_tokens_e2e": null,
+   "prefill_passes": 32,
+   "rss_bytes": null,
+   "ttft_ms": null,
+   "prompt_tok_s": null,
+   "decode_tok_s": null,
+   "projection_ms": 801600,
+   "attention_ms": 219400,
+   "failure": null,
+   "notes": "NOT RUN: the attention gate fires before this length (see attention_gate), and the fit predicts 21.5% attention here"
+  },
+  {
+   "context_length": 16384,
+   "capacity_pass": true,
+   "addressing_pass": true,
+   "e2e_pass": false,
+   "kv_bytes": 2147483648,
+   "predicted_gib": 23.01,
+   "engine_tokens_e2e": null,
+   "prefill_passes": 64,
+   "rss_bytes": null,
+   "ttft_ms": null,
+   "prompt_tok_s": null,
+   "decode_tok_s": null,
+   "projection_ms": 1603200,
+   "attention_ms": 865500,
+   "failure": null,
+   "notes": "NOT RUN: fit predicts 35.1% attention; a full run is ~0.7 h of prefill for a path already selected as bottleneck-bound"
+  },
+  {
+   "context_length": 32768,
+   "capacity_pass": true,
+   "addressing_pass": true,
+   "e2e_pass": false,
+   "kv_bytes": 4294967296,
+   "predicted_gib": 25.04,
+   "projection_ms": 3206400,
+   "attention_ms": 3438100,
+   "failure": null,
+   "notes": "NOT RUN: fit predicts 51.7% attention, ~1.9 h prefill"
+  },
+  {
+   "context_length": 65536,
+   "capacity_pass": true,
+   "addressing_pass": false,
+   "e2e_pass": false,
+   "kv_bytes": 8589934592,
+   "predicted_gib": 29.1,
+   "failure": null,
+   "notes": "capacity only; addressing probed at 65535/65536/65537 and above"
+  },
+  {
+   "context_length": 131072,
+   "capacity_pass": true,
+   "addressing_pass": true,
+   "e2e_pass": false,
+   "kv_bytes": 17179869184,
+   "predicted_gib": 37.23,
+   "failure": null,
+   "notes": "addressing probed at 131071/131072/131073"
+  },
+  {
+   "context_length": 262144,
+   "capacity_pass": true,
+   "addressing_pass": true,
+   "e2e_pass": false,
+   "kv_bytes": 34359738368,
+   "predicted_gib": 53.48,
+   "failure": null,
+   "notes": "addressing probed at 262143; capacity accepted the full length with no silent reduction"
+  }
+ ],
+ "server_smoke": {
+  "artefact": "runs/oflm-serve-20261102-192100",
+  "verdict": "PASS",
+  "ctx": 4096,
+  "long_request": {
+   "text_tokens": 4085,
+   "engine_tokens": 4093,
+   "wall_s": 516.42,
+   "result": "accepted, prefilled, generated, output produced, no DMA/allocation/context error"
+  },
+  "short_request_same_process": {
+   "text_tokens": 40,
+   "wall_s": 21.87,
+   "result": "ok"
+  },
+  "repeat_long_same_process": {
+   "matches_first": true
+  },
+  "short_after_long": {
+   "wall_s": 21.89,
+   "result": "ok",
+   "matches_the_first_short": true
+  },
+  "isolation": "the long request leaked no KV / DeltaNet / conv / position state into the next request: the short request before and after the long one returned the same answer and the same ~21.9 s",
+  "reset_endpoint": "N/A -- serve exposes none (recorded, not counted as a pass)"
+ },
+ "capacity_validated": [
+  4096,
+  8192,
+  16384,
+  32768,
+  65536,
+  131072,
+  262144
+ ],
+ "addressing_validated_positions": [
+  4095,
+  4096,
+  4097,
+  8191,
+  8192,
+  8193,
+  16383,
+  16384,
+  16385,
+  32767,
+  32768,
+  32769,
+  65535,
+  65536,
+  65537,
+  131071,
+  131072,
+  131073,
+  262143
+ ],
+ "end_to_end_validated": [
+  4095
+ ],
+ "addressing_detail": {
+  "rope_max_abs_err": 2.97e-08,
+  "rope_reference": "cos/sin(pos * inv_freq[i]) in float64 against the f32 the engine wrote",
+  "record_valid_rule": "valid = pos - start (stream_patch::attn_window), so a full causal window gives valid == pos",
+  "no_wrap_at_65536": true,
+  "kv_row_nonzero_all": true
+ },
+ "attention_gate": {
+  "source": "engine-internal accounting, block route, 4000 ids, 16 blocks",
+  "total_ms": 592000,
+  "gemm_ms": 401000,
+  "gemm_share": 0.678,
+  "attention_ms": 51000,
+  "attention_share": 0.086,
+  "attention_share_excl_tail": 0.123,
+  "ms_per_position": 1.628,
+  "model": "attention per block = 1.628 ms/position x position + 187 ms   (R^2 = 0.99768, 15 full blocks)",
+  "model_r2": 0.99768,
+  "why_it_matters": "attention is linear in position while GEMM is linear in BLOCKS, so attention's share grows quadratically in context length: 12.3% at 4K, 21.5% at 8K, 35.1% at 16K",
+  "gate_threshold": 0.2,
+  "gate_crossing_context": 7600,
+  "fires": true,
+  "decision": "STOP full-context escalation; report attention as the selected next target"
+ },
+ "max_prefill_len": {
+  "registry_value": 4096,
+  "proposed": "unchanged in this phase",
+  "reason": "8K/16K did not pass the end-to-end gate, so there is no evidence to raise it; the value must follow a validated prefill, not a capacity PASS"
+ },
+ "default_context_length": {
+  "registry_value": 32768,
+  "note": "a context longer than default_context_length is requestable with --ctx-len; the 256K capacity is available without making it the default, and KV at 256K is 32 GiB",
+  "recommendation": "leave 32768; a 256K default would allocate 32 GiB of KV for every request that asked for it"
+ },
+ "failure_behaviour": {
+  "over_capacity": "explicit '[WARNING] Max length reached, stopping prefilling...' and nothing prefilled",
+  "silent_reduction": false,
+  "position_wrap": false,
+  "observed": "engine 4096 at a 4096 capacity is refused outright; engine 4095 runs (16 passes)"
+ }
+}
