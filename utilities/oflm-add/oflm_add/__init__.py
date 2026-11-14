@@ -28,8 +28,8 @@ the second place open_qwen36::Engine::find_kernels looks.
 The script never rewrites the system model list or the system xclbins; it
 writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
 symlink into ~/.config/oflm/xclbins/ for the new model directory. Custom OFLM
-models never ship xclbins (they are closed source), so the kernel symlink is
-always taken from the matching official model, keyed by family (engine) and
+models usually do not ship xclbins (they are closed source), so the kernel symlink
+is always taken from the matching official model, keyed by family (engine) and
 size -- e.g. Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2. OpenFlowLM discovers
 both automatically -- it reads the user registry in preference to the shipped
 one and resolves each model's kernels under whichever xclbin root carries that
@@ -39,11 +39,13 @@ model's directory -- so no environment variables are required.
 import argparse
 import copy
 import hashlib
+import dataclasses
 import json
 import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -68,12 +70,38 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # end for Q6_K on gemma3-4b). Order is install preference: exact first,
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
-# Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
-# manifest section + f32-scale kernel sets only ship for these). qwen3.5
-# (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
-# installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+# Which GGUF to take when a repo offers several, for GGUF-DIRECT.
+#
+# The pool the kernels stream is q4_1 (recipes/spec.py QUANT_FORMATS), so the source's
+# format decides how many quantisation steps the weights take on the way in:
+#   * Q4_1 -- packed near-exactly (the file's fp16 d/m widen to f32/bf16). Measured on the
+#     Qwen3.5-4B: the engine matched the fp64 reference at cos 0.993 per layer.
+#   * Q4_0 -- re-encoded exactly (the implicit -8 becomes q4_1's min), scales widened.
+#   * Q6_K / Q8_0 / Q5_K / Q4_K / IQ4_* -- DEQUANTIZED and re-quantized to q4_1, so the
+#     source's error is added to q4_1's. The same 4B as Q4_K_M measured cos 0.75: still
+#     coherent, but two lossy steps where one would do.
+# Hence exact formats first, then the requantized ones by how precise the SOURCE is (Q6_K
+# and Q8_0 requantize to something very close to a clean q4_1; IQ4 is the worst of both).
+# Size is the trade: Q8_0 is twice the download of Q4_1 for no gain over it.
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q6_K", "Q8_0", "Q5_K", "Q4_K", "IQ4"]
+# The SAME choice for an NpuEmbeddings GGUF (bert / nomic-bert). Those packers
+# dequantize every tensor to F32 and pack the checkpoint, so there is no q4_1
+# pool to preserve and the source's precision is all that matters. Measured
+# against the author's safetensors (cosine of the embeddings, 8 texts):
+# Q8_0 0.9996, Q4_0 0.966 (MiniLM) / 0.91 (nomic, which is far more sensitive).
+# So Q8_0 first -- half the bytes of F16 for the same result -- then the exact
+# floats for a repo that ships no quant, then the coarser quants.
+NPUE_GGUF_PREFERENCE = ["Q8_0", "F16", "BF16", "F32",
+                        "Q6_K", "Q5_K", "Q4_K", "Q4_1", "Q4_0", "IQ4"]
+# Whether a GGUF can be used is NOT a property of the family NAME: it is a
+# property of the kernel set the install links. The recipe emits the manifest's
+# f32-scale twin ("gguf" section) and the export builds its kernel set; the
+# engine swaps that section in when the model ships a model.gguf. So the gate
+# is the manifest itself (manifest_supports_gguf), read from the xclbins the
+# install links -- one check, no list to keep in step with the recipes, and no
+# name namespaces to confuse: the registry's family ("qwen3.5") and the
+# recipe's ("qwen35") are different strings for the same model, and a list
+# written in one of them silently refuses the other.
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -89,42 +117,143 @@ NPU_EMBED_FILES = [
     "config.json", "model.safetensors", "tokenizer.json",
     "tokenizer_config.json", "vocab.txt", "1_Pooling/config.json",
 ]
+# Speech-to-text (the open whisper_gemm engine). Like the embedding families it
+# is NOT a chat model -- no chat template, no vision projector, no chat-model
+# open-kernel link -- and unlike the .npue packers it needs no design-set
+# symlink: the open engine discovers its kernel set (whisper_kernels.json +
+# design.json, both written by export_whisper_kernels.py) at the same
+# <xclbin_root>/xclbins/<model_name>/open_kernels the chat sets use. The GGUF
+# path is just the base-repo climb for config.json + tokenizer +
+# generation_config.json, exactly as a text model climbs for its aux files.
+WHISPER_FAMILIES = {"whisper-v3"}
+WHISPER_AUX = ["config.json", "tokenizer.json", "tokenizer_config.json",
+               "generation_config.json"]
+
+
+def _whisper_gguf_llcpp_layout(source):
+    """True when a whisper GGUF uses llama.cpp's tensor names (enc.* / dec.*), the
+    layout the open engine reads straight from model.gguf. The HF-layout GGUFs
+    (model.encoder.conv1.weight) are not readable by the engine, so the caller
+    builds an open container from the HF base checkpoint instead."""
+    inv = read_gguf_inventory(source, limit_mb=16)
+    if not inv:
+        return False
+    _, tensors = inv
+    names = [t[0] for t in tensors]
+    return any(n.startswith("enc.") for n in names) and any(n.startswith("dec.") for n in names)
+
+
+def _build_open_whisper(target, repo, bases, modelscope, local_dir):
+    """Build the open whisper container (model.open.safetensors + weights_manifest.json)
+    into `target` from the base HF checkpoint the README names."""
+    candidates = list(bases) if bases else []
+    if not candidates:
+        candidates = ["openai/whisper-large-v3-turbo"]
+    for b in candidates:
+        try:
+            # the bundled q4nx-build's open whisper builder; import the module
+            # in-process rather than re-implementing the build
+            here = Path(__file__).resolve().parents[2]
+            sys.path.insert(0, str(here / "utilities" / "q4nx-build"))
+            import q4nx.open_whisper as ow  # type: ignore
+            ow.build_open_whisper_repo(b, str(target))
+            return True
+        except Exception as ex:
+            log(f"[WARN] open whisper build from {b} failed: {ex}")
+            continue
+    raise SystemExit(
+        f"{repo}: could not build the open whisper container from any base model the "
+        f"README names (tried: {', '.join(candidates)}). Pass --tag with a different "
+        f"base, or install a llm.cpp-style GGUF directly.")
+
+
 # The quant must run to the end of the stem: 'Q4_0_4_4' is a different
 # tensor layout (ik_llama matmul shuffles), not Q4_0, and matching only a
 # prefix once installed exactly that as Q4_0 pools (silent garbage).
-GGUF_QUANT_RE = re.compile(r"[.\-_ ](I?Q[0-9](?:_[A-Za-z0-9]+)*)\.gguf$", re.IGNORECASE)
+# Plain float formats (F16/BF16/F32, and the FP16/FP32 spellings repos use)
+# are whole-file formats rather than named Q families, but they are explicitly
+# supported sources (NPUE_GGUF_PREFERENCE) and must be selectable by name.
+GGUF_QUANT_RE = re.compile(
+    r"[.\-_ ]((?:I?Q[0-9](?:_[A-Za-z0-9]+)*|F16|BF16|F32|FP16|FP32))\.gguf$",
+    re.IGNORECASE,
+)
+_FLOAT_QUANT_CANON = {"FP16": "F16", "FP32": "F32"}
+
+
+def _canon_quant_token(token):
+    """Fold a quant token to the canonical family spelling used in preferences."""
+    if not token:
+        return None
+    up = token.upper()
+    return _FLOAT_QUANT_CANON.get(up, up)
+
 
 def gguf_quant_suffix(name):
     """The raw trailing quant-ish token of a GGUF file name, e.g.
     'Model-Q4_K_M.gguf' -> 'Q4_K_M', 'Model-Q4_0_4_4.gguf' -> 'Q4_0_4_4'
     (None when the stem ends in nothing quant-like)."""
     m = GGUF_QUANT_RE.search(name)
-    return m.group(1) if m else None
+    return _canon_quant_token(m.group(1)) if m else None
 
-def gguf_quant_family(suffix):
+def gguf_quant_family(suffix, preference=None):
     """A raw suffix folded to its tensor family, or None when unknown.
     K-subtype letters stay with their family ('Q4_K_M' -> 'Q4_K': the tensors
     inside are plain Q4_K), but anything with a digit run past the family
-    ('Q4_0_4_4', 'Q4_K_L2'?) is a different layout, not a variant."""
+    ('Q4_0_4_4', 'Q4_K_L2'?) is a different layout, not a variant.
+
+    `preference` is the accepted family list: the chat kernels' q4_1-pool law
+    by default, or NPUE_GGUF_PREFERENCE for an NpuEmbeddings GGUF (which also
+    accepts the plain F16/F32/BF16 files those repos ship)."""
     if not suffix:
         return None
-    q = suffix.upper()
-    for fam in GGUF_QUANT_PREFERENCE:
+    q = _canon_quant_token(suffix)
+    for fam in (preference or GGUF_QUANT_PREFERENCE):
         if q == fam:
             return fam
         if q.startswith(fam + "_") and re.fullmatch(r"[A-Z]+", q[len(fam) + 1:]):
             return fam
     return None
 
-def gguf_quant_of(name):
+def gguf_quant_of(name, preference=None):
     """The quant family in a llama.cpp-style weight file name, e.g.
     'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked or
-    unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
-    return gguf_quant_family(gguf_quant_suffix(name))
+    unknown -- 'Q4_0_4_4' is NOT 'Q4_0').
 
-def choose_gguf_file(names):
+    Float formats (F16/BF16/F32) are recognized as their own families even
+    when the default chat-pool preference does not list them, because some
+    install paths (e.g. NPU embeddings) accept them explicitly."""
+    suffix = gguf_quant_suffix(name)
+    if suffix in ("F16", "BF16", "F32"):
+        return suffix
+    return gguf_quant_family(suffix, preference)
+
+def split_quant_request(repo_arg: str):
+    """`repo:QUANT` -- name the quant to take from a GGUF repo.
+
+    "mradermacher/Qwen3.5-9B-i1-GGUF:IQ4_NL" asks for that file's quant; the
+    suffix must LOOK like a quant (letters, digits, underscores) or the argument
+    is a repo id or a URL as it stands -- a URL's port would otherwise be read
+    as a quant request.
+    """
+    if ":" not in repo_arg:
+        return repo_arg, None
+    head, _, tail = repo_arg.rpartition(":")
+    if not head or not re.fullmatch(r"[A-Za-z0-9_]+", tail):
+        return repo_arg, None
+    return head, tail.upper()
+
+
+def choose_gguf_file(names, want=None, preference=None):
     """Pick the best compatible *.gguf from a repo's root file names.
-    Returns (chosen, refused) -- refused maps every other gguf to why."""
+    Returns (chosen, refused) -- refused maps every other gguf to why.
+
+    `want` names the quant the user asked for ("IQ4_NL"): the files whose quant
+    SUFFIX matches it exactly win, and the ones whose FAMILY matches are the
+    fallback. Without it the preference order decides (Q4_1 first -- it is the
+    one the pool takes byte-exactly). `preference` replaces that order for an
+    NpuEmbeddings GGUF, whose packer dequantizes everything (NPUE_GGUF_PREFERENCE).
+    """
+    pref = preference or GGUF_QUANT_PREFERENCE
     refused = {}
     cands = []
     for n in names:
@@ -134,15 +263,67 @@ def choose_gguf_file(names):
             refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
             continue
         suffix = gguf_quant_suffix(n)
-        q = gguf_quant_family(suffix)
-        if q not in GGUF_QUANT_PREFERENCE:
-            refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
+        q = gguf_quant_family(suffix, pref)
+        if q not in pref:
+            refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(pref)}); convert with q4nx-build"
             continue
-        cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
+        cands.append((pref.index(q), q, suffix, n))
     cands.sort()
     if not cands:
         return None, refused
-    return cands[0][1], refused
+    if want:
+        exact = [c for c in cands if c[2].upper() == want]
+        if exact:
+            return exact[0][3], refused
+        fam = gguf_quant_family(want, pref)
+        same = [c for c in cands if c[1] == fam]
+        if not same:
+            have = ", ".join(sorted({c[2] for c in cands})) or "none"
+            for c in cands:
+                refused[c[3]] = f"the repo has no {want} GGUF (it has: {have})"
+            return None, refused
+        return same[0][3], refused
+    return cands[0][3], refused
+
+
+def choose_gguf_candidates(names, want=None, preference=None):
+    """All compatible *.gguf candidates, best first, like choose_gguf_file.
+
+    Returns (candidates, refused) -- each candidate is (pref_index, q, suffix, name).
+    With an explicit `:QUANT` only the files matching it (exact, then family) are
+    candidates; without one everything compatible is, so the verifier can fall
+    through to the next quant when one repo's Q4_1 happens to hide a stray tensor
+    type the NPU packers reject (a single Q5_0/Q6_K embedding row)."""
+    pref = preference or GGUF_QUANT_PREFERENCE
+    refused = {}
+    cands = []
+    for n in names:
+        if not n.endswith(".gguf"):
+            continue
+        if re.search(r"-\d+-of-\d+\.gguf$", n):
+            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
+            continue
+        suffix = gguf_quant_suffix(n)
+        q = gguf_quant_family(suffix, pref)
+        if q not in pref:
+            refused[n] = ("quant " + (suffix or "unmarked") + " not supported by the open kernels (have "
+                          + "/".join(pref) + "); convert with q4nx-build")
+            continue
+        cands.append((pref.index(q), q, suffix, n))
+    cands.sort()
+    if not want:
+        return cands, refused
+    exact = [c for c in cands if c[2].upper() == want]
+    if exact:
+        return exact, refused
+    fam = gguf_quant_family(want, pref)
+    same = [c for c in cands if c[1] == fam]
+    if same:
+        return same, refused
+    have = ", ".join(sorted({c[2] for c in cands})) or "none"
+    for c in cands:
+        refused[c[3]] = f"the repo has no {want} GGUF (it has: {have})"
+    return [], refused
 
 
 def root_file_names(tree):
@@ -162,6 +343,236 @@ def manifest_supports_gguf(path):
         return "gguf" in json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+
+
+def tree_xclbins():
+    """The repo's own kernel sets (src/xclbins), when oflm-add runs from a
+    checkout: a freshly exported set lives there, and it may be newer than the
+    installed one (a rebuild adds the f32-scale twins the GGUF path needs)."""
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    repo = Path(root).parent
+    for d in (repo / "src" / "xclbins", repo / "xclbins"):
+        if d.is_dir():
+            return d
+    return None
+
+
+def gguf_kernel_set(name, roots):
+    """The kernel set for an official model that carries the GGUF-direct build.
+
+    Kept for `--xclbin-from NAME`, where the user names a set explicitly. The
+    automatic path does NOT use it: a set chosen by NAME was the second matching
+    path, and it is what refused a model whose geometry the installed sets
+    already served (translategemma: a registry name with no set of that name on
+    disk). `scan_kernel_sets` is the one path -- geometry decides, and the name
+    is only ever a label.
+    """
+    if not name:
+        return None
+    for root in roots:
+        if not root:
+            continue
+        mj = Path(root) / name / "open_kernels" / "manifest.json"
+        if manifest_supports_gguf(mj):
+            return mj.parent
+    return None
+
+
+def scan_kernel_sets(spec, roots, source=None, need_gguf=False):
+    """Every installed kernel set that can run this model, and why the rest cannot.
+
+    Returns (dir, name, notes): the first set that SERVES the model (its geometry
+    and at least as many head rows as the model needs), the set's directory name,
+    and one line per set that was considered and refused. The notes are what the
+    refusal message is built from, so the reason a model does not install is the
+    reason it actually does not -- not a name lookup that missed.
+
+    `need_gguf` is the GGUF-direct requirement: the set must carry the nested
+    "gguf" manifest section, which is the f32-scale build the GGUF weight file is
+    packed for. A set can have the right geometry and predate that build; the
+    note says so, because "build this size's kernels" would be wrong.
+    """
+    ModelSpec = _model_spec_class()
+    if spec is None:
+        return None, None, ["this model's geometry could not be read from its file "
+                            "(no recipe for its architecture, and no config.json)"]
+    if ModelSpec is None:
+        return None, None, ["no open-kernels checkout to compare a spec with"]
+    ignore = rope_ignore(source)
+    notes = []
+    same_family = []                   # this family, a different geometry
+    seen_names = set()                 # the user's xclbins link the system's; count once
+    seen = 0
+    serving = []                       # every set that serves, newest manifest first
+    for root in roots:
+        if not root:
+            continue
+        for m in sorted(Path(root).glob("*/open_kernels/manifest.json")):
+            try:
+                d = json.loads(m.read_text(encoding="utf-8"))
+                laid = d.get("spec")
+                if not laid:
+                    continue
+                gap = ModelSpec.from_dict(laid).serves(spec)
+            except (OSError, ValueError):
+                continue
+            name = m.parents[1].name
+            seen += 1
+            if gap is None:
+                if need_gguf and "gguf" not in d:
+                    if name not in seen_names:
+                        seen_names.add(name)
+                        notes.append(f"{name} has this geometry but no GGUF-direct build "
+                                     f"(its manifest has no 'gguf' section)")
+                    continue
+                try:
+                    stamp = m.stat().st_mtime
+                except OSError:
+                    stamp = 0.0
+                serving.append((stamp, m.parent, name))
+                continue
+            if gap == "a different geometry":
+                # Only a set of the SAME family is worth naming: it is the one the
+                # user would expect to serve this model, so "same family, different
+                # size" is the useful sentence, and an alphabetical neighbour from
+                # another family is noise.
+                if laid.get("family") == spec.family and name not in seen_names:
+                    seen_names.add(name)
+                    same_family.append(name)
+                continue
+            if name not in seen_names:
+                seen_names.add(name)
+                notes.append(f"{name} has this geometry but {gap}")
+    if serving:
+        # Several sets can serve one geometry (a per-model sibling, the installed copy, and
+        # a freshly exported one in the tree). The NEWEST manifest wins: a kernel fix lands
+        # in a rebuild, and a stale installed copy must not shadow it -- which is exactly
+        # what a dev tree hits after `export-kernels.py` (the old roots order let the
+        # installed set win and silently ran the old pack).
+        serving.sort(key=lambda s: s[0], reverse=True)
+        _stamp, kdir, name = serving[0]
+        return kdir, name, notes
+    if same_family:
+        shown = ", ".join(same_family[:3]) + (" ..." if len(same_family) > 3 else "")
+        notes.insert(0, f"{shown}: this family, a different geometry")
+    if not notes:
+        notes.append("no installed set has this geometry"
+                     if seen else "no kernel sets are installed")
+    return None, None, notes
+
+
+def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
+    """The message when no installed set can run a model -- saying which reason.
+
+    Three cases, and they used to share one message that told the user to build
+    kernels even when the kernels were on disk: a geometry nothing covers (a real
+    build), a geometry a set covers but cannot carry (a wider head), and a set
+    that has the geometry but predates the GGUF-direct build.
+
+    `build` is the build-new-spec command line when this checkout can build the size
+    itself -- after `build_geometry` has already tried and failed. Without one (an
+    installed package: no recipes, no toolchain) the answer is that the size is ours
+    to ship, not the user's to build.
+    """
+    head = f"{model_name}: no open kernel set can run this model (family '{family}')."
+    body = "".join(f"\n  {n}" for n in notes)
+    if any("could not be read from its file" in n for n in notes):
+        # No recipe for the architecture: there is nothing to match, nothing to build, and
+        # no amount of retrying a spec will change that. Say so plainly instead of pointing
+        # at build-new-spec.py, which only adds a SIZE to a family that already has kernels.
+        return (f"{head}{body}\n"
+                f"This build has no recipe for that architecture, so its geometry cannot be "
+                f"read from the file. Not supported yet -- nothing to match, nothing to build.")
+    if any("no GGUF-direct build" in n for n in notes):
+        return (f"{head}{body}\n"
+                f"The kernels are installed; this build of the set predates GGUF-direct.\n"
+                f"Re-export the set with:\n"
+                f"  python utilities/export-kernels.py")
+    if any("row head" in n for n in notes):
+        return (f"{head}{body}\n"
+                f"The set's head cannot be widened at install time; this size needs its\n"
+                f"own kernels." + (f"\n  {build}" if build else ""))
+    if build:
+        return (f"{head}{body}\n"
+                f"Building this size's kernels did not succeed. To retry:\n  {build}")
+    # No checkout: the user cannot build anything, and telling them to run a script
+    # that is not installed is the same false gate in a different place.
+    return (f"{head}{body}\n"
+            f"This size's kernels are not part of this release. They are built from the\n"
+            f"geometry above and shipped with the app -- please report it with the family\n"
+            f"and the shape, and the next release will carry the set.")
+
+
+# Families whose GGUF-direct numerics are not right yet. A model that installs, loads and
+# emits fluent gibberish is worse than one that refuses, so a family lands here until its
+# text is measured. Empty today: qwen3.5 came off the list when its three pack bugs were
+# fixed (conv_transpose's layout, lmhead_q8's pool raster, and the per-head [q|gate] order)
+# and Qwen3.5-0.8B started answering; the sets for 0.8B/2B/4B/9B/27B carry the fixed pack.
+GGUF_DIRECT_UNREADY: dict[str, str] = {}
+
+
+def kernel_set_name(dir_name):
+    """The kernel set directory a build for this model is written to.
+
+    The registry's convention (`Qwen3-VL-4B-Instruct-NPU2`) with the repo's container
+    suffix removed, because the export takes its destination from the spec's
+    `extra.model` and `oflm add` links a converted model's kernels by that directory.
+    """
+    n = dir_name or ""
+    while True:
+        stripped = re.sub(r"[-_.](gguf|q4nx|i1)$", "", n, flags=re.IGNORECASE)
+        if stripped == n:
+            break
+        n = stripped
+    if not n:
+        return ""
+    return n if n.lower().endswith("-npu2") else f"{n}-NPU2"
+
+
+def build_geometry(spec, family, size, dir_name="", quiet=False):
+    """Build the kernel set for a geometry nothing installed serves.
+
+    The geometry is already known -- it came out of the model's own file -- so this
+    is the scripted form of the advice `oflm add` used to print. The spec is written
+    where `build-new-spec.py` looks for it and that script does the rest: build,
+    gate against the fixtures, catalogue the validated points, rebuild through the
+    validated path, register the frozen hashes.
+
+    Returns the set's open_kernels directory, or None when this tree cannot build (an
+    installed package has no recipes and no toolchain -- there the size is ours to
+    ship, and `kernel_set_refusal` says so).
+    """
+    checkout = open_kernels_checkout()
+    if checkout is None:
+        return None
+    root = Path(checkout).parent
+    script = root / "utilities" / "build-new-spec.py"
+    specs = Path(checkout) / "recipes" / "specs"
+    if not script.is_file() or not specs.is_dir():
+        return None
+    name = f"{family.replace('.', '')}-{size}".lower() if size else family.replace(".", "")
+    path = specs / f"{name}.json"
+    if not path.is_file():
+        import dataclasses
+        # `extra.model` is the export destination (src/xclbins/<name>) and the name
+        # `oflm add` links a converted model's kernels by: ours to derive from the
+        # repo's own name, never something the user is asked to add.
+        own = dataclasses.replace(spec, extra=dict(spec.extra, source="gguf",
+                                                   model=kernel_set_name(dir_name)))
+        path.write_text(own.to_json(), encoding="utf-8")
+    log(f"[INFO] no installed kernel set serves this geometry; building it "
+        f"({path.relative_to(root)} -- this is the build a release ships, and it "
+        f"takes a while)")
+    import subprocess
+    rc = subprocess.run([sys.executable, str(script), "--spec", name], cwd=str(root)).returncode
+    if rc != 0:
+        return None
+    kdir, _set, _notes = scan_kernel_sets(spec, [tree_xclbins()], need_gguf=True)
+    return kdir
+
+
 
 SYSTEM_LIST_CANDIDATES = [
     "/opt/openflowlm/share/oflm/model_list.json",
@@ -203,7 +614,7 @@ FAMILY_ALIASES = [
     # 2560). It aliased onto llama3 because nothing served it; leaving that
     # would route a Granite directory to the Llama 3 AutoModel, whose sampler
     # defaults and chat-template probe are the wrong ones -- and the closed
-    # llama_npu refuses hidden_size 2560 outright.
+    # The (since-removed) closed llama_npu refused hidden_size 2560 outright.
     ("granite", "granite"),
     ("hunyuan", "hunyuan"),
     ("crow", "qwen3.5"),
@@ -217,6 +628,7 @@ FAMILY_ALIASES = [
     ("nanbeige4", "nanbeige"),
     ("nanbeige", "nanbeige"),
     ("gpt-oss", "gpt-oss"),
+    ("lfm2moe", "lfm2moe"),
     ("lfm2.5", "lfm2.5-tk"),
     ("lfm2", "lfm2"),
     ("phi4", "phi4"),
@@ -249,6 +661,20 @@ GGUF_ARCH_FAMILIES = {
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "hunyuan-dense": "hunyuan",     # Hy-MT2's own arch name
+    "k2-horizon": "k2",             # IFM K2-Horizon (0.9B / 3.7B / 7B)
+    "qwen35": "qwen3.5",
+    "qwen3next": "qwen3.5",
+    "qwen35moe": "qwen3.6-moe",
+    "lfm2moe": "lfm2moe",
+    "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
+    "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
+    "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
+    "whisper": "whisper-v3",         # speech-to-text, on the open whisper_gemm set
+    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): the marker is the 12B's own arch.
+    # The E2B / E4B also call themselves gemma4; nothing serves them yet, and
+    # kernel linking fails closed rather than bind the wrong set.
+    "gemma4": "gemma4",
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -260,10 +686,35 @@ CONFIG_MODEL_FAMILIES = {
     "qwen2": "qwen2",
     "llama": "llama3",
     "gemma3": "gemma3",
+    "gemma3_text": "gemma3",
     "phi4": "phi4",
+    # Phi-3 and Phi-4 both publish model_type `phi3`, and the engine family for the set we
+    # ship (Phi4-mini-Instruct-NPU2) is `phi4`. Mapping it to `phi3` matched no official
+    # entry, so an abliterated Phi-4-mini GGUF installed with "No official model matched; no
+    # xclbins link" -- the geometry was right and nothing was linked.
+    "phi3": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "hunyuan_v1_dense": "hunyuan",
+    "k2_horizon": "k2",
+    "lfm2": "lfm2",
+    "lfm2_moe": "lfm2moe",
     "gpt_oss": "gpt-oss",
+    # Qwen3.5 / 3.8's own model_type (the tag is still qwen3.5)
+    "qwen3_5": "qwen3.5",
+    "qwen3_5_text": "qwen3.5",
+    "qwen3_next": "qwen3.5",
+    "qwen3_vl": "qwen3vl",
+    "qwen3_vl_text": "qwen3vl",
+    "qwen2_vl": "qwen2vl",
+    "qwen2_5_vl": "qwen2vl",
+    "qwen2_5_vl_text": "qwen2vl",
+    "whisper": "whisper-v3",
+    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): only the 12B (gemma4_unified /
+    # gemma4_unified_text) is served -- the E2B / E4B (plain gemma4 / gemma4_text)
+    # need per-layer embeddings and KV sharing and stay unmapped.
+    "gemma4_unified": "gemma4",
+    "gemma4_unified_text": "gemma4",
 }
 
 
@@ -640,11 +1091,23 @@ def resolve_official(system_registry, dir_name, family, size):
     return None, None
 
 
-def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
+def derive_family(system_registry, dir_name, explicit=None, base_entry=None,
+                  content_families=()):
+    """details.family for this install.
+
+    The explicit --family wins; then the official entry's own family; then
+    what the model IS (the content routes: the kernels it needs, the base
+    model it was built on); and last the name, which is the weakest signal --
+    a fine-tune's name usually says nothing about its family ("Ornith-1.5-9B"
+    is a Qwen3.5-9B).
+    """
     if explicit:
         return explicit
     if base_entry:
         fam = base_entry.get("details", {}).get("family")
+        if fam:
+            return fam
+    for fam in content_families:
         if fam:
             return fam
     lower = dir_name.lower()
@@ -655,6 +1118,158 @@ def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
         f"Could not determine details.family for '{dir_name}'. "
         "Pass --family (e.g. qwen3.5, qwen3.6-moe, nanbeige, llama3, ...)."
     )
+
+
+def family_of_official(system_registry, name):
+    """The registry's details.family for an official model's name, or None."""
+    if not name:
+        return None
+    for sizes in system_registry.get("models", {}).values():
+        for info in sizes.values():
+            if info.get("name") == name:
+                return (info.get("details") or {}).get("family")
+    return None
+
+
+def _model_key(name):
+    """The comparable name of a model: the registry's container name and the
+    HF repo slug name the same model ("Qwen3.5-9B-NPU2" / "Qwen3.5-9B")."""
+    n = (name or "").split("/")[-1].lower()
+    for suf in ("-opennpu2", "-npu2"):
+        if n.endswith(suf):
+            n = n[: -len(suf)]
+    return n
+
+
+def family_from_base_chain(system_registry, bases):
+    """The family of the official model a fine-tune is built on.
+
+    A fine-tune's README names its base model, and the official registry says
+    that base's family. The fine-tune needs the base's kernels (the same
+    shape, the same engine), so this is where its family comes from when its
+    own name says nothing. Returns (family, official name).
+    """
+    for b in bases or ():
+        key = _model_key(b)
+        for sizes in system_registry.get("models", {}).values():
+            for info in sizes.values():
+                name = info.get("name") or ""
+                if _model_key(name) != key:
+                    continue
+                fam = (info.get("details") or {}).get("family")
+                if fam:
+                    return fam, name
+    return None, None
+
+
+def _model_spec_class():
+    """The recipes' ModelSpec, or None when there is no open_kernels checkout."""
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.spec import ModelSpec
+        return ModelSpec
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def rope_ignore(source) -> tuple[str, ...]:
+    """The kernel_hash fields to ignore for THIS model, given its weight file.
+
+    llama.cpp BAKES Llama-3's wavelength scaling into `rope_freqs.weight`; the GGUF's
+    metadata then has no rope_scaling at all (and the HF config it was converted from
+    is not in the file). The set's position table is the same law, so the geometry
+    matches -- comparing the rope_scaling GROUP would only refuse a model the set
+    serves. A GGUF WITHOUT the tensor (Meta-Llama-3-8B, plain rope) keeps the field in
+    the hash, because then it is the set's table that must be the plain one.
+    """
+    if source is None:
+        return ()
+    try:
+        inv = read_gguf_inventory(source, limit_mb=96)
+        names = [x[0] if isinstance(x, (list, tuple)) else x for x in (inv[1] if inv else [])]
+        if any("rope_freqs" in str(n) for n in names):
+            return ("rope_scaling",)
+    except Exception:
+        pass
+    return ()
+
+
+def family_of_set(system_registry, kdir, name):
+    """The family a kernel set runs: the registry's for its official name, else
+    the family its manifest's spec was built for (a set of ours the registry does
+    not list)."""
+    fam = family_of_official(system_registry, name)
+    if fam:
+        return fam
+    try:
+        laid = json.loads((Path(kdir) / "manifest.json").read_text(encoding="utf-8")).get("spec")
+    except (OSError, ValueError):
+        laid = None
+    return (laid or {}).get("family")
+
+
+def family_precedence(content_family, content_where, base_family, base_name):
+    """Which of the two families a model's own content names to use, and where from.
+
+    The content (a GGUF's architecture, or config.json's model_type) says which
+    ARCHITECTURE the file is; the base chain says which MODEL it was built from. The
+    registry's families are finer than either: `qwen3-it` is Qwen3-4B-Instruct-2507 and
+    `qwen3-tk` is its Thinking sibling, while both GGUFs say arch `qwen3` -- so for a
+    finetune the BASE is the better answer, and it is a refinement (same prefix, longer
+    name). A VL model whose README names a text base keeps its VL family, because `qwen3`
+    is not a refinement of `qwen3vl`: the architecture is the more specific statement
+    there.
+    """
+    if content_family and base_family and base_family != content_family:
+        if base_family.lower().startswith(content_family.lower()):
+            return base_family, f"the base model '{base_name}' (a {content_family} variant)"
+        return content_family, content_where
+    if content_family:
+        return content_family, content_where
+    if base_family:
+        return base_family, f"the base model '{base_name}'"
+    return None, ""
+
+
+def family_from_kernels(system_registry, spec, roots, source=None, need_gguf=False):
+    """The family of the installed kernel set whose GEOMETRY this model needs.
+
+    The kernels decide the engine, and so the family: a fine-tune of a
+    supported model runs on the base model's kernels -- the depth is the
+    manifest's business, not the kernels' -- and the installed set's directory
+    is named after the official model, which the registry ties to a family.
+    The match is `scan_kernel_sets` (geometry plus the head-row requirement),
+    so it is the kernels that decide, not the depth, the tokenizer's id count,
+    or the model's name. Returns (family, set name).
+    """
+    kdir, name, _notes = scan_kernel_sets(spec, roots, source=source, need_gguf=need_gguf)
+    if kdir is None:
+        return None, None
+    return family_of_set(system_registry, kdir, name), name
+
+
+def spec_from_config_dict(cfg):
+    """The ModelSpec a config.json describes, or None (no recipes, or a shape
+    they do not know)."""
+    ModelSpec = _model_spec_class()
+    if ModelSpec is None or not isinstance(cfg, dict):
+        return None
+    try:
+        return ModelSpec.from_hf_config(cfg)
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------- asset fetch
@@ -793,6 +1408,544 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def kernel_manifest_dir(name, roots):
+    """The kernel set directory called `name` in any root, or None."""
+    if not name:
+        return None
+    for root in roots:
+        if not root:
+            continue
+        d = Path(root) / name
+        if (d / "open_kernels" / "manifest.json").is_file():
+            return d
+    return None
+
+
+def official_repo_id(entry, registry=None):
+    """The Hugging Face repo id of an official entry ("Atomic-Germ/Nanbeige4.1-3B-NPU2").
+
+    The registry writes its own repositories' urls with `{hf_owner}`; the engine
+    fills it from the list's "hf_owner" (or OFLM_HF_OWNER). oflm add has the same
+    registry in hand, so the same substitution names the repo to climb to.
+    """
+    if not entry:
+        return None
+    url = entry.get("url") or ""
+    owner = os.environ.get("OFLM_HF_OWNER") or (registry or {}).get("hf_owner", "")
+    url = url.replace("{hf_owner}", owner or "")
+    if "huggingface.co/" in url:
+        return url.split("huggingface.co/", 1)[1].strip("/")
+    return entry.get("name") or None
+
+
+def fill_chat_template(target, repo, bases, modelscope=False):
+    """Merge a chat template in from the model's chain when the installed
+    tokenizer_config.json has none.
+
+    A quant repo's tokenizer_config.json is often minimal (Nanbeige's has no
+    chat_template; its sibling Nanbeige4.2-3B-Base does), and `oflm serve` refuses
+    a model with no template -- after the weights have loaded. The aux fetch stops
+    at the FIRST base that has the file, which is not necessarily the one with the
+    template, so look further only for this one field.
+    """
+    tc = Path(target) / "tokenizer_config.json"
+    if not tc.is_file() or (Path(target) / "chat_template.jinja").is_file():
+        return None
+    try:
+        cfg = json.loads(tc.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if cfg.get("chat_template"):
+        return None
+    tmp = Path(target) / ".tokenizer_config.from_base.json"
+    try:
+        for src in [repo] + list(bases):
+            if Path(src).is_dir():
+                continue
+            tmp.unlink(missing_ok=True)     # fetch_from_repo skips an existing destination
+            try:
+                got = fetch_from_repo(src, "tokenizer_config.json", tmp, modelscope=modelscope,
+                                      force=True)
+            except Exception:
+                continue
+            if not got or not tmp.is_file():
+                continue
+            try:
+                d = json.loads(tmp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            t = d.get("chat_template")
+            if t:
+                cfg["chat_template"] = t
+                tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+                log(f"[INFO] chat_template from {src} (the installed tokenizer_config had none)")
+                return src
+        log("[WARN] no chat_template in this model's chain; `oflm serve` will refuse it "
+            "(add one to tokenizer_config.json or a chat_template.jinja)")
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# The projector is a llama.cpp `mmproj-*.gguf`. Preference is by COST, not by size:
+# the tower runs on the host as bf16, so BF16/F16 is LOSSLESS and needs no dequant at
+# all, while an 8-bit projector is smaller and slower (requant per tensor). f32 works
+# too, it is just twice the bytes.
+PROJECTOR_PREFERENCE = ["bf16", "f16", "fp16", "f32", "q8_0", "q4"]
+
+
+def _projector_rank(name):
+    low = name.lower()
+    for i, q in enumerate(PROJECTOR_PREFERENCE):
+        if q in low:
+            return i
+    return len(PROJECTOR_PREFERENCE)
+
+
+def projector_sibling(repo):
+    """The repo that carries this quant's mmproj, or "" when the name gives none.
+
+    A mradermacher `-i1` repo does NOT ship the projector; the non-i1 repo of the same
+    model does, and its id differs by exactly that marker. (`Qwen3-VL-4B-Instruct-i1-GGUF`
+    -> `Qwen3-VL-4B-Instruct-GGUF`.) Everything else keeps its own name.
+    """
+    owner, _, name = (repo or "").partition("/")
+    if not owner or not name:
+        return ""
+    m = re.search(r"-i1(?=-|$)", name)
+    if not m:
+        return ""
+    return f"{owner}/{name[:m.start()]}{name[m.end():]}"
+
+
+def _projectors_in(repo, modelscope):
+    """The `*mmproj*.gguf` file names at a repo's root, or [] when it has none."""
+    try:
+        if modelscope:
+            names = list(ms_file_tree(repo)[1])
+        else:
+            names = [e.get("path") or "" for e in hf_file_tree(repo)]
+    except Exception:
+        return []
+    return [n for n in names
+            if n and n.lower().endswith(".gguf") and "mmproj" in os.path.basename(n).lower()]
+
+
+# llama.cpp's `clip.projector_type` -> the tower design a person names. The projector is
+# how a VLM install says which VISION side it needs; the GGUF's text arch cannot (Qwen3.5's
+# VLM says `qwen35` and carries a Qwen3-VL tower).
+VISION_TOWERS = {
+    "qwen3vl_merger": "the Qwen3-VL tower",
+    "qwen2.5vl_merger": "the Qwen2.5-VL tower",
+    "qwen2vl_merger": "the Qwen2-VL tower",
+    "gemma3": "the Gemma 3 tower",
+    "gemma4": "the Gemma 4 tower",
+}
+
+
+def install_projector(target, repo, modelscope=False, quiet=False, force=False, mmproj_repo=""):
+    """Fetch this model's vision projector as `mmproj.gguf`, or return "".
+
+    A GGUF model's tower is a SEPARATE file from the language model, and a quant repo
+    often does not carry it at all -- llama.cpp reads the two side by side. The engine
+    (open_qwen36/vision/vit.cpp, vision_weights_path) takes `mmproj*.gguf` from the model
+    directory when there is no `vision_weight.q4nx`, so this is all the install side has
+    to do. The file is verified to BE a projector before it is kept: a language-model
+    GGUF downloaded under that name would load as a tower and fail far from here.
+    """
+    model = Path(target) / "model.gguf"
+    if not model.is_file():
+        return ""
+    # Which repo carries the tower, in order: the one the user named (`--mmproj`), this
+    # repo, then the non-i1 sibling of an i1 repo (mradermacher's `-i1` quants leave the
+    # projector in the original). `--mmproj` exists because a repo can be structured in a way
+    # none of those covers -- the tower in a third repo the user already knows about -- and
+    # then the model still runs multi-modal instead of installing text-only.
+    source = ""
+    names = []
+    for cand in (mmproj_repo, repo, projector_sibling(repo)):
+        if not cand:
+            continue
+        names = _projectors_in(cand, modelscope)
+        if names:
+            source = cand
+            break
+    if not names:
+        if mmproj_repo:
+            raise SystemExit(f"--mmproj {mmproj_repo}: no *mmproj*.gguf at the repo root")
+        return ""
+    names.sort(key=lambda n: (_projector_rank(n), len(n)))
+    pick = names[0]
+    dest = Path(target) / "mmproj.gguf"
+    if not quiet:
+        log(f"[INFO] vision projector: {pick} <- {source}")
+    got = fetch_from_repo(source, pick, dest, modelscope=modelscope, force=force)
+    if not got:
+        return ""
+    inv = read_gguf_inventory(dest, limit_mb=8)
+    kv = (inv[0] if inv else {}) or {}
+    arch = str(kv.get("general.architecture") or "")
+    if arch != "clip" or not kv.get("clip.has_vision_encoder"):
+        log(f"[WARN] {pick} is not a vision projector (arch '{arch}'); ignoring it")
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return ""
+    # The projector's own type names the TOWER DESIGN, and that is the useful fact: a
+    # Qwen3.5 VLM's README names text checkpoints as its base models, and its tower is
+    # Qwen3-VL's (llama.cpp writes `qwen3vl_merger` for it). Without this, an install that
+    # lists two text bases and a `qwen3vl_merger` projector reads like it picked the wrong
+    # base model.
+    ptype = str(kv.get("clip.projector_type") or "")
+    design = VISION_TOWERS.get(ptype)
+    log(f"[INFO]   {pick} is a '{ptype}' projector for a "
+        f"{kv.get('clip.vision.embedding_length')}-wide, {kv.get('clip.vision.block_count')}-block tower"
+        + (f" ({design}; the base model(s) above are the TEXT checkpoints)" if design else ""))
+    return "mmproj.gguf"
+
+
+def spec_from_gguf_source(source):
+    """The ModelSpec a GGUF file describes, from its own metadata (path or URL).
+
+    A gated base repo (meta-llama/*, google/gemma-*) leaves oflm add with a stub
+    config.json -- observed: {"model_type": "mistral"} -- which derives no spec, so
+    the open kernels cannot be matched and the engine's sampler is built over
+    nothing. The GGUF always names its architecture and geometry, so read it.
+    """
+    if source is None:
+        return None
+    ModelSpec = _model_spec_class()
+    if ModelSpec is None:
+        return None
+    inv = read_gguf_inventory(source, limit_mb=96)
+    if not inv:
+        return None
+    names = [x[0] if isinstance(x, (list, tuple)) else x for x in inv[1]]
+    try:
+        return ModelSpec.from_gguf_metadata(inv[0])
+    except Exception:
+        return None
+
+
+def projector_vision_config(target, base=None):
+    """config.json's `vision_config` for a GGUF install, translated from the projector.
+
+    `base` is whatever the installed config already carries: a repo that ships its own
+    `vision_config` (Qwen2.5-VL does) keeps every value it states -- the window's edge and
+    the full-attention blocks are NOT in the projector -- and the projector fills the rest.
+
+    Qwen3-VL's adapter reads the tower's geometry from config.json's `vision_config` --
+    the container ships one -- while a GGUF model's tower is described in the mmproj, in
+    llama.cpp's `clip.vision.*` names. Without this translation an installed VL GGUF
+    leaves the adapter with zeros (patch size 0) and images cannot be prepared at all.
+    Everything here comes from the file: the metadata for the geometry, the tensor names
+    for which blocks the deepstack mergers hang off, and the position table's own shape.
+    """
+    p = Path(target) / "mmproj.gguf"
+    if not p.is_file():
+        return {}
+    inv = read_gguf_inventory(p, limit_mb=16)
+    if not inv:
+        return {}
+    kv, tensors = inv
+    if str((kv or {}).get("general.architecture") or "") != "clip":
+        return {}
+    names = [t[0] if isinstance(t, (list, tuple)) else t for t in (tensors or [])]
+    dims = {t[0]: t[2] for t in (tensors or []) if isinstance(t, (list, tuple)) and len(t) > 2}
+
+    def n(k, default=None):
+        v = (kv or {}).get(k, default)
+        return int(v) if isinstance(v, (int, float)) else default
+
+    pos = dims.get("v.position_embd.weight") or []
+    pe = dims.get("v.patch_embd.weight") or []          # [P, P, C, hidden]
+    vc = {
+        "model_type": "qwen3_vl",
+        "depth": n("clip.vision.block_count"),
+        "hidden_size": n("clip.vision.embedding_length"),
+        "num_heads": n("clip.vision.attention.head_count"),
+        "intermediate_size": n("clip.vision.feed_forward_length"),
+        "out_hidden_size": n("clip.vision.projection_dim"),
+        "patch_size": n("clip.vision.patch_size"),
+        "spatial_merge_size": n("clip.vision.spatial_merge_size"),
+        "in_channels": int(pe[2]) if len(pe) >= 3 else 3,
+        "hidden_act": "gelu_pytorch_tanh",
+        # The preprocessing constants are not in the mmproj (they are the model's
+        # smart_resize / normalize defaults, not tower geometry), and the OFLM
+        # containers bake them under family-prefixed names. Qwen3-VL and every
+        # Qwen that shares its tower use one set; write it so the config is
+        # self-describing and the reader does not guess zeros and refuse.
+        "shortest_edge": 65536,         # min pixels before the factor rounding
+        "longest_edge": 16777216,       # max pixels
+        "rescale_factor": 1.0 / 255.0,  # 0..255 -> 0..1
+        "rescale_mean": 0.5,
+        "rescale_std": 0.5,
+    }
+    if pos:
+        vc["num_position_embeddings"] = int(pos[1])
+    # which blocks the deepstack mergers hang off is in the tensor names
+    taps = set()
+    for nm in names:
+        if nm.startswith("v.deepstack."):
+            try:
+                taps.add(int(nm.split(".")[2]))
+            except (IndexError, ValueError):
+                pass
+    if taps:
+        vc["deepstack_visual_indexes"] = sorted(taps)
+    # the temporal patch size is the number of patch_embed slices
+    t = 1
+    while f"v.patch_embd.weight.{t}" in names:
+        t += 1
+    vc["temporal_patch_size"] = t
+    out = dict(base or {})
+    for k, v in vc.items():
+        if v is not None and not out.get(k):
+            out[k] = v
+    return out
+
+
+def projector_special_ids(target):
+    """The image/vision special-token ids the adapter needs, from the tokenizer."""
+    p = Path(target) / "tokenizer.json"
+    try:
+        tok = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    want = {"<|image_pad|>": "image_token_id",
+            "<|vision_start|>": "vision_start_token_id",
+            "<|vision_end|>": "vision_end_token_id"}
+    out = {}
+    for a in tok.get("added_tokens") or []:
+        c = a.get("content")
+        if c in want and isinstance(a.get("id"), int):
+            out[want[c]] = a["id"]
+    return out
+
+
+def repair_config_from_gguf(target):
+    """Write the geometry keys a GGUF names into a stub/absent config.json.
+
+    Done BEFORE the kernel-set reconciliation, because the engine's sampler reads
+    vocab_size / hidden_size from config.json: a stub ({"model_type": "mistral"})
+    built the sampler over zero features and segfaulted after prefill
+    (Meta-Llama-3-8B-Instruct), and derived no spec so no open kernels were linked.
+    """
+    cfg_path = Path(target) / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    has_projector = (Path(target) / "mmproj.gguf").is_file()
+    # The FILE is the authority for a GGUF install, even over a config that looks complete.
+    # empero-ai/Qwen3.8-4B ships a config saying 32 layers while its distilled GGUF has 33
+    # blocks (the last is an MTP/NextN tail the kernels do not run), and an earlier install
+    # can leave a config rebuilt from that count -- either way the engine refuses the model
+    # at load ("num_hidden_layers = 33, the kernel set was built for 32"). The keys below are
+    # the file's own numbers, so they are written whenever they differ; the vision wrapper is
+    # the one thing the GGUF does not carry, which is what `has_projector` is for.
+    if not (Path(target) / "model.gguf").is_file():
+        return []
+    inv = read_gguf_inventory(str(Path(target) / "model.gguf"), limit_mb=96)
+    spec = spec_from_gguf_source(str(Path(target) / "model.gguf"))
+    if spec is None:
+        return []
+    sys.path.insert(0, str(open_kernels_checkout() or ""))
+    from recipes.spec import hf_model_types
+    types = hf_model_types(spec.family)
+    built = {
+        "model_type": (types[0] if types else None) or cfg.get("model_type") or "unknown",
+        "hidden_size": spec.hidden,
+        "num_hidden_layers": spec.num_layers,
+        "intermediate_size": spec.intermediate,
+        "vocab_size": spec.vocab,
+        "num_attention_heads": spec.num_heads,
+        "num_key_value_heads": spec.num_kv_heads,
+        "head_dim": spec.head_dim,
+        "rope_theta": spec.rope_theta,
+        "rms_norm_eps": spec.norm_eps,
+    }
+    # Qwen3-VL's M-RoPE: a text token has one position, an image token three (t, h, w), so
+    # the decoder needs the section split. The GGUF states it (`rope.dimension_sections`),
+    # and the engine reads it from config.json's rope_parameters (or rope_scaling) -- a
+    # config rebuilt from the GGUF would otherwise lose the only description of it, and an
+    # image prompt then places its tokens at text positions. The 4th element is the unused
+    # tail of rotary_dim/2, which is why mrope_section is the first three.
+    md = (inv[0] if inv else {}) or {}
+    arch = str(md.get("general.architecture") or "")
+    sections = md.get(f"{arch}.rope.dimension_sections")
+    if isinstance(sections, list) and len(sections) >= 3 and sum(int(x) for x in sections[:3]) > 0:
+        # Qwen3-VL interleaves the three axes' rotary pairs; Qwen2.5-VL does not (it lays
+        # them out in sections). A config that states it wins; otherwise the arch decides.
+        stated = cfg.get("rope_parameters") or cfg.get("rope_scaling")
+        interleaved = (bool(stated["mrope_interleaved"])
+                       if isinstance(stated, dict) and "mrope_interleaved" in stated else arch in ("qwen3vl",))
+        built["rope_parameters"] = {"rope_type": "default",
+                                    "mrope_section": [int(x) for x in sections[:3]],
+                                    "mrope_interleaved": interleaved}
+    # A GGUF VL model's tower is the mmproj: translate it into the vision_config the
+    # adapter reads, and name the file so the engine needs no guessing.
+    vc = projector_vision_config(target, cfg.get("vision_config"))
+    if vc:
+        built["vision_config"] = vc
+        built["vision_model_weight"] = "mmproj.gguf"
+        built.update(projector_special_ids(target))
+    repaired = [k for k, v in built.items() if v is not None and cfg.get(k) != v]
+    cfg.update({k: v for k, v in built.items() if v is not None})
+    cfg_path.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+    if repaired:
+        log(f"[INFO] config.json: rebuilt from the GGUF metadata ({len(repaired)} key(s); "
+            f"the repo's config was absent or a stub)")
+    return repaired
+
+
+def reconcile_config_json(target, kernel_dir):
+    """Make config.json carry the keys the KERNEL SET validates against.
+
+    A GGUF repo's config.json -- or the finetune base's, which is where add
+    takes it from -- is often not the full HF config: empero-ai/Qwen3.8-4B
+    ships one without `layer_types` and without `full_attention_interval`, so
+    the model INSTALLS (the geometry matched by kernel_hash) and then the
+    engine refuses it at load, after the multi-GB download:
+
+        open_qwen36: <model>: config.json lacks 'layer_types'
+
+    The kernel set's manifest already holds the exact values the engine will
+    compare against (`hf_config_check`, plus `hf_config_defaults` for a key
+    whose absence is legal). A key the config OMITS and the set REQUIRES is
+    filled from there: the install already matched this model's geometry, so
+    the set is the authority on what it can serve -- and `layer_types` is
+    exactly the key a finetune's config drops, because it is redundant for a
+    loader that infers the pattern from `full_attention_interval`.
+
+    A key the config CONTRADICTS is never overwritten: that is a different
+    model, and the engine must still refuse it. Those are reported instead, at
+    install time rather than at the first `oflm run`.
+
+    Returns (filled, conflicting) key lists.
+    """
+    cfg_path = Path(target) / "config.json"
+    mj = Path(kernel_dir) / "open_kernels" / "manifest.json" if kernel_dir else None
+    if not cfg_path.is_file() or mj is None or not mj.is_file():
+        return [], []
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        man = json.loads(mj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    check = man.get("hf_config_check") or {}
+    defaults = man.get("hf_config_defaults") or {}
+    if not isinstance(cfg, dict):
+        return [], []
+
+    # 1. A MULTIMODAL config wraps the text tower: empero-ai/Qwen3.8-4B (and
+    # Qwen/Qwen3.5-4B itself) keep hidden_size, layer_types,
+    # full_attention_interval ... under `text_config`, and the engine merges the
+    # GGUF's FLAT metadata over the TOP level -- which supplies hidden_size but
+    # has no layer_types to supply ("config.json lacks 'layer_types'" at load,
+    # after a 2.8 GB install). Lift the tower's keys up where the top level has
+    # none; the wrapper is left intact, so a vision engine still finds it.
+    flattened = []
+    for wrapper in ("text_config", "llm_config", "language_config"):
+        inner = cfg.get(wrapper)
+        if not isinstance(inner, dict):
+            continue
+        for k, v in inner.items():
+            if k not in cfg:
+                cfg[k] = v
+                flattened.append(k)
+        break
+
+    def expected(key):
+        want = check[key]
+        return want[0] if isinstance(want, list) else want
+
+    filled, conflicting = [], []
+    for key, want in check.items():
+        if key == "layer_types":
+            got = cfg.get("layer_types")
+            if got is None and cfg.get("full_attention_interval") and cfg.get("num_hidden_layers"):
+                iv = int(cfg["full_attention_interval"])
+                n = int(cfg["num_hidden_layers"])
+                if iv > 0:
+                    got = ["full_attention" if (l + 1) % iv == 0 else "linear_attention"
+                           for l in range(n)]
+            if got is None:
+                cfg[key] = list(want)
+                filled.append(key)
+            else:
+                # Normalize GGUF/HF-native conv naming to the kernel set's canonical
+                # form (short_conv / short_conv_dense) so a config rebuilt from GGUF
+                # metadata validates against the set it was linked to. "conv" in a
+                # GGUF layer_types means a short-conv mixer; the first num_dense_layers
+                # conv slots are the dense-lead (short_conv_dense), the rest MoE
+                # (short_conv). Only rewrite when the normalized form matches want --
+                # a genuinely different architecture stays conflicting.
+                norm = list(got)
+                if "conv" in norm and "short_conv" not in "".join(str(x) for x in norm):
+                    nd = int(cfg.get("num_dense_layers") or 0)
+                    ci = 0
+                    for i, t in enumerate(norm):
+                        if t == "conv":
+                            norm[i] = "short_conv_dense" if ci < nd else "short_conv"
+                            ci += 1
+                if list(norm) == list(want):
+                    if list(got) != list(want):
+                        cfg[key] = list(want)
+                        filled.append(key)
+                elif list(got) != list(want):
+                    conflicting.append(key)
+            continue
+        if key in cfg:
+            got = cfg[key]
+            ok = got in want if isinstance(want, list) else got == want
+            if not ok:
+                conflicting.append(key)
+            continue
+        if key in defaults:                # absence is legal (the manifest names a default)
+            continue
+        cfg[key] = expected(key)
+        filled.append(key)
+
+    if filled or flattened:
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    if flattened:
+        log(f"[INFO] config.json: flattened {len(flattened)} key(s) from text_config "
+            f"(the engine validates at the top level)")
+    if filled:
+        log(f"[INFO] config.json: filled {', '.join(filled)} from the kernel set "
+            f"(the model's config omits it; the engine validates against the set)")
+    if conflicting:
+        log(f"[WARN] config.json disagrees with the kernel set on {', '.join(conflicting)}; "
+            f"the engine will refuse this model at load. The set was built for another "
+            f"configuration -- check the base model and the quant repo.")
+    return filled, conflicting
+
+
+def token_id_of(target, token):
+    """The id of a special token by its STRING, from the installed tokenizer.json.
+
+    A tokenizer_config can name `bos_token` / `eos_token` and never give the id
+    (Hy-MT2: `<|startoftext|>` with no bos_token_id), and the engine needs the
+    integer. tokenizer.json has both: the added_tokens list and the base vocab.
+    """
+    if not token or not isinstance(token, str):
+        return None
+    tj = Path(target) / "tokenizer.json"
+    try:
+        t = json.loads(tj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for a in t.get("added_tokens", []) or []:
+        if a.get("content") == token and isinstance(a.get("id"), int):
+            return a["id"]
+    v = (t.get("model") or {}).get("vocab")
+    if isinstance(v, dict) and isinstance(v.get(token), int):
+        return v[token]
+    return None
+
+
 def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
     stock HF repos keep them in generation_config.json -- merge them over."""
@@ -800,10 +1953,42 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     if not tc.is_file():
         return
     cfg = json.loads(tc.read_text(encoding="utf-8"))
-    need_eos = "eos_token_id" not in cfg or not isinstance(cfg.get("eos_token_id"), list)
+    # A token NAMED but not numbered: resolve the id from tokenizer.json BEFORE any
+    # early return, so a repo that has the tokenizer but no generation_config still
+    # gets its ids (Hy-MT2: `<|startoftext|>` with no bos_token_id).
+    _ids_fixed = False
+    for _tok_key, _id_key in (("bos_token", "bos_token_id"), ("eos_token", "eos_token_id")):
+        if cfg.get(_id_key) is not None:      # a null id is a MISSING id, not a set one
+            continue
+        _tok = cfg.get(_tok_key)
+        if isinstance(_tok, dict):
+            _tok = _tok.get("content")
+        _tid = token_id_of(target, _tok) if isinstance(_tok, str) else None
+        if _tid is None and (Path(target) / "model.gguf").is_file():
+            # The GGUF's own metadata names the ids (Hy-MT2: bos 127958, and the
+            # string <|startoftext|> is not in tokenizer.json's vocab to look up).
+            inv = read_gguf_inventory(str(Path(target) / "model.gguf"), limit_mb=32)
+            _kv = inv[0] if inv else {}
+            _gg = _kv.get(f"tokenizer.ggml.{_id_key}")
+            if isinstance(_gg, int):
+                _tid = _gg
+        if _tid is not None:
+            cfg[_id_key] = [_tid] if _id_key == "eos_token_id" else _tid
+            _ids_fixed = True
+    if _ids_fixed:
+        # persist BEFORE the need_eos/need_bos early return: a repo whose only gap was
+        # the id (Hy-MT2's null bos_token_id) has nothing left to fetch, and returning
+        # without writing left the engine to refuse the model.
+        tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     need_bos = cfg.get("bos_token") is not None and "bos_token_id" not in cfg
-    if not (need_eos or need_bos):
-        return
+    # HF spells the eos ids three ways: tokenizer_config's array (one id, from the
+    # name resolution above -- Gemma 4 turns are ended by <turn|>, id 106, and that
+    # id is in generation_config.json / config.json, never in the GGUF's eos),
+    # generation_config.json's array, and config.json's (top level or the text tower).
+    # The engine reads the array, so union every source rather than pick one.
+    eos_ids: set[int] = set()
+    if isinstance(cfg.get("eos_token_id"), list):
+        eos_ids.update(x for x in cfg["eos_token_id"] if isinstance(x, int))
     g = None
     gc = target / "generation_config.json"
     repo_gen = None
@@ -830,23 +2015,46 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
                 g = json.loads(Path(cand).read_text(encoding="utf-8"))
             except Exception:
                 g = None
-            if g and (need_eos and isinstance(g.get("eos_token_id"), list) or
+            if g and (isinstance(g.get("eos_token_id"), list) or
                       need_bos and isinstance(g.get("bos_token_id"), int)):
                 break
-    if not g:
-        log("[WARN] no generation_config.json; the model may fail at load if the engine "
-            "needs eos_token_id in tokenizer_config.json")
+    # Union the generation_config's ids (whole chain's best file won the loop) with
+    # config.json's, top level and text tower; a key the config omits contributes none.
+    cfg_path = target / "config.json"
+    conf_ids: set[int] = set()
+    conf_bos: int | None = None
+    if cfg_path.is_file():
+        try:
+            mcfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            mcfg = {}
+        for c in (mcfg, mcfg.get("text_config") or {}):
+            v = c.get("eos_token_id")
+            if isinstance(v, int):
+                conf_ids.add(v)
+            elif isinstance(v, list):
+                conf_ids.update(int(x) for x in v if isinstance(x, int))
+            b = c.get("bos_token_id")
+            if isinstance(b, int):
+                conf_bos = b
+    if isinstance(g, dict) and isinstance(g.get("eos_token_id"), list):
+        eos_ids.update(int(x) for x in g["eos_token_id"] if isinstance(x, int))
+    eos_ids.update(conf_ids)
+    merged_eos = sorted(eos_ids)
+    changed_list = []
+    if merged_eos != sorted(set(cfg.get("eos_token_id") or [])):
+        cfg["eos_token_id"] = merged_eos
+        changed_list.append("eos")
+    g_bos = g.get("bos_token_id") if isinstance(g, dict) else None
+    bos_src = g_bos if isinstance(g_bos, int) else conf_bos
+    if need_bos and isinstance(bos_src, int):
+        cfg["bos_token_id"] = bos_src
+        changed_list.append("bos")
+    if not changed_list:
         return
-    changed = False
-    if need_eos and isinstance(g.get("eos_token_id"), list):
-        cfg["eos_token_id"] = g["eos_token_id"]
-        changed = True
-    if need_bos and isinstance(g.get("bos_token_id"), int):
-        cfg["bos_token_id"] = g["bos_token_id"]
-        changed = True
-    if changed:
-        tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        log("[INFO] merged eos/bos ids from generation_config.json into tokenizer_config.json")
+    tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    log("[INFO] merged eos/bos ids into tokenizer_config.json (union of config.json / "
+        "generation_config.json)")
 
 
 def _parse_base_model_frontmatter(text):
@@ -1051,7 +2259,9 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
     if gguf_name:
-        want_list = GGUF_FILES + GGUF_OPTIONAL
+        # `want` adds files a GGUF repo needs beyond the chat set -- the
+        # NPU-embedding checkpoint's vocab.txt and 1_Pooling/config.json.
+        want_list = list(dict.fromkeys(GGUF_FILES + GGUF_OPTIONAL + (want or [])))
     else:
         want_list = want if want is not None else ALL_FILES
     if modelscope:
@@ -1119,15 +2329,18 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
 
 def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
     obtained = []
-    want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else (want if want is not None else ALL_FILES)
+    want_list = (list(dict.fromkeys(GGUF_FILES + GGUF_OPTIONAL + (want or [])))
+                 if gguf_name else (want if want is not None else ALL_FILES))
     for fname in want_list:
         src = src_dir / (gguf_name if fname == "model.gguf" else fname)
         if src.is_file():
             dest = target / fname
-            if dest.is_file() and not force:
+            if dest.is_file() and (not force or src.resolve() == dest.resolve()):
                 obtained.append(fname)
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.is_file() or dest.is_symlink():
+                dest.unlink()
             shutil.copy2(src, dest)
             obtained.append(fname)
     return obtained
@@ -1153,22 +2366,124 @@ def estimate_size(config_path):
 
 
 def estimate_size_dict(cfg):
-    """Registry 'size' (bytes) from an already-parsed config.json dict."""
+    """Registry 'size' (bytes) from an already-parsed config.json dict.
+
+    A VLM nests the decoder's geometry under `text_config` (Qwen3.5's published form,
+    and every VLM derivative of it), so the top level alone says nothing -- which is how
+    `Atomic-Germ/GRaPE-1.5-TEST-DONTDL` (a Qwen3.5-4B behind a joke name) ended up with
+    no size at all. Read the text tower when there is one, exactly as the recipes do.
+    """
     if not isinstance(cfg, dict):
         return None
     try:
-        hidden = cfg.get("hidden_size")
-        layers = cfg.get("num_hidden_layers")
+        tc = cfg.get("text_config")
+        c = tc if isinstance(tc, dict) else cfg
+        hidden = c.get("hidden_size")
+        layers = c.get("num_hidden_layers")
         if not hidden or not layers:
             return None
-        intermediate = cfg.get("intermediate_size")
+        intermediate = c.get("intermediate_size")
         per_layer = 12 * hidden * hidden
         if intermediate:
             per_layer += 3 * hidden * intermediate
-        total = per_layer * layers + 2 * hidden * (cfg.get("vocab_size") or hidden)
+        total = per_layer * layers + 2 * hidden * (c.get("vocab_size") or hidden)
         return max(int(round(total / 1e9 * 2) / 2 * 1e9), 1_000_000_000)
     except Exception:
         return None
+
+
+# safetensors dtype -> bytes per parameter. An index's `metadata.total_size` is in
+# BYTES, so the dtype is what turns it into a parameter count.
+DTYPE_BYTES_PER_PARAM = {"float32": 4.0, "float16": 2.0, "bfloat16": 2.0,
+                         "float8_e4m3fn": 1.0, "float8_e5m2": 1.0,
+                         "int8": 1.0, "uint8": 1.0}
+
+# A real model is at least ~100M parameters. Below that the file is a fixture or a
+# truncated header, and its tensor list is a worse clue than its byte size.
+MIN_PLAUSIBLE_PARAMS = 1e8
+
+
+def safetensors_params(cfg, repo, modelscope=False, local_dirs=(), tree=None):
+    """Parameter count from a repo's safetensors index, or None.
+
+    `model.safetensors.index.json` carries the exact byte total of every shard, and the
+    config's dtype says how many bytes a parameter is: that is the real count, not an
+    estimate from the geometry. Only an install-time tag/kernel hint -- the weights are
+    verified by hash.
+    """
+    want = "model.safetensors.index.json"
+    idx = None
+    for d in local_dirs:
+        if d and (Path(d) / want).is_file():
+            try:
+                idx = load_json(Path(d) / want)
+            except Exception:
+                idx = None
+            break
+    if idx is None and repo and (tree is None or want in root_file_names(tree)):
+        try:
+            with tempfile.TemporaryDirectory(prefix="oflm-add-st-") as tmp:
+                got = fetch_from_repo(repo, want, Path(tmp) / want,
+                                      modelscope=modelscope, force=True)
+                if got:
+                    idx = load_json(got)
+        except Exception:
+            idx = None
+    total = ((idx or {}).get("metadata") or {}).get("total_size")
+    dtype = None
+    if isinstance(cfg, dict):
+        tc = cfg.get("text_config")
+        dtype = (cfg.get("torch_dtype")
+                 or (tc.get("torch_dtype") if isinstance(tc, dict) else None)
+                 or cfg.get("dtype"))
+    bpp = DTYPE_BYTES_PER_PARAM.get(str(dtype))
+    if not total or not bpp:
+        return None
+    return total / bpp
+
+
+def size_from_set_name(name):
+    """The size marker of the kernel set that serves a model ('Qwen3.5-4B-NPU2' -> '4b').
+
+    The geometry already matched, so the set's size IS this model's size -- and it is the
+    one signal that needs no extra read at all.
+    """
+    size, _rest = _extract_size(_strip_npu2(name or ""))
+    return size
+
+
+def model_size_token(cfg=None, gguf_source=None, st_params=None, gguf_bytes=None,
+                     quant=None, set_name=None):
+    """The tag's size marker from the model's own NUMBERS, never its name.
+
+    In order of exactness, each skipped when its source is absent:
+      1. a GGUF's tensors -- every parameter is in the header, so this is the count;
+      2. a safetensors index over the dtype's bytes per parameter;
+      3. the config's geometry (a VLM's text tower included);
+      4. the GGUF's byte size over the quant's bytes per parameter -- last because it is
+         the noisy one: a K-quant file mixes formats and an embedded tokenizer is not
+         weights, which is how a 1.5B model got tagged 4.4b;
+      5. the kernel set that serves it -- the geometry matched, so its size is this
+         model's size.
+
+    A count below MIN_PLAUSIBLE_PARAMS is not a model (a fixture, a truncated header),
+    and the next source is used instead: a 72-parameter file must not be tagged "0b".
+    """
+    if gguf_source:
+        n = gguf_params(gguf_source)
+        if n and n >= MIN_PLAUSIBLE_PARAMS:
+            return size_token_from_bytes(n)
+    if st_params and st_params >= MIN_PLAUSIBLE_PARAMS:
+        return size_token_from_bytes(st_params)
+    if cfg:
+        est = estimate_size_dict(cfg)
+        if est:
+            return size_token_from_bytes(est)
+    if gguf_bytes and quant:
+        tok = gguf_size_token(gguf_bytes, quant)
+        if tok:
+            return tok
+    return size_from_set_name(set_name)
 
 
 def size_token_from_bytes(num_bytes):
@@ -1249,6 +2564,30 @@ def link_npue_design(system_prefixes, user_root, design_family, force=False, qui
     _link_one(user_root, design_family, str(src), force, quiet)
 
 
+def link_whisper_set(model_dir, system_prefixes, model_name, force=False, quiet=False):
+    """Symlink the open whisper_gemm set into <model_dir>/open_kernels so the
+    open whisper engine finds it (whisper_kernels.json + design.json), keyed by
+    the official model name exactly where export_whisper_kernels.py writes it:
+    <xclbin_root>/xclbins/<model_name>/open_kernels.
+
+    This mirrors link_npue_design: the kernel set ships under a system xclbin
+    root and the install links it, so a whisper GGUF install needs no manual
+    step to transcribe on NPU."""
+    src = None
+    for p in system_prefixes:
+        cand = Path(p) / "xclbins" / model_name / "open_kernels"
+        if (cand / "whisper_kernels.json").is_file() or (cand / "design.json").is_file():
+            src = cand
+            break
+    if src is None:
+        if not quiet:
+            log(f"[WARN] No open whisper set for '{model_name}' under any system "
+                "xclbin root; the engine cannot transcribe without it. Build it with "
+                "open_kernels/export_whisper_kernels.py.")
+        return
+    _link_one(Path(model_dir), "open_kernels", str(src), force, quiet)
+
+
 def build_entry(base_entry, dir_name, files, size):
     # Deep copy: the new entry shares no nested objects with the registry it
     # was seeded from, so stamping details below cannot corrupt the curated
@@ -1319,19 +2658,25 @@ def register(
         # Collision check: shipped registry -- on the FINAL destination tag,
         # and unconditionally. Checking only when --name was absent let
         # `--name qwen3.8:27b` write a user entry that shadows the shipped
-        # one through the merged overlay. Exception: the NPU-embedding flow
+        # one through the merged overlay. Exceptions: the NPU-embedding flow
         # deliberately re-installs the official design under its shipped tag
-        # (the engine routes by that exact tag); a same-design re-install
-        # is not a takeover of the name.
+        # (the engine routes by that exact tag), and a supported Whisper GGUF
+        # install may reuse its corresponding official shipped Whisper tag.
         shipped_entry = (system_registry.get("models", {})
                          .get(model_type, {}).get(size))
         if shipped_entry is not None:
+            shipped_details = shipped_entry.get("details") or {}
             same_npue_design = (
                 entry.get("npue_design_family")
                 and shipped_entry.get("npue_design_family")
                 and entry["npue_design_family"] == shipped_entry["npue_design_family"]
             )
-            if not same_npue_design:
+            same_whisper = (
+                shipped_details.get("family") in WHISPER_FAMILIES
+                and shipped_entry.get("asr")
+                and (entry.get("details") or {}).get("family") == shipped_details.get("family")
+            )
+            if not same_npue_design and not same_whisper:
                 raise SystemExit(
                     f"Model {final_tag} already exists in the shipped registry. "
                     f"Use --name to install under a different name."
@@ -1396,6 +2741,13 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
         return
     src = system_root / source_name
     if not src.is_dir():
+        # A set built by `oflm add` itself lands in the tree's src/xclbins, not in the
+        # installed tree: link the one that exists rather than warning about the one
+        # that does not.
+        tree = tree_xclbins()
+        if tree and (tree / source_name).is_dir():
+            src = tree / source_name
+    if not src.is_dir():
         if not quiet:
             log(f"[WARN] Official model has no xclbins directory: {source_name}")
         return
@@ -1444,29 +2796,16 @@ def open_kernels_checkout():
 def model_spec_hash(model_dir):
     """(spec_hash, note) for an installed model directory; (None, why) on failure.
 
-    Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
-    config.json, the tokenizer's real vocab, and the per-role weight format off
-    the model.q4nx safetensors header (no weight byte is read).
+    The spec is derived the way the recipes do it: from the model's own
+    weights where it has them (a GGUF's own metadata) and from config.json
+    plus the tokenizer's real vocab otherwise (the model.q4nx safetensors
+    header gives the per-role weight format; no weight byte is read).
     """
-    root = open_kernels_checkout()
-    if root is None:
-        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
-    added = str(root)
-    inserted = added not in sys.path
-    if inserted:
-        sys.path.insert(0, added)
-    try:
-        from recipes.load import spec_from_model_dir
-        spec = spec_from_model_dir(Path(model_dir))
-        return spec.spec_hash(), f"spec from {root}"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-    finally:
-        if inserted:
-            try:
-                sys.path.remove(added)
-            except ValueError:
-                pass
+    spec = model_spec(model_dir)
+    if spec is None:
+        return None, ("no spec for this model (no open_kernels/recipes checkout, "
+                      "or a shape they do not know)")
+    return spec.spec_hash(), "spec from the model's own metadata"
 
 
 def kernel_set_spec_hash(kernel_dir):
@@ -1577,7 +2916,167 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     return False
 
 
-def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
+def model_spec(model_dir):
+    """The ModelSpec for an installed model directory, or None (no recipes
+    checkout, or a shape they do not know).
+
+    A GGUF-direct model is described by ITS OWN weights. The repo's
+    config.json is a claim about the model the repo was built from, and for a
+    fine-tune that is often the BASE: empero-ai/Qwen3.8-9B-Distill-GGUF
+    ships no config.json at all, and the one its README names (the base's)
+    says 32 layers where the file has 33. The geometry that decides which
+    kernels serve the model is the file's; the config.json is the fallback for
+    a model that has no GGUF.
+    """
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.load import spec_from_model_dir
+        from recipes.spec import ModelSpec
+        gguf = Path(model_dir) / "model.gguf"
+        if gguf.is_file():
+            try:
+                inv = read_gguf_inventory(str(gguf))
+                if inv:
+                    names = [x[0] if isinstance(x, (list, tuple)) else x for x in inv[1]]
+                    spec = ModelSpec.from_gguf_metadata(inv[0])
+                    # the tokenizer's id count (the logits above it are undefined)
+                    try:
+                        spec = dataclasses.replace(spec, real_vocab=spec_from_model_dir(Path(model_dir)).real_vocab)
+                    except Exception:
+                        pass
+                    return spec
+            except Exception:
+                pass
+        return spec_from_model_dir(Path(model_dir))
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def sibling_spec(base_spec, model_spec):
+    """The spec a sibling kernel set's manifest is written for.
+
+    The BASE's compiled geometry -- widths, head layout, rope law and `vocab` (the
+    row count the head kernel was built for) -- with the MODEL's own loop and
+    tokenizer: its depth, its layer sequence, and the id count the logits are
+    masked at.
+
+    `vocab` is the field that must NOT come from the model. A set built for a
+    padded vocabulary serves a narrower head (the pack zero-fills the rest), but
+    the head kernel's band count and split are compiled from the SET's row count;
+    writing the model's own here would hand the engine a band count the compiled
+    kernel does not have.
+    """
+    import dataclasses
+    # `extra` is not hashed, and the manifest's `hf_config_check` is built from it: LFM2
+    # publishes its FFN width before transformers' two-thirds adjustment (12288 where the
+    # kernels run 8192), and Granite records whether its multiplier was folded. Those are
+    # facts about THIS model's config, so the model's own keys win over the base's -- with
+    # the base's filling anything the model does not state.
+    return dataclasses.replace(base_spec, num_layers=model_spec.num_layers,
+                               layer_types=tuple(model_spec.layer_types),
+                               real_vocab=model_spec.real_vocab,
+                               extra={**base_spec.extra, **model_spec.extra})
+
+
+def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
+    """A kernel set for this model built from the kernels of an installed set
+    that serves the same GEOMETRY, with a manifest for THIS model.
+
+    The kernels are width-keyed: the depth is the manifest's business (the
+    layer loop it drives), so a fine-tune of a different depth runs on the base
+    model's kernels -- only the manifest differs. A model whose shape no
+    installed set covers needs a build; a model whose DEPTH differs does not,
+    and asking for a rebuild here would put a kernel build between the user and
+    a model that runs today.
+
+    The manifest is the BASE set's spec with this model's own loop: its depth,
+    its layer sequence and its tokenizer's id count. Everything else stays the
+    base's, and `vocab` most of all -- that is the row count the head kernel was
+    COMPILED for, not a property of the model (the pack zero-fills the rows past
+    the model's own). Writing the model's own vocab here would hand the engine a
+    band count the compiled kernel does not have.
+
+    The sibling set is a directory of the base's kernel files (hard-linked
+    where the filesystem allows it) plus that manifest, and it is what the model
+    links to. Returns the directory, or None.
+    """
+    spec = model_spec(model_dir)
+    if spec is None:
+        return None
+    want = spec.kernel_hash()
+    # The preferred base first: the set the GGUF gate picked (the freshest one
+    # with the f32-scale twins), so the sibling carries them too.
+    manifests = []
+    if prefer:
+        manifests.append(Path(prefer) / "manifest.json")
+    for root in roots:
+        if not root:
+            continue
+        manifests += sorted(Path(root).glob("*/open_kernels/manifest.json"))
+    for m in manifests:
+        try:
+            d = json.loads(m.read_text(encoding="utf-8"))
+            s = d.get("spec")
+            if not s:
+                continue
+            ModelSpec = _model_spec_class()
+            if ModelSpec is None:
+                continue
+            base_spec = ModelSpec.from_dict(s)
+            if base_spec.serves(spec) is not None:
+                continue
+        except Exception:
+            continue
+        base = m.parent
+        out = Path(model_dir) / "open_kernels"
+        try:
+            if out.exists() and not out.is_symlink():
+                shutil.rmtree(out)
+            out.mkdir(parents=True, exist_ok=True)
+            for f in base.rglob("*"):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(base)
+                dst = out / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    dst.unlink()
+                try:
+                    os.link(f, dst)                    # the same bytes, no copy
+                except OSError:
+                    shutil.copy2(f, dst)
+            from recipes.manifest import manifest
+            # The base set's spec (the compiled geometry, `vocab` included) with this
+            # model's own loop and tokenizer bound. `want` above is the same for both,
+            # so the only fields that can differ are the ones the manifest is for.
+            own = sibling_spec(base_spec, spec)
+            (out / "manifest.json").write_text(json.dumps(manifest(own), indent=1) + "\n",
+                                               encoding="utf-8")
+        except Exception as exc:
+            if not quiet:
+                log(f"[WARN] could not build the sibling kernel set: {exc}")
+            return None
+        if not quiet:
+            log(f"[INFO] open kernels: {out} (the kernels of {base.parent.name}, "
+                f"with this model's own manifest -- same geometry, "
+                f"{spec.num_layers} layers)")
+        return out
+    return None
+
+
+def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False, prefer=None):
     """Find and link the open kernel set for this model; say which and why."""
     if override:
         kernel_dir = Path(override)
@@ -1591,11 +3090,21 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
         return False
-    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
+    if prefer and kernel_set_spec_hash(prefer) == spec_hash:
+        kernel_dir, source = Path(prefer), Path(prefer).parent.name
+    else:
+        kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
     if kernel_dir:
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+    # No set was built for this shape exactly. The kernels are width-keyed, so
+    # a set that serves the same geometry does: only the manifest (the layer
+    # loop) differs, and it is written here -- no build, no kernel set to
+    # export, nothing for the user to run.
+    sibling = sibling_open_kernels(model_dir, roots, quiet=quiet, prefer=prefer)
+    if sibling:
+        return True
     checkout = open_kernels_checkout()
     script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
     log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
@@ -1687,7 +3196,7 @@ def write_vision_sidecar(target, dir_name, quiet=False):
 #      resort when every base repo is unreachable or gated.
 #
 # ggml type numbers (llama.cpp ggml.h; cross-checked with
-# src/open_qwen36/gguf_file.hpp -- only metadata parsing needs these).
+# src/gguf/gguf_file.hpp -- only metadata parsing needs these).
 GGML_TYPE_NAMES = {
     0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1",
     8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K",
@@ -1699,7 +3208,8 @@ GGML_TYPE_NAMES = {
 }
 # Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
 # quants, put/pack_norm for the small float weights).
-GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"}
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K",
+                     "IQ4_NL", "IQ4_XS"}
 
 
 class _GgufTruncated(Exception):
@@ -1836,6 +3346,33 @@ def read_gguf_inventory(source, limit_mb=32):
         return None
 
 
+def gguf_params(gguf_source):
+    """The parameter count from a GGUF's own tensors, or None.
+
+    Every parameter is in the header, so this is the REAL count, not an estimate from
+    the geometry -- which is what a repo named after its author's cat needs, and what
+    the bytes-over-quant guess only approximates (a K-quant file mixes formats, and an
+    embedded tokenizer is not weights: that guess tagged a 1.5B model 4.4b).
+    """
+    inv = read_gguf_inventory(gguf_source)
+    if not inv:
+        return None
+    _kv, tensors = inv
+    total = 0
+    for _name, _type, dims in tensors:
+        n = 1
+        for d in dims:
+            n *= int(d)
+        total += n
+    return total
+
+
+def gguf_params_size_token(gguf_source):
+    """A tag size marker from the GGUF's own tensors, or None (see gguf_params)."""
+    n = gguf_params(gguf_source)
+    return size_token_from_bytes(n) if n else None
+
+
 def family_from_gguf_arch(gguf_source):
     """details.family from a GGUF's general.architecture, or None.
 
@@ -1897,14 +3434,17 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
                        "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
-    # The output projection is routinely a coarser quant than the body
-    # (Q8_0 over Q4_*); anything else must be the claimed family.
+    # llama.cpp's quantizers MIX types by importance: the body at the named quant,
+    # the output projection and the attention V at a finer one (a Q4_1 file holds
+    # Q6_K beside its Q4_1; an IQ4_XS file holds Q5_K). So the name is a hint, not
+    # a contract: what must hold is that SOME tensor is of the claimed family --
+    # otherwise the name is a lie and the file is not what was asked for.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
-    if others:
-        return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
-                       f"{claimed_family}; refusing rather than packing the wrong layout")
+    fams = {gguf_quant_family(q) for q in quants}
+    if claimed_family and claimed_family not in fams:
+        return False, (f"the file's tensors are {'/'.join(sorted(quants))} -- none of them is the "
+                       f"{claimed_family} its name claims; refusing rather than packing the wrong layout")
     arch = kv.get("general.architecture", "?")
     return True, f"{len(tensors)} tensors ({arch}), quant {sorted(quants)}"
 
@@ -1963,6 +3503,13 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
             "from the base repo named in the GGUF repo's README")
     types = kv.get("tokenizer.ggml.token_type") or [1] * len(tokens)
     table = _bytes_to_unicode()
+    # GPT-2 byte-level BPE (Qwen, GPT-2, Llama-3) stores its vocab keys and
+    # merges ALREADY byte-mapped (`\u0120` for the space). Re-mapping them a
+    # second time turns every space-prefixed token into a nonsense pair of
+    # U+0100+ code points, so the reconstructed tokenizer emits a control token
+    # between every word. q4nx-build's converter reads these tokens directly;
+    # do the same for this family.
+    byte_level = model == "gpt2"
 
     def raw(i):
         return tokens[i].encode("utf-8", "surrogateescape")
@@ -1972,7 +3519,7 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
         typ = types[i] if i < len(types) else 1
         if typ == 5:  # unused slot
             continue
-        content = _map_token(raw(i), table)
+        content = tok if byte_level else _map_token(raw(i), table)
         if typ in (2, 3, 4):  # unknown / control / user-defined specials
             added.append({"id": i, "content": content, "single_word": False,
                           "lstrip": False, "rstrip": False, "normalized": False,
@@ -1984,6 +3531,13 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
             vocab[content] = i
     hf_merges = []
     for m in merges:
+        if byte_level:
+            # Already "Ġ t" (the two byte-mapped tokens joined by a plain
+            # space), exactly what a HF tokenizer.json merges entry is.
+            if not m or " " not in m:
+                continue
+            hf_merges.append(m)
+            continue
         raw_m = m.encode("utf-8", "surrogateescape")
         # Pairs join on ONE space; a side may itself hold 0x20, so split right.
         left, _, right = raw_m.decode("utf-8", "surrogateescape").rpartition(" ")
@@ -1996,7 +3550,7 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
     def tok_content(tid, default=None):
         if tid is None or not (0 <= tid < len(tokens)):
             return default
-        return _map_token(raw(tid), table)
+        return tokens[tid] if byte_level else _map_token(raw(tid), table)
 
     bos_id = kv.get("tokenizer.ggml.bos_token_id")
     eos_id = kv.get("tokenizer.ggml.eos_token_id")
@@ -2051,6 +3605,263 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
     return written
 
 
+def _bundle_layout(path):
+    """The layout hash a bundle declares, or "" when the directory is not one."""
+    man = Path(path) / "bundle.json"
+    if not man.is_file():
+        return ""
+    try:
+        return json.loads(man.read_text(encoding="utf-8")).get("layout", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def find_diffusion_kernels(layout, roots):
+    """The kernel set a bundle needs: its own, or one under an xclbins root.
+
+    A diffusion bundle names the kernel workload by a LAYOUT HASH (the stream specs it was
+    built against), not by a model geometry, so the match is exact: a set built for another
+    resolution or edit list is refused by the engine rather than run.
+    """
+    for root in roots:
+        if not root:
+            continue
+        for m in sorted(Path(root).glob("*/open_kernels/diffusion_kernels.json")):
+            try:
+                d = json.loads(m.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if d.get("layout") == layout and d.get("complete"):
+                return m.parent
+    return None
+
+
+def is_diffusion_dit(kv, tensors):
+    """True when a GGUF is a diffusion transformer, not a language model.
+
+    `general.architecture` is not reliable -- leejet's converter omits it entirely -- so the
+    TENSORS decide: FLUX's double/single blocks and its two embedders exist in no
+    language-model GGUF, and the pair is unmistakable.
+    """
+    if str((kv or {}).get("general.architecture", "")).lower() == "flux":
+        return True
+    names = {t[0] if isinstance(t, (list, tuple)) else t for t in (tensors or [])}
+    return ("double_blocks.0.img_attn.qkv.weight" in names
+            and "single_blocks.0.linear1.weight" in names)
+
+
+# FLUX.2 [klein]'s DiT quant preference (Q8_0 first: near-lossless and half the size of
+# BF16, measured 0.9946 correlation with the shipped bf16 bundle). The text path's
+# GGUF_QUANT_PREFERENCE is about the q4_1 pool law; this one is about image quality.
+DIT_QUANTS = ["Q8_0", "BF16", "F16", "Q5_1", "Q5_0", "Q4_1", "Q4_0"]
+
+
+def _pick_dit_gguf(names):
+    for q in DIT_QUANTS:
+        cand = sorted(n for n in names if q.lower() in n.lower())
+        if cand:
+            return cand[0]
+    return None
+
+
+def dit_builder():
+    """`export_bundle.py` when this install can build a bundle, else None.
+
+    The diffusion conversion is a BUILD-machine job -- numpy, ml_dtypes, an 8 GB download and
+    ~9 minutes of packing -- so it is not part of the runtime install. It is looked for in
+    $OFLM_DIT_CHAIN, then beside this package (a source checkout, or a future install that
+    ships it), and `oflm add` says exactly that when it is missing instead of failing deep
+    inside a build.
+    """
+    cands = []
+    env = os.environ.get("OFLM_DIT_CHAIN")
+    if env:
+        cands.append(Path(env))
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        cands.append(parent / "dit-chain")
+        cands.append(parent / "utilities" / "dit-chain")
+    for c in cands:
+        if (c / "export_bundle.py").is_file():
+            return c / "export_bundle.py"
+    return None
+
+
+def install_diffusion_gguf(args, repo, gguf_name, local_dir, dir_name):
+    """A FLUX.2 [klein] DiT GGUF -> a bundle -> an installed, runnable model.
+
+    `oflm add <gguf-repo>` for a diffusion repo is the same promise as for a text one: repo
+    in, runnable tag out. The DiT is only one of the three parts (the text encoder and the
+    VAE come from the checkpoint the repo's README names), so this builds the bundle with
+    export_bundle.py and then installs it through install_bundle() -- one path for the
+    registration, the tag and the kernel link.
+    """
+    builder = dit_builder()
+    if builder is None:
+        raise SystemExit(
+            f"{repo}: this is a diffusion DiT (FLUX.2 [klein]), not a language model, so it has "
+            "to be converted into a bundle before it can be installed -- and this build has no "
+            "converter.\n"
+            "  * use a prebuilt bundle instead: oflm pull flux2-klein:4b, or oflm add <bundle dir>\n"
+            "  * or convert it with utilities/dit-chain/klein-from-gguf.py (source checkout), "
+            "then oflm add the directory it writes")
+    models_root = models_root_dir(args.models_root)
+    target = models_root / dir_name
+    if target.is_symlink():
+        if not args.force:
+            raise SystemExit(f"{target} is a link to {target.resolve()}; --force replaces it")
+        target.unlink()
+
+    # the DiT file: a local one, or the repo's best quant (Q8_0 first)
+    quant = gguf_name
+    pack_cache = Path.home() / ".cache" / "oflm" / "dit-pack" / f"{repo.replace('/', '--')}--{Path(quant).stem}"
+    resolutions, edits = "512,1024", "512,1024"   # the shipped kernel set's pair
+    if args.dry_run:
+        print(f"diffusion      : {repo} ({quant}) -> {target}")
+        print(f"bundle         : build with {builder}")
+        print(f"resolutions    : {resolutions}   edits {edits}")
+        print(f"pack cache     : {pack_cache}")
+        print(f"kernels        : the xclbins set whose layout matches (export_dit_kernels.py --install)")
+        return None
+    if local_dir:
+        gguf = Path(local_dir) / quant
+    else:
+        gguf = Path.home() / ".cache" / "oflm" / "dit-gguf" / f"{repo.replace('/', '--')}--{Path(quant).name}"
+        if not gguf.is_file():
+            log(f"[INFO] DiT GGUF: {quant} <- {repo}")
+            got = fetch_from_repo(repo, quant, gguf, modelscope=args.modelscope, force=args.force)
+            if not got:
+                raise SystemExit(f"{repo}: could not fetch {quant}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    log(f"[INFO] converting {quant} into a diffusion bundle (this packs ~8 GiB; 5-15 minutes)")
+    rc = subprocess.run([sys.executable, str(builder),
+                         "--gguf-repo", repo, "--transformer-gguf", str(gguf),
+                         "--resolutions", resolutions, "--edits", edits,
+                         "--out", str(target), "--pack-cache", str(pack_cache),
+                         "--jobs", "4"]).returncode
+    if rc:
+        raise SystemExit(f"{repo}: the bundle build failed (exit {rc})")
+    files = sorted(p.name for p in target.iterdir() if p.is_file())
+    log(f"[INFO] bundle: {len(files)} files, layout {_bundle_layout(target)}")
+    return install_bundle(args, target, dir_name, args.modelscope)
+
+
+def install_bundle(args, source, dir_name, modelscope=False):
+    """Install a diffusion bundle: FLUX.2 [klein]'s schedules, weights and VAE.
+
+    A bundle is neither a q4nx container nor a GGUF -- it is what `q4nx-build
+    --open-diffusion` writes and what `oflm image` replays -- so it gets its own path:
+    copy (or fetch) its files, register it with the official `flux2-klein` entry as the
+    template, and link the kernel set whose layout hash matches. Returns the tag.
+    """
+    system_list = Path(args.system_list) if args.system_list else find_system_model_list()
+    system_registry = load_json(system_list)
+    template = (system_registry.get("models", {}).get("flux2-klein") or {}).get("4b")
+    if template is None:
+        raise SystemExit(f"{system_list} has no flux2-klein entry to install a bundle against")
+    models_root = models_root_dir(args.models_root)
+    target = models_root / dir_name
+    # A link here is a previous install that pointed at the build directory (what
+    # register-bundle.py does). Writing through it would edit the SOURCE: with --force it
+    # even unlinked the source's files one by one. Replace the link with a real directory.
+    if target.is_symlink():
+        if not args.force:
+            raise SystemExit(f"{target} is a link to {target.resolve()}; --force replaces it "
+                             f"with a real directory")
+        target.unlink()
+
+    if isinstance(source, Path):
+        man = json.loads((source / "bundle.json").read_text(encoding="utf-8"))
+        files = sorted(p.name for p in source.iterdir() if p.is_file())
+        if args.dry_run:
+            print(f"bundle         : {source} -> {target}")
+            print(f"files          : {len(files)} ({sum((source / f).stat().st_size for f in files) / 2**30:.2f} GiB)")
+            print(f"layout         : {man.get('layout')}")
+            print(f"resolutions    : {sorted(man.get('resolutions', {}))}  edits {sorted(man.get('edits', {}))}")
+            return None
+        if target.resolve() == source.resolve():
+            # installed in place: the files are already the model's
+            files = sorted(p.name for p in target.iterdir() if p.is_file())
+            target_ready = True
+        else:
+            target_ready = False
+        target.mkdir(parents=True, exist_ok=True)
+        for f in ([] if target_ready else files):
+            dst = target / f
+            if dst.exists() and not args.force:
+                continue
+            # a bundle is gigabytes and the source is usually a build output on the same
+            # filesystem: hard-link it, so `oflm add <dir>` costs no space (deleting either
+            # side later leaves the other intact). Fall back to a copy across filesystems.
+            if dst.exists():
+                dst.unlink()
+            try:
+                os.link(source / f, dst)
+            except OSError:
+                shutil.copy2(source / f, dst)
+        src_kernels = source / "open_kernels"
+        if src_kernels.is_dir() and target.resolve() != source.resolve():
+            dst = target / "open_kernels"
+            if dst.is_symlink() or dst.exists():
+                if args.force:
+                    shutil.rmtree(dst, ignore_errors=True)
+            if not dst.exists():
+                shutil.copytree(src_kernels, dst, copy_function=os.link)
+    else:
+        if args.dry_run:
+            from huggingface_hub import list_repo_files
+            print(f"bundle repo    : {source}")
+            print(f"files          : {len(list(list_repo_files(source)))}")
+            return None
+        from huggingface_hub import snapshot_download
+
+        target.mkdir(parents=True, exist_ok=True)
+        snapshot_download(source, local_dir=str(target),
+                          allow_patterns=None if args.force else None)
+        files = sorted(p.name for p in target.iterdir() if p.is_file())
+
+    layout = _bundle_layout(target)
+    if not layout:
+        raise SystemExit(f"{target} has no readable bundle.json after install")
+    bundle = json.loads((target / "bundle.json").read_text(encoding="utf-8"))
+
+    # the kernel set: beside the model wins (the engine looks there first); otherwise link
+    # the family's set from an xclbins root when its layout matches
+    kernels = target / "open_kernels"
+    if not (kernels / "diffusion_kernels.json").is_file() and not args.no_xclbin:
+        roots = [find_system_xclbin_root(), tree_xclbins()]
+        found = find_diffusion_kernels(layout, roots)
+        if found:
+            if kernels.is_symlink():
+                kernels.unlink()
+            elif kernels.is_dir():
+                shutil.rmtree(kernels, ignore_errors=True)
+            kernels.symlink_to(found)
+            log(f"[INFO] Linked diffusion kernels: {kernels} -> {found}")
+        else:
+            log(f"[WARN] no kernel set with layout {layout} under any xclbins root; "
+                f"build it with open_kernels/export_dit_kernels.py")
+
+    entry = copy.deepcopy(template)
+    entry["name"] = dir_name
+    entry["files"] = sorted(f for f in files if f not in ("open_kernels",))
+    entry["size"] = sum((target / f).stat().st_size for f in entry["files"] if (target / f).is_file())
+    entry["url"] = entry["file_url"] = entry["ms_url"] = ""
+    entry.setdefault("details", {})["family"] = "flux2-klein"
+    if bundle.get("resolutions"):
+        entry["image_sizes"] = sorted(int(r) for r in bundle["resolutions"])
+    entry["image_edit_sizes"] = sorted(int(r) for r in bundle.get("edits", {}))
+    tag = derive_tag(dir_name, args.tag or args.name, entry["size"])
+    tag = register(entry, user_settings_path(args.config), system_registry,
+                   force=args.force, name_override=args.name, tag=tag)
+    log(f"[INFO] Registered tag '{tag}' in {user_settings_path(args.config)}")
+    log(f"[INFO] {tag}: {len(entry['files'])} files, {entry['size'] / 2**30:.2f} GiB, "
+        f"layout {layout}, sizes {entry.get('image_sizes')}"
+        + (f", edits {entry['image_edit_sizes']}" if entry["image_edit_sizes"] else ""))
+    log(f"Run:  oflm image {tag} \"a red fox in fresh snow\" --size {(entry.get('image_sizes') or [512])[0]}")
+    return tag
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
@@ -2069,14 +3880,27 @@ def main():
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
+    ap.add_argument("--mmproj", default="",
+                    help="a repo to take this model's vision projector from, when its own repo "
+                         "and its base's do not carry one (a *mmproj*.gguf at the root is used)")
+    ap.add_argument("--text-only", action="store_true",
+                    help="GGUF installs only: do NOT fetch the vision projector (mmproj). The model runs "
+                         "as a text model; images are refused by the engine, which is the same code path a "
+                         "text-only checkpoint takes.")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and exit")
     ap.add_argument("--quiet", action="store_true", help="Less output")
+    ap.add_argument("--verbose", action="store_true",
+                    help="show which GGUF candidates were passed over, and why")
     args = ap.parse_args()
 
     # Hugging Face is the default hub; --modelscope opts in explicitly and a
     # modelscope.ai/.cn URL implies it on its own.
     modelscope = args.modelscope
     repo_arg = args.repo
+    # `repo:QUANT` names the quant to take from a GGUF repo (mradermacher's
+    # catalogues carry one file per quant). Without it the preference order
+    # decides -- Q4_1 first, the one the pool takes byte-exactly.
+    repo_arg, gguf_want = split_quant_request(repo_arg)
     local_dir = Path(repo_arg) if os.path.isdir(repo_arg) else None
     if local_dir:
         repo, dir_name = repo_arg, local_dir.name
@@ -2087,6 +3911,23 @@ def main():
         dir_name = repo.split("/")[-1]
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
+
+    # ---- a diffusion bundle: `q4nx-build --open-diffusion` writes one, and `oflm image`
+    # replays it. It has no q4nx container and no GGUF, so it takes its own path before
+    # either scan below.
+    _bundle_src = None
+    if local_dir and (local_dir / "bundle.json").is_file():
+        _bundle_src = local_dir
+    elif not local_dir:
+        try:
+            _tree = ms_file_tree(repo)[1] if modelscope else hf_file_tree(repo)
+            _names = set(_tree) if modelscope else {e.get("path") for e in _tree}
+            if "bundle.json" in _names:
+                _bundle_src = repo
+        except Exception:
+            pass
+    if _bundle_src is not None:
+        return install_bundle(args, _bundle_src, dir_name, modelscope)
 
     # ---- scan the repo for a compatible GGUF (the GGUF-direct path): a repo
     # that carries llama.cpp-style weights installs one of them as model.gguf;
@@ -2104,37 +3945,123 @@ def main():
             gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    # A FLUX DiT is a GGUF repo too, and `choose_gguf_file` would install it as a language
+    # model (there is no model.gguf convention for it). Read the chosen file's architecture
+    # -- one small range read -- and take the diffusion path when it says `flux`.
+    dit_name = _pick_dit_gguf(gguf_names) if gguf_names else None
+    if dit_name and not gguf_want:
+        try:
+            if local_dir:
+                _inv = read_gguf_inventory(str(local_dir / dit_name), limit_mb=2)
+            else:
+                _src = (f"https://huggingface.co/{repo}/resolve/main/{dit_name}" if not modelscope
+                        else f"https://www.modelscope.ai/models/{repo}/resolve/master/{dit_name}")
+                _inv = read_gguf_inventory(_src, limit_mb=2)
+        except Exception:
+            _inv = None
+        if _inv and is_diffusion_dit(*_inv):
+            return install_diffusion_gguf(args, repo, dit_name, local_dir, dir_name)
+
+    # An NpuEmbeddings GGUF (bert / nomic-bert) is packed from dequantized F32
+    # tensors, not streamed as q4_1 pools, so PRECISION -- not the q4_1-pool law
+    # -- is what picks the file (see NPUE_GGUF_PREFERENCE). Every candidate's
+    # header names its architecture, so one small range read decides, and the
+    # file itself stays the authority, exactly as it is for the family below.
+    npue_gguf = False
+    if gguf_names:
+        probe = gguf_names[0]
+        if local_dir:
+            probe_src = str(local_dir / probe)
+        elif cache and (cache / probe).is_file():
+            probe_src = str(cache / probe)
+        else:
+            probe_src = (f"https://www.modelscope.ai/models/{repo}/resolve/master/{probe}"
+                         if modelscope
+                         else f"https://huggingface.co/{repo}/resolve/main/{probe}")
+        try:
+            _inv = read_gguf_inventory(probe_src, limit_mb=2)
+            _arch = str((_inv[0] if _inv else {}).get("general.architecture") or "")
+            npue_gguf = _arch in ("bert", "nomic-bert")
+        except Exception:
+            npue_gguf = False
+    gguf_pref = NPUE_GGUF_PREFERENCE if npue_gguf else GGUF_QUANT_PREFERENCE
+    # Every compatible candidate in preference order, so when the best-named file
+    # turns out to hide a tensor type the NPU packers reject (a single Q5_0
+    # embedding row inside a Q4_1 elsewhere in the repo), the installer verifies
+    # the next one instead of refusing the whole install.
+    cands, gguf_refused = choose_gguf_candidates(gguf_names, gguf_want,
+                                                 preference=gguf_pref)
+    if not gguf_want and "model.gguf" in gguf_names:
+        gguf_name = "model.gguf"
+        cands = [(0, "model.gguf", "", "model.gguf")] + [c for c in cands if c[3] != "model.gguf"]
+        gguf_refused.pop("model.gguf", None)
+    elif cands:
+        gguf_name = cands[0][3]
+    else:
+        gguf_name = None
+    if gguf_want and gguf_name is None:
+        if not gguf_names:
+            all_files = sorted(e.name for e in local_dir.iterdir() if e.is_file()) if local_dir else sorted(root_file_names(tree))
+            raise SystemExit(
+                f"{repo_arg}: ':QUANT' is for GGUF repositories, and this repository has no .gguf files "
+                f"(files present: {', '.join(all_files) or 'none'})")
+        compat = sorted({(gguf_quant_suffix(n) or "").upper() for n in gguf_names
+                         if gguf_quant_family(gguf_quant_suffix(n), gguf_pref) in gguf_pref
+                         and not re.search(r"-\d+-of-\d+\.gguf$", n)})
+        files = ", ".join(sorted(gguf_names))
+        raise SystemExit(
+            f"{repo_arg}: no compatible '{gguf_want}' GGUF in that repository.\n"
+            f"  supported quants present : {', '.join(compat) or 'none'} "
+            f"(open kernels accept {'/'.join(gguf_pref)})\n"
+            f"  .gguf files in repo      : {files}")
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
     else:
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
+    gguf_only = bool(gguf_names) and not have_q4nx
+    if gguf_only and gguf_name is None:
+        files = ", ".join(sorted(gguf_names))
+        raise SystemExit(
+            f"{repo_arg}: repository carries only .gguf files, and none uses a quant supported "
+            f"by the open kernels (accept {'/'.join(gguf_pref)}).\n"
+            f"  .gguf files in repo: {files}")
     gguf_mode = gguf_name is not None and not have_q4nx
     if gguf_mode:
         # The tensors must be what the name claims, in types the NPU packers
-        # ingest. Remote metadata is best-effort (Range); a local file is on
-        # disk, so a failed parse there refuses the file outright.
-        if local_dir:
-            gguf_source = str(local_dir / gguf_name)
-        elif cache and (cache / gguf_name).is_file():
-            # The user already has this GGUF on disk in their HF cache: verify
-            # the local file (no network round trip) and let the install copy
-            # it from there below.
-            gguf_source = str(cache / gguf_name)
-        elif modelscope:
-            domain = ms_file_tree(repo)[0]
-            gguf_source = f"https://{domain}/models/{repo}/resolve/master/{gguf_name}"
-        else:
-            gguf_source = f"https://huggingface.co/{repo}/resolve/main/{gguf_name}"
-        ok, note = verify_gguf_choice(gguf_source, gguf_name, gguf_quant_of(gguf_name))
-        if ok:
-            log(f"[INFO] {gguf_name}: {note}")
-        else:
-            log(f"[WARN] refusing {gguf_name}: {note}")
-            gguf_refused[gguf_name] = note
-            gguf_name, gguf_mode = None, False
+        # ingest. Try every compatible candidate: each repo's best-named file can
+        # still hide one stray tensor of a rejected type (a Q4_1 with a Q5_0
+        # embedding row). Remote metadata is best-effort (Range); a local file is
+        # on disk, so a failed parse there refuses the file outright.
+        def _source_for(name):
+            if local_dir:
+                return str(local_dir / name)
+            if cache and (cache / name).is_file():
+                return str(cache / name)
+            if modelscope:
+                domain = ms_file_tree(repo)[0]
+                return f"https://{domain}/models/{repo}/resolve/master/{name}"
+            return f"https://huggingface.co/{repo}/resolve/main/{name}"
+
+        gguf_source = None
+        for _, _q, _suffix, name in ([(0, "", "", gguf_name)] if gguf_name == "model.gguf"
+                                     else cands):
+            ok, note = verify_gguf_choice(_source_for(name), name,
+                                          gguf_quant_of(name, gguf_pref))
+            if ok:
+                if name != gguf_name:
+                    log(f"[INFO] {gguf_name}: refused ({note}); using {name} instead")
+                else:
+                    log(f"[INFO] {name}: {note}")
+                gguf_name, gguf_source = name, _source_for(name)
+                break
+            gguf_refused[name] = note
+            log(f"[INFO] {name}: refused ({note}); trying the next compatible quant")
+        if gguf_source is None:
+            raise SystemExit(
+                f"{repo_arg}: no compatible GGUF installs from that repository.\n"
+                + "\n".join(f"  {n}: {why}" for n, why in gguf_refused.items() if n.endswith(".gguf")))
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
@@ -2164,28 +4091,88 @@ def main():
                                       local_dirs=[d for d in (local_dir, cache) if d])
         return peeked
 
+    # ---- the family: what the model IS, before what it is CALLED. A fine-tune's
+    # name says nothing ("Ornith-1.5-9B"), but the kernels it needs say who it
+    # is: the installed set whose geometry matches is the base model's, and the
+    # registry ties that base to a family. Then the base chain (the README's
+    # base model), then the content (the GGUF header's architecture, the
+    # config's model_type), and last the name.
+    #
+    # Geometry detection and kernel discovery are independent of family inference:
+    # --family overrides the model family metadata but must not disable kernel
+    # selection or automatic builds for an otherwise compatible install.
+    content_families = []
+    # The roots the open kernel sets live in. The SHIPPED tree first: when several sets
+    # serve one geometry, the one the app ships is the stable answer, and a per-model
+    # sibling set or an install symlink in the user's directory (which sorts earlier by
+    # name, and is often a duplicate) should not be what a text model links to. Then the
+    # user's own (a set they converted), then the tree's src/xclbins (one `oflm add`
+    # just built).
+    kernel_roots = [find_system_xclbin_root(), user_xclbin_dir(args.xclbin_dir), tree_xclbins()]
+    spec = None
+    geom_dir = None                     # the set whose GEOMETRY this model needs
+    geom_set = None                     # ... and its directory name (a label from here on)
+    geom_notes = []                     # why the sets that do not serve it do not
+    # THE FILE FIRST. For a GGUF install the weight file is the model: its metadata
+    # names the architecture, the widths, the rope law and the head, and llama.cpp
+    # already baked the conversion's choices into it. A config.json in the repo (or
+    # in its base model's repo) is a HINT for what the GGUF does not carry --
+    # tokenizer, chat template, vision tower -- never the source of the geometry.
+    # Peeking it first is what made a translategemma GGUF "a different geometry"
+    # from the Gemma 3 4B set it matches exactly: the repo's config has no
+    # rope_scaling, while the GGUF's metadata says factor 8.0, which is what runs.
+    if gguf_mode and gguf_source is not None:
+        spec = spec_from_gguf_source(gguf_source)
+    if spec is None:
+        spec = spec_from_config_dict(get_peeked_config())
+    # WHAT THE MODEL IS comes first: a vision tower is a property of the checkpoint, not
+    # of the kernels it borrows. Qwen2.5-VL runs on the plain Qwen2.5-3B set (same
+    # decoder, and the M-RoPE lives in config.json), so the kernel family is `qwen2`
+    # while the model is `qwen2vl` -- and the adapter that prepares images is picked by
+    # the latter. For a text model the two agree, so this only changes VL installs.
+    content_fam, content_where = None, ""
+    if gguf_mode and gguf_source is not None:
+        content_fam = family_from_gguf_arch(gguf_source)
+        content_where = "the GGUF architecture"
+    if content_fam is None:
+        # No GGUF (or an arch the map does not know): the config's model_type is the
+        # file's own statement about itself, and for a VLM it names the wrapper.
+        content_fam = family_from_config_dict(get_peeked_config())
+        content_where = "config.json model_type"
+    geom_dir, geom_set, geom_notes = scan_kernel_sets(
+        spec, kernel_roots, source=gguf_source, need_gguf=gguf_mode)
+    if args.family is None:
+        # The SET names the kernels, never the model. `details.family` is the engine /
+        # adapter that runs a MODEL -- qwen3, qwen3-it, qwen3-tk, qwen3vl are four
+        # different entries for four different Qwen3 4B containers -- while a kernel
+        # set is shared by every model of one geometry. So a text Qwen3-4B fine-tune
+        # matches Qwen3-VL-4B-Instruct-NPU2's kernels and is NOT a qwen3vl; taking the
+        # set's registry family here is what said it was. The family comes from the
+        # model (arch, config, base chain); the set is the LAST resort below, for a
+        # model whose own content names nothing.
+        fam, base_name = family_from_base_chain(system_registry, get_base_chain())
+        chosen, where = family_precedence(content_fam, content_where, fam, base_name)
+        if chosen:
+            content_families.append(chosen)
+            log(f"[INFO] family '{chosen}' from {where}")
     try:
-        family = derive_family(system_registry, dir_name, args.family)
+        family = derive_family(system_registry, dir_name, args.family,
+                               content_families=content_families)
     except SystemExit:
-        # No name marker, and no official entry can supply the family yet
-        # (that matching happens below). Climb the content instead, cheapest
-        # first: the GGUF header names its architecture; otherwise a
-        # config.json -- the repo's own, else its base-model chain's -- names
-        # its model_type. llama.cpp resolves the same way, from the file, not
-        # the repo slug.
+        # No name marker and no content family: the last thing that knows anything about
+        # this model is the kernel set that serves its geometry -- it was built for SOME
+        # model, and the registry ties that model to a family. The log says so, rather
+        # than presenting the set's model as if the model itself had said it.
         family = None
-        if args.family is None:
-            if gguf_source is not None:
-                family = family_from_gguf_arch(gguf_source)
-                if family:
-                    log(f"[INFO] family '{family}' from the GGUF architecture")
-            if family is None:
-                family = family_from_config_dict(get_peeked_config())
-                if family:
-                    log(f"[INFO] family '{family}' from config.json model_type")
+        if args.family is None and geom_set:
+            family = family_of_set(system_registry, geom_dir, geom_set)
+            if family:
+                log(f"[INFO] family '{family}' from the kernel set '{geom_set}' "
+                    f"(its own model -- this model names no family)")
         if family is None:
             raise
     npue_embed = family in NPU_EMBED_FAMILIES
+    whisper_model = family in WHISPER_FAMILIES
     if npue_embed:
         # NPU-embedding (NpuEmbeddings) model: the authoritative registry entry
         # carries `npue_design_family` + the safetensors file list, and the engine
@@ -2204,32 +4191,52 @@ def main():
         tag = f"{official[1]}:{official[2]}" if not args.tag else args.tag
         bucket, size_token = tag.split(":", 1)
         size_value = base_entry.get("size") or size_from_tag(tag)
-        gguf_mode = False
-        gguf_name = None
+        if gguf_mode:
+            # The official entry's `size` is its safetensors checkpoint (438 MB
+            # for bge-base); the install is one GGUF (118 MB). Report the file
+            # that is actually on disk.
+            size_value = (gguf_byte_size(None if local_dir else repo, modelscope,
+                                         local_dir, cache, gguf_name, tree)
+                          or size_value)
+        # An NpuEmbeddings model may arrive as a GGUF (llama.cpp's `bert` /
+        # `nomic-bert` arch) instead of the safetensors checkpoint its packers
+        # read. The GGUF path above has already chosen and verified the file;
+        # keep it, and the engine stages a checkpoint from it on first load.
+        # A repo that ships BOTH keeps the safetensors: that is the packers'
+        # native input, and the GGUF is a lossy re-encoding of it.
+        if local_dir is not None:
+            have_st = (local_dir / "model.safetensors").is_file()
+        else:
+            have_st = "model.safetensors" in root_file_names(tree)
+        if have_st:
+            gguf_mode = False
+            gguf_name = None
     else:
         official = match_official_entry(system_registry, dir_name)
         base_entry = official[3] if official else None
         try:
             tag = derive_tag(dir_name, args.tag)
         except SystemExit:
-            # Chaotic slugs carry no size marker: guess from the GGUF's bytes
-            # and quant, else from the peeked config's geometry. Kernel
-            # matching keys off the tag size, so a logged guess beats a
-            # refusal; --tag still overrides.
+            # Chaotic slugs carry no size marker: take it from the model's own numbers
+            # (a GGUF's tensors, a safetensors index, the config's geometry), and only
+            # then from the bytes/quant guess or the set that serves it. Kernel matching
+            # keys off the tag size, so a logged guess beats a refusal; --tag still
+            # overrides.
             if args.tag is not None:
                 raise
-            size_guess = None
-            if gguf_mode:
-                size_guess = gguf_size_token(
-                    gguf_byte_size(repo, modelscope, local_dir, cache,
-                                   gguf_name, tree),
-                    gguf_quant_of(gguf_name))
-            if size_guess is None:
-                size_guess = size_token_from_bytes(
-                    estimate_size_dict(get_peeked_config()))
+            _cfg = get_peeked_config()
+            size_guess = model_size_token(
+                cfg=_cfg,
+                gguf_source=(gguf_source if gguf_mode else None),
+                st_params=safetensors_params(_cfg, repo, modelscope,
+                                             (local_dir, cache), tree),
+                gguf_bytes=(gguf_byte_size(repo, modelscope, local_dir, cache,
+                                           gguf_name, tree) if gguf_mode else None),
+                quant=gguf_quant_of(gguf_name) if gguf_mode else None,
+                set_name=geom_set)
             if size_guess is None:
                 raise
-            log(f"[INFO] tag size '{size_guess}' guessed for '{dir_name}'; "
+            log(f"[INFO] tag size '{size_guess}' read from the model for '{dir_name}'; "
                 "pass --tag to override")
             tag = derive_tag(dir_name, None, size_guess)
         bucket, size_token = tag.split(":", 1)
@@ -2237,50 +4244,105 @@ def main():
         official, official_note = resolve_official(system_registry, dir_name, family, size_value)
         base_entry = official[3] if official else None
         src_tag = f"{official[1]}:{official[2]}" if official else None
-        xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
+        if whisper_model and official:
+            # The open whisper engine's kernel discovery keys off the official
+            # entry's name (xclbins/<name>/open_kernels) and routes by tag the
+            # way npue_embed does, so a whisper model installs as its official
+            # tag, not a slug derived from the quant repo's name.
+            tag = src_tag
+            bucket, size_token = tag.split(":", 1)
+        # A set whose KERNELS match this model's geometry is the right answer, and
+        # resolve_official's last resort -- the nearest official size -- is not: a
+        # Qwen3-14B model was being handed Qwen3-8B's kernels because the registry
+        # has no 14B entry, which is a wrong link, not a small one.
+        xclbin_source = args.xclbin_from or geom_set or (base_entry or {}).get("name")
 
     # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
     # xclbins must actually carry the GGUF-direct kernel builds (the nested
     # "gguf" manifest section, produced by the *_f32 sets in utilities/
-    # build-all.sh). Otherwise fall back to the normal safetensors install.
-    gguf_skip = None
-    if gguf_mode:
+    # build-all.sh). A GGUF repository never carries model.q4nx, so a missing
+    # kernel set stops here with a direct error rather than falling back to the
+    # q4nx file list.
+    #
+    # The set comes from the SAME scan that named the family, so this is one
+    # path: geometry (and the head-row requirement) decides, and a set found by
+    # name is only ever the one the user named with --open-kernels. Before this,
+    # a model whose geometry an installed set already served could be refused
+    # because the registry named a set that is not on disk.
+    gguf_kernel_dir = None
+    built_set = None                   # the set this install built for a new size
+    if gguf_mode and not npue_embed and not whisper_model:
+        # (An NpuEmbeddings model skips this gate: its kernels are the
+        # npue_design_family design set, not a chat open-kernels manifest. A
+        # whisper model skips it too: the open engine discovers its own
+        # whisper_gemm set the same way the chat sets are discovered, and its
+        # weights come from the GGUF's host dequant, not a pool law.)
         if family in EMBEDDING_FAMILIES:
             # Embedding GGUF uses the existing bf16 matmul kernels (the engine
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
             # open_kernels manifest. Just confirm the family is recognized.
-            pass
-        elif family not in GGUF_CAPABLE_FAMILIES:
-            gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
-                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
-                         + "); installing the safetensors weights instead")
+            xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
+        elif family in GGUF_DIRECT_UNREADY and not args.force:
+            # It would install, load and answer -- wrongly. Refuse by name, and say how
+            # to see it anyway (--force), because the numerics work needs to run it.
+            raise SystemExit(
+                f"{repo_arg}: {family} GGUF-direct is not ready -- "
+                f"{GGUF_DIRECT_UNREADY[family]}\n"
+                f"Install the container instead, or pass --force to install it anyway "
+                f"(it will emit wrong text).")
         else:
             if args.open_kernels:
-                mj = Path(args.open_kernels) / "manifest.json"
+                kdir = Path(args.open_kernels) if manifest_supports_gguf(
+                    Path(args.open_kernels) / "manifest.json") else None
+                if kdir is None:
+                    raise SystemExit(
+                        f"{repo_arg}: --open-kernels {args.open_kernels} has no GGUF-direct "
+                        f"build (its manifest has no 'gguf' section)")
             else:
-                sys_xcl = find_system_xclbin_root()
-                mj = (sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
-                      if xclbin_source and sys_xcl else Path())
-            if not manifest_supports_gguf(mj):
-                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
-                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
-                             "rebuild them with utilities/build-all.sh -- "
-                             "installing the safetensors weights instead")
-        if gguf_skip:
-            gguf_refused[gguf_name] = gguf_skip
-            log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
-            gguf_name, gguf_mode = None, False
-        elif family in EMBEDDING_FAMILIES and gguf_mode:
-            # Embedding GGUF loads the existing bf16 matmul kernels, whose
-            # directory is fixed by the engine; point the xclbin link there.
-            xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
+                kdir = geom_dir
+                if kdir is None and not args.dry_run and spec is not None:
+                    # The geometry is known and this tree has the recipes, so the build
+                    # is ours to run -- not a command to hand the user. `--dry-run` says
+                    # it would happen and stops there.
+                    kdir = build_geometry(spec, family, size_token, dir_name,
+                                         quiet=args.quiet)
+                    if kdir:
+                        # kdir is <root>/<set name>/open_kernels, so the name is the
+                        # directory that CONTAINS open_kernels.
+                        geom_set = kdir.parent.name
+                        geom_notes = []
+                        built_set = geom_set
+                        # The closed set for this size does not exist (we just built the
+                        # open one), so do not link the nearest official size's xclbins
+                        # under this model: a GGUF model runs on the open kernels, and a
+                        # symlink to a different geometry would be a lie in the registry.
+                        xclbin_source = geom_set
+                if kdir is None and not args.dry_run:
+                    raise SystemExit(kernel_set_refusal(
+                        repo_arg, family, geom_notes, get_base_chain(),
+                        build=f"python utilities/build-new-spec.py --spec "
+                              f"{family.replace('.', '')}-{size_token}".lower()))
+            gguf_kernel_dir = kdir
+            if kdir and str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
+                log(f"[INFO] GGUF-direct kernels: {kdir}")
 
     if not args.dry_run:
-        if official:
+        if built_set:
+            # The registry's nearest entry is only the model's template here (size,
+            # details); the kernels are the set this install just built.
+            log(f"[INFO] xclbins from the set built for this model ({built_set})")
+        elif official:
             note = f" ({official_note})" if official_note else ""
-            log(f"[INFO] xclbins from official {src_tag}{note}")
+            log(f"[INFO] xclbins from {src_tag}{note}")
+        elif geom_set:
+            # The GEOMETRY matched an installed set, and that is where the kernels come from
+            # (`xclbin_source` already prefers it). The registry is a suggestion list, not
+            # the boundary of what can run: a fine-tune the list does not name still links
+            # the set its shape needs. Saying "no xclbins link" here was simply false.
+            log(f"[INFO] xclbins from the kernel set that serves this geometry ({geom_set})")
         else:
-            log("[WARN] No official model matched; no xclbins link. Pass --xclbin-from NAME (or --no-xclbin).")
+            log("[WARN] No installed kernel set matches this model's geometry; no xclbins link. "
+                "Pass --xclbin-from NAME to link one explicitly.")
 
     if args.dry_run:
         print(f"repo directory : {dir_name}")
@@ -2288,37 +4350,88 @@ def main():
         print(f"details.family : {family}")
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
-        if gguf_mode:
-            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
+        if gguf_mode and not npue_embed:
+            if whisper_model:
+                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, host dequant)")
+            else:
+                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
+            # The geometry decision, in the dry run: which set serves this file,
+            # or why none does. This is what makes `oflm add --dry-run <repo>` the
+            # scripted answer to "will this install?".
+            if gguf_kernel_dir:
+                print(f"gguf kernels   : {gguf_kernel_dir}")
+            elif spec is not None and open_kernels_checkout() is not None:
+                print(f"gguf kernels   : (would build {family}-{size_token}: "
+                      f"{'; '.join(geom_notes)})")
+            else:
+                print(f"gguf kernels   : (none: {'; '.join(geom_notes)})")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
             bases = get_base_chain()
             print(f"base model(s)  : {', '.join(bases) or '(none in README)'}")
             print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
         elif npue_embed:
-            print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
-        elif gguf_refused:
-            print(f"weights        : safetensors (GGUF present but not usable: "
-                  + "; ".join(sorted(set(gguf_refused.values()))) + ")")
-        probe = args.open_kernels or (local_dir if local_dir else None)
-        if args.open_kernels:
+            # An NpuEmbeddings model: the checkpoint is packed into a `.npue`
+            # container on first load and the engine routes by the exact tag.
+            # No chat xclbin linking and no quant family -- the packers read
+            # the checkpoint (or the checkpoint the adapter stages from the
+            # GGUF), so the `gguf kernels` question does not apply.
+            if gguf_mode:
+                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct; "
+                      f"staged as an F32 checkpoint on first load)")
+                print(f"design set     : {base_entry.get('npue_design_family')}")
+                print("tokenizer      : container vocab.txt (base repo's, else "
+                      "rebuilt from the GGUF's WordPiece tokens)")
+            else:
+                print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
+        if npue_embed:
+            # No chat-model open-kernel link: the design set printed above is
+            # the whole kernel story for an NpuEmbeddings model.
+            pass
+        elif args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
             sh, note = model_spec_hash(local_dir)
-            roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
-            found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
+            found, _ = find_open_kernels(sh, kernel_roots, dir_name) if sh else (None, None)
             print(f"spec hash      : {sh or '(' + note + ')'}")
             print(f"open kernels   : {found or '(none installed)'}")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return
 
+    if whisper_model and gguf_mode:
+        # Prefer the GGUF direct route when it can serve (the open engine reads
+        # llm.cpp-style whisper GGUFs straight from model.gguf). Anything else --
+        # the HF-Layout whisper GGUFs like unsloth/oxide-lab -- has to go through
+        # the bundled open whisper builder instead (build model.open.safetensors
+        # from the base HF checkpoint the README names). The installer then
+        # proceeds as a container install of that build.
+        src = local_dir if local_dir is not None else (
+            cache / gguf_name if cache and (cache / gguf_name).is_file()
+            else f"https://huggingface.co/{repo}/resolve/main/{gguf_name}")
+        llcpp = _whisper_gguf_llcpp_layout(src)
+        if not llcpp:
+            bases = get_base_chain() or []
+            if local_dir is None:
+                log(f"[INFO] whisper GGUF not in llm.cpp layout; building open container from "
+                    + (bases[0] if bases else "openai/whisper-large-v3-turbo"))
+            # Build the open container into target via the bundled q4nx-build
+            target.mkdir(parents=True, exist_ok=True)
+            _build_open_whisper(target, repo, bases, modelscope, local_dir)
+            local_dir = target
+            repo_arg = str(target)
+            gguf_mode = False
+            gguf_name = None
     # --- acquire model files ---
     if gguf_mode and not args.quiet:
         log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
-        for n, why in sorted(gguf_refused.items()):
-            log(f"[INFO]   skipping {n}: {why}")
+        # Which candidates we passed over is our business, not the user's: a dozen lines of
+        # "skipping X: quant Y not supported" reads as errors and trains people to ignore
+        # the output. Available under --verbose for a dev chasing a repo.
+        if getattr(args, "verbose", False):
+            for n, why in sorted(gguf_refused.items()):
+                log(f"[INFO]   skipping {n}: {why}")
     if local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
@@ -2328,6 +4441,14 @@ def main():
                               want=NPU_EMBED_FILES if npue_embed else None)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
+        # A cache that holds the repo but not the file we want is no use: the
+        # GGUF-direct path asks for ONE file by name, and a snapshot with only
+        # the config (or with a different quant) is not it. Fall through to the
+        # download then, rather than copying a cache that cannot serve.
+        if snapshot and gguf_mode and not (Path(snapshot) / gguf_name).is_file():
+            if not args.quiet:
+                log(f"[INFO] The local cache has no {gguf_name}; downloading it.")
+            snapshot = None
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
@@ -2344,12 +4465,35 @@ def main():
                                  want=NPU_EMBED_FILES if npue_embed else None)
 
     if npue_embed:
-        # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are absent
-        # for some families (e.g. gte has no vocab.txt) and are tolerated.
-        required = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"]
+        if gguf_mode:
+            # The engine stages a HuggingFace checkpoint from model.gguf on
+            # first load, including config.json / vocab.txt / 1_Pooling when
+            # the base repo cannot be reached -- so the GGUF is the only file
+            # this install cannot do without.
+            required = ["model.gguf"]
+        else:
+            # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are
+            # absent for some families (e.g. gte has no vocab.txt) and are
+            # tolerated.
+            required = ["config.json", "model.safetensors", "tokenizer.json",
+                        "tokenizer_config.json"]
     else:
-        required = ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode else REQUIRED_FILES
+        whisper_open = (whisper_model and not gguf_mode
+                        and (target / "model.open.safetensors").is_file()
+                        and (target / "weights_manifest.json").is_file()
+                        and (target / "generation_config.json").is_file())
+        required = (["model.gguf", "tokenizer.json", "tokenizer_config.json",
+                     "generation_config.json"]   # whisper: the hf-decode protocol needs it
+                    if gguf_mode and whisper_model
+                    else [] if whisper_open
+                    else ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode
+                    else REQUIRED_FILES)
     missing = [f for f in required if not (target / f).is_file()]
+    if (not gguf_mode and whisper_model
+            and missing == ["model.q4nx"]
+            and (target / "model.open.safetensors").is_file()
+            and (target / "weights_manifest.json").is_file()):
+        missing = []
     if gguf_mode:
         # GGUF-quant repos (mradermacher etc.) often ship only the GGUF: take the
         # tokenizer/config files from the original model the README names.
@@ -2358,10 +4502,26 @@ def main():
         # the quant repo: a quant of a finetune of a base tries each level in
         # order until every file resolves.
         aux_missing = [f for f in missing if f != "model.gguf"]
-        if not (target / "config.json").is_file():
-            aux_missing.append("config.json")
-        if not (target / "chat_template.jinja").is_file():
-            aux_missing.append("chat_template.jinja")
+        if npue_embed:
+            # The NpuEmbeddings packer reads vocab.txt and 1_Pooling beside
+            # config.json; the base repo has the author's own copies. Missing
+            # ones are rebuilt from the GGUF by the engine, so this is an
+            # improvement, not a requirement.
+            aux_want = ["config.json", "tokenizer.json", "tokenizer_config.json",
+                        "vocab.txt", "1_Pooling/config.json"]
+        elif whisper_model:
+            # The whisper engine reads config.json + generation_config.json (the
+            # hf decode protocol) + tokenizer; the base repo has the author's
+            # own copies. generation_config.json is REQUIRED, not optional.
+            aux_want = WHISPER_AUX
+        else:
+            # The full model tree's own tokenizer is the authority -- the root
+            # repo has the byte-perfect vocab + template -- and the GGUF's
+            # embedded tokenizer is only the fallback (gated/vanished base).
+            # Fetch the tokenizer files here, not from the reconstruction below.
+            aux_want = ["config.json", "tokenizer.json", "tokenizer_config.json",
+                        "chat_template.jinja"]
+        aux_missing = [f for f in aux_want if not (target / f).is_file()]
         if aux_missing:
             bases = get_base_chain()
             gated_warned = set()
@@ -2388,44 +4548,100 @@ def main():
                             log(f"[INFO]   {f} <- {b}")
                             break
             else:
-                log("[WARN] no base_model in the GGUF repo README; tokenizer/config must "
-                    "come from the GGUF itself")
+                if npue_embed:
+                    log("[INFO] no base_model in the GGUF repo README; the adapter derives "
+                        "config.json, vocab.txt and 1_Pooling/config.json from the GGUF")
+                else:
+                    log("[WARN] no base_model in the GGUF repo README; tokenizer/config must "
+                        "come from the GGUF itself")
             # Last resort: the GGUF embeds its own tokenizer (vocab, merges,
             # specials, chat template). Curated base-repo files win when they
             # exist; this covers gated or vanished bases with zero auth.
-            still = [f for f in ("tokenizer.json", "tokenizer_config.json")
-                     if not (target / f).is_file()]
-            if gguf_mode and still and (target / "model.gguf").is_file():
+            if npue_embed:
+                # The NpuEmbeddings engine tokenizes from the container's own
+                # vocab.txt; a BPE tokenizer.json rebuilt from a WordPiece GGUF
+                # would be a different tokenizer than the one packed.
+                pass
+            elif whisper_model:
+                # A whisper GGUF is not a chat model: its GPT-2 tiktoken
+                # tokenizer comes from the base repo, and there is no usable
+                # chat-vocab path to extract from the GGUF itself.
+                pass
+            elif gguf_mode and (target / "tokenizer.json").is_file():
+                # tokenizer.json already exists (from base repo); skip GGUF extraction
+                log("[INFO] tokenizer.json already present from base repo; skipping GGUF extraction")
+            elif (target / "model.gguf").is_file():
                 try:
-                    wrote = extract_tokenizer_from_gguf(target / "model.gguf", target)
+                    wrote = extract_tokenizer_from_gguf(target / "model.gguf", target, force=args.force)
                 except Exception as ex:
                     log(f"[WARN] GGUF-embedded tokenizer unusable: {ex}")
                 else:
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
+    # The chain ends at the OFFICIAL converted repo: a quant of a base whose own
+    # tokenizer_config has no chat_template (Nanbeige 4.3-Base) still finds one in
+    # the family's converted container (Nanbeige4.1-3B-NPU2), which is the repo
+    # the kernels came from.
+    _chain = list(get_base_chain())
+    _off_repo = official_repo_id(base_entry, system_registry)
+    if _off_repo and _off_repo not in _chain:
+        _chain.append(_off_repo)
+    if not whisper_model and not npue_embed:
+        fill_chat_template(target, repo, _chain, modelscope)
+    projector = ""
+    if gguf_mode and not args.text_only and not npue_embed and not whisper_model:
+        # The tower is a second file, and the engine reads it from the model directory.
+        # BEFORE the config repair: the repair translates the projector into the
+        # vision_config the adapter reads (a GGUF model has no other description of it).
+        projector = install_projector(target, repo, modelscope=modelscope, quiet=args.quiet,
+                                      force=args.force, mmproj_repo=args.mmproj)
+        if projector and projector not in files:
+            files.append(projector)
+    if gguf_mode:
+        repair_config_from_gguf(target)
+    _kset = gguf_kernel_dir or kernel_manifest_dir(xclbin_source, kernel_roots)
+    if _kset is not None and (Path(target) / "config.json").is_file():
+        reconcile_config_json(target, _kset)
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []
-        if missing and not gguf_mode and gguf_refused and "model.q4nx" in missing:
-            raise SystemExit(
-                f"Model is missing required files: {missing}\n"
-                "The repo carries only GGUF weights and they cannot be used directly: "
-                + "; ".join(sorted(set(gguf_refused.values())))
-                + "\nConvert one to model.q4nx with q4nx-build, or pick a GGUF-capable family (--family).")
         if missing:
-            raise SystemExit(f"Model is missing required files: {missing}")
-    if gguf_mode and not (target / "config.json").is_file():
+            present = sorted(e.name for e in target.iterdir() if e.is_file())
+            raise SystemExit(
+                f"Model is missing required files: {missing} (files present: {', '.join(present) or 'none'})")
+    if gguf_mode and not npue_embed and not (target / "config.json").is_file():
         log("[WARN] No config.json in the repo; the engine will derive the config from the GGUF "
             "metadata (llama-family shapes only -- Granite etc. need a config.json).")
+    elif gguf_mode and npue_embed and not (target / "config.json").is_file():
+        log("[INFO] No config.json in the repo; the NpuEmbeddings adapter derives one from the "
+            "GGUF's metadata when it stages the checkpoint.")
 
     if not size_value:
         size_value = estimate_size(target / "config.json")
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
+    if projector:
+        # build_entry infers this from a `vision*` file name; the projector is mmproj.gguf.
+        entry["vlm"] = True
     if gguf_mode:
-        entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
+        entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (q4_1 pool law)
         entry.setdefault("flm_min_version", "0.9.45")
+    if npue_embed and args.force:
+        # A .npue is packed from the checkpoint beside it and named after the
+        # model directory, so replacing the weights without dropping the
+        # container would leave the OLD weights packed under the new name --
+        # correctly sized and silently wrong. --force is the flag that rewrites
+        # the weights, so it is the flag that invalidates the pack.
+        stale = sorted(target.glob("*.npue"))
+        for p in stale:
+            try:
+                p.unlink()
+            except OSError as ex:
+                log(f"[WARN] could not remove stale container {p}: {ex}")
+        if stale:
+            log(f"[INFO] removed {len(stale)} stale .npue container(s); "
+                "the model repacks on first load")
     if npue_embed:
         # build_entry copies npue_design_family / details / label from the official
         # entry, but blanks `url`; restore it so the .npue packer attributes the
@@ -2446,7 +4662,13 @@ def main():
     log(f"[INFO] Registered tag '{tag}' in {settings_path}")
 
     system_root = find_system_xclbin_root()
-    if not args.no_xclbin:
+    # A whisper model takes neither the closed container's xclbins nor the chat
+    # open-kernels link: the open whisper engine discovers its shipped
+    # whisper_gemm set (whisper_kernels.json + design.json) under
+    # <xclbin_root>/xclbins/<model_name>/open_kernels, or beside the model at
+    # <model>/open_kernels. Link the latter so the repo-slug directory name is
+    # irrelevant.
+    if not args.no_xclbin and not whisper_model:
         if npue_embed:
             design = base_entry.get("npue_design_family")
             if design:
@@ -2466,16 +4688,23 @@ def main():
 
     # Open kernels: keyed by this model's spec, not by an official model name.
     # NPU-embedding uses the npue_design_family design set (already installed),
-    # not the chat-model open-kernel link, so it is skipped here.
-    if (args.open_kernels or not args.no_xclbin) and not npue_embed:
+    # not the chat-model open-kernel link, so it is skipped here; whisper does
+    # the same by discovering its own set.
+    if (args.open_kernels or gguf_kernel_dir or not args.no_xclbin) and not npue_embed \
+            and not whisper_model:
         setup_open_kernels(
             target,
             dir_name,
-            [user_xclbin_dir(args.xclbin_dir), system_root],
+            kernel_roots,
             override=args.open_kernels,
+            prefer=str(gguf_kernel_dir) if gguf_kernel_dir else None,
             force=args.force,
             quiet=args.quiet,
         )
+
+    if whisper_model and not args.no_xclbin:
+        link_whisper_set(target, SYSTEM_XCLBIN_PREFIXES, (base_entry or {}).get("name"),
+                         force=args.force, quiet=args.quiet)
 
     write_vision_sidecar(target, dir_name, quiet=args.quiet)
 

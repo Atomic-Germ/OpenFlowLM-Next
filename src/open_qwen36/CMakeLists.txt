@@ -34,20 +34,20 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp omp_policy.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp ../gguf/gguf_file.cpp omp_policy.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
 
-add_executable(manifest_test manifest_test.cpp manifest.cpp gguf_file.cpp q4nx_file.cpp)
-add_executable(gguf_pack_test gguf_pack_test.cpp gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+add_executable(manifest_test manifest_test.cpp manifest.cpp ../gguf/gguf_file.cpp q4nx_file.cpp)
+add_executable(gguf_pack_test gguf_pack_test.cpp ../gguf/gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp)
 foreach(t gguf_pack_test)
     target_include_directories(${t} PRIVATE ${_inc})
 endforeach()
 target_include_directories(manifest_test PRIVATE ${_inc})
 
 # vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
-add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
+add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp ../gguf/gguf_file.cpp)
 target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
 find_package(OpenMP REQUIRED)
 if(OpenMP_CXX_FOUND)

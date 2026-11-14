@@ -1,5 +1,45 @@
 # Qwen3.8-27B: apply the OpenMP wait policy before runtime initialization
 
+## Status after the 2026-11-14 main merge
+
+**Draft: the startup-policy implementation is preserved, but the merged runtime
+does not pass numerical regression with the previously accepted kernel export.**
+The performance and full-model acceptance below apply to the November 11 tree;
+they are not acceptance evidence for the merged runtime.
+
+The merge of upstream `9b1409d3` preserves model-scoped policy selection, explicit
+environment overrides, opt-out and failure handling. The CMake conflict was
+resolved by retaining `omp_policy.cpp` alongside the relocated GGUF reader.
+Standalone/private build paths, trace anchors and nested-manifest checks were
+updated for upstream's new source layout and recipe representation.
+
+A fresh four-layer NPU comparison at 257 prompt tokens and two generated tokens
+failed the unchanged 0.9999 logit cosine gate: prompt-last **0.992549563**, next
+decode **0.981242017**. Conv/recurrent/KV state also differs. The two greedy IDs
+still match, demonstrating why token equality alone cannot accept this merge.
+The retained kernels are unchanged. Upstream changed the host DeltaNet key-head
+selection from `h / (value_heads / key_heads)` to `h % key_heads`, and changed
+the kernel source/reference correspondingly; an existing compiled export still
+contains the earlier mapping.
+
+A separate diagnostic build restores only the three host mapping expressions.
+With the same inputs and kernels it reproduces the accepted logits and state
+**byte for byte**. This isolates the compatibility issue; the diagnostic is not
+installed as production and does not validate a newly compiled kernel export.
+Before submission, resolve the mapping/export compatibility explicitly and rerun
+the numerical, full-depth and resident-server acceptance. Do not weaken gates or
+reuse old performance results as acceptance for new arithmetic.
+
+Post-merge checks: full Python suite **2582 passed, 172 skipped**, including the
+companion-manifest regression; standalone CMake **5/5 passed**. The Docker app
+and all CTest executables were rebuilt: **30 passed, 2 skipped**.
+Updated test results and command logs are
+retained under `Models/qwen38-27b/main-merge-20261114/` (including both NPU
+comparisons). No new kernel export or full-model NPU run was performed for this
+merge.
+
+## Purpose
+
 Linux libgomp reads its environment before application static constructors.
 Setting `OMP_WAIT_POLICY` from the old constructor therefore changed the value
 printed by the engine without applying that default at runtime initialization.
@@ -38,7 +78,7 @@ The repeatable driver is `utilities/prefill-block/omp_policy.py`. Its modes shar
 existing profile provenance, CLI, server and state-comparison helpers.
 
 The full-model benchmark compares a fresh control build from `7f227b15` with the
-PR #2 implementation at `78c41524` plus the review fixes in this working tree.
+PR #2 implementation at `78c41524` plus the review fixes committed as `9f8415c9`.
 It excludes one warm-up pair, then runs five measured pairs in alternating order
 at each of 256, 512 and 1024 prompt tokens, generating 16 tokens per run.
 Profiling is disabled. Engine prompt-ingestion time excludes model loading;

@@ -20,8 +20,8 @@ void Qwen3_5VL::load_model(std::string model_path, json model_info, int default_
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
     
-    // The engine: the open kernels when installed for this model, the closed
-    // qwen3_5vl_npu DLL otherwise. See AutoModel::_shared_select_open_engine.
+    // The engine: the open kernels when a set is installed for this model;
+    // the closed DLL only via OFLM_QWEN35_ENGINE=closed (AutoModel::_shared_select_open_engine).
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN35_ENGINE", "Qwen3.5");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -45,12 +45,34 @@ void Qwen3_5VL::load_model(std::string model_path, json model_info, int default_
         vision_.rescale = v.value("QWEN3_5_VISION_RESCALE_FACTOR", 0.0f);
         vision_.mean = v.value("QWEN3_5_VISION_RESCALE_IMAGE_MEAN", 0.0f);
         vision_.stdv = v.value("QWEN3_5_VISION_RESCALE_IMAGE_STD", 0.0f);
+        // A GGUF install's config.json carries the HF-shaped vision_config that
+        // `oflm add` translated from the mmproj (`patch_size`,
+        // `spatial_merge_size`, ...), not the family-prefixed keys a container
+        // ships. The tower is the same across the Qwen families -- only the key
+        // prefix differs -- so read the plain names too instead of refusing.
+        if (vision_.patch == 0) {
+            vision_.patch = v.value("patch_size", 0);
+            vision_.merge = v.value("spatial_merge_size", 0);
+            vision_.spatial_merge = v.value("spatial_merge_size", 0);
+        }
+        if (vision_.temporal == 0)
+            vision_.temporal = v.value("temporal_patch_size", 0);
+        if (vision_.shortest_edge == 0)
+            vision_.shortest_edge = v.value("shortest_edge", 0);
+        if (vision_.longest_edge == 0)
+            vision_.longest_edge = v.value("longest_edge", 0);
+        if (vision_.rescale == 0.0f)
+            vision_.rescale = v.value("rescale_factor", 0.0f);
+        if (vision_.mean == 0.0f)
+            vision_.mean = v.value("rescale_mean", 0.0f);
+        if (vision_.stdv == 0.0f)
+            vision_.stdv = v.value("rescale_std", 0.0f);
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
 
-    this->enable_tool = (model_info["size"] > 800000000)? true : false;
+    this->enable_tool = true;
 
     sampler_config config;
     config.top_k = 20;

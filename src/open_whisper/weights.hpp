@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+namespace open_qwen36 {
+class GgufFile;
+}
+
 namespace ow {
 
 // The pre-tiling npu_offload/gemm_rtp/npue.py's tile_b(order="k,n") performs,
@@ -64,6 +68,17 @@ public:
   explicit Weights(const std::string &model_dir, int64_t tile_k, int64_t tile_n,
                    int64_t mac_s, int64_t mac_t);
 
+  // The GGUF-direct path (the same pattern as the other open engines): a
+  // llama.cpp `whisper` GGUF read through the shared GgufFile, dequantized on
+  // the host, mapped from its modern `enc.`/`dec.` names onto the container's
+  // layout, and tiled exactly like the container path. The ggml ordering is
+  // already the container's: matmul weights are [in, out] (= B = W^T), the
+  // conv stem is [kernel, C_in, C_out] tap-major, and only the position and
+  // embedding tables (ggml [d, pos]/[d, vocab]) need a transpose.
+  static Weights from_gguf(const open_qwen36::GgufFile &gf,
+                           int64_t tile_k, int64_t tile_n,
+                           int64_t mac_s, int64_t mac_t);
+
   std::vector<uint16_t> conv1_B, conv2_B, xkv_B;        // tiled bf16
   std::vector<float> conv1_bias, conv2_bias, pos, ln_w, ln_b, xkv_bias;
   std::vector<LayerWeights> layers;   // size Geometry::n_enc
@@ -71,6 +86,10 @@ public:
   // The tile tuple these weights were tiled with -- kernels.cpp compares it
   // against design.json's b_layout before trusting a single dispatch.
   int64_t tile_k, tile_n, mac_s, mac_t;
+
+private:
+  Weights(int64_t tk, int64_t tn, int64_t ms, int64_t mt)
+      : tile_k(tk), tile_n(tn), mac_s(ms), mac_t(mt) {}
 };
 
 }  // namespace ow

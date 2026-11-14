@@ -3,8 +3,8 @@
 > **This WSL path is not required for building AIE kernels anymore.** Native
 > Windows builds them too, with a downloaded XRT SDK zip and mlir-aie's own
 > `iron_setup.py` -- no WSL, no source build. See
-> `.agents/skills/open-granite-kernels/SKILL.md`'s "Build" section and
-> mlir-aie's `docs/buildHostWinNative.md`. **Check the mlir-aie clone out at tag
+> `.agents/skills/open-kernel-pipeline/SKILL.md`'s "Build environments" section
+> and mlir-aie's `docs/buildHostWinNative.md`. **Check the mlir-aie clone out at tag
 > `v1.4.2` before running `iron_setup.py`:** this tree's designs use 1.4.2's IRON
 > API (`ironvenv-requirements.txt` pins `mlir_aie==1.4.2`), and a checkout left on
 > `main` installs the rolling wheel instead, whose API `dx.py` fails to import

@@ -188,6 +188,21 @@ All gates passed; this is a layer-slice regression, not full-model validation.
 
 ## Building the standalone CLI
 
+The shared GGUF reader now lives in `src/gguf/`. Standalone targets must link
+`../gguf/gguf_file.cpp`, including `vit_test`; private source stages must expose
+`src/gguf` alongside `src/include`. Preserve `omp_policy.cpp` in the standalone
+CLI target when resolving source-list merges. The serial trace patch anchors on
+`submit_ahead_ > 0 && !layer_nan_ && !deepstack` and must still refuse source drift.
+
+After a DeltaNet mapping change, compare the new runtime against the previously
+accepted binary using the same export. On 2026-11-14, upstream's modulo key-head
+mapping failed the four-layer 257-token state/logit control with the existing
+Qwen3.8 export, despite identical greedy IDs. A private host-only mapping reversal
+restored exact bytes. Do not treat that diagnostic as production acceptance or
+assume newly generated kernels are interchangeable with the retained export.
+Resolve the host/kernel mapping together before reusing full-model acceptance.
+Evidence: `Models/qwen38-27b/main-merge-20261114/`; see the OpenMP policy report.
+
 `utilities/prefill-block/build-cli.sh` needs `-mavx2 -mfma` for `cli.cpp`: its
 argmax is vectorised. `core.cpp` includes the intrinsics header for `_mm_mfence`
 explicitly — do not rely on transitive includes from build flags.

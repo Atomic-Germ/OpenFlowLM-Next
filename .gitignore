@@ -110,5 +110,6 @@ bin/
 # local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
 TestGGUF/
 *.gguf
+./bin/act
 .claude/plans/
 compose.override.yaml

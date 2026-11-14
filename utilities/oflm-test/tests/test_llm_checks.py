@@ -127,6 +127,61 @@ class TestCheckRound(unittest.TestCase):
         self.assertIn("names no model", detail)
 
 
+class TestDegenerateAnswer(unittest.TestCase):
+    """The one answer-quality check: is this text at all?
+
+    A mis-packed GGUF or a wrong kernel returns a finish_reason and a
+    plausible length, so the contract checks above cannot see it. What it
+    cannot do is emit a paragraph of prose.
+    """
+
+    def test_a_looping_answer_fails(self):
+        verdict, detail = LLMTask._check_round(
+            MODEL, MODEL, "The answer is " + "the " * 400, "stop", _usage())
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("repeated", detail)
+
+    def test_replacement_characters_fail(self):
+        verdict, detail = LLMTask._check_round(
+            MODEL, MODEL, "\ufffd" * 300, "stop", _usage())
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("replacement", detail)
+
+    def test_control_characters_fail(self):
+        verdict, detail = LLMTask._check_round(
+            MODEL, MODEL, "\x01\x02" * 200, "stop", _usage())
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("control", detail)
+
+    def test_a_normal_paragraph_passes(self):
+        text = (
+            "Maxwell's equations describe how electric and magnetic fields "
+            "change together. In a vacuum, Gauss's law relates the divergence "
+            "of the electric field to charge density, while Faraday's law says "
+            "a changing magnetic field curls the electric field. The fourth "
+            "equation adds Maxwell's displacement current, which is what makes "
+            "light an electromagnetic wave. Together they predict a speed of "
+            "propagation fixed by two constants measured in the laboratory, "
+            "which is why they were recognised as a theory of light.\n\n"
+            "Their importance is hard to overstate: special relativity grew out "
+            "of the fact that this speed does not depend on the observer, and "
+            "the whole of classical optics, radio and circuit theory is a "
+            "consequence of the same four lines."
+        )
+        verdict, _ = LLMTask._check_round(MODEL, MODEL, text, "stop", _usage())
+        self.assertEqual(verdict, "PASS")
+
+    def test_short_repetition_is_not_a_loop(self):
+        # "ha ha ha" is ordinary prose; the check only looks at long answers.
+        verdict, _ = LLMTask._check_round(MODEL, MODEL, "ha " * 20, "stop", _usage())
+        self.assertEqual(verdict, "PASS")
+
+    def test_a_row_of_punctuation_is_not_a_loop(self):
+        verdict, _ = LLMTask._check_round(
+            MODEL, MODEL, "Answer:\n" + "=" * 200, "stop", _usage())
+        self.assertEqual(verdict, "PASS")
+
+
 class TestMemoryProbe(unittest.TestCase):
     """The probe that asks whether round one ever reached the model.
 

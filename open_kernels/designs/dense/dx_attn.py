@@ -84,6 +84,8 @@ if RB > 1:
     ATTN_FLAGS.append(f"-DATTN_RB={RB}")
 if QKVB:                                               # same as dx.py: only a family with a bias sees the flag
     ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
+if G.ROPE_IL:                                          # same as dx.py: interleaved RoPE pairs
+    ATTN_FLAGS.append("-DATTN_ROPE_IL=1")
 if NPTAB > 1:                                          # same as dx.py
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL, same as dx.py

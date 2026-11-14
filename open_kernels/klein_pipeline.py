@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,18 +55,123 @@ from ml_dtypes import bfloat16
 
 HERE = Path(__file__).resolve().parent
 
-H, MLP, L_TXT, HEADS, HD = 3072, 9216, 512, 24, 128
-N_DBL, N_SGL = 5, 20
-EL = 3072                                    # dit_ew row element
-FU = 3 * H + 2 * H + 2 * MLP                 # single block q|k|v, attention slot, MLP tiles
-PATCH_PX, LAT_CH = 16, 128
-STEPS = 4
+# The shape of a diffusion family: everything the schedule, the packing and the params
+# depend on, in ONE record -- the diffusion equivalent of a text ModelSpec. The module's
+# globals below are the ACTIVE shape (set_shape rebinds them), so the 700 lines of schedule
+# code read them by name; `SHAPES` is the registry a caller picks from.
+@dataclass(frozen=True)
+class Shape:
+    H: int                      # transformer hidden
+    MLP: int                    # transformer FFN width
+    HEADS: int
+    HD: int
+    N_DBL: int                  # double-stream blocks
+    N_SGL: int                  # single-stream blocks
+    L_TXT: int                  # text tokens per prompt
+    PATCH_PX: int
+    LAT_CH: int
+    TE_LAYERS: int              # text encoder
+    TE_HID: int
+    TE_PAD: int                 # its row width after padding (a PACKING choice, gated)
+    TE_Q: int
+    TE_KV: int
+    TE_MLP: int
+    TAPS: tuple
+    CTX_LD: int                 # CTX row stride: len(TAPS) * TE_HID + one element's spill
+    STEPS: int
+    family: str = ""
+
+    @property
+    def EL(self) -> int:
+        """dit_ew row element -- the transformer hidden on every family so far."""
+        return self.H
+
+    @property
+    def FU(self) -> int:
+        """Single block FU: q|k|v, the attention-output slot, the MLP tiles."""
+        return 3 * self.H + 2 * self.H + 2 * self.MLP
+
+    @property
+    def MOD_N(self) -> int:
+        return len(MOD_RUNS) * MOD_SLOT * self.EL
+
+
+KLEIN_4B = Shape(H=3072, MLP=9216, HEADS=24, HD=128, N_DBL=5, N_SGL=20, L_TXT=512,
+                 PATCH_PX=16, LAT_CH=128, TE_LAYERS=27, TE_HID=2560, TE_PAD=3072,
+                 TE_Q=4096, TE_KV=1024, TE_MLP=9728, TAPS=(9, 18, 27), CTX_LD=8192,
+                 STEPS=4, family="FLUX.2-klein-4B-NPU2")
+
+# FLUX.2-klein-9B from its own configs (32 heads, 8 double + 24 single blocks, Qwen3-8B text
+# encoder; scheduler and VAE identical to the 4B). Its DiT streams pass export_dit_kernels'
+# gates already; TE_PAD is the one PACKING decision that still needs a build to confirm
+# (4096 = TE_HID, as the 4B pads 2560 -> 3072).
+KLEIN_9B = Shape(H=4096, MLP=12288, HEADS=32, HD=128, N_DBL=8, N_SGL=24, L_TXT=512,
+                 PATCH_PX=16, LAT_CH=128, TE_LAYERS=27, TE_HID=4096, TE_PAD=4096,
+                 TE_Q=4096, TE_KV=1024, TE_MLP=12288, TAPS=(9, 18, 27), CTX_LD=12288,
+                 STEPS=4, family="FLUX.2-klein-9B-NPU2")
+
+SHAPES = {s.family: s for s in (KLEIN_4B, KLEIN_9B)}
+
+# Flux2KleinPipeline's own default (`text_encoder_out_layers`), the SAME for every size --
+# read from diffusers' pipeline_flux2_klein.py. The bundle runs the text encoder up to the
+# last tap, so TE_LAYERS = max(TAPS), not the encoder's full depth: klein-4B taps 9/18/27 of
+# Qwen3-4B's 36 layers, and klein-9B taps the same three of Qwen3-8B's.
+TEXT_TAPS = (9, 18, 27)
+
+# The schedule's row paddings: the dit_ew/dit_gemm row widths must be whole 1024s (measured
+# against the shipped 4B: 3*2560 -> 8192 and 2560 -> 3072, and both kernels accept it).
+ROW_ALIGN = 1024
+
+
+def _row(n: int) -> int:
+    return -(-n // ROW_ALIGN) * ROW_ALIGN
+
+
+def shape_from_config(transformer: Mapping, text_encoder: Mapping, *,
+                      patch_px: int = 16, steps: int = 4, taps: tuple = TEXT_TAPS,
+                      family: str = "") -> Shape:
+    """Derive a family's Shape from the checkpoint's own configs.
+
+    This is the diffusion equivalent of deriving a text spec from config.json: nothing here
+    is a per-size constant except `patch_px` and `steps`, which the configs do not carry
+    (they are the VAE/transformer patch law and the distilled step count).
+
+        H      = attention_head_dim x num_attention_heads
+        MLP    = H x mlp_ratio
+        TE_*   = the text encoder's own widths, taps from the pipeline's default
+        TE_PAD = the encoder's hidden rounded up to a 1024 row
+        CTX_LD = three taps of that hidden, rounded up to a 1024 row
+    """
+    hd = int(transformer["attention_head_dim"])
+    heads = int(transformer["num_attention_heads"])
+    h = hd * heads
+    mlp = int(round(h * float(transformer.get("mlp_ratio", 3.0))))
+    te_hid = int(text_encoder["hidden_size"])
+    te_heads = int(text_encoder["num_attention_heads"])
+    te_hd = int(text_encoder.get("head_dim") or te_hid // te_heads)
+    te_kv = int(text_encoder["num_key_value_heads"])
+    return Shape(
+        H=h, MLP=mlp, HEADS=heads, HD=hd,
+        N_DBL=int(transformer["num_layers"]), N_SGL=int(transformer["num_single_layers"]),
+        L_TXT=512, PATCH_PX=patch_px, LAT_CH=int(transformer["in_channels"]),
+        TE_LAYERS=max(taps), TE_HID=te_hid, TE_PAD=_row(te_hid),
+        TE_Q=te_heads * te_hd, TE_KV=te_kv * te_hd, TE_MLP=int(text_encoder["intermediate_size"]),
+        TAPS=tuple(taps), CTX_LD=_row(len(taps) * te_hid), STEPS=steps, family=family,
+    )
+
+# The ACTIVE shape's values, as the module-level names the schedule code reads.
+H, MLP, L_TXT, HEADS, HD = KLEIN_4B.H, KLEIN_4B.MLP, KLEIN_4B.L_TXT, KLEIN_4B.HEADS, KLEIN_4B.HD
+N_DBL, N_SGL = KLEIN_4B.N_DBL, KLEIN_4B.N_SGL
+EL = KLEIN_4B.EL
+FU = KLEIN_4B.FU
+PATCH_PX, LAT_CH = KLEIN_4B.PATCH_PX, KLEIN_4B.LAT_CH
+STEPS = KLEIN_4B.STEPS
 ALIGN = 4096                                 # sub-buffer offsets (bytes)
 
-TE_LAYERS, TE_HID, TE_PAD = 27, 2560, 3072
-TE_Q, TE_KV, TE_MLP = 4096, 1024, 9728
-TAPS = (9, 18, 27)
-CTX_LD = 8192                                # CTX row stride: 3 taps x 2560 + one element's spill
+TE_LAYERS, TE_HID, TE_PAD = KLEIN_4B.TE_LAYERS, KLEIN_4B.TE_HID, KLEIN_4B.TE_PAD
+TE_Q, TE_KV, TE_MLP = KLEIN_4B.TE_Q, KLEIN_4B.TE_KV, KLEIN_4B.TE_MLP
+TAPS = KLEIN_4B.TAPS
+CTX_LD = KLEIN_4B.CTX_LD
 PAD_ID = 151643                              # <|endoftext|>
 
 # The modulation GEMM's output, per step row: diffusers' chunk orders are double
@@ -94,13 +201,60 @@ MOD_N = len(MOD_RUNS) * MOD_SLOT * EL        # 184320
 RUN_INDEX = {name: i for i, (name, _) in enumerate(MOD_RUNS)}
 
 
+def set_shape(shape: Shape) -> Shape:
+    """Make `shape` the ACTIVE family and return the previous one.
+
+    The schedule, the packing and the param table read the module-level names; rebinding
+    them here is what lets one module build any family. Callers that build more than one
+    shape in a process restore the old value (`previous = set_shape(a); ...; set_shape(previous)`).
+    """
+    global H, MLP, L_TXT, HEADS, HD, N_DBL, N_SGL, EL, FU, PATCH_PX, LAT_CH, STEPS
+    global TE_LAYERS, TE_HID, TE_PAD, TE_Q, TE_KV, TE_MLP, TAPS, CTX_LD, MOD_N
+    previous = Shape(H=H, MLP=MLP, HEADS=HEADS, HD=HD, N_DBL=N_DBL, N_SGL=N_SGL, L_TXT=L_TXT,
+                     PATCH_PX=PATCH_PX, LAT_CH=LAT_CH, TE_LAYERS=TE_LAYERS, TE_HID=TE_HID,
+                     TE_PAD=TE_PAD, TE_Q=TE_Q, TE_KV=TE_KV, TE_MLP=TE_MLP, TAPS=tuple(TAPS),
+                     CTX_LD=CTX_LD, STEPS=STEPS)
+    H, MLP, L_TXT, HEADS, HD = shape.H, shape.MLP, shape.L_TXT, shape.HEADS, shape.HD
+    N_DBL, N_SGL = shape.N_DBL, shape.N_SGL
+    EL, FU = shape.EL, shape.FU
+    PATCH_PX, LAT_CH = shape.PATCH_PX, shape.LAT_CH
+    STEPS = shape.STEPS
+    TE_LAYERS, TE_HID, TE_PAD = shape.TE_LAYERS, shape.TE_HID, shape.TE_PAD
+    TE_Q, TE_KV, TE_MLP = shape.TE_Q, shape.TE_KV, shape.TE_MLP
+    TAPS = tuple(shape.TAPS)
+    CTX_LD = shape.CTX_LD
+    MOD_N = shape.MOD_N
+    return previous
+
+
+def family_for_shape(shape: Shape) -> str | None:
+    """The registry family whose KERNELS this shape can run, or None.
+
+    Matched on the four numbers the kernel streams are built from (hidden, FFN width, and
+    the two block counts) -- the diffusion analogue of a text spec's kernel_hash. A shape
+    that matches nothing needs an entry in export_dit_kernels.FAMILIES and a build.
+    """
+    for fam, s in SHAPES.items():
+        if (s.H, s.MLP, s.N_DBL, s.N_SGL) == (shape.H, shape.MLP, shape.N_DBL, shape.N_SGL):
+            return fam
+    return None
+
+
 def image_tokens(R: int) -> int:
     return (R // PATCH_PX) ** 2
 
 
+def euler_tile_rows() -> int:
+    """Tokens per dit_ew euler element: EL bf16 = (EL / 128) tokens x 128 channels.
+
+    24 on the 4B (24 x 128 = 3072); 32 on the 9B (32 x 128 = 4096). The element is one
+    row element, so it follows the family's hidden size."""
+    return EL // 128
+
+
 def euler_elems(T_img: int) -> int:
-    """dit_ew euler's tile24 elements (24 tokens x 128 channels), whole per core."""
-    n = -(-T_img // 24)
+    """dit_ew euler's elements ((EL/128) tokens x 128 channels), whole per core."""
+    n = -(-T_img // euler_tile_rows())
     return n + (-n) % 16
 
 
@@ -220,6 +374,13 @@ def _pack():
 
 
 def _ew_params():
+    """The dit_ew parameter builders, at the ACTIVE shape's row element.
+
+    make_test.py is re-executed on every call (see _load) and reads EW_EL, so setting it here
+    is what keeps its RoPE tables and qk blocks the family's width -- they are 3072-long
+    tables on the 4B and 4096-long on the 9B, and a mismatch fails `fill_params`' size assert.
+    """
+    os.environ["EW_EL"] = str(EL)
     return _load("dit_ew_make_test", HERE / "designs" / "dit_ew" / "make_test.py")
 
 
@@ -254,7 +415,7 @@ def dit_weight_specs() -> dict[str, tuple]:
         "t_emb1": (512, H, lambda g: pad_rows(g("time_guidance_embed.timestep_embedder.linear_1.weight").T, 512)),
         "t_emb2": (H, H, lambda g: g("time_guidance_embed.timestep_embedder.linear_2.weight").T),
         "mod": (H, MOD_N, mod_weight),
-        "ctx_emb": (7680, H, lambda g: g("context_embedder.weight").T),
+        "ctx_emb": (len(TAPS) * TE_HID, H, lambda g: g("context_embedder.weight").T),
         "x_emb": (512, H, lambda g: pad_rows(g("x_embedder.weight").T, 512)),
         "proj_out": (H, 1024, lambda g: pad_cols(g("proj_out.weight").T, 1024)),
     }
@@ -279,6 +440,57 @@ def dit_weight_specs() -> dict[str, tuple]:
             f"sgl{j}.out": (H + MLP, H, lambda g, p=p: g(p + "to_out.weight").T),
         }
     return specs
+
+
+def validate_sources(get_dit, get_te) -> None:
+    """Check the weights a bundle is built from are the ones the schedule runs.
+
+    This replaces the hand-written config dicts the builder used to compare against
+    (`attention_head_dim: 128`, `num_layers: 5`, `hidden_size: 2560`, ...). Those restated
+    the schedule's own constants, so they could only catch a checkpoint that disagreed
+    with them -- and a checkpoint whose config.json agreed while its tensors did not would
+    pass and pack garbage.
+
+    This asks the TENSORS, the way the text families' specs do: the weights the schedule
+    names must build at the (K, N) the schedule needs. Building all 194 would decode the
+    whole 7.5 GiB a second time, so the sample covers every distinct kind (the singles, the
+    first and last double/single block, the first and last text-encoder layer) -- a wrong
+    width, depth or fused layout changes one of those -- and `fill_params` then reads EVERY
+    norm, which is the cheap half. The embedding table's width is checked against the row
+    the schedule pads to.
+
+    Raises ValueError naming what does not fit.
+    """
+    dit, te = dit_weight_specs(), te_weight_specs()
+    names = ["t_emb1", "t_emb2", "mod", "ctx_emb", "x_emb", "proj_out",
+             "dbl0.img_qkv", f"dbl{N_DBL - 1}.txt_ffin", "sgl0.in", f"sgl{N_SGL - 1}.out",
+             "te0.qkv", f"te{TE_LAYERS - 1}.down"]
+    bad = []
+    for name in names:
+        specs, get = (dit, get_dit) if name in dit else (te, get_te)
+        if name not in specs:
+            bad.append(f"{name}: not a weight this schedule names")
+            continue
+        K, N, build = specs[name]
+        try:
+            b = build(get)
+        except Exception as e:                       # noqa: BLE001 - report them all
+            bad.append(f"{name}: {type(e).__name__}: {e}")
+            continue
+        if b.shape != (K, N):
+            bad.append(f"{name}: {b.shape} where the schedule needs {(K, N)}")
+    try:
+        fill_params(get_dit, get_te)                 # every norm the kernels read
+    except Exception as e:                           # noqa: BLE001
+        bad.append(f"norms: {type(e).__name__}: {e}")
+    try:
+        emb = get_te("model.embed_tokens.weight")
+        if getattr(emb, "ndim", 0) != 2 or emb.shape[1] > TE_PAD:
+            bad.append(f"embed table {getattr(emb, 'shape', '?')}: the schedule pads rows to {TE_PAD}")
+    except Exception as e:                           # noqa: BLE001
+        bad.append(f"embed table: {type(e).__name__}: {e}")
+    if bad:
+        raise ValueError("not the checkpoint these schedules were built for:\n  " + "\n  ".join(bad))
 
 
 def te_weight_specs() -> dict[str, tuple]:
@@ -425,7 +637,7 @@ def plan(R: int, steps: int = STEPS, edit: bool = False) -> Plan:
     T_img = image_tokens(R)
     T_ref = T_img if edit else 0
     T = T_img + T_ref + L_TXT
-    Tp = 24 * euler_elems(T_img)
+    Tp = euler_tile_rows() * euler_elems(T_img)      # the euler's padded token count
     pl = Plan(R, steps, edit=edit)
     key = pl.key
     B = pl.buffers
@@ -595,7 +807,7 @@ def plan(R: int, steps: int = STEPS, edit: bool = False) -> Plan:
 def gemm_streams() -> dict[str, dict]:
     """dit_gemm streams this pipeline adds to export_dit_kernels.klein_streams."""
     return {"mod": dict(M=512, K=H, N=MOD_N, role="modulation, all steps (M = steps padded)"),
-            "ctx_emb": dict(M=L_TXT, K=7680, N=H, layout={"lda": CTX_LD, "a_size": L_TXT * CTX_LD},
+            "ctx_emb": dict(M=L_TXT, K=len(TAPS) * TE_HID, N=H, layout={"lda": CTX_LD, "a_size": L_TXT * CTX_LD},
                             role="context_embedder (CTX row stride 8192)")}
 
 

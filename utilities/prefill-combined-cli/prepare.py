@@ -25,6 +25,10 @@ base, digest = audit.base, builder.digest
 def check_manifest(record, spec):
     from recipes.manifest import manifest
     expected = manifest(spec, max_ctx=record['max_ctx_default'], key=record['build_key'])
+    # The GGUF companion can carry its own build identity. As with the outer
+    # key, bind it in the build inventory; still compare its complete recipe.
+    if 'gguf' in expected and 'gguf' in record:
+        expected['gguf']['build_key'] = record['gguf'].get('build_key')
     if expected != record:
         raise ValueError('retained manifest differs from current model-derived recipe')
     return expected

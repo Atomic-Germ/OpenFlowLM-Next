@@ -30,10 +30,10 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
     // The engine: the open one (open_qwen36/, the dense recipe's kernel set
-    // under xclbins/<model>/open_kernels). Unlike llama3 / qwen3 / gemma3 there
-    // is NO closed granite engine to fall back to -- llama_npu whitelists
-    // hidden_size to {2048, 3072, 4096} and refuses Granite's 2560 outright --
-    // so a missing kernel set is a named refusal, not a quiet substitution.
+    // under xclbins/<model>/open_kernels). There is NO closed granite engine to
+    // fall back to (the closed llama_npu, now removed, whitelisted hidden_size
+    // to {2048, 3072, 4096} and refused Granite's 2560 outright) -- so a missing
+    // kernel set is a named refusal, not a quiet substitution.
     // OFLM_GRANITE_ENGINE=open is accepted (and is the only value that means
     // anything) so the variable behaves like the other families'.
 #ifdef OFLM_USE_OPEN_QWEN36
@@ -41,7 +41,7 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
     const char* sel = std::getenv("OFLM_GRANITE_ENGINE");
     if (sel && std::string(sel) == "closed")
         throw std::runtime_error("OFLM_GRANITE_ENGINE=closed: not implemented -- Granite has no closed engine "
-                                 "(llama_npu refuses hidden_size 2560); build the open kernels instead");
+                                 "(the closed llama_npu refused hidden_size 2560 and has been removed); build the open kernels instead");
     if (kernels.empty())
         throw std::runtime_error("no open kernels were found for " + this->lm_config->model_name +
                                  ". Granite runs on the open kernels only: build them with "

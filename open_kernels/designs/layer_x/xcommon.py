@@ -94,6 +94,13 @@ BAND16, BAND32 = C.BAND16, C.BAND32   # K=HID / K=2*HID band bytes
 N_HDR = C.N_HDR
 ROWS_PC, HID_PC = C.ROWS_PC, C.HID_PC # MoE rows per core, hidden per core
 OS = ["-Os"]                          # main-core kernels: size over speed (the GEMV is DMA-bound)
+# The GGUF-direct (f32-scale) build: the same q4_1 codes with the block scales in f32
+# instead of bf16, so a chunk is 6144 B instead of 5120 (designs/dense/dx.py's GEMV_DEF).
+# The tile body reads the scale width from the header, so the flag is all the design
+# needs -- and a q4_1 build sees exactly the flags it saw before.
+F32 = SPEC.quant == "q4_1_f32"
+if F32:
+    OS = OS + ["-DGEMV_Q4_SCALES_F32=1"]
 # timing-only ablation (output garbage): LX_NULL_GEMV=1 compiles the q4 / q8 GEMV tile body
 # to a zero store -- the GEMV twin of LX_NULL_DN below -- and leaves every stream, fifo and
 # DMA (so insts.bin) exactly as it was, to tell a stream limit from a compute one.

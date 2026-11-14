@@ -21,8 +21,8 @@ void Qwen2VL::load_model(std::string model_path, json model_info, int default_co
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
 
-    // The engine: the open kernels when a set is installed for this model, the closed
-    // DLL otherwise (AutoModel::_shared_select_open_engine). The decoder derives as plain
+    // The engine: the open kernels when a set is installed for this model; the closed
+    // DLL only via OFLM_QWEN2VL_ENGINE=closed (AutoModel::_shared_select_open_engine). The decoder derives as plain
     // qwen2, so the set it links to is a Qwen2.5-3B one; the windowed tower comes from
     // this container's own vision_config.
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN2VL_ENGINE", "Qwen2.5-VL");
@@ -64,6 +64,8 @@ std::string Qwen2VL::apply_chat_template(nlohmann::ordered_json& messages, nlohm
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->_shared_apply_template(inputs);
 }
 
@@ -158,7 +160,7 @@ bool Qwen2VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
 
                 qwenvl_message.push_back(newItem);
             }
-            templated_text = this->apply_chat_template(qwenvl_message);
+            templated_text = this->apply_chat_template(qwenvl_message, input.tools);
             header_print_g("OFLM", "Total images: " + std::to_string(total_images));
         }
         else if (!input.prompt.empty()) { // a pure text, usually from the cli

@@ -182,9 +182,12 @@ The `-r` option determines the image's height:
 
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
@@ -251,9 +254,12 @@ The `-r` option determines the image's height:
 
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
@@ -302,9 +308,12 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-0.8B model card](https://huggingface.co/Qwen/Qwen3.5-0.8B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
@@ -353,9 +362,12 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-2B model card](https://huggingface.co/Qwen/Qwen3.5-2B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
@@ -404,9 +416,12 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-4B model card](https://huggingface.co/Qwen/Qwen3.5-4B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
@@ -455,9 +470,12 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-9B model card](https://huggingface.co/Qwen/Qwen3.5-9B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
@@ -506,7 +524,10 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.6-35B-A3B model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B#using-qwen36-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
-- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
-  only; sending an image selects the closed engine even for a model whose text
-  path runs open kernels. See the
+- ⚠️ **Vision runs on the closed engine or not at all.** There is no *implicit*
+  engine fallback any more: with the open kernels installed, an image is served by the
+  open engine's vision tower when the mmproj/vision weights are present, and OFLM
+  errors otherwise rather than quietly swapping engines. Set
+  the family's engine switch (e.g. `OFLM_QWEN3VL_ENGINE=closed`) to opt into the
+  legacy closed engine for both text and vision. See the
   [support-status matrix](/docs/models/#open-vs-closed-support-status).

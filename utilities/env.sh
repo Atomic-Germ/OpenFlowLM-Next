@@ -415,7 +415,7 @@ done
 # The binary this tree builds, when it has been built.
 if [ -x "$OFLM_ROOT/build/src/oflm" ]; then
     export OFLM_BIN="$OFLM_ROOT/build/src/oflm"
-    oflm_env_append "$OFLM_ROOT/build/src" PATH
+    oflm_env_prepend "$OFLM_ROOT/build/src" PATH
 fi
 
 # The sentencepiece build needs the abseil headers, which are a nested

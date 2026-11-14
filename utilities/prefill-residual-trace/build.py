@@ -22,7 +22,7 @@ def patch(cpp, cli):
     cli = once(cli, include, include + '\n#include "open_qwen36/trace.hpp"')
     # A queued next layer could overwrite global xres before the host reads it.
     # Keep the existing serial dispatch body and wait for every layer.
-    cpp = once(cpp, 'const bool pipe = submit_ahead_ > 0 && !deepstack;',
+    cpp = once(cpp, 'const bool pipe = submit_ahead_ > 0 && !layer_nan_ && !deepstack;',
                'const bool pipe = false; // private residual trace: finish each layer before readback')
     anchor = '''            continue;
         }
@@ -69,7 +69,7 @@ def build(a):
             if path.is_file():
                 source = original / path.relative_to(dst)
                 evidence['sources'][str(source)] = digest(source)
-        for relative in ('src/include', 'open_kernels', 'specs'):
+        for relative in ('src/include', 'src/gguf', 'open_kernels', 'specs'):
             (stage / relative).symlink_to(ROOT / relative, target_is_directory=True)
         helpers = [Path(__file__), HERE / 'trace.hpp', Path(paired.__file__), paired.HERE / 'paired_gemm.hpp']
         evidence['sources'].update({str(p): digest(p) for p in helpers})

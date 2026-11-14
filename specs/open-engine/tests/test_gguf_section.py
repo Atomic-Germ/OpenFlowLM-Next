@@ -1,0 +1,123 @@
+# Traces: OPEN-GGUF-DIRECT (the manifest's `gguf` section).
+"""The manifest section a GGUF model loads, checked for the two things that are easy to
+get WRONG when the section's chunk law changes.
+
+A GGUF runs on the q4_1 chunk law (`q4_1_gguf`), the same one every container uses, so
+"the sections agree" is true for almost everything -- except the PACK OPS, which are the
+whole difference: the base section's read a `.q4nx`, the section's read a GGUF. And two
+decisions were keyed on the OLD twin's name (`q4_1_f32`) because it used to be the only
+GGUF law: the lm head's pack op, and Gemma3's embedding scale (a container pre-scales the
+table at conversion; a GGUF's token_embd is raw).
+
+Both failed only at load, on hardware, with "lm_head.weight is not in a q4nx container" or
+a Gemma3 that answers nonsense -- so they are pinned here.
+"""
+from __future__ import annotations
+
+import pytest
+
+from recipes.load import load_spec
+from recipes.manifest import manifest
+from recipes.spec import ModelSpec
+
+
+def _spec(stem):
+    return load_spec(__import__("pathlib").Path(__file__).resolve().parents[3]
+                     / "open_kernels" / "recipes" / "specs" / f"{stem}.json")
+
+
+def test_the_gguf_section_packs_the_head_from_the_gguf():
+    """The lm head is packed from `lm_head.weight` like any projection, so its op has to be
+    the GGUF-reading one -- `std_perm` on a GGUF dies before a single token is generated."""
+    m = manifest(_spec("qwen3-4b"), 4096)
+    g = m["gguf"]
+    assert g["pack"]["lm_head"]["ops"][0]["op"] == "std_perm_gguf"
+    # the projections, for the same reason
+    assert g["layer_types"]["dense"]["pack"]["pool"][0]["op"] == "std_perm_gguf"
+    # and the base section stays the container's
+    assert m["pack"]["lm_head"]["ops"][0]["op"] == "std_perm"
+
+
+def test_a_gemma3_gguf_scales_its_embedding_table():
+    """Gemma3's container pre-scales token_embd by sqrt(hidden) at conversion; a GGUF's is
+    raw. Without the scale the model still runs -- and answers nonsense."""
+    m = manifest(_spec("gemma3-4b"), 4096)
+    g = m["gguf"]
+    assert g["pack"]["embed"]["scale"] == pytest.approx(g["spec"]["hidden"] ** 0.5, rel=1e-12)
+    assert "scale" not in m["pack"]["embed"]
+
+
+def test_reads_gguf_names_both_gguf_quant_laws():
+    """`q4_1_f32` (the dropped f32 twin) and `q4_1_gguf` (the q4_1 law with GGUF ops) both
+    mean "these weights are a GGUF file"; every decision that asks that must use the
+    predicate, not one of the names."""
+    from dataclasses import replace
+    s = _spec("qwen3-4b")
+    for q, want in (("q4_1", False), ("q4_1_f32", True), ("q4_1_gguf", True), ("q8", False)):
+        assert replace(s, quant=q).reads_gguf is want, q
+
+
+def test_the_moe_gguf_section_packs_three_d_experts():
+    """A GGUF keeps the routed experts 3-D ([in, n, experts]) while a container flattens
+    them into one [E*n, k] tensor per projection. The destination stripes are the same,
+    but the source reader is not -- so the section must name the GGUF forms, and the
+    shared expert (an ordinary projection) and the router (which the container stores
+    already transposed) must follow too. A section naming the container ops fails at
+    load, on hardware, long after `oflm add` said it worked."""
+    m = manifest(_spec("qwen36-35b-a3b"), 4096)
+    g = m["gguf"]
+    for lt in ("linear_attention", "full_attention"):
+        pool = [o["op"] for o in g["layer_types"][lt]["pack"]["pool"]]
+        assert pool[:2] == ["expert_stripes_gguf", "expert_down_gguf"]
+        assert pool[2:5] == ["std_perm_gguf"] * 3
+        assert "transpose" in [o["op"] for o in g["layer_types"][lt]["pack"]["consts"]]
+        # the container plan keeps its own readers
+        base = [o["op"] for o in m["layer_types"][lt]["pack"]["pool"]]
+        assert base[:2] == ["expert_stripes", "expert_down"]
+        assert base[2:5] == ["std_perm"] * 3
+        assert "put" in [o["op"] for o in m["layer_types"][lt]["pack"]["consts"]]
+
+
+QWEN25VL_GGUF = {
+    "general.architecture": "qwen2vl",
+    "qwen2vl.embedding_length": 2048,
+    "qwen2vl.block_count": 36,
+    "qwen2vl.attention.head_count": 16,
+    "qwen2vl.attention.head_count_kv": 2,
+    "qwen2vl.attention.layer_norm_rms_epsilon": 1e-06,
+    "qwen2vl.feed_forward_length": 11008,
+    "qwen2vl.rope.dimension_sections": [16, 24, 24, 0],
+    "qwen2vl.rope.freq_base": 1000000.0,
+    "tokenizer.ggml.tokens": ["x"] * 151936,
+}
+
+
+def test_a_qwen2vl_checkpoint_hashes_to_its_text_sibling():
+    """A VL checkpoint's decoder IS the text model's; its M-RoPE sections live in
+    config.json (the row table is rewritten per image row), not in the kernels. So it must
+    hash to the plain text set -- otherwise every VL model needs a duplicate kernel set
+    that differs in nothing the NPU executes."""
+    vl = ModelSpec.from_gguf_metadata(QWEN25VL_GGUF)
+    text = _spec("qwen25-3b")
+    assert vl.family == "qwen2" and text.family == "qwen2"
+    assert (vl.hidden, vl.num_layers, vl.intermediate) == (2048, 36, 11008)
+    assert vl.rope_theta == text.rope_theta == 1_000_000.0
+    assert vl.qk_norm is False
+    assert vl.kernel_hash() == text.kernel_hash()
+
+
+def test_a_speculative_mtp_tail_is_not_part_of_the_kernel_geometry():
+    """llama.cpp appends a multi-token-prediction block (NextN/MTP) and counts it in
+    block_count; GGUF-direct does not implement that block yet, so the spec describes the
+    layers the kernels run. Qwen3.8-4B-Distill: 33 blocks, one MTP -> 32."""
+    from recipes.spec import _spec_layers
+
+    assert _spec_layers({"qwen35.nextn_predict_layers": 1}, "qwen35", 33) == 32
+    assert _spec_layers({"qwen35.mtp_num_hidden_layers": 2}, "qwen35", 34) == 32
+    assert _spec_layers({}, "qwen35", 33) == 33
+    try:
+        _spec_layers({"qwen35.nextn_predict_layers": 33}, "qwen35", 33)
+    except Exception as exc:
+        assert "tail" in str(exc)
+    else:
+        raise AssertionError("a whole-model MTP count must be refused")

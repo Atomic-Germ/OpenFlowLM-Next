@@ -31,7 +31,22 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q4_1_f32", "q8", "mxfp4")
+
+# The families whose RoPE pairs ADJACENT dims -- (2i, 2i + 1), llama.cpp's NORM layout, which is
+# how every GGUF of the family's architecture defines the rotation. The other families (Qwen,
+# Gemma, the neox-style archs) pair (i, i + rot/2) -- what the kernels hard-wire, so half-split
+# is the default everywhere and this list switches it (dense.py's geometry, attn.h's
+# ATTN_ROPE_IL). A measured family property like QKNORM_POST_ROPE: Llama 3.2's GGUF-direct
+# garbage was exactly this -- BOS (position 0, an identity rotation) perfect, every other
+# position wrong. Phi-3 and Granite are the same llama.cpp NORM law in principle but stay
+# half-split here until their GGUF-direct weights are measured against their own reference the
+# way llama's were (Phi-3 also rotates only rotary_dim of a head, and llama.cpp keeps that
+# tail in the un-rotated neox-style position: verify before moving either family).
+ROPE_INTERLEAVED_FAMILIES = ("llama3",)
+# q4_1_gguf: the manifest SECTION a GGUF model loads (the q4_1 chunk law, with the
+# pack ops in their GGUF-reading form). Not a weight format a container carries --
+# see recipes/gguf.py.
+QUANT_FORMATS = ("q4_1", "q4_1_f32", "q4_1_gguf", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
 NORM_GROUPS = (1, 2, 4)   # the GroupRMSNorm counts the `ln` kernels build (ln.h LN_GROUPS)
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
@@ -87,6 +102,18 @@ class ModelSpec:
     # and hashes exactly as the pre-field specs did while it is 1 (to_dict below), the same way
     # canonical_quant keeps a no-q8 model hashing as the bare string.
     norm_groups: int = 1
+    # Gemma 4 (OPEN-FAMILY-GEMMA4): the GLOBAL (`dense`) layers' own attention geometry, and
+    # four pieces of arithmetic no dense family had. Every one is zero / False on every other
+    # family and dropped from to_dict() at that value, exactly as norm_groups is, so no
+    # shipped spec's hash moves. The sliding (`dense_local`) layers use the fields above.
+    global_head_dim: int = 0          # a `dense` layer's head dim (Gemma 4 12B: 512); 0 = head_dim
+    global_kv_heads: int = 0          # ... and its kv heads (1); 0 = num_kv_heads
+    global_rotary_dim: int = 0        # proportional RoPE: dims rotated per global head (128 of 512),
+                                      # pairs (i, i + global_head_dim/2), theta^(-2i/global_head_dim)
+    attn_k_eq_v: bool = False         # the global layers have no v_proj: V is the raw k projection
+    v_norm: bool = False              # a weightless RMSNorm on V (every layer)
+    attn_scale: float = 0.0           # the score scale; 0 = 1/sqrt(head_dim) (Gemma 4: 1.0)
+    final_softcap: float = 0.0        # logits = c * tanh(logits / c); 0 = none
     # the weight format: the string every role is at ("q4_1"), or a role -> format map
     # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
     quant: str | dict = DEFAULT_QUANT
@@ -138,6 +165,20 @@ class ModelSpec:
             return {r: self.quant for r in QUANT_ROLES}
         return {r: self.quant.get(r, DEFAULT_QUANT) for r in QUANT_ROLES}
 
+    @property
+    def reads_gguf(self) -> bool:
+        """True when the weights come from a GGUF FILE rather than a `.q4nx` container.
+
+        TWO quant names say so, and they are not the same thing: `q4_1_f32` is the old
+        f32-scale twin's chunk law, and `q4_1_gguf` is the q4_1 chunk law with the pack
+        ops in their GGUF-reading form. The manifest's `gguf` section moved to
+        `q4_1_gguf` (the law every container uses), so every decision that means "these
+        weights are a GGUF" must ask THIS, not `== "q4_1_f32"` -- the lm_head op and
+        Gemma3's embedding scale were both left behind by that move, and a GGUF then
+        failed at load with "only std_perm_gguf packs GGUF tensors".
+        """
+        return self.quant in ("q4_1_f32", "q4_1_gguf")
+
     def quant_of(self, role: str) -> str:
         if role not in QUANT_ROLES:
             raise SpecError(f"no quant role {role!r} (have {list(QUANT_ROLES)})")
@@ -167,6 +208,13 @@ class ModelSpec:
         q = self.canonical_quant()
         return hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:8]
 
+    @property
+    def rope_interleaved(self) -> bool:
+        """The RoPE pairing law this family's GGUF uses: True for the interleaved (2i, 2i + 1)
+        NORM archs, False for half-split (i, i + rot/2). Family-driven, like qk_norm: the law
+        comes from the architecture, never from a per-model field."""
+        return self.family in ROPE_INTERLEAVED_FAMILIES
+
     def rope_inv_freq(self, local: bool = False, ctx: int | None = None) -> list[float]:
         """The inverse frequency of each rotary pair i < rotary_dim/2: theta^(-2i/rot), with Llama 3's
         wavelength-dependent scaling, a linear factor, or Phi-3's longrope factor lists when
@@ -175,6 +223,14 @@ class ModelSpec:
         rope_local_theta, unscaled). `ctx`: the context the table serves -- longrope takes its
         long factors above original_max_position_embeddings and its short ones otherwise."""
         import math
+        if self.global_rotary_dim and not local:
+            # Gemma 4's "proportional" RoPE (HF _compute_proportional_rope_parameters): only
+            # the first global_rotary_dim/2 pairs turn, at theta^(-2i/HEAD_DIM) -- the head
+            # dim, not the rotated width, is the denominator -- and each pairs dim i with
+            # i + head_dim/2. The pairs past them have inv_freq 0 (no rotation), so the table
+            # stops here and the kernel's pair distance (attn.h ATTN_ROPE_PAIR) carries the rest.
+            hd = self.global_head_dim or self.head_dim
+            return [self.rope_theta ** (-2 * i / hd) for i in range(self.global_rotary_dim // 2)]
         half = self.rotary_dim // 2
         if local:
             theta = self.rope_local_theta or self.rope_theta
@@ -229,6 +285,9 @@ class ModelSpec:
         d["quant"] = self.canonical_quant()
         if d["norm_groups"] == 1:
             del d["norm_groups"]   # what every shipped spec serialised before the field existed
+        for k in GEMMA4_FIELDS:
+            if d[k] == _DEFAULTS[k]:
+                del d[k]           # the Gemma 4 fields, likewise: absent on every other family
         return d
 
     def to_json(self) -> str:
@@ -269,6 +328,71 @@ class ModelSpec:
         d.pop("extra", None)
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
+    # The spec fields that do NOT change the compiled kernels: the depth (the
+    # manifest drives the layer loop; the kernel is the same for any depth),
+    # the layer sequence (WHICH designs a model needs is what matters, not how
+    # many of each it stacks), the tokenizer's id count (the real count only
+    # masks the logits at runtime) and the informational extras.
+    #
+    # `vocab` is here for the same reason, and it took a false gate to see it:
+    # the head is compiled for the SET's row count, and a model whose head is
+    # narrower is packed into it with the rows past its own zero-filled
+    # (pools.cpp: "padded rows: zeroed scales/codes"). So a set built for a
+    # container whose vocabulary was padded serves a GGUF of the same family
+    # whose head is smaller -- Gemma 3 4B is exactly that (the set has 262208
+    # rows, the GGUF 262144) -- and a packing choice must not read as
+    # geometry. The one direction that is NOT free is the other one: rows the
+    # set does not have cannot be packed, so `serves()` below carries the
+    # asymmetry the hash cannot. Do not compare vocabs in the hash; ask
+    # `serves()`.
+    _KERNEL_INDEPENDENT = ("num_layers", "real_vocab", "extra", "layer_types", "vocab")
+
+    def kernel_hash(self, ignore: tuple[str, ...] = ()) -> str:
+        """The hash of the geometry the KERNELS depend on.
+
+        Two specs with the same kernel hash need the same compiled xclbins. The
+        depth is the manifest's business (the loop it drives), not the
+        kernels': so a fine-tune of a model -- a different depth, the same
+        width -- runs on the base model's kernels, and this hash is how it
+        finds them. The full spec_hash stays the manifest's identity (it names
+        the layer loop), so a set of kernels is still matched to a model
+        exactly; this is the coarser key that says "these kernels serve you".
+        """
+        d = self.to_dict()
+        for k in (*self._KERNEL_INDEPENDENT, *ignore):
+            d.pop(k, None)
+        d["layer_types"] = sorted(set(self.layer_types))   # which designs, not how many
+        # The eps rides in the norm design's env as f"{eps:g}", so the two
+        # spellings of it ("1e-06" and the f32-rounded "9.999999974752427e-07")
+        # compile the same kernel -- the hash must not tell them apart.
+        d["norm_eps"] = float(f"{self.norm_eps:g}")
+        return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
+    def serves(self, model: "ModelSpec") -> str | None:
+        """None when a kernel set built for THIS spec can run `model`, else why not.
+
+        `kernel_hash` says two models need the same xclbins. This says whether the set
+        that was BUILT for this spec can carry that model's weights, which is a weaker
+        and one-sided relation because the pack zero-fills:
+
+          * a model whose head is narrower than the set's is packed into it, the rows
+            past the model's own left zero (pools.cpp), so the set serves it;
+          * a model whose head is wider is not -- the rows are simply not in the set,
+            and the head kernel would stream past its pool.
+
+        A container that padded its vocabulary is therefore not a different geometry
+        from the same model's GGUF, which is what a hash over `vocab` claimed (Gemma 3
+        4B: set 262208 rows, GGUF 262144, every other field equal). The check belongs
+        here, where a set is chosen, not in the hash, where it refused a model the set
+        serves.
+        """
+        if self.kernel_hash() != model.kernel_hash():
+            return "a different geometry"
+        if self.vocab < model.vocab:
+            return (f"a {self.vocab}-row head and this model's is {model.vocab} "
+                    f"(the set cannot carry rows it was not built for)")
+        return None
+
     # ---- sources
     @classmethod
     def from_hf_config(cls, cfg: Mapping[str, Any], real_vocab: int | None = None) -> "ModelSpec":
@@ -289,6 +413,11 @@ class ModelSpec:
         if arch not in GGUF_FAMILIES:
             raise SpecError(f"general.architecture {arch!r} has no recipe (known: {sorted(GGUF_FAMILIES)})")
         return GGUF_FAMILIES[arch](md)
+
+
+GEMMA4_FIELDS = ("global_head_dim", "global_kv_heads", "global_rotary_dim", "attn_k_eq_v", "v_norm",
+                 "attn_scale", "final_softcap")
+_DEFAULTS = {f.name: f.default for f in fields(ModelSpec) if f.name in GEMMA4_FIELDS}
 
 
 def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
@@ -383,13 +512,34 @@ def _qwen36moe_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
+def _spec_layers(md: Mapping[str, Any], a: str, n: int) -> int:
+    """The layers the KERNELS run: `block_count` minus the speculative (MTP / NextN) tail.
+
+    llama.cpp appends a multi-token-prediction block (or a few) to models that ship one and
+    records them as `<arch>.nextn_predict_layers` (Qwen3.5 writes `mtp_num_hidden_layers`
+    in its config). GGUF-direct does not implement that block yet -- it is a second forward
+    pass, not another layer -- so the spec must describe the 32 blocks the kernels run, not
+    the 33 in the file: with the file's count, the model matched no set, a sibling was built
+    for 33 layers, and the config (32) then disagreed with it at load
+    ("config.json layer_types differ from the kernel set's (32 layers)"). The tensors of the
+    tail blocks are simply not packed.
+    """
+    mtp = md.get(f"{a}.nextn_predict_layers")
+    if mtp is None:
+        mtp = md.get(f"{a}.mtp_num_hidden_layers")
+    mtp = int(mtp or 0)
+    if mtp < 0 or mtp >= n:
+        raise SpecError(f"{a}: nextn/mtp layers {mtp} is not a tail of block_count {n}")
+    return n - mtp
+
+
 def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
     a = md["general.architecture"]
 
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _spec_layers(md, a, k("block_count"))
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -592,13 +742,25 @@ def _lfm2_layer_types(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
     return tuple(FULL if l in idxs else SHORT_CONV for l in range(n))
 
 
+def _lfm2_published_ff(cfg: Mapping[str, Any]) -> int:
+    """The FFN width the CONFIG states, before transformers' two-thirds adjustment.
+
+    `Lfm2Config.__post_init__` lets `block_ff_dim` override `intermediate_size`, and
+    `Lfm2MLP` then takes two thirds of it. So config.json says 12288 where the kernels run
+    8192 on the 1.2B: the manifest's `hf_config_check` has to compare the PUBLISHED value,
+    or the engine refuses a correct model at load ("intermediate_size = 12288, the kernel
+    set was built for 8192").
+    """
+    return int(cfg["block_ff_dim"] if "block_ff_dim" in cfg else _need(cfg, "intermediate_size"))
+
+
 def _lfm2_ff_dim(cfg: Mapping[str, Any]) -> int:
     """The FFN width, by transformers' own rule: `block_ff_dim` overrides `intermediate_size`
     (`Lfm2Config.__post_init__`), then `Lfm2MLP` takes two thirds of it, applies the
     multiplier and rounds up to `block_multiple_of`. The 1.2B's 12288 lands on 8192, which is
     what its gate / up projections hold -- reading `intermediate_size` raw would have worked
     here by luck and given 5632 on a container that ships only the unadjusted width."""
-    ff = int(cfg["block_ff_dim"] if "block_ff_dim" in cfg else _need(cfg, "intermediate_size"))
+    ff = _lfm2_published_ff(cfg)
     if not cfg.get("block_auto_adjust_ff_dim", True):
         return ff
     ff = int(2 * ff / 3)
@@ -653,7 +815,10 @@ def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         intermediate=_lfm2_ff_dim(cfg),
         norm_eps=float(cfg.get("norm_eps", cfg.get("rms_norm_eps", 1e-5))),
         quant="q4_1",
-        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+        extra={"model_type": cfg["model_type"], "source": "hf_config",
+               # what config.json publishes, for the manifest's hf_config_check (the
+               # kernels run the adjusted width; `extra` is not hashed)
+               "published_intermediate": _lfm2_published_ff(cfg)},
     )
 
 
@@ -839,6 +1004,49 @@ def _qwen3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
         rope_theta=float(k("rope.freq_base")),
         qk_norm=True,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
+def _qwen2_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """Qwen2 / Qwen2-VL / Qwen2.5-VL from a GGUF's metadata (llama.cpp's key names).
+
+    The same decoder keys as qwen3 without the q/k norms, and `qwen2vl`'s are identical
+    apart from the M-RoPE sections -- which are a CONFIG field, not a kernel one (the
+    ptab's inv_freq is 1-D data and every manifest's row table is rewritten per row for
+    images), so a VL checkpoint hashes to its text sibling and runs on its kernels.
+    """
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    heads = k("attention.head_count")
+    hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    return ModelSpec(
+        family="qwen2",
+        hidden=k("embedding_length"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=k("attention.head_count_kv"),
+        head_dim=hd,
+        rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
+        rope_theta=float(k("rope.freq_base")),
+        qk_norm=False,
         attn_gate=False,
         intermediate=k("feed_forward_length"),
         norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
@@ -1250,16 +1458,33 @@ def _granite_scale_check(where: str, attn_mult: float | None, hd: int,
             f"{1.0 / want:g} on every score at head_dim {hd}. A container converted by "
             f"q4nx-build records the post-fold value ({want}) explicitly; convert it, "
             f"or state the multiplier if you know it.")
-    if abs(float(attn_mult) - want) > 1e-9:
-        raise SpecError(
-            f"granite: attention_multiplier {attn_mult} != head_dim**-0.5 {want} "
-            f"(attn.h scales by 1/sqrt(HD)). This container looks UNFOLDED; convert it "
-            f"with q4nx-build, which folds the multiplier into q_proj -- see {where}.")
+    # An UNFOLDED model (a raw GGUF: llama.cpp does not fold) is accepted and the
+    # original multiplier is recorded in `extra`, so the packing plan can carry the
+    # fold as a SCALE on q_proj: the engine applies it to a GGUF source and skips it
+    # for a container (a container was folded by q4nx-build). See dense.py's
+    # pack_plan and pools.cpp's std_perm_gguf.
     for name, v in others.items():
         if v is not None and abs(float(v) - 1.0) > 1e-9:
             raise SpecError(
                 f"granite: {name} {v} != 1.0, so it was not folded into the weights "
                 f"(the recipe has nowhere to apply it) -- convert with q4nx-build.")
+
+
+def _granite_unfolded(cfg: Mapping[str, Any], hd: int) -> float | None:
+    """The attention multiplier BEFORE the fold, or None when nothing to fold.
+
+    q4nx-build folds it into q_proj and records the original under
+    `q4nx_folded_multipliers`; a raw GGUF's config states the unfolded value
+    directly. Either way the packer wants to know it.
+    """
+    want = hd ** -0.5
+    folded = (cfg.get("q4nx_folded_multipliers") or {}).get("attention_multiplier")
+    if folded is not None:
+        return float(folded)
+    cur = cfg.get("attention_multiplier")
+    if cur is not None and abs(float(cur) - want) > 1e-9:
+        return float(cur)          # unfolded (a GGUF)
+    return None
 
 
 def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
@@ -1295,7 +1520,12 @@ def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         intermediate=_need(cfg, "intermediate_size"),
         norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
         quant="q4_1",
-        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+        extra={"model_type": cfg["model_type"], "source": "hf_config",
+               # the attention multiplier BEFORE q4nx-build's fold, when this config
+               # is unfolded (a raw GGUF) or records its pre-fold value. dense.py's
+               # pack plan turns it into a q_proj scale the GGUF packer applies.
+               **({"granite_attention_multiplier": _granite_unfolded(cfg, hd)}
+                  if _granite_unfolded(cfg, hd) is not None else {})},
     )
 
 
@@ -1448,6 +1678,186 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         extra={"architecture": a, "source": "gguf"},
     )
 
+def _gemma4_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Gemma 4 12B (`gemma4_unified`, text tower `gemma4_unified_text`): Gemma 3 12B's
+    sliding layers, plus global layers with their own geometry. From transformers 5.15
+    `modeling_gemma4.py`: head_dim 512 and ONE kv head on the global layers, whose V is the raw
+    k projection (`attention_k_eq_v`); a weightless RMSNorm on V everywhere; score scale 1.0
+    (q_norm / k_norm carry it); "proportional" RoPE on the global layers; a per-layer output
+    scalar (folded into the post norms by the packer); a tanh cap on the final logits.
+
+    The E2B / E4B (`gemma4` / `gemma4_text`) add per-layer embeddings and KV sharing across
+    layers, which nothing here builds -- refused by name rather than run without them."""
+    tc = cfg.get("text_config", cfg)
+    mt = tc.get("model_type", cfg.get("model_type"))
+    if mt != "gemma4_unified_text":
+        raise SpecError(f"gemma4: text model_type {mt!r}: only the 12B's gemma4_unified_text is implemented "
+                        f"(the E2B / E4B need per-layer embeddings and KV sharing)")
+    for key, want in (("num_kv_shared_layers", 0), ("hidden_size_per_layer_input", 0),
+                      ("use_double_wide_mlp", False), ("enable_moe_block", False), ("attention_bias", False)):
+        if (tc.get(key) or want) != want:
+            raise SpecError(f"gemma4: {key} = {tc.get(key)!r} is not implemented (need {want!r})")
+    if tc.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
+        raise SpecError(f"gemma4: hidden_activation {tc.get('hidden_activation')!r} is not gelu_pytorch_tanh")
+    if tc.get("attn_logit_softcapping"):
+        raise SpecError("gemma4: attention-logit softcapping is not supported (Gemma 4 has none)")
+    n = _need(tc, "num_hidden_layers")
+    hd = _need(tc, "head_dim")
+    ghd = int(tc.get("global_head_dim") or hd)
+    k_eq_v = bool(tc.get("attention_k_eq_v", False))
+    gkv = int((tc.get("num_global_key_value_heads") if k_eq_v else None) or _need(tc, "num_key_value_heads"))
+    rp = _need(tc, "rope_parameters")
+    loc, glob = rp.get("sliding_attention") or {}, rp.get("full_attention") or {}
+    if loc.get("rope_type", "default") != "default":
+        raise SpecError(f"gemma4: sliding rope_type {loc.get('rope_type')!r} (default only)")
+    if glob.get("rope_type") != "proportional" or float(glob.get("factor", 1.0)) != 1.0:
+        raise SpecError(f"gemma4: full-attention RoPE {glob!r} (proportional, factor 1, only)")
+    grot = 2 * int(float(glob.get("partial_rotary_factor", 1.0)) * ghd // 2)
+    m = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
+    lt = tuple(m.get(t, t) for t in _need(tc, "layer_types"))
+    bad = sorted(set(lt) - {DENSE, DENSE_LOCAL})
+    if bad or len(lt) != n:
+        raise SpecError(f"gemma4: layer_types {bad or len(lt)} (sliding / full, one per layer)")
+    vocab = _need(tc, "vocab_size")
+    return ModelSpec(
+        family="gemma4",
+        hidden=_need(tc, "hidden_size"),
+        num_layers=n,
+        layer_types=lt,
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=_need(tc, "num_attention_heads"),
+        num_kv_heads=_need(tc, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(glob, "rope_theta", "rope_parameters.full_attention")),
+        rope_local_theta=float(_need(loc, "rope_theta", "rope_parameters.sliding_attention")),
+        sliding_window=int(_need(tc, "sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=_need(tc, "intermediate_size"),
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        norm_eps=float(tc.get("rms_norm_eps", 1e-6)),
+        global_head_dim=ghd if ghd != hd else 0,
+        global_kv_heads=gkv,
+        global_rotary_dim=grot,
+        attn_k_eq_v=k_eq_v,
+        v_norm=True,
+        attn_scale=1.0,
+        final_softcap=float(tc.get("final_logit_softcapping") or 0.0),
+        quant="q4_1",
+        extra={"model_type": cfg.get("model_type", mt), "source": "hf_config"},
+    )
+
+
+def _gemma4_unsupported(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    raise SpecError("gemma4: the E2B / E4B (model_type gemma4) are not implemented on the open "
+                    "kernels: per-layer embeddings and KV sharing across layers have no recipe. "
+                    "The 12B (gemma4_unified) is.")
+
+
+def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """Gemma 4 12B from the GGUF header (llama.cpp's `gemma4` arch).
+
+    Only the 12B (the gemma4_unified tower) is served: the E2B / E4B also call themselves
+    `gemma4`, and nothing builds per-layer embeddings or KV sharing. They are named refused
+    by the two keys that say so -- embedding_length_per_layer_input and
+    attention.shared_kv_layers -- rather than guessed from a size or a head dim.
+
+    The sliding (SWA) layers are Gemma 3 12B's geometry (head dim 256, 8 kv heads, a 1024-row
+    window, theta 10000); the global layers carry their own (head dim 512, one kv head,
+    proportional RoPE at theta 1000000, K = V). llama.cpp's header carries the per-layer kv
+    heads and the per-layer sliding pattern as ARRAYS; the HF dict nests them instead."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    elpi = md.get(f"{a}.embedding_length_per_layer_input", 0)
+    skv = md.get(f"{a}.attention.shared_kv_layers", 0)
+    if elpi or skv:
+        raise SpecError(f"gemma4: embedding_length_per_layer_input={elpi} / "
+                        f"attention.shared_kv_layers={skv}: the E2B / E4B are not implemented "
+                        f"(per-layer embeddings, KV sharing across layers)")
+    n = k("block_count")
+    hid = k("embedding_length")
+    hd = k("attention.key_length_swa")           # sliding layers' head dim (256)
+    ghd = k("attention.key_length")              # global layers' (512)
+    vocab = md.get(f"{a}.vocab_size")
+    toks = md.get("tokenizer.ggml.tokens")
+    if vocab is None:
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    n_heads = k("attention.head_count")
+    kv = k("attention.head_count_kv")
+    kv_list = list(kv) if isinstance(kv, list) else None
+    num_kv = kv_list[0] if kv_list else int(kv)
+    gkv = kv_list[-1] if kv_list else 1
+    if kv_list:
+        full = [int(v) for i, v in enumerate(kv_list)]
+        pat0 = md.get(f"{a}.attention.sliding_window_pattern")
+        if isinstance(pat0, list) and len(pat0) == n:
+            for i, (p, v) in enumerate(zip(pat0, full)):
+                want = 1 if not p else 8
+                if int(v) != want:
+                    raise SpecError(f"gemma4: layer {i} has kv_heads {v}, the pattern says {want}")
+        num_kv = 8 if max(full) <= 8 else num_kv
+        gkv = 1
+    pat = md.get(f"{a}.attention.sliding_window_pattern")
+    if isinstance(pat, list):
+        if len(pat) != n:
+            raise SpecError(f"gemma4: sliding_window_pattern has {len(pat)} entries, block_count is {n}")
+        layer_types = tuple(DENSE_LOCAL if bool(p) else DENSE for p in pat)
+    else:
+        p = int(pat if pat is not None else 6)
+        layer_types = tuple(DENSE if (l + 1) % p == 0 else DENSE_LOCAL for l in range(n))
+    bad = sorted(set(layer_types) - {DENSE, DENSE_LOCAL})
+    if bad:
+        raise SpecError(f"gemma4: layer_types {bad} (sliding / full, one per layer)")
+    if len(layer_types) != n:
+        raise SpecError(f"gemma4: layer_types has {len(layer_types)} entries, block_count is {n}")
+    rope_dim = k("rope.dimension_count")
+    swa_dim = int(md.get(f"{a}.rope.dimension_count_swa", hd))
+    # proportional RoPE on the global layers: the HF config turns 64 pairs of a 512-dim
+    # head at theta^(-2i/512); the header says nothing about the partial factor, so it is
+    # the 12B's: a quarter of the head.
+    grot = 2 * int(0.25 * rope_dim // 2)
+    scs = md.get(f"{a}.final_logit_softcapping", 0.0)
+    return ModelSpec(
+        family="gemma4",
+        hidden=hid,
+        num_layers=n,
+        layer_types=layer_types,
+        vocab=vocab,
+        real_vocab=len(toks) if toks is not None else vocab,
+        num_heads=n_heads,
+        num_kv_heads=num_kv,
+        head_dim=hd,
+        rotary_dim=swa_dim,
+        rope_theta=float(k("rope.freq_base")),
+        rope_local_theta=float(md.get(f"{a}.rope.freq_base_swa", 10000.0)),
+        sliding_window=int(k("attention.sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        global_head_dim=ghd if ghd != hd else 0,
+        global_kv_heads=gkv,
+        global_rotary_dim=grot,
+        attn_k_eq_v=bool(k("attention.value_length") == k("attention.key_length")),
+        v_norm=True,
+        attn_scale=1.0,
+        final_softcap=float(scs or 0.0),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
+
 # `qwen3_5_moe_text` is the text-only derivative of the VLM `qwen3_5_moe` (Ornith-1.0-35B-A3B
 # and friends: `Qwen3_5MoeForCausalLM`, no vision_config). Every field the recipe and the
 # config check read is identical to the VLM's, so it derives through the same builder --
@@ -1459,17 +1869,34 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
-               "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
-GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
-                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
+               "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf,
+               "gemma4_unified": _gemma4_hf, "gemma4_unified_text": _gemma4_hf,
+               "gemma4": _gemma4_unsupported, "gemma4_text": _gemma4_unsupported}
+GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf,
+                 # Qwen3-VL: the same decoder as qwen3, and its GGUF carries the same
+                 # qwen3vl.* keys -- so the qwen3 builder reads it unchanged. The spec is
+                 # family qwen3 (the kernels are qwen3's geometry); the model's own family
+                 # stays qwen3vl, which is what picks the vision adapter. Its rope base is
+                 # 5e6, not qwen3-4b's 1e6, so it needs its own set (the ptab's inv_freq is
+                 # export-time data and kernel_hash keeps rope_theta).
+                 "qwen3vl": _qwen3_gguf, "qwen3_vl": _qwen3_gguf,
+                 # Qwen2 family: qwen2, and the two VL arches (qwen2vl covers both
+                 # Qwen2-VL and Qwen2.5-VL in llama.cpp). Same decoder, no q/k norms; the
+                 # M-RoPE sections live in config.json, so the spec hashes as plain qwen2.
+                 "qwen2": _qwen2_gguf, "qwen2vl": _qwen2_gguf, "llama": _llama3_gguf,
+                 "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
+                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf,
+                 "gemma4": _gemma4_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
+              _qwen2_gguf: "qwen2",
               _qwen25vl_hf: "qwen2",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
-              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss", _k2_hf: "k2"}
+              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss", _k2_hf: "k2",
+              _gemma4_hf: "gemma4", _gemma4_unsupported: "gemma4", _gemma4_gguf: "gemma4"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1506,7 +1933,7 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
 ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
                         "shortconv.in_proj.weight": "linear",
                         "shortconv.out_proj.weight": "linear_out"}
-for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2"):
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2", "gemma4"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 # GPT-OSS's routed experts, under the names q4nx-build writes them
 # (utilities/q4nx-build/configs/gpt-oss.json). No shared expert and no dense FFN.

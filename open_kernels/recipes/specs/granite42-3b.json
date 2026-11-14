@@ -73,6 +73,7 @@
   "extra": {
     "model_type": "granite",
     "source": "hf_config",
+    "granite_attention_multiplier": 0.015625,
     "model": "Granite-4.2-3B-NPU2"
   }
 }

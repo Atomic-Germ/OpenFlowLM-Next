@@ -21,6 +21,7 @@ EXCLUDED_DIRS = {
     ".venv",
     "__pycache__",
     "build",
+    "build.bak",  # stale local build tree snapshot, not source, never inventoried
     "build_tmp",
     "ironvenv",
     "node_modules",
@@ -93,10 +94,11 @@ def ownership(path: Path) -> str:
     parts = path.parts
     name = path.name.lower()
     if path.suffix.lower() == ".xclbin" or "xclbins" in parts:
-        # The open embedding's own compiled kernels ship under a family dir's
-        # npu_matmul_f32/ subdirectory. They are open artifacts we build, not
-        # closed-source kernels awaiting replacement.
-        if "npu_matmul_f32" in parts:
+        # Open artifacts we build and ship ourselves: the per-family open kernel
+        # sets live under <family>/open_kernels/, the embedding's own compiled
+        # kernels under <family>/npu_matmul_f32/. Everything else xclbin is a
+        # closed-source kernel awaiting replacement.
+        if "npu_matmul_f32" in parts or "open_kernels" in parts:
             return "open_npu_kernel"
         return "closed_npu_kernel"
     if "xrt" in parts or "hrx" in parts:

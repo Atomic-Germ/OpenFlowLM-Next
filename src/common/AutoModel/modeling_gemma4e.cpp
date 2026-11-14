@@ -31,7 +31,7 @@ void Gemma4e::load_model(std::string model_path, json model_info, int default_co
     this->setup_tokenizer(model_path);
     this->sampler.reset();
 
-    this->enable_tool = (model_info["size"] > 800000000)? true : false;
+    this->enable_tool = true;
 
     sampler_config config;
     config.top_k = 64;

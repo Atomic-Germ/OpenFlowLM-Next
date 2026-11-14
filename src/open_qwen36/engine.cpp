@@ -51,8 +51,17 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
         if (complete(env, &why)) { chose("OFLM_OPEN_KERNELS_DIR"); return env; }
         std::fprintf(stderr, "open_qwen36: OFLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
     }
+    // A directory that exists but fails the check is named with the reason: otherwise the
+    // caller reports "no open kernels installed" for a set that is there and incomplete
+    // (a GGUF-only build has no q4nx-route xclbins, and the check counts both routes).
+    auto incomplete = [](const fs::path& dir, const std::string& reason) {
+        std::error_code ec;
+        if (fs::exists(dir, ec))
+            std::fprintf(stderr, "open_qwen36: %s is not a complete kernel set: %s\n", dir.string().c_str(), reason.c_str());
+    };
     fs::path local = fs::path(config.model_path) / "open_kernels";
     if (complete(local, &why)) { chose("beside the model"); return local.string(); }
+    incomplete(local, why);
     // Every xclbins root the closed path would consider, not just the first one
     // find_xclbin_path() happens to return: oflm-add links a set under the user
     // root ($OFLM_XCLBIN_PATH / ~/.config/oflm) while the shipped sets live in the
@@ -67,6 +76,7 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     for (const std::string& r : roots) {
         fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
         if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
+        incomplete(cand, why);
     }
     return {};
 }
@@ -155,12 +165,9 @@ void Engine::ensure_vit() {
     if (vit_) return;
     auto t0 = std::chrono::steady_clock::now();
     vcfg_ = vision::VitConfig::for_model_dir(cfg_.model_dir);
-    std::string file = "vision_weight.q4nx";
-    {
-        std::ifstream cf(cfg_.model_dir + "/config.json");
-        auto j = nlohmann::json::parse(cf, nullptr, false);
-        if (j.is_object()) file = j.value("vision_model_weight", file);
-    }
+    // `vision_weight.q4nx` for a container, `mmproj*.gguf` for a GGUF install; the
+    // config's own `vision_model_weight` wins when it names one. See vision_weights_path.
+    const std::string file = vision::vision_weights_path(cfg_.model_dir);
     vit_ = std::make_unique<vision::VitWeights>(vision::load_vit(cfg_.model_dir + "/" + file, vcfg_));
     std::fprintf(stderr, "open_qwen36: vision tower resident (%s, %d blocks) in %.1f s\n", file.c_str(), vcfg_.depth,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
@@ -445,7 +452,8 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     // same counter (Core::mrope_*), and later chunks / generated tokens inherit it.
     if (!core_->has_mrope() || core_->image_token_id() < 0)
         throw std::runtime_error("open_qwen36: config.json carries no image_token_id / mrope_section for this model; "
-                                 "images need the closed engine (OFLM_QWEN36_ENGINE=closed)");
+                                 "images need the closed engine -- set this family's engine switch "
+                                 "OFLM_<FAMILY>_ENGINE=closed (e.g. OFLM_GEMMA_ENGINE=closed)");
     // The app hands its own family's payload struct (qwen3_6_moe_image_payload_t /
     // qwen3_5vl_image_payload_t -- the same fields); read it through the one matching the
     // kernel set's family.
