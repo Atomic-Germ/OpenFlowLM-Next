@@ -7,7 +7,7 @@ Each time you build a new kernel set, record what is durable in `open-kernel-fam
 Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.
 
-The new format Q4NX models for this will be located on huggingface `Atomic-Germ/*-nB-OpenNPU2`, each will need a builder in q4nx-build as they gain xclbin support. Family xclbins will be distributed with the application, and a converted model ships with the rest. Each model links to a family xclbin, regardless of fine-tuning or derivitive models. The purpose of this is to allow quick additions of new but shape-identical models without updates needed, distributed through `oflm-add` to install and link properly.
+Q4NX models (`Atomic-Germ/*-nB-OpenNPU2` on Hugging Face) are deprecated: the existing ones keep working, but new models load from GGUF and get no q4nx-build builder. Family xclbins will be distributed with the application, and a converted model ships with the rest. Each model links to a family xclbin, regardless of fine-tuning or derivitive models. The purpose of this is to allow quick additions of new but shape-identical models without updates needed, distributed through `oflm-add` to install and link properly.
 
 As you encounter closed-source requirements, note them and replace with "not implemented" messaging before coding a replacement.
 
@@ -15,7 +15,7 @@ When investigating pre-compiled xclbins and libraries, save any useful tools you
 
 The `oflm-test` tool at `utilities/oflm-test` is capable of running a full test suite for `--llm`, `--vision`, `--embed`, or `--tools`.
 
-The `q4nx-build` tool at `utilities/q4nx-build` should always be in-sync with the expected formats of the models as each gains support, there should be no manual steps left. If unavoidable, the user should always recieve instruction for it.
+The `q4nx-build` tool at `utilities/q4nx-build` is kept only for the existing q4nx models. Do not add builders or formats to it for new models. Installing a model should leave no manual steps; if one is unavoidable, the user should always receive instruction for it.
 
 For each successfully packed model, update `open-kernel-pipeline` / `open-kernel-families` with anything the next agent would otherwise have to rediscover. The goal is that adding a model needs only two facts: the family has support, and a repo exists with weights.
 
@@ -69,6 +69,42 @@ alone.
 variables it exported, so the discovery stays in one place. The two stay in
 step through `OFLM_ENV_DUMP=1`, which makes `env.sh` print its variables as
 `KEY=VALUE` lines instead of its report.
+
+## The production bar for a supported model
+
+Do not add q4nx support for any model: q4nx is being deprecated. New support
+loads the model from GGUF.
+
+Every PR that adds or changes support for a model also updates its entry in
+`src/model_list.json`: the entry exists, names the files the engine loads, and
+states the real quant, family and context length. A model with no correct
+registry entry is not supported, whatever the engine can do.
+
+A top-tier supported model ships finished and production-ready. Before you
+export its kernel set as done, or open an issue or PR that calls it supported,
+show each of these with measurements:
+
+- Prefill uses the block route (usually). State the reason for any exception.
+- Decode and prefill are near optimal. Profile them and name what is left.
+- No unusual context-length limits. Test up to the model's real context, not
+  only the 4096 default.
+- Everything runs on the NPU (usually). Name each host stage and its cost.
+- Speculative decoding was explored: MTP, DFlash, DFlash2, prompt lookup or
+  another drafter. Ship one, or reject it with the measured reason. We
+  generally want one.
+- `oflm add` and `oflm serve` run the model, not only a CLI harness.
+- The model ships quantized, usually q4. Prefer Unsloth's GGUFs when the
+  engine supports their quant types; state the reason for any other source.
+- Benchmarks are recorded: `oflm bench` results (prefill and decode against
+  context length, with the machine and stack named) on the model's page in
+  `docs/docs/benchmarks/`, and a row in the README's "Recommended models"
+  table.
+- Most of the model's own features are exposed: its vision and audio towers,
+  MTP heads (as the drafter), reasoning and tool calling, and for image models
+  every supported resolution and image editing. Name each feature left out
+  and the reason.
+
+If an item is not done, the PR stays a draft and lists the item.
 
 ## Git rules for agents
 
