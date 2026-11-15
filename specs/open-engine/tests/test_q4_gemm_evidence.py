@@ -28,9 +28,15 @@ def test_shipped_summary_has_all_five_paired_shapes_and_remains_a_draft(report):
     diagnosis = report['validation']['context_diagnosis']
     assert diagnosis['firmware_status'] == '0x2000003'
     assert diagnosis['firmware_status_name'] == 'AIE2_STATUS_MGMT_ERT_NOAVAIL'
-    assert diagnosis['accepted_binary_reproduced'] is True
+    assert diagnosis['observed_ceiling_healthy'] == 16
+    assert diagnosis['observed_ceiling_degraded'] == 8
+    assert diagnosis['ceiling_is_stable'] is False
+    assert diagnosis['firmware_max_proven'] is False
+    assert diagnosis['capacity_returned_after_destroy'] is True
+    assert diagnosis['leak_after_64_churn_cycles'] is False
+    assert diagnosis['process_exit_leak'] is False
     assert diagnosis['valid_control_substitute'] is False
-    assert diagnosis['administrative_recovery'].startswith('NOT RUN')
+    assert 'create_ctx_resp' in diagnosis['root_cause_experiment']
 
 
 @pytest.mark.parametrize('field,value', [('end_to_end_acceptance', True),

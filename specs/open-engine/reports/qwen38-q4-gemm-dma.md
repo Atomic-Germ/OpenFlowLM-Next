@@ -132,40 +132,25 @@ the same installed XRT library; the fresh CLI's SHA-256 is
 `c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad`.
 
 This establishes a current combined-context blocker in the control, not a
-numerical failure of the candidate. Repeating one unchanged full-width xclbin
-(`ln` or `gemm_n34816_k5120_low`) also succeeds eight times and fails on the
-ninth. The kernel log reports firmware status `0x2000003`
-(`AIE2_STATUS_MGMT_ERT_NOAVAIL`) for the create-context command. All retained
-artifacts request eight columns at start column zero, so they share one
-full-device partition; the Strix driver's advertised 16-context telemetry
-limit is not the limiting resource here. The accepted PR #2 binary, with the
-same build ID and installed XRT library, now fails in the same way. This is a
-persistent runtime/firmware capacity issue, not a GEMM-specific incompatibility.
+numerical failure of the candidate. The initial probe failed on the ninth of
+eleven contexts, and
+[`qwen38-context-capacity.md`](qwen38-context-capacity.md) shows why that is
+not a stable limit: within one boot the ceiling measured **16** and later **8**.
+At 16, the seventeenth create fails with firmware status `0x2000003`
+(`AIE2_STATUS_MGMT_ERT_NOAVAIL`), destroy returns capacity and 64 churn cycles
+leak nothing. After a benchmark campaign the ceiling fell to 8 and persisted
+across both runtimes, 200 single create/destroy cycles, child-process exits and
+idle time, while `aie-partitions` still reported no held contexts. The failure
+is firmware-reported unavailability from persistent driver/firmware state, not
+a proven firmware maximum, not a monotonic leak, and not width dependence.
 
-`context_probe.py` retains individual/combined commands, logs and artifact
-hashes. No driver reset, context-coalescing change, precision fallback or
-manifest relabelling is used to bypass the gate. No NPU client is active, but
-passwordless administrative access is unavailable, so a module reload or PCI
-reset was not attempted. A valid recovery requires an administrator to reload
-the NPU driver or reboot, followed by a fresh unchanged-control smoke test;
-if the nine-context control still fails, the runtime/firmware must be fixed or
-the model runtime must be redesigned in a separate PR. The older six-context
-export is not a valid substitute because it omits the paired low-weight
-companions, and host-attention flags do not avoid the eager GEMM context loads.
-
-A subsequent user-reported availability check was rerun against the unchanged
-export. The combined probe still fails on the ninth context and the four-layer
-smoke still exits before inference with the same firmware `NOAVAIL` status.
-The probe now returns its recorded result and exits nonzero on any failed
-context, preventing a recorded failure from being mistaken for recovery.
-
-Review probes reproduce the same ninth-context failure for the untouched
-export and both staged batch-1/batch-4 arms; all eleven contexts pass when
-created individually in every arm. No competing hardware context is visible.
-The process file-descriptor limit is 524,288 and locked memory is unlimited;
-these observations do not establish the driver's root cause. Read-only sysfs
-inspection exposes no module parameter to adjust on this host. Evidence is
-retained in `context-probe-review*` and `context-review.log`.
+`context_probe.py --experiment diagnose` retains each arm's create/destroy
+sequence, the libraries actually loaded, kernel-log status codes and the
+`xrt-smi examine --report aie-partitions --verbose` output. No driver reset,
+context-coalescing change, precision fallback or manifest relabelling is used
+to bypass the gate. The older six-context export is not a valid substitute
+because it omits the paired low-weight companions, and host-attention flags do
+not avoid the eager GEMM context loads.
 
 | Required end-to-end metric/gate | Baseline | Candidate |
 |---|---|---|

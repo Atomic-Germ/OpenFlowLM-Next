@@ -122,3 +122,48 @@ def test_context_probe_returns_recorded_results_and_cli_fails_on_context_error(t
                       'r = context_probe.probe(' + repr(kernels) + ', ' + repr(harness) + ', ' + repr(tmp_path/'cli-out') + '); '
                       'raise SystemExit(1 if r["combined"]["returncode"] else 0)')
     assert subprocess.run([str(Path(__import__('sys').executable)), str(script)]).returncode == 1
+
+
+def test_capacity_reclaim_and_churn_plans_are_explicit():
+    tool = load('context_probe')
+    steps = tool.capacity_steps(['a', 'b'], 5, 'cap')
+    assert [s['asset'] for s in steps] == ['a', 'b', 'a', 'b', 'a']
+    reclaim = tool.reclaim_steps('a', 8)
+    assert [s['op'] for s in reclaim[-2:]] == ['destroy', 'create']
+    assert reclaim[-1]['tag'] == 'replacement'
+    churn = tool.churn_steps('a', 3, 4)
+    assert [s['op'] for s in churn[:6]] == ['create', 'destroy'] * 3
+    assert sum(1 for s in churn if str(s.get('tag', '')).startswith('after-churn')) == 4
+    for bad in (lambda: tool.capacity_steps([], 1, 'x'), lambda: tool.reclaim_steps('a', 0),
+                lambda: tool.churn_steps('a', 0, 1)):
+        with pytest.raises(ValueError):
+            bad()
+
+
+def test_kernel_log_status_decoding_and_capacity_classification():
+    tool = load('context_probe')
+    lines = tool.parse_kernel_log('amdxdna 0000:67:00.1: [drm] *ERROR* aie_send_mgmt_msg_wait: '
+                                  'command opcode 0x2 failed, status 0x2000003\nnoise\n')
+    assert lines == [{'line': lines[0]['line'], 'opcode': '0x2', 'status': '0x2000003',
+                      'status_name': 'AIE2_STATUS_MGMT_ERT_NOAVAIL'}]
+    failed = {'events': [{'op': 'create', 'ok': True, 'held': 8},
+                         {'op': 'create', 'ok': False, 'held': 8, 'error': 'EINVAL'},
+                         {'op': 'destroy', 'ok': True, 'held': 7},
+                         {'op': 'create', 'ok': True, 'tag': 'replacement', 'held': 8}],
+              'complete': True}
+    assert tool.max_held(failed) == 8 and tool.first_create_failure(failed)['error'] == 'EINVAL'
+    assert tool.reclaim_worked(failed) is True
+    assert tool.churn_leaked({'events': [{'op': 'create', 'ok': True, 'held': 13,
+                                          'tag': 'after-churn-12'}]}, 16) is True
+    steps17 = tool.capacity_steps(['a'], 17, 'x')
+    def arm(held):
+        return {'experiment': f'capacity-repeat-{held}', 'runtime': 'opt', 'max_held': held,
+                'assets': ['a'], 'steps': steps17, 'kernel': {'lines': []}, 'result': {}}
+    consistent = tool.classify([arm(16), arm(16)], boot_age=5000, narrow=None)
+    assert consistent['firmware_max_proven'] is False
+    assert 'hwctx_limit=16' in consistent['conclusions'][0]
+    assert 'not proof' in consistent['conclusions'][0]
+    inconsistent = tool.classify([arm(16), arm(8)], boot_age=5000, narrow=None)
+    assert 'not established' in inconsistent['conclusions'][0]
+    assert any('partition-width' in r for r in inconsistent['remaining_experiments'])
+    assert any('fresh-boot' in r for r in inconsistent['remaining_experiments'])
