@@ -265,6 +265,25 @@ def export_diffusion_sets(py: Path, force: bool, jobs: int = 4,
     return failed
 
 
+WHISPER_EXPORT = REPO / "open_kernels" / "export_whisper_kernels.py"
+WHISPER_DEFAULT_NAME = "Whisper-V3-Turbo-NPU2"
+
+
+def export_whisper_set(py: Path, force: bool, no_fa: bool = False) -> int:
+    """The open whisper_gemm kernel set (+ fa/ by default). Failures count."""
+    script = WHISPER_EXPORT
+    if not script.is_file():
+        print(f"-- whisper: exporter not found at {script}", flush=True)
+        return 1
+    print(f"-- whisper: {WHISPER_DEFAULT_NAME}", flush=True)
+    cmd = [str(py), str(script), "--model-name", WHISPER_DEFAULT_NAME]
+    if force:
+        cmd.append("--force")
+    if no_fa:
+        cmd.append("--no-fa")
+    return 0 if subprocess.run(cmd).returncode == 0 else 1
+
+
 def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
     """open_npue BERT design sets (needs pyxrt + NPU). Returns 0 on success."""
     spec = json.loads(BERT_SPEC.read_text(encoding="utf-8"))
@@ -348,6 +367,14 @@ def main() -> int:
     ap.add_argument("--diffusion-family", default="",
                     help="comma-separated diffusion families (default: every family the "
                          "exporter can build -- FLUX.2-klein-4B-NPU2, -9B-NPU2, ...)")
+    ap.add_argument("--whisper", action="store_true",
+                    help="also build the open whisper_gemm kernel set (Whisper-V3-Turbo-NPU2)")
+    ap.add_argument("--whisper-only", action="store_true",
+                    help="only build the open whisper_gemm kernel set")
+    ap.add_argument("--skip-whisper", action="store_true",
+                    help="skip the open whisper_gemm kernel set")
+    ap.add_argument("--whisper-no-fa", action="store_true",
+                    help="when building whisper, skip fa/ (host attention fallback)")
     ap.add_argument("-j", "--jobs", type=int, default=0,
                    help="parallel kernel builds (default: 0 = auto-detect CPU count)")
     a = ap.parse_args()
@@ -359,8 +386,21 @@ def main() -> int:
         print("FATAL: --skip-bert and --bert-only are mutually exclusive", file=sys.stderr)
         return 1
     if a.diffusion_only:
-        # --diffusion-only is the narrow run: no dense specs, no BERT
+        # --diffusion-only is the narrow run: no dense specs, no BERT, no whisper unless requested
         a.skip_bert = True
+    if a.whisper_only:
+        # --whisper-only is the narrow run
+        a.skip_bert = True
+        a.skip_diffusion = True
+
+    only_modes = sum([bool(a.bert_only), bool(a.diffusion_only), bool(a.whisper_only)])
+    if only_modes > 1:
+        print("FATAL: --bert-only, --diffusion-only, and --whisper-only are mutually exclusive", file=sys.stderr)
+        return 1
+
+    # Whisper is built only when explicitly requested (--whisper/--whisper-only)
+    # to avoid surprising long builds in existing export flows.
+    do_whisper = (a.whisper or a.whisper_only) and not a.skip_whisper
 
     skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
 
@@ -400,22 +440,26 @@ def main() -> int:
     if mlir_aie.is_dir():
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
-    # ---- the three kernel families -------------------------------------------
+    # ---- kernel families -----------------------------------------------------
     n_failed = 0
     specs = []
-    if not a.bert_only and not a.diffusion_only:
+    run_specs = not a.bert_only and not a.diffusion_only and not a.whisper_only
+    if run_specs:
         specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
         if not specs:
             print("FATAL: no kernel specs found", file=sys.stderr)
             return 1
         n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
-    if not a.skip_bert and not a.diffusion_only:
+    if not a.skip_bert and not a.diffusion_only and not a.whisper_only:
         n_failed += export_bert_sets(py, a.force, a.jobs)
 
-    if not a.skip_diffusion:
+    if not a.skip_diffusion and not a.whisper_only:
         fams = [f.strip() for f in a.diffusion_family.split(",") if f.strip()] or None
         n_failed += export_diffusion_sets(py, a.force, a.jobs, fams)
+
+    if do_whisper:
+        n_failed += export_whisper_set(py, a.force, a.whisper_no_fa)
 
     print(flush=True)
     if n_failed:
@@ -425,10 +469,14 @@ def main() -> int:
         print("kernel export ok: BERT design sets", flush=True)
     elif a.diffusion_only:
         print("kernel export ok: diffusion sets", flush=True)
+    elif a.whisper_only:
+        print("kernel export ok: whisper kernel set", flush=True)
     else:
         suffix = " + BERT design sets" if not a.skip_bert else ""
         if not a.skip_diffusion:
             suffix += " + diffusion sets"
+        if do_whisper:
+            suffix += " + whisper kernel set"
         print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 

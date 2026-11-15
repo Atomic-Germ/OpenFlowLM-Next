@@ -256,9 +256,9 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
             last = exc
             more = any(per_band % t == 0 for t in tries[idx + 1:])
             if more:
-                print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; trying another per_call")
+                print(f"   per_call={pc} failed for K={k}; trying another per_call")
             else:
-                print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; no more per_call candidates")
+                print(f"   per_call={pc} failed for K={k}; no more per_call candidates")
             _cleanup(d, tag, cc_before, keep=dry)     # a failed build leaves TUs behind too
             continue
         _run([harness, d / f"run_{tag}.cfg"], env=e, cwd=d, quiet=True)
@@ -268,7 +268,23 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
         _cleanup(d, tag, cc_before, keep=dry)
         print(f"   PASS gemv_q4 K={k} (rs={rs}, per_call={pc})")
         return
-    raise last or GateError(f"gemv_q4: no suitable per_call found for K={k} (per_band={per_band})")
+    # Heuristic: large-K standalone gemv_q4 fixtures can exceed AIE tile L1 even
+    # at per_call=1 because tab(~2.25*K)+x(~2*K)+2*w buffers must be resident.
+    tab_b = 2 * k + 4 * (k // 32) + 2 * (k // 32) + 2 * (k // 32)
+    x_b = 2 * k
+    w_b = 2 * min(tries) * 5120 if tries else 0
+    est_b = 4096 + tab_b + x_b + w_b + 512
+    detail = (f"gemv_q4 gate failed for K={k}, rs={rs}, per_band={per_band} "
+              f"(attempted per_call={tries[:8]}{'...' if len(tries)>8 else ''}, n={attempted}). "
+              f"Estimated standalone fixture footprint per tile ~{est_b} B "
+              f"(stack+tab+x+2*w+y), L1 budget ~65536 B. "
+              f"If aiecc reported 'allocated buffers exceeded available memory', "
+              f"this is a fixture/layout validation gap (not host RAM): the gate needs "
+              f"a large-K-capable fixture/design path (e.g. K-tiled/streamed x+tab) "
+              f"to certify this point.")
+    if last is not None:
+        raise GateError(str(last) + "\n" + detail) from last
+    raise GateError(detail)
 
 
 def gate_ln(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:

@@ -62,11 +62,12 @@ oflm dev env-check
 | `oflm dev probe-sizes [args...]` | Probe GGUF repos for `served/would_build/unreadable/...` | `utilities/probe-family-sizes.py` |
 | `oflm dev export-kernels [args...]` | Export/build open kernel xclbin sets | `utilities/export-kernels.py` |
 | `oflm dev op-gate [args...]` | Run fixtures to validate missing catalogue points | `utilities/op-gate.py` |
+| `oflm dev run-kernel <cfg> [args...]` | Run a `.cfg` fixture on NPU via `open_kernels/harness/run_kernel` (builds harness if needed; `OFLM_RUN_KERNEL` overrides) | `open_kernels/harness` |
 | `oflm dev clean-specs [--dry-run]` | Remove failed/candidate specs in `open_kernels/recipes/candidates/` | built-in |
 | `oflm dev clean-kernels [--sets]` | Remove kernel export scratch (and optionally `src/xclbins/*`) | `utilities/clean-kernels.py` |
 | `oflm dev env-check` | Show toolchain/environment status | built-in |
 
-Aliases like `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec` are accepted.
+Aliases like `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec`, `run-kernel`/`harness`/`run_kernel` are accepted.
 
 **Not yet wrapped (use directly as needed):** `utilities/gen-kernel-spec.py`, `utilities/register-spec.py`, `utilities/catalogue-add-point.py`, `utilities/audit-kernel-export.py`, `utilities/clean-kernels.py` options beyond basics, and specialized exports in `open_kernels/` (e.g. `export_whisper_kernels.py`, `export_dit_kernels.py`, `compose_elf.py`) and `open_embedding/` tooling. Wiring more of these into `oflm dev` is incremental as the workflow stabilizes.
 
@@ -151,14 +152,24 @@ For “fully supported” claims, follow the project’s production bar (correct
 ## Exporting kernels
 
 ```bash
-# all specs
+# all families/sets (dense specs + BERT embedding sets + diffusion sets, as configured)
 oflm dev export-kernels
 
-# specific spec(s)
-oflm dev export-kernels --specs qwen3-8b
+# specific dense/open_kernels spec(s) only
+oflm dev export-kernels --specs qwen3-8b --skip-bert --skip-diffusion
+
+# skip known-bad specs in a broad run
+oflm dev export-kernels --skip-specs hy-mt1.5-1.8b-i1-gguf,qwen2.5-1.5b-instruct-i1-gguf
+
+# tune parallelism if toolchain/NPU contention causes flaky failures
+oflm dev export-kernels -j 4
 ```
 
-See [BUILD.md](../BUILD.md) for preset-driven exports and packaging (`linux-default`, `linux-package`, etc.). `export-kernels.py` coordinates the kernel families and toolchain/venv requirements it builds.
+Notes:
+- `--specs` filters **open_kernels/dense spec exports**; BERT and diffusion families still run unless `--skip-bert` / `--skip-diffusion` are set (use `--diffusion-only`, `--bert-only`, or `--whisper-only` for focused runs).
+- Whisper kernel export is separate: `oflm dev export-kernels --whisper` (or `--whisper-only`, `--whisper-no-fa`) wraps `open_kernels/export_whisper_kernels.py`.
+- Intermittent failures can happen under heavy parallel build/load; rerunning (or lowering `-j`) often isolates real breakage from contention/flakes.
+- See [BUILD.md](../BUILD.md) for preset-driven exports and packaging (`linux-default`, `linux-package`, etc.). `export-kernels.py` coordinates kernel families and toolchain/venv requirements.
 
 ---
 

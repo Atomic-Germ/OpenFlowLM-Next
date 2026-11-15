@@ -186,17 +186,20 @@ void print_help() {
         << "      e.g. oflm dev probe-sizes --builtin --jobs 4\n"
         << "  export-kernels [args...]   Build/export open kernel xclbin sets\n"
         << "                             (wraps utilities/export-kernels.py)\n"
-        << "      e.g. oflm dev export-kernels --specs qwen3-8b\n"
+        << "      e.g. oflm dev export-kernels --specs qwen3-8b --skip-bert --skip-diffusion\n"
+        << "           (use -j/--jobs to limit parallelism if builds are flaky)\n"
         << "  op-gate [args...]          Validate missing catalogue points by running fixtures\n"
         << "                             (wraps utilities/op-gate.py)\n"
         << "      e.g. oflm dev op-gate --spec qwen3-8b\n"
+        << "  run-kernel <cfg> [args]    Run open_kernels harness (run_kernel) on a .cfg fixture\n"
+        << "                             (builds harness if needed; OFLM_RUN_KERNEL overrides)\n"
         << "  clean-specs [--dry-run]    Remove failed/candidate specs from\n"
         << "                             open_kernels/recipes/candidates/\n"
         << "  clean-kernels [--sets]     Remove kernel export scratch (and optionally exported sets)\n"
         << "  env-check                  Show toolchain/environment status\n"
         << "  help                       Show this help\n\n"
         << "Aliases accepted: --build-new-spec, --probe-sizes, --export-kernels, --op-gate,\n"
-        << "                  --clean-specs, --env-check, new-spec.\n\n"
+        << "                  --clean-specs, --env-check, new-spec, run-kernel, harness, run_kernel.\n\n"
         << "Notes:\n"
         << "  - Geometry is the identity: new sizes of supported families are specs + builds,\n"
         << "    not new kernel code. `build-new-spec` runs SPEC->BUILD->GATE->CATALOGUE->REBUILD->REGISTER.\n"
@@ -268,6 +271,91 @@ int clean_specs(const fs::path& repo, bool dry_run) {
     return 0;
 }
 
+fs::path find_or_build_run_kernel(const fs::path& repo) {
+    if (const char* e = std::getenv("OFLM_RUN_KERNEL")) {
+        fs::path p(e);
+        if (fs::is_regular_file(p)) return fs::weakly_canonical(p);
+    }
+    std::vector<fs::path> candidates = {
+        repo / "build" / "op-gate" / "harness" / "run_kernel",
+        repo / "open_kernels" / "harness" / "out" / "run_kernel",
+        repo / "build" / "dev-harness" / "run_kernel",
+    };
+    // pick newest attn-gate harness if present
+    std::error_code ec;
+    fs::path attn_gate = repo / "build" / "attn-gate";
+    fs::file_time_type best_time{};
+    fs::path best;
+    if (fs::is_directory(attn_gate, ec)) {
+        for (const auto& ent : fs::directory_iterator(attn_gate, ec)) {
+            if (!ent.is_directory(ec)) continue;
+            fs::path rk = ent.path() / "harness" / "run_kernel";
+            if (!fs::is_regular_file(rk, ec)) continue;
+            auto t = fs::last_write_time(rk, ec);
+            if (best.empty() || t > best_time) { best = rk; best_time = t; }
+        }
+    }
+    if (!best.empty()) candidates.insert(candidates.begin(), best);
+    for (const auto& c : candidates) {
+        if (fs::is_regular_file(c, ec)) return fs::weakly_canonical(c, ec);
+    }
+
+    const fs::path harness_src = repo / "open_kernels" / "harness";
+    if (!fs::is_directory(harness_src, ec)) return {};
+    const fs::path build_dir = repo / "build" / "dev-harness";
+    std::cout << "[oflm dev] Building run_kernel harness in " << build_dir.string() << "...\n";
+    fs::create_directories(build_dir, ec);
+    // Configure/build (best-effort). Uses system CMake/XRT; users may need env.sh.
+    {
+        std::vector<std::string> cfg = {"cmake", "-S", harness_src.string(), "-B", build_dir.string(), "-DCMAKE_BUILD_TYPE=Release"};
+        if (spawn(cfg, repo) != 0) return {};
+    }
+    {
+        std::vector<std::string> bld = {"cmake", "--build", build_dir.string(), "-j", "8"};
+        if (spawn(bld, repo) != 0) return {};
+    }
+    fs::path out = build_dir / "run_kernel";
+    if (fs::is_regular_file(out, ec)) return fs::weakly_canonical(out, ec);
+#ifdef _WIN32
+    out = build_dir / "run_kernel.exe";
+    if (fs::is_regular_file(out, ec)) return fs::weakly_canonical(out, ec);
+#endif
+    return {};
+}
+
+int run_kernel_cmd(const fs::path& repo, int argc, char* argv[]) {
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "-h" || a == "--help") {
+            std::cout << "Usage: oflm dev run-kernel <run.cfg> [-- more harness args]\n\n"
+                      << "Runs the open_kernels NPU harness (open_kernels/harness/run_kernel).\n"
+                      << "Builds it if missing (requires CMake and XRT). Set OFLM_RUN_KERNEL to\n"
+                      << "use a specific binary. Relative paths in the cfg resolve against the cfg's\n"
+                      << "directory (same as running run_kernel directly).\n";
+            return 0;
+        }
+    }
+    if (argc <= 0) {
+        std::cerr << "Error: run-kernel requires a cfg path (and any harness args).\n";
+        return 1;
+    }
+    const fs::path rk = find_or_build_run_kernel(repo);
+    if (rk.empty()) {
+        std::cerr << "Error: could not find or build run_kernel harness.\n"
+                  << "Ensure XRT/CMake are available (source utilities/env.sh in source trees)\n"
+                  << "or set OFLM_RUN_KERNEL=/path/to/run_kernel.\n";
+        print_toolchain_hint(repo, true);
+        return 1;
+    }
+    std::vector<std::string> args;
+    args.push_back(rk.string());
+    for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
+    std::cout << "[oflm dev] " << rk.string();
+    for (int i = 0; i < argc; ++i) std::cout << " " << argv[i];
+    std::cout << "\n";
+    return spawn(args, repo);
+}
+
 std::string norm(std::string c) {
     // accept --foo and foo
     while (c.rfind("--", 0) == 0) c = c.substr(2);
@@ -300,6 +388,9 @@ int run(int argc, char* argv[]) {
     }
     if (cmd == "op-gate") {
         return run_script(repo, "utilities/op-gate.py", argc - 1, argv + 1, true);
+    }
+    if (cmd == "run-kernel" || cmd == "run_kernel" || cmd == "harness") {
+        return run_kernel_cmd(repo, argc - 1, argv + 1);
     }
     if (cmd == "env-check" || cmd == "check-env" || cmd == "env") {
         return env_check(repo);
