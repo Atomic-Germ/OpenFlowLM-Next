@@ -34,9 +34,40 @@ def test_shipped_summary_has_all_five_paired_shapes_and_remains_a_draft(report):
     assert diagnosis['firmware_max_proven'] is False
     assert diagnosis['capacity_returned_after_destroy'] is True
     assert diagnosis['leak_after_64_churn_cycles'] is False
-    assert diagnosis['process_exit_leak'] is False
+    assert diagnosis['process_exit_leak'] is None
     assert diagnosis['valid_control_substitute'] is False
+    assert diagnosis['trigger_identified'] is False
+    assert diagnosis['minimal_reproducer'] is None
+    assert diagnosis['exact_trigger_operation'] is None
+    assert diagnosis['recovery_validated'] is False
+    assert diagnosis['pre_reboot_observation']['held'] == [16, 16, 16]
     assert 'create_ctx_resp' in diagnosis['root_cause_experiment']
+
+
+def test_fresh_boot_phase_a_preserves_draft_and_does_not_invent_a_trigger(report):
+    diagnosis = report['validation']['context_diagnosis']
+    phase = diagnosis['phase_a_fresh_boot']
+    assert phase['status'] == 'COMPLETED_NO_DECREASE'
+    assert phase['start_boot_age_s'] <= 900
+    assert phase['initial_capacity_controls'] == [16, 16, 16]
+    assert phase['post_process_capacity'] == [16] * 12
+    assert len(phase['processes']) == 12
+    assert all(p['returncode'] == 0 and p['runtime_verified'] and
+               p['capacity_before'] == p['capacity_after'] == 16 for p in phase['processes'])
+    assert len({p['pid'] for p in phase['processes']}) == 12
+    assert phase['kernel_windows_available'] == 27
+    assert phase['kernel_error_count'] == 0
+    assert phase['all_trajectories_match'] is True and len(phase['generated_ids']) == 16
+    assert len(phase['log_identities']) == 36
+    assert all(len(h) == 64 for h in phase['log_identities'].values())
+    assert phase['post_idle_observation']['capacity'] == [16, 16, 16]
+    assert phase['full_model_acceptance'] is False
+    assert diagnosis['trigger_identified'] is False
+    assert diagnosis['exact_trigger_operation'] is None
+    assert diagnosis['minimal_reproducer'] is None
+    assert diagnosis['recovery_validated'] is False
+    assert report['end_to_end_acceptance'] is False
+    assert report['production_default_dma_batch'] == 1
 
 
 @pytest.mark.parametrize('field,value', [('end_to_end_acceptance', True),

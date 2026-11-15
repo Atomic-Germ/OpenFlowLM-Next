@@ -121,38 +121,36 @@ N=14336/K=5120/T=256 instruction stream exactly matches the pre-edit baseline
 
 ## Full-model blocker and remaining gates
 
-The current retained manifest declares eleven contexts. On this machine each
-artifact creates a context successfully alone; keeping them together succeeds
-for the first eight and fails on the ninth with
-`DRM_IOCTL_AMDXDNA_CREATE_HWCTX ... err=-22: Invalid argument`.
-The fresh current-branch CLI and the retained accepted CLI both fail with the
-**untouched** retained export. The attempted 64-layer, 256-token candidate
-benchmark fails during initialization, before inference. The binaries bind
-the same installed XRT library; the fresh CLI's SHA-256 is
+The retained manifest declares eleven contexts. Historical attempts fail on the
+ninth with `DRM_IOCTL_AMDXDNA_CREATE_HWCTX ... err=-22`, including the unchanged
+control. Other attempts run successfully, so this is not a permanent
+eight-context limit. The standalone CLI's SHA-256 is
 `c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad`.
 
-This establishes a current combined-context blocker in the control, not a
-numerical failure of the candidate. The initial probe failed on the ninth of
-eleven contexts, and
-[`qwen38-context-capacity.md`](qwen38-context-capacity.md) shows why that is
-not a stable limit: within one boot the ceiling measured **16** and later **8**.
-At 16, the seventeenth create fails with firmware status `0x2000003`
-(`AIE2_STATUS_MGMT_ERT_NOAVAIL`), destroy returns capacity and 64 churn cycles
-leak nothing. After a benchmark campaign the ceiling fell to 8 and persisted
-across both runtimes, 200 single create/destroy cycles, child-process exits and
-idle time, while `aie-partitions` still reported no held contexts. The failure
-is firmware-reported unavailability from persistent driver/firmware state, not
-a proven firmware maximum, not a monotonic leak, and not width dependence.
+The [context-capacity report](qwen38-context-capacity.md) separates observations
+from attribution. The historical eight-context observation is separated from
+the successful campaign by an eight-hour gap; no measurement identifies which
+operation changed capacity. Following the operator reboot, Phase A starts at
+174.58 seconds uptime, establishes 16 contexts in three probe-only controls,
+and completes all 12 pinned sequential benchmark processes. Each exits zero
+and is followed by 16 available contexts on verified XRT 2.25. All 16-token
+trajectories match; no parsed amdxdna errors occur in the 27 captured windows.
+Three further post-idle observations also hold 16. The recorder reports
+`COMPLETED_NO_DECREASE`, not a triggering operation or a minimal reproducer.
+Reliable recovery and long-term stability remain unproven. Firmware `NOAVAIL`
+does not identify the exhausted resource or establish a firmware defect.
 
-`context_probe.py --experiment diagnose` retains each arm's create/destroy
-sequence, the libraries actually loaded, kernel-log status codes and the
-`xrt-smi examine --report aie-partitions --verbose` output. No driver reset,
+`context_probe.py --experiment transition` gates execution on a fresh-boot,
+16-context baseline and three no-work probe controls. It brackets one pinned
+foreground action at a time and stops on the first decrease or invalid result.
+Records include live partitions, actual libraries, journal-cursor windows,
+process lifecycles and PM observations. No driver reset,
 context-coalescing change, precision fallback or manifest relabelling is used
 to bypass the gate. The older six-context export is not a valid substitute
 because it omits the paired low-weight companions, and host-attention flags do
 not avoid the eager GEMM context loads.
 
-| Required end-to-end metric/gate | Baseline | Candidate |
+| Required acceptance after runtime stability is established | Baseline | Candidate |
 |---|---|---|
 | Prefill / TTFT, 256 / 512 / 1024 tokens | NOT MEASURED | NOT MEASURED |
 | Decode, short / approximately-4K context | NOT MEASURED | NOT MEASURED |
@@ -161,16 +159,17 @@ not avoid the eager GEMM context loads.
 | 95/96/97, 255/256/257, 511/512/513 model boundaries | NOT MEASURED | NOT MEASURED |
 | Production CLI, server repeated-request isolation | NOT MEASURED | NOT MEASURED |
 
-Native Windows validation is **NOT MEASURED**. The recipe remains unchanged and
-the PR remains draft until the control initializes and all required model,
-performance and integration gates can run. The next action is an administrative
-runtime recovery followed by the unchanged-control smoke test, then this same
-controlled ablation—not PR #4, a full-ELF rewrite, or promotion of an isolated
-speedup.
+The historical 256-token paired benchmark remains in
+`Models/qwen38-27b/pr3-gemm/e2e-256/`; it does not establish runtime stability or
+complete the matrix above. Native Windows validation is **NOT MEASURED**. The
+recipe remains unchanged and the PR stays Draft until runtime stability and
+the complete model, numerical, decode and integration matrix are validated.
+Driver reload/reboot recovery tests require explicit operator authorization.
 
 ## Host validation and reproduction
 
-- Full portable suite: **2,731 passed, 172 skipped**; skips are not passes.
+- Full portable suite after fresh-boot evidence checks: **2,754 passed,
+  172 skipped**; skips are not passes.
 - Latest recovery-recheck focused suite: **25 passed**; the unchanged control
   remains blocked, so no new end-to-end result is claimed.
 - Fresh standalone CLI and Docker harness builds pass.
@@ -204,11 +203,13 @@ portable JSON artifact only and reports local evidence as **NOT CHECKED**.
   companions, inconsistent arithmetic and unvalidated promotion claims.
 - [x] Numerical projection fixtures, resource budgets, exact core/output
   identities, DMA tail ordering and paired measurements are recorded.
-- [x] Diagnose the combined-context failure: firmware `NOAVAIL` on the ninth
-  identical full-width context, reproduced with the accepted control binary.
-- [ ] Recover the runtime with an administrator driver reload/reboot and
-  establish a runnable unchanged control without changing precision or context
-  architecture.
+- [x] Capture context-capacity observations and verify the installed driver
+  source revision without changing production arithmetic or recipes.
+- [x] Run fresh-boot Phase A once with process-by-process capacity observations;
+  all 12 processes complete without a decrease. Preserve the negative result.
+- [ ] Identify a minimal bracketed transition from a fresh-boot baseline,
+  distinguish probe effects and PM/restart/retention paths, and validate a
+  recovery operation with operator authorization.
 - [ ] Run independent per-layer residual gates and the full 64-layer logit/state
   and 16-token greedy continuation comparison.
 - [ ] Run all nine model-boundary cases and prefill-to-decode state checks.

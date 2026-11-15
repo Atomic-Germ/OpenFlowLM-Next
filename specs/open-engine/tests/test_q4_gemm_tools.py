@@ -102,6 +102,7 @@ def test_resource_gate_covers_all_cores_and_enforces_budgets(tmp_path, monkeypat
 
 
 def test_context_probe_returns_recorded_results_and_cli_fails_on_context_error(tmp_path, monkeypatch):
+    pytest.importorskip('fcntl', reason='legacy context driver requires POSIX locking')
     tool = load('context_probe')
     kernels = tmp_path/'kernels'
     kernels.mkdir()
@@ -115,13 +116,11 @@ def test_context_probe_returns_recorded_results_and_cli_fails_on_context_error(t
     result = tool.probe(kernels, harness, tmp_path/'out')
     assert result['combined']['returncode'] == 1
     assert json.loads((tmp_path/'out/result.json').read_text())['individual'][0]['returncode'] == 1
-    script = tmp_path/'probe.py'
-    script.write_text('import sys; sys.path.insert(0, ' + repr(str(ROOT/'utilities/q4-gemm')) + '); '
-                      'import context_probe; context_probe.ROOT = ' + repr(tmp_path) + '; '
-                      'context_probe.subprocess.run = lambda *a, **k: __import__("subprocess").CompletedProcess(a[0], 1, "", "NOAVAIL"); '
-                      'r = context_probe.probe(' + repr(kernels) + ', ' + repr(harness) + ', ' + repr(tmp_path/'cli-out') + '); '
-                      'raise SystemExit(1 if r["combined"]["returncode"] else 0)')
-    assert subprocess.run([str(Path(__import__('sys').executable)), str(script)]).returncode == 1
+    monkeypatch.setattr(tool, 'probe', lambda *a: result)
+    args = ['--kernels', str(kernels), '--harness', str(harness), '--out', str(tmp_path/'cli-out')]
+    assert tool.main(args) == 1
+    result['combined']['returncode'] = result['individual'][0]['returncode'] = 0
+    assert tool.main(args) == 0
 
 
 def test_capacity_reclaim_and_churn_plans_are_explicit():
@@ -157,11 +156,14 @@ def test_kernel_log_status_decoding_and_capacity_classification():
                                           'tag': 'after-churn-12'}]}, 16) is True
     steps17 = tool.capacity_steps(['a'], 17, 'x')
     def arm(held):
+        events = [dict(op='create', ok=True, held=i + 1) for i in range(held)]
+        events.append(dict(op='create', ok=False, held=held))
         return {'experiment': f'capacity-repeat-{held}', 'runtime': 'opt', 'max_held': held,
-                'assets': ['a'], 'steps': steps17, 'kernel': {'lines': []}, 'result': {}}
+                'assets': ['a'], 'steps': steps17, 'kernel': {'lines': []},
+                'result': {'events': events, 'complete': True, 'returncode': 0}}
     consistent = tool.classify([arm(16), arm(16)], boot_age=5000, narrow=None)
     assert consistent['firmware_max_proven'] is False
-    assert 'hwctx_limit=16' in consistent['conclusions'][0]
+    assert 'exactly 16' in consistent['conclusions'][0]
     assert 'not proof' in consistent['conclusions'][0]
     inconsistent = tool.classify([arm(16), arm(8)], boot_age=5000, narrow=None)
     assert 'not established' in inconsistent['conclusions'][0]
