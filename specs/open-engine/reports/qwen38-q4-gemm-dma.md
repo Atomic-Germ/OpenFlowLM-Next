@@ -2,7 +2,13 @@
 
 ## Acceptance state
 
-**DRAFT — implemented and isolated-kernel validated, not production accepted.**
+**DRAFT — correctness accepted, performance not established.**
+The full acceptance matrix has run; see
+[`qwen38-q4-gemm-acceptance.md`](qwen38-q4-gemm-acceptance.md). The candidate is
+byte-exact against the control across all 64 layers and passes every integration
+gate, and prefill improves 2.29% / 1.99% / 2.05% at 256 / 512 / 3000 tokens, but
+the **1024-token prefill gate fails** (−0.60%, 4/5 pairs). Recommendation:
+KEEP DRAFT.
 The production default remains one DMA visit per TaskGroup. No recipe opts in,
 no installed artifact or model registration changes, and no end-to-end speedup
 is claimed. The required full-model gates are blocked by context creation in

@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT: opt-in only; transition trigger and runtime stability unproven; full validation pending",
+  "status": "DRAFT: correctness accepted and byte-exact; performance not established (1024-token prefill gate fails); opt-in only",
   "baseline_commit": "836072db",
   "candidate_commit": null,
   "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
@@ -998,5 +998,82 @@
   },
   "cli_sha256": "c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad",
   "end_to_end_acceptance": false,
-  "production_default_dma_batch": 1
+  "production_default_dma_batch": 1,
+  "acceptance": {
+    "report": "specs/open-engine/reports/qwen38-q4-gemm-acceptance.md",
+    "report_sha256": "08ba15c7b6404983e5d26baf9f0447539af53e3988b1031ceb9ab56a1da73e17",
+    "recommendation": "KEEP DRAFT",
+    "numerical": "PASS: 147 checks, byte-exact logits and state, identical 16-token greedy",
+    "prefill": [
+      {
+        "tokens": 256,
+        "before_ms": 29432,
+        "after_ms": 28759,
+        "change_pct": -2.29,
+        "pairs_faster": "5/5",
+        "verdict": "PASS"
+      },
+      {
+        "tokens": 512,
+        "before_ms": 59365,
+        "after_ms": 58186,
+        "change_pct": -1.99,
+        "pairs_faster": "5/5",
+        "verdict": "PASS"
+      },
+      {
+        "tokens": 1024,
+        "before_ms": 118743,
+        "after_ms": 118029,
+        "change_pct": -0.6,
+        "pairs_faster": "4/5",
+        "verdict": "FAIL"
+      },
+      {
+        "tokens": 3000,
+        "before_ms": 377565,
+        "after_ms": 369280,
+        "change_pct": -2.05,
+        "pairs_faster": "2/2",
+        "verdict": "supporting"
+      }
+    ],
+    "decode": [
+      {
+        "scenario": "256-token prompt",
+        "change_pct": -0.22
+      },
+      {
+        "scenario": "512-token prompt",
+        "change_pct": 0.64
+      },
+      {
+        "scenario": "1024-token prompt",
+        "change_pct": 0.63
+      },
+      {
+        "scenario": "~4K context",
+        "change_pct": -0.4
+      }
+    ],
+    "memory": "flat: RSS change <= 0.00%; driver-owned NPU memory NOT MEASURED",
+    "integration": {
+      "oflm_run": "PASS both arms",
+      "server_aba": "PASS 6/6 applicable",
+      "boundaries": "9/9 PASS exact bytes",
+      "context_reset_endpoint": "N/A on this build"
+    },
+    "context_capacity": "16 before and after campaign; earlier 16-to-8 transition did not reproduce",
+    "arm_separation": "92 kernel files compared; only 20 GEMM files differ",
+    "commits": {
+      "baseline": "836072db",
+      "candidate": "34419a6b",
+      "diagnostics": "b4ee9f22"
+    },
+    "not_measured": [
+      "Windows",
+      "driver-owned NPU memory",
+      "freshly rebuilt tiled exports"
+    ]
+  }
 }
