@@ -52,6 +52,12 @@ EXPECTED = {
     "qwen3vl-4b": "Qwen3-VL-4B-Instruct-NPU2",
     "qwen3vl-8b": "Qwen3-VL-8B-Instruct-NPU2",
     "gemma-4-12b-it-npu2": "gemma-4-12B-it-NPU2",
+    "hy-mt1.5-1.8b-i1-gguf": "HY-MT1.5-1.8B-i1-GGUF-NPU2",
+    "qwen2.5-1.5b-instruct-i1-gguf": "Qwen2.5-1.5B-Instruct-i1-GGUF-NPU2",
+    "qwen3-vl-2b-instruct-i1-gguf": "Qwen3-VL-2B-Instruct-i1-GGUF-NPU2",
+    "llama-3.2-1b-instruct-i1-gguf": "Llama-3.2-1B-Instruct-i1-GGUF-NPU2",
+    "llama-3.2-3b-instruct-i1-gguf": "Llama-3.2-3B-Instruct-i1-GGUF-NPU2",
+    "hy-mt1.5-7b-i1-gguf": "HY-MT1.5-7B-i1-GGUF-NPU2",
 }
 
 

@@ -10,6 +10,7 @@
 #include "model_downloader.hpp"
 #include "add_command.hpp"
 #include "pack_command.hpp"
+#include "dev_command.hpp"
 #include "update.hpp"
 #include "utils/utils.hpp"
 #include "program_args.hpp"
@@ -644,6 +645,12 @@ int main(int argc, char* argv[]) {
     // mean. See pack_command.hpp for why this is a handoff and not a port.
     if (argc > 1 && std::string(argv[1]) == "pack") {
         return pack_command::run(argc - 2, argv + 2);
+    }
+
+    // `dev` hosts developer/toolchain workflows (build-new-spec, clean-specs, ...).
+    // These run in source/build environments and may invoke repo utilities.
+    if (argc > 1 && std::string(argv[1]) == "dev") {
+        return dev_command::run(argc - 2, argv + 2);
     }
     
     // Naked `oflm`: print the quick start, not an error.

@@ -207,6 +207,12 @@ def test_no_shipped_models_hash_moved():
         "qwen3vl-4b.json": "sha256:981fe2a61e060fe6751aa63d616d321f7e3c96794f7e5ddca0c2138ad985084e",
         "qwen3vl-8b.json": "sha256:f34322ee88f75e951520353931ab64a5f119a5af2a632654aef4ad3e2926e66f",
         "gemma-4-12b-it-npu2.json": "sha256:47f6e4ed7aff6b93dc061750f41a8a5f0ae14d6fc4f31c1f716a5f70bc84a0da",
+        "hy-mt1.5-1.8b-i1-gguf.json": "sha256:1135ae360be976c90f32b4f2c6f938c224bca32c6ac066686cfb0703b9684ba3",
+        "qwen2.5-1.5b-instruct-i1-gguf.json": "sha256:85d4ad411ea47e3ea0070f6d2bd8c5509b7eae4b2ce42f2b0c605a35307c5bc1",
+        "qwen3-vl-2b-instruct-i1-gguf.json": "sha256:1d385c4672a2adaffdea4dcaeeaab1de1d08f41a32ddab9e21c78f4b12c47095",
+        "llama-3.2-1b-instruct-i1-gguf.json": "sha256:5722d3b5c07ba6967df81eae214b3927fb185f2464c150117ffcc627d0a06fc0",
+        "llama-3.2-3b-instruct-i1-gguf.json": "sha256:ad241778ac39247a1ec5a8baeb9fef2a3b1f3b2c153aafed78b95d6de385a06a",
+        "hy-mt1.5-7b-i1-gguf.json": "sha256:bbae51b29776085c710f20c2614d12e33a01693e652772d588ab43e08d84fb49",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

@@ -308,8 +308,14 @@ def main() -> int:
                                  harness_binary(work), skip=("attn",))
         except mod_gate.GateError as exc:
             print(exc, file=sys.stderr)
-            print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
-                  "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
+            msg = str(exc)
+            if "has no automated gate" in msg or "NOT_AUTOMATED" in msg:
+                print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
+                      "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
+            else:
+                print("   (fixture/gate failed for this geometry; see the error above. "
+                      "This may be a fixture/layout limit rather than a missing op fixture.)",
+                      file=sys.stderr)
             return 1
 
     # 2. the kernel set compiles at this geometry

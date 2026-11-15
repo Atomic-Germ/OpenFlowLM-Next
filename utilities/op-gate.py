@@ -220,13 +220,24 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
     k = int(kw["K"])
     rs = int(kw.get("rs", 2))
     per_band = rs * k // 256
-    tries = [int(kw.get("per_call", 2)), 1]
+    # The standalone fixture's L1 layout is tighter than the production design's.
+    # Prefer the recipe's per_call, then try other valid divisors (smaller first,
+    # to reduce buffered chunks) so off-grid geometries can still be gated.
+    preferred = int(kw.get("per_call", 2))
+    divisors = [d for d in range(1, per_band + 1) if per_band % d == 0]
+    # try preferred, then 1, then remaining divisors ascending
+    tries = []
+    for v in (preferred, 1):
+        if v in divisors and v not in tries:
+            tries.append(v)
+    for v in divisors:
+        if v not in tries:
+            tries.append(v)
     d = DESIGNS / "gemv_q4"
     cc_before = set(d.glob("*.cc"))
     last: GateError | None = None
-    for pc in dict.fromkeys(tries):
-        if per_band % pc:
-            continue
+    attempted = 0
+    for idx, pc in enumerate(tries):
         n = 8 * 32 * rs                  # one band per core, 8 cores
         tag, build_dir = _gemv_names(k, n, pc)
         e = dict(env, GEMV_N=str(n), GEMV_K=str(k), GEMV_RS=str(rs), GEMV_CORES="8", GEMV_PER_CALL=str(pc))
@@ -237,12 +248,17 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
             print(f"   would build: {' '.join(map(str, cmd_build))}")
             print(f"   would add:  gemv_q4 K={k}")
             return
-        _run(cmd_fixture, env=e, cwd=d, quiet=pc != tries[0])
+        attempted += 1
+        _run(cmd_fixture, env=e, cwd=d, quiet=attempted > 1)
         try:
             _run(cmd_build, env=e)
         except GateError as exc:
             last = exc
-            print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; trying the next")
+            more = any(per_band % t == 0 for t in tries[idx + 1:])
+            if more:
+                print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; trying another per_call")
+            else:
+                print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; no more per_call candidates")
             _cleanup(d, tag, cc_before, keep=dry)     # a failed build leaves TUs behind too
             continue
         _run([harness, d / f"run_{tag}.cfg"], env=e, cwd=d, quiet=True)
@@ -252,7 +268,7 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
         _cleanup(d, tag, cc_before, keep=dry)
         print(f"   PASS gemv_q4 K={k} (rs={rs}, per_call={pc})")
         return
-    raise last or GateError(f"gemv_q4: no per_call in {tries} divides {per_band} chunks per band at K={k}")
+    raise last or GateError(f"gemv_q4: no suitable per_call found for K={k} (per_band={per_band})")
 
 
 def gate_ln(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
