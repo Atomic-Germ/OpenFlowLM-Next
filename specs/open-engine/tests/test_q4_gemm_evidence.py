@@ -25,6 +25,12 @@ def test_shipped_summary_has_all_five_paired_shapes_and_remains_a_draft(report):
     assert all(c['summary']['paired_wins'] == report['methodology']['pairs'] for c in report['cases'])
     assert report['status'].startswith('DRAFT')
     assert report['validation']['full_model'].startswith('NOT MEASURED')
+    diagnosis = report['validation']['context_diagnosis']
+    assert diagnosis['firmware_status'] == '0x2000003'
+    assert diagnosis['firmware_status_name'] == 'AIE2_STATUS_MGMT_ERT_NOAVAIL'
+    assert diagnosis['accepted_binary_reproduced'] is True
+    assert diagnosis['valid_control_substitute'] is False
+    assert diagnosis['administrative_recovery'].startswith('NOT RUN')
 
 
 @pytest.mark.parametrize('field,value', [('end_to_end_acceptance', True),

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 
 import numpy as np
 import pytest
@@ -98,3 +99,26 @@ def test_resource_gate_covers_all_cores_and_enforces_budgets(tmp_path, monkeypat
     else:
         with pytest.raises(ValueError, match='memory budget'):
             tool.resources(tmp_path)
+
+
+def test_context_probe_returns_recorded_results_and_cli_fails_on_context_error(tmp_path, monkeypatch):
+    tool = load('context_probe')
+    kernels = tmp_path/'kernels'
+    kernels.mkdir()
+    (kernels/'manifest.json').write_text(json.dumps({'contexts': {'one': 'one.xclbin'}}))
+    (kernels/'one.xclbin').write_bytes(b'xclbin')
+    harness = tmp_path/'harness'
+    harness.write_bytes(b'harness')
+    monkeypatch.setattr(tool, 'ROOT', tmp_path)
+    monkeypatch.setattr(tool.subprocess, 'run', lambda *args, **kwargs: subprocess.CompletedProcess(
+        args[0], 1, stdout='device\n', stderr='NOAVAIL'))
+    result = tool.probe(kernels, harness, tmp_path/'out')
+    assert result['combined']['returncode'] == 1
+    assert json.loads((tmp_path/'out/result.json').read_text())['individual'][0]['returncode'] == 1
+    script = tmp_path/'probe.py'
+    script.write_text('import sys; sys.path.insert(0, ' + repr(str(ROOT/'utilities/q4-gemm')) + '); '
+                      'import context_probe; context_probe.ROOT = ' + repr(tmp_path) + '; '
+                      'context_probe.subprocess.run = lambda *a, **k: __import__("subprocess").CompletedProcess(a[0], 1, "", "NOAVAIL"); '
+                      'r = context_probe.probe(' + repr(kernels) + ', ' + repr(harness) + ', ' + repr(tmp_path/'cli-out') + '); '
+                      'raise SystemExit(1 if r["combined"]["returncode"] else 0)')
+    assert subprocess.run([str(Path(__import__('sys').executable)), str(script)]).returncode == 1

@@ -132,10 +132,32 @@ the same installed XRT library; the fresh CLI's SHA-256 is
 `c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad`.
 
 This establishes a current combined-context blocker in the control, not a
-numerical failure of the candidate or a diagnosis of the driver's root cause.
+numerical failure of the candidate. Repeating one unchanged full-width xclbin
+(`ln` or `gemm_n34816_k5120_low`) also succeeds eight times and fails on the
+ninth. The kernel log reports firmware status `0x2000003`
+(`AIE2_STATUS_MGMT_ERT_NOAVAIL`) for the create-context command. All retained
+artifacts request eight columns at start column zero, so they share one
+full-device partition; the Strix driver's advertised 16-context telemetry
+limit is not the limiting resource here. The accepted PR #2 binary, with the
+same build ID and installed XRT library, now fails in the same way. This is a
+persistent runtime/firmware capacity issue, not a GEMM-specific incompatibility.
+
 `context_probe.py` retains individual/combined commands, logs and artifact
 hashes. No driver reset, context-coalescing change, precision fallback or
-manifest relabelling is used to bypass the gate.
+manifest relabelling is used to bypass the gate. No NPU client is active, but
+passwordless administrative access is unavailable, so a module reload or PCI
+reset was not attempted. A valid recovery requires an administrator to reload
+the NPU driver or reboot, followed by a fresh unchanged-control smoke test;
+if the nine-context control still fails, the runtime/firmware must be fixed or
+the model runtime must be redesigned in a separate PR. The older six-context
+export is not a valid substitute because it omits the paired low-weight
+companions, and host-attention flags do not avoid the eager GEMM context loads.
+
+A subsequent user-reported availability check was rerun against the unchanged
+export. The combined probe still fails on the ninth context and the four-layer
+smoke still exits before inference with the same firmware `NOAVAIL` status.
+The probe now returns its recorded result and exits nonzero on any failed
+context, preventing a recorded failure from being mistaken for recovery.
 
 Review probes reproduce the same ninth-context failure for the untouched
 export and both staged batch-1/batch-4 arms; all eleven contexts pass when
@@ -156,13 +178,16 @@ retained in `context-probe-review*` and `context-review.log`.
 
 Native Windows validation is **NOT MEASURED**. The recipe remains unchanged and
 the PR remains draft until the control initializes and all required model,
-performance and integration gates can run. The next action is to diagnose the
-combined-context failure independently, then rerun this same controlled
-ablation—not to begin PR #4 or promote an isolated speedup.
+performance and integration gates can run. The next action is an administrative
+runtime recovery followed by the unchanged-control smoke test, then this same
+controlled ablation—not PR #4, a full-ELF rewrite, or promotion of an isolated
+speedup.
 
 ## Host validation and reproduction
 
 - Full portable suite: **2,731 passed, 172 skipped**; skips are not passes.
+- Latest recovery-recheck focused suite: **25 passed**; the unchanged control
+  remains blocked, so no new end-to-end result is claimed.
 - Fresh standalone CLI and Docker harness builds pass.
 - Docker standalone CTest: **5/5 passed**.
 - Direct settings scan/regeneration matches the committed registry.
@@ -194,8 +219,11 @@ portable JSON artifact only and reports local evidence as **NOT CHECKED**.
   companions, inconsistent arithmetic and unvalidated promotion claims.
 - [x] Numerical projection fixtures, resource budgets, exact core/output
   identities, DMA tail ordering and paired measurements are recorded.
-- [ ] Diagnose the combined-context failure and establish a runnable unchanged
-  control without silently changing the precision or context architecture.
+- [x] Diagnose the combined-context failure: firmware `NOAVAIL` on the ninth
+  identical full-width context, reproduced with the accepted control binary.
+- [ ] Recover the runtime with an administrator driver reload/reboot and
+  establish a runnable unchanged control without changing precision or context
+  architecture.
 - [ ] Run independent per-layer residual gates and the full 64-layer logit/state
   and 16-token greedy continuation comparison.
 - [ ] Run all nine model-boundary cases and prefill-to-decode state checks.

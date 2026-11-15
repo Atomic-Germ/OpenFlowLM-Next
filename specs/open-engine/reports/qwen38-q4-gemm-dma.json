@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT: opt-in only; full-model acceptance blocked",
+  "status": "DRAFT: opt-in only; full-model acceptance blocked by firmware NOAVAIL on ninth shared context",
   "baseline_commit": "836072db",
   "candidate_commit": null,
   "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
@@ -667,7 +667,18 @@
     "ctest_passed": 5,
     "settings_direct": "PASS",
     "settings_merge_wrapper": "PASS: clean committed branch merged with actual upstream/main; temporary per-command fetch URL override",
-    "full_model": "NOT MEASURED: retained control also fails creating its ninth simultaneous context",
+    "full_model": "NOT MEASURED: retained control and accepted PR2 binary fail creating the ninth simultaneous full-width context; firmware status 0x2000003 (AIE2_STATUS_MGMT_ERT_NOAVAIL)",
+    "context_diagnosis": {
+      "repeated_artifact_probe": "ln and gemm_n34816_k5120_low each create eight contexts and fail on the ninth",
+      "partition": "all retained contexts request 8 columns at start column 0",
+      "firmware_status": "0x2000003",
+      "firmware_status_name": "AIE2_STATUS_MGMT_ERT_NOAVAIL",
+      "accepted_binary_reproduced": true,
+      "latest_recheck": "unchanged combined probe and four-layer smoke still fail with NOAVAIL; probe now exits nonzero on failure",
+      "npu_clients_observed": false,
+      "administrative_recovery": "NOT RUN: passwordless sudo unavailable; no module reload or PCI reset attempted",
+      "valid_control_substitute": false
+    },
     "context_probe": "Models/qwen38-27b/pr3-gemm/context-probe-recorded/result.json",
     "evidence_audit": {
       "summary": "PASS",

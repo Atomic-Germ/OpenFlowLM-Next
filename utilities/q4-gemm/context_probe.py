@@ -10,7 +10,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def probe(kernels: Path, harness: Path, out: Path) -> None:
+def probe(kernels: Path, harness: Path, out: Path) -> dict:
     import fcntl
     manifest = kernels / 'manifest.json'
     contexts = json.loads(manifest.read_text())['contexts']
@@ -42,6 +42,7 @@ def probe(kernels: Path, harness: Path, out: Path) -> None:
             else:
                 result['individual'].append(row)
             (out / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+    return result
 
 
 if __name__ == '__main__':
@@ -49,4 +50,8 @@ if __name__ == '__main__':
     for name in ('kernels', 'harness', 'out'):
         parser.add_argument('--' + name, type=lambda v: Path(v).resolve(), required=True)
     args = parser.parse_args()
-    probe(args.kernels, args.harness, args.out)
+    result = probe(args.kernels, args.harness, args.out)
+    failed = [row['contexts'] for row in result['individual'] + [result['combined']]
+              if row['returncode'] != 0]
+    if failed:
+        raise SystemExit('context creation failed for: ' + ', '.join('/'.join(row) for row in failed))
