@@ -96,6 +96,47 @@ def test_same_binary_benchmark_changes_only_the_policy(tmp_path, monkeypatch):
                for row in result['rows'])
 
 
+def test_kernel_ablation_changes_only_kernel_path_not_policy(tmp_path, monkeypatch):
+    pytest.importorskip('fcntl', reason='hardware driver uses POSIX locking')
+    a = SimpleNamespace(tokens=2, generate=2, reps=5, before=tmp_path/'cli',
+                        after=tmp_path/'cli', before_commit='same', after_commit='same',
+                        model=tmp_path, kernels=tmp_path/'unused',
+                        before_kernels=tmp_path/'control', after_kernels=tmp_path/'candidate')
+    monkeypatch.setattr(M.O, 'LOCK', tmp_path/'lock')
+    monkeypatch.setattr(M.O, 'fixture', lambda *args, **kwargs: [1, 2])
+    monkeypatch.setattr(M.P, 'provenance', lambda *args: {})
+    monkeypatch.setattr(M.P, 'conditions', lambda: {})
+    monkeypatch.setattr(M, 'source_provenance', lambda *args: {})
+    monkeypatch.setattr(M, 'platform', lambda: dict(mode='default'))
+    calls = []
+    def invoke(command, *, env, **kwargs):
+        calls.append((command, env))
+        assert env['OFLM_OPEN_OMP_PASSIVE'] == '1'
+        kernel = command[command.index('--kernels') + 1]
+        Path(command[4]).write_text('1000')
+        ms = 100 if kernel == str(a.before_kernels) else 95
+        return subprocess.CompletedProcess(command, 0, stdout=(
+            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr='')
+    monkeypatch.setattr(M.subprocess, 'run', invoke)
+    result = M.benchmark(a, tmp_path)
+    assert result['verdict'] == 'PASS'
+    assert result['check'] == 'kernel-benchmark'
+    assert len(calls) == 12
+    for before, after in zip(calls[::2], calls[1::2]):
+        assert before[1] == after[1]
+        left, right = list(before[0][5:]), list(after[0][5:])
+        index = left.index('--kernels') + 1
+        assert {left[index], right[index]} == {str(a.before_kernels), str(a.after_kernels)}
+        left[index] = right[index]
+        assert left == right
+
+
+def test_partial_kernel_ablation_is_refused():
+    a = SimpleNamespace(before_kernels=Path('control'), after_kernels=None)
+    with pytest.raises(ValueError, match='both kernel directories'):
+        M.kernel_comparison(a)
+
+
 def test_boundary_state_coverage_includes_every_layer(monkeypatch):
     monkeypatch.setattr(M.O, '_LAYER_KINDS', ['linear'] * 3 + ['full'] + ['linear'] * 3 + ['full'])
     slices = M.boundary_slices(8, 273)

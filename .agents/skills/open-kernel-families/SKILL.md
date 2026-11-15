@@ -116,6 +116,31 @@ Container facts that matter:
   can name the core that overflowed.
 - The GGUF f32 twin (`spec.quant == "q4_1_f32"`) is the GGUF-direct build.
 
+### Prefill GEMM DMA experiments
+
+`designs/gemm_q4_prefill` has a build-time `GQP_DMA_BATCH` (1, 2 or 4;
+default 1). It groups consecutive `(row_group, token_tile)` DMA visits,
+without changing core arithmetic, FIFO depths or the stream ABI. The shim
+allocator must still accept every shape: the planner's bound is not proof of
+the 16-BD-per-shim limit. Do not submit the whole projection in one TaskGroup.
+The exporter clears ambient values so an experiment cannot contaminate a
+recipe's cache key. A promoted choice must be explicit in the recipe's build
+environment, on both high and low weight companions.
+
+`utilities/q4-gemm/build.py` snapshots sources and checks all 32 cores;
+`compare.py` runs five alternating pairs, excludes warm-up dispatches and
+requires complete, finite, byte-identical outputs. Its optional reference
+uses the existing kernel gate. `verify.py --local-evidence` checks the recorded
+summary against hashes, raw timings, outputs and compiler/core evidence;
+without that option it explicitly reports local evidence as not checked.
+`context_probe.py` isolates context creation from inference, both singly and
+with the whole manifest resident. Private replay builders must copy the sibling
+`dma_schedule.py` with the design. The paired model/state driver accepts
+`--before-kernels` / `--after-kernels`, holding the OpenMP policy constant.
+Keep a retained export's DeltaNet mapping when swapping only its GEMMs;
+regenerating unrelated layer kernels changes the experiment. See
+`utilities/q4-gemm/README.md` for the build and acceptance workflow.
+
 ## Qwen3.6-MoE (`recipes/qwen36moe.py`)
 
 The linear block route's `key_head_mapping` is part of the export contract.
