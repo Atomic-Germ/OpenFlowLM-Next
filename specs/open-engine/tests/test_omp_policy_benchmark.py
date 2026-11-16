@@ -1,7 +1,9 @@
 """Acceptance gates for the matched OpenMP measurement driver."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -80,19 +82,22 @@ def test_same_binary_benchmark_changes_only_the_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(M, 'source_provenance', lambda *args: {})
     monkeypatch.setattr(M, 'platform', lambda: dict(mode='default'))
     policies = []
-    def invoke(command, *, env, **kwargs):
+    def invoke(command, env, timeout):
         policy = env['OFLM_OPEN_OMP_PASSIVE']
         policies.append(policy)
         assert 'OMP_WAIT_POLICY' not in env
         Path(command[4]).write_text('1000')
         ms = 100 if policy == '0' else 85
         return subprocess.CompletedProcess(command, 0, stdout=(
-            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr='')
-    monkeypatch.setattr(M.subprocess, 'run', invoke)
+            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr=''), \
+            ['/usr/lib/libxrt_coreutil.so.2.25.00']
+    monkeypatch.setattr(M, 'run_sampled', invoke)
     result = M.benchmark(a, tmp_path)
     assert result['verdict'] == 'PASS'
     assert policies == ['1', '0', '0', '1', '1', '0', '0', '1', '1', '0', '0', '1']
     assert all(row['omp_passive'] == ('0' if row['arm'] == 'before' else '1')
+               for row in result['rows'])
+    assert all(row['runtime_libraries'] == ['/usr/lib/libxrt_coreutil.so.2.25.00']
                for row in result['rows'])
 
 
@@ -109,15 +114,15 @@ def test_kernel_ablation_changes_only_kernel_path_not_policy(tmp_path, monkeypat
     monkeypatch.setattr(M, 'source_provenance', lambda *args: {})
     monkeypatch.setattr(M, 'platform', lambda: dict(mode='default'))
     calls = []
-    def invoke(command, *, env, **kwargs):
+    def invoke(command, env, timeout):
         calls.append((command, env))
         assert env['OFLM_OPEN_OMP_PASSIVE'] == '1'
         kernel = command[command.index('--kernels') + 1]
         Path(command[4]).write_text('1000')
         ms = 100 if kernel == str(a.before_kernels) else 95
         return subprocess.CompletedProcess(command, 0, stdout=(
-            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr='')
-    monkeypatch.setattr(M.subprocess, 'run', invoke)
+            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr=''), []
+    monkeypatch.setattr(M, 'run_sampled', invoke)
     result = M.benchmark(a, tmp_path)
     assert result['verdict'] == 'PASS'
     assert result['check'] == 'kernel-benchmark'
@@ -135,6 +140,29 @@ def test_partial_kernel_ablation_is_refused():
     a = SimpleNamespace(before_kernels=Path('control'), after_kernels=None)
     with pytest.raises(ValueError, match='both kernel directories'):
         M.kernel_comparison(a)
+
+
+def test_runtime_paths_read_resolved_libraries_not_sonames():
+    maps = '\n'.join([
+        '7f00-7f01 r-xp 0 08:02 1 /usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00',
+        '7f02-7f03 r-xp 0 08:02 1 /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0',
+        '7f04-7f05 r-xp 0 08:02 1 /opt/xilinx/xrt/python/pyxrt.cpython-314-x86_64-linux-gnu.so',
+        '7f06-7f07 r-xp 0 08:02 1 /usr/lib/x86_64-linux-gnu/libstdc++.so.6',
+    ])
+    assert M.runtime_paths(maps) == [
+        '/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0',
+        '/opt/xilinx/xrt/python/pyxrt.cpython-314-x86_64-linux-gnu.so',
+        '/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00',
+    ]
+
+
+def test_run_sampled_records_child_libraries_and_exit(tmp_path):
+    pytest.importorskip('fcntl', reason='sampler depends on /proc mappings')
+    code = 'import time; time.sleep(0.3)'
+    command = [sys.executable, '-c', code]
+    result, libraries = M.run_sampled(command, dict(os.environ), 10)
+    assert result.returncode == 0
+    assert isinstance(libraries, list)
 
 
 def test_boundary_state_coverage_includes_every_layer(monkeypatch):

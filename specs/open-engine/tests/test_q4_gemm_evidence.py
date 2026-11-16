@@ -28,8 +28,24 @@ def test_shipped_summary_has_paired_shapes_without_claiming_complete_acceptance(
     assert all(c['summary']['paired_wins'] == report['methodology']['pairs'] for c in report['cases'])
     assert report['status'].startswith('DRAFT')
     assert report['validation']['full_model'].startswith('PASS: 64-layer captured logits/state')
-    assert report['acceptance']['integration']['server_aba'].startswith('NOT MEASURED for candidate')
-    assert report['acceptance']['runtime_verification'].startswith('UNVERIFIED')
+    assert report['acceptance']['integration']['server_aba'].startswith('PASS for both private arms')
+    assert report['acceptance']['runtime_verification'].startswith('Benchmark: XRT 2.26.0 both arms')
+    server = report['acceptance']['server_candidate']
+    assert server['verdict'] == 'PASS' and server['runtime_comparable'] is True
+    assert server['same_answer_between_arms'] is True and server['arm_separation']['manifest_same'] is True
+    assert len(server['arm_separation']['changed']) == 10
+    for arm in ('before', 'after'):
+        assert server['arms'][arm]['graded_pass'] == 11
+        assert server['arms'][arm]['gemm_programs'] == 10
+        assert all('.2.25.' in p for p in server['arms'][arm]['libraries'])
+    provenance = report['acceptance']['runtime_provenance']
+    assert provenance['benchmark_comparable'] is True
+    assert provenance['benchmark_runtime'] == 'XRT 2.26.0 at /opt/xilinx/xrt/lib for both arms'
+    assert provenance['server'] == 'XRT 2.25.00 distro libraries for both arms'
+    scope = report['acceptance']['scope_review']
+    assert scope['option'].startswith('B:') and scope['pr2_tip_ancestor_of_upstream'] is False
+    assert scope['rebase_performed'] is False and scope['review_target'] == '836072db'
+    assert scope['commits_only_in_branch'] == 50 and scope['pr3_commits'] == 6
     diagnosis = report['validation']['context_diagnosis']
     assert diagnosis['firmware_status'] == '0x2000003'
     assert diagnosis['firmware_status_name'] == 'AIE2_STATUS_MGMT_ERT_NOAVAIL'

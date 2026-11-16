@@ -17,6 +17,7 @@ import re
 import statistics
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layer_profile as P
@@ -24,10 +25,44 @@ import oflm_drive as D
 import oracle as O
 
 
+# Loader mappings for the timed process. `libxrt_coreutil.so.2` is an unversioned
+# SONAME and the xdna plugin is opened at run time, so only /proc/<pid>/maps says
+# which XRT a run really used. Sampling one small file at 10 Hz is far cheaper
+# than the 0.1-2 s dispatches it observes and adds no scheduling to the engine.
+_RUNTIME = re.compile(r'\S*libxrt_[A-Za-z0-9_.+-]*\.so\S*|\S*pyxrt\S*\.so\S*')
+
+
 def clean_env():
     env = clean_env_from(os.environ)
     env.update(OFLM_OPEN_PREFILL_PRECISION='paired', OFLM_OPEN_LAYER_MAJOR='0')
     return env
+
+
+def runtime_paths(maps_text):
+    found = set()
+    for line in maps_text.splitlines():
+        match = re.search(r'(\S+)\s*$', line)
+        if match and _RUNTIME.fullmatch(match.group(1)):
+            found.add(match.group(1))
+    return sorted(found)
+
+
+def run_sampled(command, env, timeout):
+    """`subprocess.run`, plus the runtime mappings the child actually loaded."""
+    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    seen, deadline = set(), time.monotonic() + timeout
+    while proc.poll() is None:
+        if time.monotonic() >= deadline:
+            proc.kill()
+            break
+        try:
+            seen.update(runtime_paths(Path(f'/proc/{proc.pid}/maps').read_text()))
+        except OSError:
+            pass
+        time.sleep(0.1)
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr), sorted(seen)
 
 
 def kernel_comparison(a):
@@ -132,8 +167,8 @@ def benchmark(a, out):
                        '--ids-file', str(ids_file), '--max-ctx', '4096', '--layers', '64',
                        '--max-tokens', str(a.generate), '--gemm-block', '--block-major', '--pmode', 'none', '--quiet']
                 before = P.conditions()
-                r = subprocess.run(['/usr/bin/time', '-f', '%M', '-o', str(out / f'{tag}.rss'), *cmd],
-                                   env=env, capture_output=True, text=True, timeout=1800)
+                r, libraries = run_sampled(
+                    ['/usr/bin/time', '-f', '%M', '-o', str(out / f'{tag}.rss'), *cmd], env, 1800)
                 log = r.stdout + '\n' + r.stderr
                 (out / f'{tag}.log').write_text(log)
                 if r.returncode:
@@ -148,6 +183,7 @@ def benchmark(a, out):
                     raise ValueError('NPU power mode changed during comparison')
                 row = dict(rep=rep, warmup=rep < 0, arm=arm, command=cmd,
                            omp_passive=env['OFLM_OPEN_OMP_PASSIVE'],
+                           runtime_libraries=libraries,
                            prefill_ms=float(prefill[1]), decode_ms=float(decode[1]), ids=tokens,
                            rss_kib=int((out / f'{tag}.rss').read_text()),
                            conditions_before=before, conditions_after=P.conditions(), power_after=power)

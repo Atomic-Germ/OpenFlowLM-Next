@@ -112,6 +112,36 @@ This probes each context alone and all of them together, with no inference.
 Its result is diagnostic evidence, not a numerical pass. Do not bypass paired
 precision or silently coalesce contexts to make a performance gate run.
 
+## Candidate server and runtime provenance
+
+The Phase 27 server result used the production kernel directory, so it does
+not validate a kernel arm. This runs the real `oflm serve` once per arm with
+`OFLM_OPEN_KERNELS_DIR` set and samples `/proc/<pid>/maps` while it is alive:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
+  utilities/prefill-block/server_candidate_check.py \
+  --before-kernels "$ROOT/model-batch1" --after-kernels "$ROOT/model-batch4" \
+  --out "$ROOT/accept-server-runtime"
+```
+
+It records the engine's `open_qwen36: kernels <dir> (<how>)` line, per-arm
+manifest/GEMM hashes, A→B→A answers, a fresh-process B reference and resolved
+XRT paths and hashes. A shell-only `OFLM_OPEN_KERNELS_DIR` is not enough for
+the older helpers: `oflm_drive.env()` overwrites it.
+
+To see which runtime any command loads, without touching a timed window:
+
+```bash
+ironvenv/bin/python utilities/prefill-block/runtime_provenance.py \
+  --out "$ROOT/runtime-check" -- <command...>
+```
+
+`utilities/env.sh` puts `/opt/xilinx/xrt/lib` first, so the tree shell loads XRT
+2.26 even though `oflm` links the unversioned soname. The benchmark driver now
+stores `runtime_libraries` per process; a run that used a different runtime is
+reported as such, never relabelled.
+
 ## Evidence and review checks
 
 ```bash
