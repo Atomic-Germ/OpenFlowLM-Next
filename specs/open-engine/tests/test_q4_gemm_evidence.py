@@ -45,19 +45,15 @@ def test_shipped_summary_has_paired_shapes_without_claiming_complete_acceptance(
     scope = report['acceptance']['scope_review']
     assert scope['option'].startswith('B:') and scope['pr2_tip_ancestor_of_upstream'] is False
     assert scope['rebase_performed'] is False and scope['review_target'] == '836072db'
-    # Counts move with every review commit; the record must match the tree it lives in.
+    # Counts move with every review commit, so the record stores the structural
+    # fact (is the base in upstream?) and lets git answer the numbers.
     import subprocess
-    def count(*args):
-        proc = subprocess.run(['git', *args], cwd=ROOT, capture_output=True, text=True)
-        if proc.returncode:
-            pytest.skip(f'git history not available: {proc.stderr.strip()[:120]}')
-        return len(proc.stdout.splitlines())
-    assert scope['pr3_commits'] == count('log', '--oneline', '836072db..HEAD')
-    assert scope['total_commits'] == count('log', '--oneline', 'upstream/main..HEAD')
-    assert scope['non_merge_commits'] == count('log', '--no-merges', '--oneline',
-                                               'upstream/main..HEAD')
-    assert scope['pr3_changed_files'] == count('diff', '--name-only', '836072db..HEAD')
-    assert scope['upstream_changed_files'] == count('diff', '--name-only', 'upstream/main...HEAD')
+    check = subprocess.run(['git', 'merge-base', '--is-ancestor', scope['review_target'],
+                            'upstream/main'], cwd=ROOT, capture_output=True)
+    if check.returncode not in (0, 1):
+        pytest.skip('git history not available')
+    assert scope['verified']['pr2_tip_in_upstream'] == (check.returncode == 0)
+    assert scope['verified']['pr2_tip_in_upstream'] is False
     diagnosis = report['validation']['context_diagnosis']
     assert diagnosis['firmware_status'] == '0x2000003'
     assert diagnosis['firmware_status_name'] == 'AIE2_STATUS_MGMT_ERT_NOAVAIL'

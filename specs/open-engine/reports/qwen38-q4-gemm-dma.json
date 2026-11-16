@@ -1212,17 +1212,16 @@
     "scope_review": {
       "intended_base": "836072db",
       "upstream_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
-      "pr3_changed_files": 34,
-      "upstream_changed_files": 68,
       "prerequisites": "Earlier OpenMP startup-policy and manifest-mapping work must land first or be an explicit stacked base",
       "option": "B: stacked; PR #2 not in upstream main",
       "pr2_tip_ancestor_of_upstream": false,
       "merge_base_check": "git merge-base --is-ancestor 836072db upstream/main exits 1",
       "review_target": "836072db",
       "rebase_performed": false,
-      "non_merge_commits": 23,
-      "pr3_commits": 8,
-      "total_commits": 52
+      "verified": {
+        "pr2_tip_in_upstream": false,
+        "counted_by": "git rev-list/diff at review time; counts move with each review commit"
+      }
     },
     "review_checks": {
       "pytest_passed": 2757,

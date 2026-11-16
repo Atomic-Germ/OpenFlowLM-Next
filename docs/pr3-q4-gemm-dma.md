@@ -9,9 +9,9 @@
 | PR #3 base | `836072db` (`perf/npu-prefill-scheduling` tip) |
 | Upstream main at review | `9b1409d3` |
 | `836072db` ancestor of upstream? | **no** (merge-base check exits 1) |
-| PR #3 commits | 6 (`34419a6b` … `0f15a67a`, plus review commits) |
-| Diff vs base | 31 files |
-| Diff vs upstream main | 65 files, because it contains PR #2 and its merges |
+| PR #3 commits | `34419a6b` … `0f15a67a`, plus review commits |
+| Diff vs base | the GEMM change plus its tests, tools, evidence and PR description |
+| Diff vs upstream main | much larger, because it also contains PR #2 and its merges |
 
 Land PR #2 first and re-target, or review this PR against `836072db`. No rebase
 or history rewrite was performed.
