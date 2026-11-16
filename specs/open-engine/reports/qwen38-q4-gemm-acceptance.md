@@ -22,13 +22,13 @@ model precision, or alters the default DMA setting.
 - `git merge-base --is-ancestor 836072db upstream/main` exits **1**, and neither
   `4573739c` (OpenMP isolation), `1448fc65` (DeltaNet head mapping),
   `78c41524`/`9f8415c9` nor `836072db` is an ancestor of upstream main.
-- `upstream/main..HEAD` is **50 commits** (21 non-merge); `836072db..HEAD` is
-  **6 commits**, all PR #3. The extra commits are PR #2 (`004821d0`, `8ba65ae9`,
-  `78c41524`, `9f8415c9`, `4573739c`, `1448fc65`, `836072db`) plus merges of
-  upstream main and earlier PR #1 profiler work.
-- Diff against the intended base: **31 files**. Diff against upstream main:
-  **65 files** (5,479 insertions, 52 deletions), because it includes PR #2 and
-  its main merges.
+- `836072db..HEAD` contains only PR #3 commits (the DMA design, diagnostics,
+  evidence and review). `upstream/main..HEAD` also contains PR #2
+  (`004821d0`, `8ba65ae9`, `78c41524`, `9f8415c9`, `4573739c`, `1448fc65`,
+  `836072db`), merges of upstream main and earlier PR #1 profiler work.
+- The upstream diff is therefore much larger than the PR #3 diff. The checked-in
+  JSON records the exact commit and file counts; `git diff --shortstat` against
+  each base is authoritative and moves with each review commit.
 
 Review against `836072db` (Option B), or land PR #2 first and re-target. A
 rebase onto upstream main was **not** performed: it would either absorb PR #2
