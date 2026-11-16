@@ -142,7 +142,8 @@ capacity probes precede the first benchmark. The full 64-layer CLI then runs
 | 10 | before | 18445 | 0 | 16 → 16 |
 | 11 | after | 18635 | 0 | 16 → 16 |
 
-All 12 processes have verified XRT 2.25 mappings and identical 16-token greedy
+All 12 processes have verified XRT 2.25 mappings in the probe worker and
+identical 16-token greedy
 trajectories. This does **not** substitute for residual, full-state or independent
 oracle gates. All 27 cursor-bounded kernel-log windows (15 probes and 12 actions)
 are available, with zero parsed amdxdna errors. Each probe retains its live

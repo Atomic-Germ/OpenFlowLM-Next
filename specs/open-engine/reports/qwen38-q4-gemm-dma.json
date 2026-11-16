@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT: opt-in performance PASS; upstream scope and integration/runtime evidence conditional",
+  "status": "DRAFT: opt-in performance PASS (XRT 2.26, 14-pair); candidate server PASS (XRT 2.25); stacked on PR #2",
   "baseline_commit": "836072db",
   "candidate_commit": null,
   "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
@@ -1001,7 +1001,7 @@
   "production_default_dma_batch": 1,
   "acceptance": {
     "report": "specs/open-engine/reports/qwen38-q4-gemm-acceptance.md",
-    "report_sha256": "22c9b19286d8029db3d0b286e2d53deba94fc2a3c7a9fd531379f4a70f429c4b",
+    "report_sha256": "1c20d6e4b70cb630ac08732bbbccc25be3e1859b22bfdd3bc4b0b06a7d563c16",
     "recommendation": "CONDITIONAL opt-in merge: scope prerequisite work and resolve or explicitly accept candidate-server/runtime evidence gaps; default unchanged",
     "numerical": "PASS: 147 checks, byte-exact logits and state, identical 16-token greedy",
     "prefill": [
@@ -1075,7 +1075,7 @@
     "memory": "Measured process RSS within +3% gate; confirmation +0.001%; driver-owned NPU memory NOT MEASURED",
     "integration": {
       "oflm_run": "PASS both arms",
-      "server_aba": "NOT MEASURED for candidate: retained production kernels passed 6/6 applicable checks",
+      "server_aba": "PASS for both private arms on XRT 2.25 with arm selection and live maps",
       "boundaries": "9/9 PASS exact bytes",
       "context_reset_endpoint": "N/A on this build"
     },
@@ -1087,18 +1087,19 @@
       "diagnostics": "b4ee9f22"
     },
     "not_measured": [
-      "candidate server isolation",
       "HTTP streaming TTFT",
       "independent per-layer residual oracle",
       "Windows",
       "driver-owned NPU memory",
-      "freshly rebuilt tiled exports"
+      "freshly rebuilt tiled exports",
+      "14-pair re-timing on XRT 2.25",
+      "thermal-controlled re-runs"
     ],
     "confirmation": {
       "criterion": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation-criterion.md",
       "criterion_sha256": "cd564a5fa4a5cd05238bda004f2226f64a029b1873a448d02b09b69284939a7a",
       "report": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation.md",
-      "report_sha256": "2b8d3e7b4b0e2cc4a699b5b15272fcca829bc246d0354fcd76af20393de906f9",
+      "report_sha256": "d34da3058a70530e439a8039f5750e2326978633f45c28ef9e80fcd9263405c1",
       "stats": {
         "pairs": 14,
         "per_pair_delta_ms": [
@@ -1200,30 +1201,145 @@
         "governor": "powersave",
         "thermal_c": "54 (acpitz, not NPU die)",
         "capacity_before_after": "Three observations of 16 before and after; no parsed errors in probe windows, not continuous campaign coverage",
-        "runtime": "Benchmark per-process loaded libraries NOT RECORDED; separate capacity probes verified XRT 2.25"
+        "runtime": "XRT 2.26.0 under utilities/env.sh for both arms; established by re-running the benchmark shape with live /proc maps"
       },
       "next_target": "Separate profiling of GEMM submit/wait accounting; device-active, bandwidth and dequantization contributions are not established",
       "raw_result": "Models/qwen38-27b/pr3-gemm/confirm-1024/result.json",
-      "raw_result_sha256": "b7bb4994f5ed6e12b89368b39f50b22713b79ace930199992bdfb823318a1503"
+      "raw_result_sha256": "b7bb4994f5ed6e12b89368b39f50b22713b79ace930199992bdfb823318a1503",
+      "runtime": "XRT 2.26.0 both arms (reproduced; historical maps not captured)"
     },
-    "runtime_verification": "UNVERIFIED for acceptance/confirmation benchmark processes: loaded library maps not captured; separate XRT 2.25 probes do not verify them",
+    "runtime_verification": "Benchmark: XRT 2.26.0 both arms (reproduced command shape, live maps). Candidate server: XRT 2.25.00 both arms (live maps). Historical benchmark maps not captured; the retained performance numbers are 2.26 results.",
     "scope_review": {
       "intended_base": "836072db",
       "upstream_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
       "pr3_changed_files": 31,
       "upstream_changed_files": 65,
-      "prerequisites": "Earlier OpenMP startup-policy and manifest-mapping work must land first or be an explicit stacked base"
+      "prerequisites": "Earlier OpenMP startup-policy and manifest-mapping work must land first or be an explicit stacked base",
+      "option": "B: stacked; PR #2 not in upstream main",
+      "pr2_tip_ancestor_of_upstream": false,
+      "merge_base_check": "git merge-base --is-ancestor 836072db upstream/main exits 1",
+      "review_target": "836072db",
+      "rebase_performed": false,
+      "commits_only_in_branch": 50,
+      "non_merge_commits": 21,
+      "pr3_commits": 6
     },
     "review_checks": {
       "pytest_passed": 2757,
       "pytest_skipped": 172,
-      "focused_passed": 212,
+      "focused_passed": 214,
       "local_evidence_files": 1955,
       "dispatch_records": 1100,
       "confirmation_provenance_paths": 187,
       "settings_merge_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
       "settings_merge": "PASS",
-      "hardware_rerun": false
+      "hardware_rerun": "candidate server + runtime provenance only; no performance campaign",
+      "candidate_server": "PASS both arms (11/11 graded, reset N/A)",
+      "benchmark_runtime": "XRT 2.26.0 both arms, reproduced",
+      "server_runtime": "XRT 2.25.00 both arms, live maps",
+      "full_passed": 2759
+    },
+    "server_candidate": {
+      "verdict": "PASS",
+      "record": "Models/qwen38-27b/pr3-gemm/accept-server-runtime/result.json",
+      "record_sha256": "05b23da97500dee92127121a5a7dad2ac6d4ed3de86f74ef3ce47b0c6b4c222e",
+      "arms": {
+        "before": {
+          "verdict": "PASS",
+          "kernel_directory": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr3-gemm/model-batch1",
+          "manifest_sha256": "744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee",
+          "gemm_programs": 10,
+          "libraries": [
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
+          ],
+          "graded_pass": 11,
+          "not_applicable": 1
+        },
+        "after": {
+          "verdict": "PASS",
+          "kernel_directory": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr3-gemm/model-batch4",
+          "manifest_sha256": "744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee",
+          "gemm_programs": 10,
+          "libraries": [
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
+          ],
+          "graded_pass": 11,
+          "not_applicable": 1
+        }
+      },
+      "arm_separation": {
+        "gemm_programs": 10,
+        "changed": [
+          "gemm_n14336_k5120",
+          "gemm_n14336_k5120_low",
+          "gemm_n16384_k5120",
+          "gemm_n16384_k5120_low",
+          "gemm_n34816_k5120",
+          "gemm_n34816_k5120_low",
+          "gemm_n5120_k17408",
+          "gemm_n5120_k17408_low",
+          "gemm_n5120_k6144",
+          "gemm_n5120_k6144_low"
+        ],
+        "unchanged": 0,
+        "manifest_same": true
+      },
+      "runtime_comparable": true,
+      "same_answer_between_arms": true,
+      "historical": {
+        "result": "utilities/prefill-block/runs/isolation-aba-20261115-223324/result.json",
+        "kernels": "production-v2/kernels-model",
+        "status": "superseded for candidate validation"
+      }
+    },
+    "runtime_provenance": {
+      "benchmark": {
+        "batch1": {
+          "versions": [
+            "2.26.0"
+          ],
+          "paths": [
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+          ],
+          "sha256": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068"
+          },
+          "record_sha256": "19f28d9c4622f0bba48ffa491d2d12e1457998142ee64581784b41d3a2442435"
+        },
+        "batch4": {
+          "versions": [
+            "2.26.0"
+          ],
+          "paths": [
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+          ],
+          "sha256": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068"
+          },
+          "record_sha256": "32ba2480220dec11806dcded6be281fca0a7689793036ac264c15a0a06fb8cd8"
+        }
+      },
+      "benchmark_comparable": true,
+      "benchmark_runtime": "XRT 2.26.0 at /opt/xilinx/xrt/lib for both arms",
+      "server": "XRT 2.25.00 distro libraries for both arms",
+      "historical_claim": "NOT VERIFIED at run time; earlier XRT 2.25 claim corrected to 2.26",
+      "driver_records": "omp_policy.py now stores runtime_libraries per measured process",
+      "evidence": {
+        "envsh": "Models/qwen38-27b/pr3-gemm/accept-runtime-envsh/provenance.json",
+        "envsh_sha256": "63503c71c1702add9766b26e6dd7a7a66b75415230da611e6a970eaf7acb05cf"
+      }
     }
   }
 }

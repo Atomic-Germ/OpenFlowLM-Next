@@ -12,14 +12,28 @@ an assertion that every requested integration/runtime gate has been measured.
 Nothing here enables the candidate, changes a numerical tolerance, changes
 model precision, or alters the default DMA setting.
 
-## Scope and remaining merge conditions
+## Base and dependency status
 
-Against the intended PR #2 tip `836072db`, the reviewed PR #3 adds 31 files
-(4,432 insertions, 31 deletions before this documentation review). Against actual
-upstream main `9b1409d3`, the branch includes 65 changed files, including earlier
-OpenMP startup-policy and DeltaNet manifest-mapping work. Those are dependencies,
-not GEMM changes: land the prerequisite work first or use the intended stacked
-base. Do not present the 65-file diff as a standalone GEMM-only PR.
+**PR #3 is stacked on PR #2; PR #2 has not landed upstream.**
+
+- Intended PR #3 base: `836072db` (`perf/npu-prefill-scheduling` tip, "docs:
+  record merged Qwen3.8 prefill acceptance").
+- Actual upstream main at review: `9b1409d3`.
+- `git merge-base --is-ancestor 836072db upstream/main` exits **1**, and neither
+  `4573739c` (OpenMP isolation), `1448fc65` (DeltaNet head mapping),
+  `78c41524`/`9f8415c9` nor `836072db` is an ancestor of upstream main.
+- `upstream/main..HEAD` is **50 commits** (21 non-merge); `836072db..HEAD` is
+  **6 commits**, all PR #3. The extra commits are PR #2 (`004821d0`, `8ba65ae9`,
+  `78c41524`, `9f8415c9`, `4573739c`, `1448fc65`, `836072db`) plus merges of
+  upstream main and earlier PR #1 profiler work.
+- Diff against the intended base: **31 files**. Diff against upstream main:
+  **65 files** (5,479 insertions, 52 deletions), because it includes PR #2 and
+  its main merges.
+
+Review against `836072db` (Option B), or land PR #2 first and re-target. A
+rebase onto upstream main was **not** performed: it would either absorb PR #2
+changes into this PR or require rewriting history, neither authorized here.
+Do not present the 65-file diff as a standalone GEMM-only PR.
 
 Within the PR #3 slice, production changes are limited to the DMA planner/design,
 export-environment isolation and copying/hashing the planner in five existing
@@ -31,20 +45,57 @@ address the explicitly requested blocker investigation and remain separate
 diagnostic commits. They are not needed to enable batching and can be reviewed
 separately rather than folded into the optimization's rationale.
 
-Two evidence qualifications remain material to the requested acceptance matrix:
+## Candidate server validation — PASS
 
-- The server A→B→A result records the retained production kernel path, not either
-  private DMA arm. Candidate server isolation is **NOT MEASURED** by that result.
-- The acceptance/confirmation benchmark driver records commands and artifact
-  hashes, but not loaded XRT libraries. Separate diagnostic processes verify
-  XRT 2.25; they do not prove the benchmark processes used it. The requested
-  verified-XRT-2.25 benchmark condition is **UNVERIFIED**, not PASS.
+A new run (`Models/qwen38-27b/pr3-gemm/accept-server-runtime/`) pointed
+`OFLM_OPEN_KERNELS_DIR` at each private arm and drove the real `oflm serve`.
+
+| Check | Control `model-batch1` | Candidate `model-batch4` |
+|---|---|---|
+| Engine selection log | arm path, `OFLM_OPEN_KERNELS_DIR` | arm path, `OFLM_OPEN_KERNELS_DIR` |
+| GEMM artifacts | 10 programs, manifest `744879192c49…` | 10 programs, same manifest |
+| 64-layer model init | PASS | PASS |
+| A, B then A again | all answered | all answered |
+| A before B == A after B | byte-identical | byte-identical |
+| B == fresh-process B | identical | identical |
+| A ≠ B | distinct prompts | distinct prompts |
+| Runtime mappings | XRT 2.25.00 | XRT 2.25.00 |
+| Kernel errors / capacity | none parsed; no contexts left resident | none parsed; no contexts left resident |
+| Result | **PASS 11/11 graded**, reset N/A | **PASS 11/11 graded**, reset N/A |
+
+All 20 GEMM binaries differ between arms (`insts.bin` and `final.xclbin`);
+the manifest is byte-identical. Control and candidate return the same A and B
+answers, so the candidate does not change server output. `/v1/context/reset`
+and the other reset paths still 404; recorded as N/A, not a pass.
+
+## Runtime provenance
+
+The historical benchmark processes preserved no `/proc/<pid>/maps`. The claim
+that they ran on XRT 2.25 was **wrong**: re-running the exact 64-layer benchmark
+command shape under `utilities/env.sh` loads
+`/opt/xilinx/xrt/lib/libxrt_{core,coreutil,driver_xdna}.so.2.26.0` for **both**
+arms (`runtime-bench-batch{1,4}/provenance.json`). `ofllm` links the distro
+soname, but `env.sh` prepends `/opt`, so the loader chooses 2.26.
+
+The server run above deliberately avoids `env.sh` and the `oflm_drive` helper's
+library path, so it maps `/usr/lib/x86_64-linux-gnu/libxrt_*.so.2.25.00` for
+both arms.
+
+Consequence: the historical 14-pair comparison remains internally valid, since
+both arms used the same 2.26 runtime and the same binary; it is a **2.26
+result**, not a 2.25 result. No measurement is reinterpreted or overwritten.
+`utilities/prefill-block/omp_policy.py` now samples each timed process's maps
+and stores `runtime_libraries` per row, so future campaigns carry this proof
+without adding tracing to the inference window.
+
+Remaining material gap: candidate and control were not re-timed end-to-end on
+XRT 2.25. The opt-in candidate's server path is validated on 2.25; its 14-pair
+prefill number is a 2.26 number. Re-timing is a bounded future confirmation,
+not needed to accept the implementation, and it was not run here.
 
 The performance arm is complete; no more DMA tuning or 64-layer rerun is
-requested by this review. Keep the upstream PR draft/conditional until its base
-is scoped correctly and these qualifications are either satisfied or explicitly
-accepted as limitations of an experimental opt-in merge. No history rewrite,
-default promotion, merge or push is performed here.
+requested by this review. No history rewrite, default promotion, merge or push
+is performed here.
 
 ## Host verification
 
@@ -65,7 +116,7 @@ execution, kernel build or benchmark campaign is performed for this review.
 | Kernel set | `model-batch1` (`GQP_DMA_BATCH=1`) | `model-batch4` (`GQP_DMA_BATCH=4`) |
 | Manifest | identical (`744879192c49…`) | identical |
 | Binary | `open_qwen36_cli` / `oflm` same build | same build |
-| Runtime | Tree environment; loaded libraries not recorded | Same launch method, exact runtime identity unverified |
+| Runtime | XRT 2.26.0 under `utilities/env.sh` (reproduced) | XRT 2.26.0 under the same shell |
 | Device | NPU Strix, 8 columns | same |
 
 Arm separation verified: 92 kernel files compared, **only the 20 GEMM
@@ -149,9 +200,10 @@ NPU memory was **NOT MEASURED** (no supported counter on this stack).
 | Gate | Result |
 |---|---|
 | `oflm run`, both arms | exit 0, 64/64 layers, identical answer `RED` |
-| `oflm serve`, A→B→A in one process | Six checks PASS on retained production kernels; candidate NOT MEASURED |
-| A before B equals A after B | PASS on retained production kernels only |
-| B matches a fresh-process B | PASS on retained production kernels only |
+| `oflm serve`, control arm A→B→A | 11/11 graded PASS, arm selection logged |
+| `oflm serve`, candidate arm A→B→A | 11/11 graded PASS, arm selection logged |
+| A before B equals A after B | PASS, byte-identical in both arms |
+| B matches a fresh-process B | PASS in both arms |
 | `/v1/context/reset` etc. | N/A — no reset endpoint on this build |
 | Boundaries 95/96/97 | 3/3 PASS, exact bytes |
 | Boundaries 255/256/257 | 3/3 PASS, exact bytes |
@@ -184,13 +236,20 @@ diagnostic run also completed without a decrease (`b4ee9f22`).
 
 `Models/qwen38-27b/pr3-gemm/`: `accept-full64/`, `e2e-256/`,
 `accept-e2e-512/`, `accept-e2e-1024/`, `accept-decode4k-valid.json`,
-`accept-run-batch{1,4}.log`, `accept-isolation.log`, `accept-boundary-*/`,
-`capacity-phase2-*/`, `capacity-postphase-*/`.
+`accept-run-batch{1,4}.log`, `accept-boundary-*/`, `capacity-phase2-*/`,
+`capacity-postphase-*/`.
 
-Server result: `utilities/prefill-block/runs/isolation-aba-20261115-223324/result.json`.
-The helper sets its own kernel directory, overriding a shell-only selection.
+Candidate server: `accept-server-runtime/` (`result.json`, per-arm
+`result.json`, `artifacts.json`, server logs, live library hashes), with
+`utilities/prefill-block/server_candidate_check.py`.
 
-Not measured: candidate server isolation, HTTP TTFT, independent per-layer
-residual oracle, Windows, driver-owned NPU memory, freshly rebuilt tiled exports,
-context/numerical capability beyond the recorded prompt lengths. Loaded-library
-identity for acceptance/confirmation benchmark processes is unverified.
+Runtime provenance: `runtime-bench-batch{1,4}/provenance.json` for the benchmark
+command shape, `accept-runtime-envsh/provenance.json` for the `env.sh` shell.
+The older production-kernel server result remains at
+`utilities/prefill-block/runs/isolation-aba-20261115-223324/result.json` and is
+superseded for candidate validation.
+
+Not measured: HTTP TTFT, independent per-layer residual oracle, Windows,
+driver-owned NPU memory, freshly rebuilt tiled exports, context/numerical
+capability beyond the recorded prompt lengths, and a 14-pair re-timing on XRT
+2.25 (the retained performance run is XRT 2.26 for both arms).

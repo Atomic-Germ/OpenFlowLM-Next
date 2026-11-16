@@ -10,10 +10,12 @@ Captured full-depth logits/state are byte-exact against the control. The final
 95% bootstrap CI for median Δ −3683 to −1984 ms on one Strix host.
 The initial five-pair 1024-token gate remains FAIL (−0.60%, 4/5 faster).
 The production default remains one DMA visit per TaskGroup. No recipe opts in,
-no installed artifact or model registration changes. Candidate server isolation
-and loaded-library verification for the final benchmark are not established by
-the retained evidence. The branch also includes prerequisite PR #2 work relative
-to upstream main; it is not a standalone 31-file GEMM diff against that target.
+no installed artifact or model registration changes. The candidate's own
+`oflm serve` A→B→A run now passes on XRT 2.25 with live library mappings.
+The 14-pair benchmark is a **XRT 2.26** result: both arms load `/opt` 2.26 under
+`utilities/env.sh`, established by re-running the benchmark command shape with
+map sampling. PR #3 remains **stacked on PR #2**, which is not in upstream main;
+review against `836072db`, not the 65-file upstream diff.
 
 Baseline: commit `836072db`. The review branch is `perf/npu-q4-gemm`.
 The measured candidate is identified by its source SHA-256 snapshot, not a
@@ -140,7 +142,8 @@ the successful campaign by an eight-hour gap; no measurement identifies which
 operation changed capacity. Following the operator reboot, Phase A starts at
 174.58 seconds uptime, establishes 16 contexts in three probe-only controls,
 and completes all 12 pinned sequential benchmark processes. Each exits zero
-and is followed by 16 available contexts on verified XRT 2.25. All 16-token
+and is followed by 16 available contexts on the probe's verified XRT 2.25
+mappings (the probe process only; not the benchmark runtime). All 16-token
 trajectories match; no parsed amdxdna errors occur in the 27 captured windows.
 Three further post-idle observations also hold 16. The recorder reports
 `COMPLETED_NO_DECREASE`, not a triggering operation or a minimal reproducer.
@@ -163,13 +166,22 @@ bytes. All nine four-layer boundary sweeps match. Direct production CLI checks
 pass on both arms. Prefill/decode/RSS measurements are recorded in the acceptance
 review; the context failure is not a current blocker in those completed runs.
 
-The retained server isolation result uses production kernels, not the candidate.
+A candidate-specific `oflm serve` run (`accept-server-runtime/`) points
+`OFLM_OPEN_KERNELS_DIR` at each private arm: both select their own 10 GEMM
+artifacts, initialise all 64 layers, pass A→B→A with byte-identical A, match a
+fresh-process B and record XRT 2.25.00 mappings. The older production-kernel
+server result is superseded for candidate validation.
+
+The historical 14-pair benchmark preserved no maps. Re-running its command shape
+under `utilities/env.sh` shows **both** arms load `/opt/xilinx/xrt` 2.26.0, so
+the comparison is valid but is a 2.26 result; the earlier "verified 2.25" claim
+was incorrect. `omp_policy.py` now records `runtime_libraries` per timed process.
+
 Independent per-layer residual-oracle comparisons, HTTP TTFT, driver-owned NPU
-memory and Windows are **NOT MEASURED**. Separate diagnostic runtime verification
-does not prove the benchmark processes loaded XRT 2.25. These qualifications,
-plus the intended branch base, remain explicit review conditions. Default/recipe
-promotion is not proposed. No further capacity campaign or recovery operation
-is part of this review.
+memory, Windows and a 2.25 re-timing are **NOT MEASURED**. The PR is stacked on
+PR #2 (`836072db`, not in upstream main). Default/recipe promotion is not
+proposed. No further capacity campaign or recovery operation is part of this
+review.
 
 ## Host validation and reproduction
 
@@ -216,10 +228,13 @@ portable JSON artifact only and reports local evidence as **NOT CHECKED**.
 - [x] Compare all nine four-layer model-boundary cases and prefill-to-decode state.
 - [x] Complete the fixed 14-pair 1024-token performance criterion without extension.
 - [x] Validate direct production CLI with both kernel arms.
-- [ ] Scope the upstream diff to GEMM plus its explicitly landed dependencies.
-- [ ] Resolve or explicitly accept candidate server and benchmark-runtime evidence gaps.
+- [x] Validate candidate-specific `oflm serve` A→B→A with arm selection and live maps.
+- [x] Establish the actual benchmark XRT: both arms are 2.26, not 2.25.
+- [x] Record the stacked base (`836072db`); PR #2 is not in upstream main.
+- [ ] Re-target or land PR #2 first; do not rebase unilaterally.
 - [ ] Complete independent residual-oracle, TTFT, transfer and NPU-memory gates
   before claiming the entire requested acceptance matrix is complete.
+- [ ] If a 2.25 end-to-end number is required, re-time with recorded maps.
 - [ ] Validate/export the target artifacts through the standard pipeline and
   complete platform-specific checks before considering any recipe promotion.
 

@@ -66,7 +66,7 @@ the criterion was fixed on disk before collection, not separately committed then
 | Item | Value |
 |---|---|
 | Host | Ryzen AI 9 365, 91 GiB, NPU Strix (8 columns) |
-| Runtime | Benchmark launched through the tree environment; loaded per-process XRT libraries NOT RECORDED. Separate capacity probes verify XRT 2.25, not the benchmark runtime. |
+| Runtime | **XRT 2.26.0** at `/opt/xilinx/xrt/lib` for the benchmark shape, re-established later by live `/proc/<pid>/maps` sampling. The historical run itself recorded no maps, so this is a reproduced-environment result, not a historical per-process capture. |
 | Driver / firmware | amdxdna 2.26.0_20260817 / 1.1.2.64 |
 | Boot | `9285622f-257b-4e83-87b0-494393f16623` |
 | Power mode | `default` (unchanged), governor `powersave` |
@@ -99,7 +99,9 @@ shipped recipes. It is not an unconditional merge approval:
 
 - Numerically byte-identical to the control across 64 layers (147 checks).
 - Direct production CLI checks pass on both arms; 9/9 four-layer boundaries match.
-- The retained server isolation run uses production kernels, not the candidate.
+- A new candidate-specific `oflm serve` run selects each arm's 10 GEMM artifacts,
+  passes A→B→A with byte-identical A and fresh-process B, and records identical
+  XRT 2.25.00 mappings in control and candidate.
 - Decode and RSS meet the measured non-regression gates.
 - The fixed 14-pair 1024-token campaign meets the performance criterion.
 
@@ -107,10 +109,11 @@ Conditions on that recommendation:
 
 1. **Default unchanged.** `GQP_DMA_BATCH` stays 1; no recipe opts in. Promotion
    requires separate approval and target-platform validation.
-2. Still **not measured**: candidate server isolation, independent full-layer
-   residual oracle, HTTP TTFT, Windows, driver-owned NPU memory, freshly rebuilt
-   tiled exports and thermal-controlled re-runs. Per-arm benchmark XRT 2.25
-   identity is unverified. See the acceptance review for branch-scope prerequisites.
+2. Still **not measured**: independent full-layer residual oracle, HTTP TTFT,
+   Windows, driver-owned NPU memory, freshly rebuilt tiled exports and
+   thermal-controlled re-runs. The historical benchmark run carries no maps;
+   the re-established benchmark environment is XRT 2.26 for both arms. See the
+   acceptance review for branch-scope prerequisites.
 
 No additional DMA tuning or benchmark extension is proposed by this report.
 
