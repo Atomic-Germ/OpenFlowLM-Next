@@ -1,22 +1,23 @@
-# Qwen3.8-27B: bounded GEMM DMA batches (PR #3 draft)
+# Qwen3.8-27B: bounded GEMM DMA batches (PR #3 opt-in)
 
 ## Acceptance state
 
-**DRAFT — correctness accepted, performance not established.**
-The full acceptance matrix has run; see
-[`qwen38-q4-gemm-acceptance.md`](qwen38-q4-gemm-acceptance.md). The candidate is
-byte-exact against the control across all 64 layers and passes every integration
-gate, and prefill improves 2.29% / 1.99% / 2.05% at 256 / 512 / 3000 tokens, but
-the **1024-token prefill gate fails** (−0.60%, 4/5 pairs). Recommendation:
-KEEP DRAFT.
+**Opt-in performance PASS; upstream merge conditional on scope/evidence review.**
+See the [acceptance review](qwen38-q4-gemm-acceptance.md) and
+[fixed 14-pair confirmation](qwen38-q4-gemm-1024-confirmation.md).
+Captured full-depth logits/state are byte-exact against the control. The final
+1024-token campaign has median paired prefill change −2.43%, 14/14 faster and
+95% bootstrap CI for median Δ −3683 to −1984 ms on one Strix host.
+The initial five-pair 1024-token gate remains FAIL (−0.60%, 4/5 faster).
 The production default remains one DMA visit per TaskGroup. No recipe opts in,
-no installed artifact or model registration changes, and no end-to-end speedup
-is claimed. The required full-model gates are blocked by context creation in
-the retained control as well as the candidate on this machine.
+no installed artifact or model registration changes. Candidate server isolation
+and loaded-library verification for the final benchmark are not established by
+the retained evidence. The branch also includes prerequisite PR #2 work relative
+to upstream main; it is not a standalone 31-file GEMM diff against that target.
 
 Baseline: commit `836072db`. The review branch is `perf/npu-q4-gemm`.
 The measured candidate is identified by its source SHA-256 snapshot, not a
-fabricated measurement commit. The containing review commit records the draft.
+fabricated measurement commit. The containing review commit records the evidence.
 [Structured measurements](qwen38-q4-gemm-dma.json) bind source, fixture, build,
 kernel and output identities. Raw evidence is under
 `Models/qwen38-27b/pr3-gemm/` (local, not shipping artifacts).
@@ -125,7 +126,7 @@ or context length. Default batch-1 compatibility is also checked: the
 N=14336/K=5120/T=256 instruction stream exactly matches the pre-edit baseline
 (`032ec3405135f5d08e3406b7cd50e26292adc3a4947399b228932602ee111ea4`).
 
-## Full-model blocker and remaining gates
+## Context investigation and full-model coverage
 
 The retained manifest declares eleven contexts. Historical attempts fail on the
 ninth with `DRM_IOCTL_AMDXDNA_CREATE_HWCTX ... err=-22`, including the unchanged
@@ -156,28 +157,26 @@ to bypass the gate. The older six-context export is not a valid substitute
 because it omits the paired low-weight companions, and host-attention flags do
 not avoid the eager GEMM context loads.
 
-| Required acceptance after runtime stability is established | Baseline | Candidate |
-|---|---|---|
-| Prefill / TTFT, 256 / 512 / 1024 tokens | NOT MEASURED | NOT MEASURED |
-| Decode, short / approximately-4K context | NOT MEASURED | NOT MEASURED |
-| Peak process RSS / total NPU memory | NOT MEASURED | NOT MEASURED |
-| Full 64-layer residuals/logits/state, 16-token greedy continuation | NOT MEASURED | NOT MEASURED |
-| 95/96/97, 255/256/257, 511/512/513 model boundaries | NOT MEASURED | NOT MEASURED |
-| Production CLI, server repeated-request isolation | NOT MEASURED | NOT MEASURED |
+Subsequent full-depth comparison captures 17 logit rows, all 112 conv/recurrent/KV
+state slices and the 16-token greedy continuation: 147 checks pass with exact
+bytes. All nine four-layer boundary sweeps match. Direct production CLI checks
+pass on both arms. Prefill/decode/RSS measurements are recorded in the acceptance
+review; the context failure is not a current blocker in those completed runs.
 
-The historical 256-token paired benchmark remains in
-`Models/qwen38-27b/pr3-gemm/e2e-256/`; it does not establish runtime stability or
-complete the matrix above. Native Windows validation is **NOT MEASURED**. The
-recipe remains unchanged and the PR stays Draft until runtime stability and
-the complete model, numerical, decode and integration matrix are validated.
-Driver reload/reboot recovery tests require explicit operator authorization.
+The retained server isolation result uses production kernels, not the candidate.
+Independent per-layer residual-oracle comparisons, HTTP TTFT, driver-owned NPU
+memory and Windows are **NOT MEASURED**. Separate diagnostic runtime verification
+does not prove the benchmark processes loaded XRT 2.25. These qualifications,
+plus the intended branch base, remain explicit review conditions. Default/recipe
+promotion is not proposed. No further capacity campaign or recovery operation
+is part of this review.
 
 ## Host validation and reproduction
 
 - Full portable suite after fresh-boot evidence checks: **2,754 passed,
   172 skipped**; skips are not passes.
-- Latest recovery-recheck focused suite: **25 passed**; the unchanged control
-  remains blocked, so no new end-to-end result is claimed.
+- Historical recovery-recheck focused suite: **25 passed**; that observation
+  predates the completed full-model comparisons.
 - Fresh standalone CLI and Docker harness builds pass.
 - Docker standalone CTest: **5/5 passed**.
 - Direct settings scan/regeneration matches the committed registry.
@@ -213,20 +212,20 @@ portable JSON artifact only and reports local evidence as **NOT CHECKED**.
   source revision without changing production arithmetic or recipes.
 - [x] Run fresh-boot Phase A once with process-by-process capacity observations;
   all 12 processes complete without a decrease. Preserve the negative result.
-- [ ] Identify a minimal bracketed transition from a fresh-boot baseline,
-  distinguish probe effects and PM/restart/retention paths, and validate a
-  recovery operation with operator authorization.
-- [ ] Run independent per-layer residual gates and the full 64-layer logit/state
-  and 16-token greedy continuation comparison.
-- [ ] Run all nine model-boundary cases and prefill-to-decode state checks.
-- [ ] Measure end-to-end prefill/TTFT at 256/512/1024 tokens, short and
-  approximately-4K decode, transfer costs and host/NPU memory with repeated
-  matched controls; reject a candidate without a credible end-to-end gain.
-- [ ] Validate production CLI and repeated server request/reset isolation.
+- [x] Compare full 64-layer captured logits/state and 16-token greedy continuation.
+- [x] Compare all nine four-layer model-boundary cases and prefill-to-decode state.
+- [x] Complete the fixed 14-pair 1024-token performance criterion without extension.
+- [x] Validate direct production CLI with both kernel arms.
+- [ ] Scope the upstream diff to GEMM plus its explicitly landed dependencies.
+- [ ] Resolve or explicitly accept candidate server and benchmark-runtime evidence gaps.
+- [ ] Complete independent residual-oracle, TTFT, transfer and NPU-memory gates
+  before claiming the entire requested acceptance matrix is complete.
 - [ ] Validate/export the target artifacts through the standard pipeline and
   complete platform-specific checks before considering any recipe promotion.
 
-These open gates are acceptance work, not permission to enable the experiment.
+The intermittent capacity issue has no established trigger or validated recovery;
+that diagnostic is separate from opt-in performance and production promotion.
+These open gates are not permission to enable the experiment by default.
 
 ## Candidate selection and rejected paths
 
@@ -242,4 +241,4 @@ Dequantization-unroll tuning is not implemented or measured: byte-identical
 core programs are preferred for this narrower DMA hypothesis. Unbounded DMA
 submission is excluded by the documented descriptor limit, not presented as
 a new experiment. Context sharing, DeltaNet and host scheduling changes are
-outside this draft and are not bundled as workarounds.
+outside this optimization and are not bundled as workarounds.

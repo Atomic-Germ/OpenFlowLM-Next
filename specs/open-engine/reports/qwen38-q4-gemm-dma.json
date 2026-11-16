@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT: correctness accepted and byte-exact; performance not established (1024-token prefill gate fails); opt-in only",
+  "status": "DRAFT: opt-in performance PASS; upstream scope and integration/runtime evidence conditional",
   "baseline_commit": "836072db",
   "candidate_commit": null,
   "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
@@ -667,7 +667,7 @@
     "ctest_passed": 5,
     "settings_direct": "PASS",
     "settings_merge_wrapper": "PASS: clean committed branch merged with actual upstream/main; temporary per-command fetch URL override",
-    "full_model": "NOT MEASURED for the complete runtime-stable acceptance matrix; historical 256-token comparison retained separately",
+    "full_model": "PASS: 64-layer captured logits/state and 16-token greedy equivalence; independent per-layer residual oracle NOT MEASURED",
     "context_diagnosis": {
       "observed_ceiling_healthy": 16,
       "ceiling_evidence": "healthy-state arms (targets 17, 18, 20, 32; 11 distinct and 1 identical asset) stopped at exactly 16 on both installed runtimes; the same boot later returned 8",
@@ -1001,8 +1001,8 @@
   "production_default_dma_batch": 1,
   "acceptance": {
     "report": "specs/open-engine/reports/qwen38-q4-gemm-acceptance.md",
-    "report_sha256": "08ba15c7b6404983e5d26baf9f0447539af53e3988b1031ceb9ab56a1da73e17",
-    "recommendation": "KEEP DRAFT",
+    "report_sha256": "22c9b19286d8029db3d0b286e2d53deba94fc2a3c7a9fd531379f4a70f429c4b",
+    "recommendation": "CONDITIONAL opt-in merge: scope prerequisite work and resolve or explicitly accept candidate-server/runtime evidence gaps; default unchanged",
     "numerical": "PASS: 147 checks, byte-exact logits and state, identical 16-token greedy",
     "prefill": [
       {
@@ -1027,15 +1027,31 @@
         "after_ms": 118029,
         "change_pct": -0.6,
         "pairs_faster": "4/5",
-        "verdict": "FAIL"
+        "verdict": "FAIL",
+        "campaign": "initial five-pair experiment"
       },
       {
-        "tokens": 3000,
-        "before_ms": 377565,
-        "after_ms": 369280,
-        "change_pct": -2.05,
-        "pairs_faster": "2/2",
-        "verdict": "supporting"
+        "tokens": 1024,
+        "before_ms": 121395.0,
+        "after_ms": 118727.0,
+        "change_pct": -2.198,
+        "paired_median_change_pct": -2.432,
+        "pairs_faster": "14/14",
+        "verdict": "PASS",
+        "campaign": "fixed 14-pair confirmation",
+        "ci95_median_delta_ms": [
+          -3683.0,
+          -1984.0
+        ]
+      },
+      {
+        "tokens": 3008,
+        "before_ms": 377564.5,
+        "after_ms": 369279.5,
+        "change_pct": -2.19,
+        "pairs_faster": "2/2 (two runs per arm; supporting only)",
+        "verdict": "supporting",
+        "text_tokens": 3000
       }
     ],
     "decode": [
@@ -1052,14 +1068,14 @@
         "change_pct": 0.63
       },
       {
-        "scenario": "~4K context",
-        "change_pct": -0.4
+        "scenario": "3008-token engine prompt, context allocation 4096; two runs per arm",
+        "change_pct": -0.33
       }
     ],
-    "memory": "flat: RSS change <= 0.00%; driver-owned NPU memory NOT MEASURED",
+    "memory": "Measured process RSS within +3% gate; confirmation +0.001%; driver-owned NPU memory NOT MEASURED",
     "integration": {
       "oflm_run": "PASS both arms",
-      "server_aba": "PASS 6/6 applicable",
+      "server_aba": "NOT MEASURED for candidate: retained production kernels passed 6/6 applicable checks",
       "boundaries": "9/9 PASS exact bytes",
       "context_reset_endpoint": "N/A on this build"
     },
@@ -1071,9 +1087,143 @@
       "diagnostics": "b4ee9f22"
     },
     "not_measured": [
+      "candidate server isolation",
+      "HTTP streaming TTFT",
+      "independent per-layer residual oracle",
       "Windows",
       "driver-owned NPU memory",
       "freshly rebuilt tiled exports"
-    ]
+    ],
+    "confirmation": {
+      "criterion": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation-criterion.md",
+      "criterion_sha256": "cd564a5fa4a5cd05238bda004f2226f64a029b1873a448d02b09b69284939a7a",
+      "report": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation.md",
+      "report_sha256": "2b8d3e7b4b0e2cc4a699b5b15272fcca829bc246d0354fcd76af20393de906f9",
+      "stats": {
+        "pairs": 14,
+        "per_pair_delta_ms": [
+          -4914.0,
+          -3663.0,
+          -1526.0,
+          -1092.0,
+          -3683.0,
+          -2815.0,
+          -2612.0,
+          -4479.0,
+          -3141.0,
+          -1984.0,
+          -1768.0,
+          -34047.0,
+          -2112.0,
+          -3146.0
+        ],
+        "per_pair_rel_pct": [
+          -4.046,
+          -3.037,
+          -1.267,
+          -0.901,
+          -3.032,
+          -2.324,
+          -2.153,
+          -3.635,
+          -2.541,
+          -1.612,
+          -1.45,
+          -22.264,
+          -1.757,
+          -2.616
+        ],
+        "faster": 14,
+        "median_rel_pct": -2.432,
+        "median_delta_ms": -2978,
+        "iqr_ms": [
+          -3683.0,
+          -1984.0
+        ],
+        "ci95_median_delta_ms": [
+          -3683.0,
+          -1984.0
+        ],
+        "decode_change_pct": -0.722,
+        "rss_change_pct": 0.001,
+        "verdicts": {
+          "median_at_least_1pct": true,
+          "at_least_12_of_14_faster": true,
+          "ci_entirely_below_zero": true,
+          "decode_ok": true,
+          "rss_ok": true
+        },
+        "PASS": true,
+        "before_prefill_ms": [
+          121447.0,
+          120619.0,
+          120482.0,
+          121139.0,
+          121457.0,
+          121137.0,
+          121343.0,
+          123202.0,
+          123616.0,
+          123049.0,
+          121952.0,
+          152926.0,
+          120171.0,
+          120266.0
+        ],
+        "after_prefill_ms": [
+          116533.0,
+          116956.0,
+          118956.0,
+          120047.0,
+          117774.0,
+          118322.0,
+          118731.0,
+          118723.0,
+          120475.0,
+          121065.0,
+          120184.0,
+          118879.0,
+          118059.0,
+          117120.0
+        ],
+        "bootstrap_seed": 20261115,
+        "bootstrap_resamples": 10000,
+        "bootstrap_indices": [
+          249,
+          9749
+        ]
+      },
+      "outlier": "pair 11 excluded in a sensitivity check: 13/13 faster, median -2.32%, CI (-3663,-1984)",
+      "conditions": {
+        "boot": "9285622f-257b-4e83-87b0-494393f16623",
+        "loadavg_start": "0.92 0.86 1.44",
+        "governor": "powersave",
+        "thermal_c": "54 (acpitz, not NPU die)",
+        "capacity_before_after": "Three observations of 16 before and after; no parsed errors in probe windows, not continuous campaign coverage",
+        "runtime": "Benchmark per-process loaded libraries NOT RECORDED; separate capacity probes verified XRT 2.25"
+      },
+      "next_target": "Separate profiling of GEMM submit/wait accounting; device-active, bandwidth and dequantization contributions are not established",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/confirm-1024/result.json",
+      "raw_result_sha256": "b7bb4994f5ed6e12b89368b39f50b22713b79ace930199992bdfb823318a1503"
+    },
+    "runtime_verification": "UNVERIFIED for acceptance/confirmation benchmark processes: loaded library maps not captured; separate XRT 2.25 probes do not verify them",
+    "scope_review": {
+      "intended_base": "836072db",
+      "upstream_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
+      "pr3_changed_files": 31,
+      "upstream_changed_files": 65,
+      "prerequisites": "Earlier OpenMP startup-policy and manifest-mapping work must land first or be an explicit stacked base"
+    },
+    "review_checks": {
+      "pytest_passed": 2757,
+      "pytest_skipped": 172,
+      "focused_passed": 212,
+      "local_evidence_files": 1955,
+      "dispatch_records": 1100,
+      "confirmation_provenance_paths": 187,
+      "settings_merge_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
+      "settings_merge": "PASS",
+      "hardware_rerun": false
+    }
   }
 }

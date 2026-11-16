@@ -1,7 +1,10 @@
 """Validate the measured JSON artifact without requiring local benchmark captures."""
 import copy
+import hashlib
 import importlib.util
 import json
+import random
+import statistics
 from pathlib import Path
 
 import pytest
@@ -17,14 +20,16 @@ def report():
     return json.loads((ROOT / 'specs/open-engine/reports/qwen38-q4-gemm-dma.json').read_text())
 
 
-def test_shipped_summary_has_all_five_paired_shapes_and_remains_a_draft(report):
+def test_shipped_summary_has_paired_shapes_without_claiming_complete_acceptance(report):
     TOOL.check_summary(report)
     shapes = ['14336_k5120', '16384_k5120', '34816_k5120', '5120_k17408', '5120_k6144']
     assert {c['name'] for c in report['cases']} == {
         f'gemm_n{shape}{suffix}' for shape in shapes for suffix in ('', '_low')}
     assert all(c['summary']['paired_wins'] == report['methodology']['pairs'] for c in report['cases'])
     assert report['status'].startswith('DRAFT')
-    assert report['validation']['full_model'].startswith('NOT MEASURED')
+    assert report['validation']['full_model'].startswith('PASS: 64-layer captured logits/state')
+    assert report['acceptance']['integration']['server_aba'].startswith('NOT MEASURED for candidate')
+    assert report['acceptance']['runtime_verification'].startswith('UNVERIFIED')
     diagnosis = report['validation']['context_diagnosis']
     assert diagnosis['firmware_status'] == '0x2000003'
     assert diagnosis['firmware_status_name'] == 'AIE2_STATUS_MGMT_ERT_NOAVAIL'
@@ -108,3 +113,51 @@ def test_local_audit_fails_closed_for_missing_or_changed_source_evidence(tmp_pat
     (tmp_path/'missing').write_bytes(b'changed')
     with pytest.raises(ValueError, match='hash mismatch'):
         TOOL.check_local(record, tmp_path)
+
+
+def test_initial_and_confirmation_campaigns_are_not_mixed(report):
+    """The artifact is the reported evidence; campaigns must retain their own numbers."""
+    rows = [r for r in report['acceptance']['prefill'] if r['tokens'] == 1024]
+    assert len(rows) == 2
+    initial, confirmation = rows
+    assert initial['verdict'] == 'FAIL' and initial['pairs_faster'] == '4/5'
+    assert confirmation['verdict'] == 'PASS' and confirmation['pairs_faster'] == '14/14'
+    for row in rows:
+        expected = 100 * (row['after_ms'] / row['before_ms'] - 1)
+        assert row['change_pct'] == pytest.approx(expected, abs=0.005)
+    assert confirmation['before_ms'] != initial['before_ms']
+
+
+def test_confirmation_statistics_reproduce_from_retained_paired_timings(report):
+    confirmation = report['acceptance']['confirmation']
+    stats = confirmation['stats']
+    before, after = stats['before_prefill_ms'], stats['after_prefill_ms']
+    assert len(before) == len(after) == stats['pairs'] == 14
+    assert all(TOOL.positive(v) for v in before + after)
+    deltas = [a - b for b, a in zip(before, after)]
+    relative = [100 * (a / b - 1) for b, a in zip(before, after)]
+    assert stats['per_pair_delta_ms'] == deltas
+    assert stats['per_pair_rel_pct'] == pytest.approx(relative, abs=0.0005)
+    assert stats['median_delta_ms'] == statistics.median(deltas)
+    assert stats['median_rel_pct'] == pytest.approx(statistics.median(relative), abs=0.0005)
+    assert stats['faster'] == sum(d < 0 for d in deltas) == 14
+    rng = random.Random(stats['bootstrap_seed'])
+    bootstrap = sorted(statistics.median(rng.choices(deltas, k=14))
+                       for _ in range(stats['bootstrap_resamples']))
+    assert stats['ci95_median_delta_ms'] == [bootstrap[i] for i in stats['bootstrap_indices']]
+    assert stats['median_rel_pct'] <= -1 and stats['faster'] >= 12
+    assert max(stats['ci95_median_delta_ms']) < 0
+    assert stats['decode_change_pct'] <= 3 and stats['rss_change_pct'] <= 3
+    row = next(r for r in report['acceptance']['prefill']
+               if r.get('campaign') == 'fixed 14-pair confirmation')
+    assert row['before_ms'] == statistics.median(before)
+    assert row['after_ms'] == statistics.median(after)
+    assert row['paired_median_change_pct'] == stats['median_rel_pct']
+
+
+def test_acceptance_documents_match_their_recorded_hashes(report):
+    acceptance = report['acceptance']
+    for item in (acceptance, acceptance['confirmation']):
+        assert hashlib.sha256((ROOT / item['report']).read_bytes()).hexdigest() == item['report_sha256']
+    confirmation = acceptance['confirmation']
+    assert hashlib.sha256((ROOT / confirmation['criterion']).read_bytes()).hexdigest() == confirmation['criterion_sha256']
