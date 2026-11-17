@@ -37,7 +37,7 @@ except Exception:
 # go through it. The hand-rolled family+hidden match linked Llama-3.2-1B to
 # minicpm5-2b (same family+hidden, HEAD DIM 64 vs 128 -- different kernels).
 sys.path.insert(0, str(ROOT / "open_kernels"))
-from recipes.spec import ModelSpec, SpecError  # noqa: E402
+from recipes.spec import ModelSpec, SpecError, GGUF_FAMILIES  # noqa: E402
 
 
 def _repo_cache(repo: str) -> str:
@@ -151,10 +151,41 @@ def repo_gguf_url(repo: str) -> str | None:
     return f"https://huggingface.co/{repo}/resolve/main/{chosen}"
 
 
+def spec_config_via_base_chain(repo: str):
+    """(base, cfg, real_vocab) from the repo's README base_model chain.
+
+    A quantized repo holds only the GGUF: no config.json, no tokenizer. Its model
+    card names the checkpoint it quantizes, and that checkpoint's repo does carry
+    both. `oflm add` already climbs that chain (finetune -> base -> base, closest
+    first, cycles/depth bounded); do the same here before giving up on config.json
+    and deriving from the GGUF header -- the GGUF names the geometry, but an HF
+    config is what the family builders (LFM2's FF/rope law, layer types, ...) read.
+    """
+    try:
+        from oflm_add import readme_base_chain
+        bases = readme_base_chain(repo)
+    except Exception as exc:                      # noqa: BLE001 - offline / no README
+        print(f"warn: could not read base_model chain for {repo}: {exc}", file=sys.stderr)
+        return None, None, None
+    for base in bases:
+        try:
+            cfg = text_config(fetch_config(base))
+        except Exception:
+            continue
+        real_vocab = fetch_real_vocab(base)
+        if not cfg.get("vocab_size") and real_vocab:
+            cfg["vocab_size"] = real_vocab
+        print(f"config.json not in {repo}; using base model {base}'s config.json")
+        return base, cfg, real_vocab
+    return None, None, None
+
+
 def base_model_from_readme(repo: str) -> str | None:
     try:
         from huggingface_hub import hf_hub_download
-        p = hf_hub_download(repo_id=repo, filename="README.md", local_dir="/tmp/hf_cfg")
+        # Per-repo cache: one shared /tmp/hf_cfg made every repo's README land on
+        # the same path, so a second repo could read the first one's base_model.
+        p = hf_hub_download(repo_id=repo, filename="README.md", local_dir=_repo_cache(repo))
         text = Path(p).read_text(errors="ignore")
     except Exception:
         return None
@@ -230,18 +261,39 @@ def main():
     args = ap.parse_args()
 
     cfg = real_vocab = None
+    base_from_chain = None
     if not args.gguf and args.repo:
         try:
             cfg, real_vocab = spec_config(args.repo)
         except Exception as exc:                  # noqa: BLE001 - 404 on config.json
-            # A GGUF-only repo has no config.json, but the file names its own
-            # geometry. Derive from the same file `oflm add` would install.
+            # The GGUF is the authority on geometry (what `oflm add` installs),
+            # so keep that path first -- a base repo's config.json can be a stub
+            # (Llama3-2B-Base claims hidden 4096 / 6 layers) and would link the
+            # wrong kernels. The header only works for architectures with a GGUF
+            # recipe; when it has none (LFM2), climb the README base_model chain
+            # the way `oflm add` does -- an HF config names the family rules the
+            # header cannot (LFM2's FF/rope law, layer types, ...).
             url = repo_gguf_url(args.repo)
-            if not url:
-                raise
-            print(f"no config.json for {args.repo} ({exc}); "
-                  f"deriving the spec from the GGUF header")
-            args.gguf = url
+            arch = None
+            if url:
+                try:
+                    from oflm_add import read_gguf_inventory
+                    inv = read_gguf_inventory(url, limit_mb=96)
+                    arch = inv[0].get("general.architecture") if inv else None
+                except Exception:
+                    pass
+            if url and arch in GGUF_FAMILIES:
+                args.gguf = url
+            else:
+                base, base_cfg, base_rv = spec_config_via_base_chain(args.repo)
+                if base_cfg is not None:
+                    base_from_chain, cfg, real_vocab = base, base_cfg, base_rv
+                else:
+                    if not url:
+                        raise
+                    print(f"no config.json for {args.repo} ({exc}); "
+                          f"deriving the spec from the GGUF header")
+                    args.gguf = url
 
     if args.gguf:
         # A GGUF names its own geometry: architecture, dimensions, vocab, rope. A gated
@@ -268,15 +320,19 @@ def main():
         print(f"ERROR: could not derive family from config for {args.repo}", file=sys.stderr)
         sys.exit(1)
 
-    bm = base_model_from_readme(args.repo)
+    bm = base_from_chain or base_model_from_readme(args.repo)
     if bm:
         print(f"base_model detected: {bm}")
-        try:
-            base_cfg = text_config(fetch_config(bm))
-            family = family_from_config(base_cfg) or family
-            cfg = base_cfg
-        except Exception as e:
-            print(f"warn: could not fetch base config: {e}")
+        if base_from_chain is None:
+            # The config came from this repo; the base is a family hint only.
+            # When the chain already supplied cfg (and its real_vocab), do not
+            # refetch/overwrite it with a raw config that lost the vocab repair.
+            try:
+                base_cfg = text_config(fetch_config(bm))
+                family = family_from_config(base_cfg) or family
+                cfg = base_cfg
+            except Exception as e:
+                print(f"warn: could not fetch base config: {e}")
 
     out_path = Path(args.out) if args.out else SPECS_DIR / f"{family}-candidate.json"
     kept_model = ""

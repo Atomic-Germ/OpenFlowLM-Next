@@ -164,7 +164,7 @@ class Template:
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
              {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
-                          10752, 11264, 12288, 14336, 15360, 10496, 11008),
+                          10752, 11264, 12288, 14336, 15360, 10496, 11008, 1536, 8960, 5376, 13824, 11520, 13312, 6912),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
@@ -177,7 +177,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                  # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
-              "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)  # Nanbeige4.1-3B (designs/gemv_q4 fixture, K=10496 PASS)  # qwen25-3b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)
+              "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)  # Nanbeige4.1-3B (designs/gemv_q4 fixture, K=10496 PASS)  # qwen25-3b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # gemma-3-27b-it-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-14b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # mistral-nemo-minitron-8b-base-chatml-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen3-32b-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # lfm2-700m-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)
              note="a new K needs gemv_q4/make_test.py + compare.py at that K first"),
     Template("gemv_q8", "designs/gemv_q4/gemv_q8.h",
              {"K": values(2048, 4096),           # 2048: the 35B's qkv / z / q / k / v / gate;
@@ -245,13 +245,13 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass, 48 (64 lanes, "
                   "glue_ab_w.cc) with its 27B pass"),
     Template("short_conv", "designs/short_conv/sc.h",
-             {"taps": values(3), "width": values(2048)},
+             {"taps": values(3), "width": values(2048, 1536)},  # lfm2-700m-gguf (utilities/op-gate.py: the short_conv fixture at this geometry)
              note="LFM2's depthwise causal conv, which REPLACES attention in a layer. (3, 2048) is "
                   "LFM2-1.2B, OPEN-SHORT-CONV-KERNEL's procedure through oflm serve on 2026-09-13; "
                   "the core holds taps - 1 state rows, so another tap count is a design change, "
                   "not a knob"),
     Template("ln", "designs/ln/ln.cc",
-             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)},
+             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120, 1536, 5376)},  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the ln fixture at this geometry)  # gemma-3-27b-it-i1-gguf (utilities/op-gate.py: the ln fixture at this geometry)
              combos=(combination(
                  # (width, groups); 1024 / 2048 take the fused single-core path (N <= 2048),
                  # 2560 / 3072 / 4096 the split-output one, 5120 the streamed residual (ln.py
@@ -263,6 +263,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  # (4096, 4): K2-Horizon-7B's GroupRMSNorm(4), make_test PASS on the NPU 2026-10-08 (OPEN-FAMILY-K2).
                  (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (4096, 4),
                  (5120, 1),
+                 (1536, 1),  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the ln fixture at this geometry)
+                 (5376, 1),  # gemma-3-27b-it-i1-gguf (utilities/op-gate.py: the ln fixture at this geometry)
                  keys=("width", "groups"),
                  defaults={"groups": 1}),),),
     Template("router", "designs/router/router.h",
@@ -277,7 +279,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family, 5120 with "
                   "the 27B"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
-             {"K": values(1024, 2048, 2560, 3072, 3840, 4096, 5120), "vocab": multiple_of(64)},  # qwen3-14b (utilities/op-gate.py: the lm_head_q4 fixture at this geometry)
+             {"K": values(1024, 2048, 2560, 3072, 3840, 4096, 5120, 1536, 5376), "vocab": multiple_of(64)},  # qwen3-14b (utilities/op-gate.py: the lm_head_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the lm_head_q4 fixture at this geometry)  # gemma-3-27b-it-i1-gguf (utilities/op-gate.py: the lm_head_q4 fixture at this geometry)
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
 ]}
 

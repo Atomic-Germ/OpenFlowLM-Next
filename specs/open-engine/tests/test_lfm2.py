@@ -219,6 +219,7 @@ def test_no_shipped_models_hash_moved():
         "mistral-nemo-minitron-8b-chat-gguf.json": "sha256:13fe4c30bbbb37122550e95108429958da0bc3f08fdc30dbefdccab70bb5d1c9",
         "deepseek-r1-distill-qwen-1.5b-gguf.json": "sha256:2936d480755a745c846c4e42d5be333b99a10ba9ce918c92511b707857e280f0",
         "qwen3-8b-gguf.json": "sha256:66e1a2e9311632eaaf3498f64ef3fe7bc519846915b5468c7cf870a046bd7a32",
+        "lfm2-700m-gguf.json": "sha256:f3a57317114dcf6d495e1662e51e3877cebce2c01f9043cda957721ab28a3cb9",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

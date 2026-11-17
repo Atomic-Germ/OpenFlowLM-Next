@@ -64,6 +64,7 @@ EXPECTED = {
     "mistral-nemo-minitron-8b-chat-gguf": "Mistral-NeMo-Minitron-8B-Chat-GGUF-NPU2",
     "deepseek-r1-distill-qwen-1.5b-gguf": "DeepSeek-R1-Distill-Qwen-1.5B-GGUF-NPU2",
     "qwen3-8b-gguf": "Qwen3-8B-GGUF-NPU2",
+    "lfm2-700m-gguf": "LFM2-700M-GGUF-NPU2",
 }
 
 
