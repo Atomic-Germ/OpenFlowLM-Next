@@ -191,7 +191,14 @@ def attn_gate_support(spec_path: Path) -> tuple[bool, str]:
     from recipes.families import for_spec
     from recipes.load import load_spec
     s = load_spec(spec_path)
-    g = for_spec(s).geometry(s)
+    mod = for_spec(s)
+    if not hasattr(mod, "geometry"):
+        # The attention probe is the DENSE worker's gate. MoE families expose
+        # recipe()/layout() instead; their attention point enters through the
+        # family bring-up procedure, not this probe. Say so instead of crashing.
+        return False, (f"the attention probe only gates dense-family geometries; "
+                       f"family {s.family!r} needs its family procedure")
+    g = mod.geometry(s)
     if g.RB not in (1, 2, 4):
         return False, f"RB={g.RB} (the probe covers only RB 1/2/4)"
     return True, ""
@@ -323,8 +330,12 @@ def main() -> int:
     # Decide attention-gate capability NOW, before any export. A family the probe
     # cannot gate still builds; saying so here is a notification, not a late hard
     # failure after a successful export.
-    attn_supported, attn_why = attn_gate_support(spec_path)
     attn_validated = attn_point_validated(spec_path)
+    # Only ask the probe about capability when there is actually a gate to run:
+    # an already-validated tuple (or a family the probe does not build) must not
+    # crash on a family module with no geometry() just to be skipped.
+    attn_supported, attn_why = ((True, "") if attn_validated or a.skip_gate
+                                else attn_gate_support(spec_path))
     if not attn_validated and not attn_supported and not a.skip_gate:
         print(f"-- attention gate: NOTIFICATION: the probe cannot gate this spec: {attn_why}",
               flush=True)
