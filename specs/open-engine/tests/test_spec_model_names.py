@@ -58,6 +58,8 @@ EXPECTED = {
     "llama-3.2-1b-instruct-i1-gguf": "Llama-3.2-1B-Instruct-i1-GGUF-NPU2",
     "llama-3.2-3b-instruct-i1-gguf": "Llama-3.2-3B-Instruct-i1-GGUF-NPU2",
     "hy-mt1.5-7b-i1-gguf": "HY-MT1.5-7B-i1-GGUF-NPU2",
+    "llama3-2b-base-i1-gguf": "Llama3-2B-Base-i1-GGUF-NPU2",
+    "llama-3.1-minitron-4b-width-base-gguf": "Llama-3.1-Minitron-4B-Width-Base-GGUF-NPU2",
 }
 
 

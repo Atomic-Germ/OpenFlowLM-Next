@@ -309,6 +309,34 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gguf_ && w_ && !want_f32) {
         Manifest& m = *man_.gguf;
         const Manifest& b = man_;
+        // GGUF block prefill: enable only where the runtime supports it today
+        // (dense gemm_block kinds). Hybrid/linear kinds are not implemented for
+        // GGUF-direct block prefill yet, so keep them on the step path.
+        bool enable_gguf_block = false;
+        std::string gguf_block_skip_kind;
+        for (const auto& [lt, g] : m.layer_types) {
+            const auto it = b.layer_types.find(lt);
+            if (it == b.layer_types.end()) continue;
+            const auto& gb = it->second.gemm_block;
+            if (!gb.t) continue;
+            if (gb.kind == "dense") enable_gguf_block = true;
+            else { gguf_block_skip_kind = gb.kind; enable_gguf_block = false; break; }
+        }
+        if (enable_gguf_block) {
+            for (const auto& [lt, g] : m.layer_types) {
+                const auto it = b.layer_types.find(lt);
+                if (it == b.layer_types.end()) continue;
+                const auto& gb = it->second.gemm_block;
+                if (gb.t && gb.kind != "dense") {
+                    gguf_block_skip_kind = gb.kind;
+                    enable_gguf_block = false;
+                    break;
+                }
+            }
+        }
+        if (!enable_gguf_block && !gguf_block_skip_kind.empty())
+            log("GGUF-direct block prefill unavailable for layer kind '" + gguf_block_skip_kind +
+                "' (dense only for now); using step prefill");
         auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
                         const std::string& lt) {
             if (go.size() != bo.size())
@@ -345,7 +373,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             g.state_bytes = bl.state_bytes;
             g.state_row = bl.state_row;
             g.program = bl.program;                  // the base builds' step
-            g.gemm_block = GemmBlockProgram{};       // the q4nx prefill route stays off for a GGUF
+            g.gemm_block = enable_gguf_block ? bl.gemm_block : GemmBlockProgram{}; // GGUF block prefill only for supported kinds (dense)
         }
         m.chunk_bytes = b.chunk_bytes;
         m.pool_bytes = b.pool_bytes;
@@ -358,9 +386,27 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         // name exists in both sections and its context differs, it drives the
         // pool slot law, so it takes the base section's build.
         std::set<std::string> swap_names;
-        for (const auto& name_step : m.layer_types)
+        for (const auto& name_step : m.layer_types) {
             for (const auto& s : name_step.second.program)
                 swap_names.insert(s.kernel);
+            if (enable_gguf_block) {
+                const auto itb = b.layer_types.find(name_step.first);
+                if (itb != b.layer_types.end()) {
+                    const auto& gb = itb->second.gemm_block;
+                    for (const auto& s : gb.program) swap_names.insert(s.kernel);
+                    for (const auto& s : gb.shared_program) swap_names.insert(s.kernel);
+                    for (const auto& s : gb.ffn_program) swap_names.insert(s.kernel);
+                    for (const auto& [_, k] : gb.low_kernels) swap_names.insert(k);
+                    if (gb.t && gb.kind == "dense") swap_names.insert(gb.attn_kernel);
+                    if (!gb.moe_kernel.empty()) swap_names.insert(gb.moe_kernel);
+                    for (const auto& [_, k] : gb.moe_batch.kernels) swap_names.insert(k);
+                    for (const auto& [_, k] : gb.attn_block.kernels_s) swap_names.insert(k);
+                    for (const auto& [_, k] : gb.attn_block.kernels_pv) swap_names.insert(k);
+                    for (const auto& [_, k] : gb.attn_fa.kernels) swap_names.insert(k);
+                    if (gb.attn_fa.has_prep()) swap_names.insert(gb.attn_fa.prep_kernel);
+                }
+            }
+        }
         for (const std::string& n : swap_names) {
             const auto kt = m.kernels.find(n);
             if (kt == m.kernels.end()) continue;
