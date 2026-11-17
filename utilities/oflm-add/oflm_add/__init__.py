@@ -4320,8 +4320,7 @@ def main():
                 if kdir is None and not args.dry_run:
                     raise SystemExit(kernel_set_refusal(
                         repo_arg, family, geom_notes, get_base_chain(),
-                        build=f"python utilities/build-new-spec.py --spec "
-                              f"{family.replace('.', '')}-{size_token}".lower()))
+                        build=f"oflm dev build-new-spec --repo {repo_arg}"))
             gguf_kernel_dir = kdir
             if kdir and str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
                 log(f"[INFO] GGUF-direct kernels: {kdir}")
