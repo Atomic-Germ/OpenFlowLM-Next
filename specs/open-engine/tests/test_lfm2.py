@@ -213,6 +213,12 @@ def test_no_shipped_models_hash_moved():
         "llama-3.2-1b-instruct-i1-gguf.json": "sha256:5722d3b5c07ba6967df81eae214b3927fb185f2464c150117ffcc627d0a06fc0",
         "llama-3.2-3b-instruct-i1-gguf.json": "sha256:ad241778ac39247a1ec5a8baeb9fef2a3b1f3b2c153aafed78b95d6de385a06a",
         "hy-mt1.5-7b-i1-gguf.json": "sha256:bbae51b29776085c710f20c2614d12e33a01693e652772d588ab43e08d84fb49",
+        "llama3-2b-base-i1-gguf.json": "sha256:a53a3aee75aa8e292489209e1a54164defffbd5855dcd5a4d69fc31b4019f1d1",
+        "llama-3.1-minitron-4b-width-base-gguf.json": "sha256:6f459218194ac1cc34f284b0a3544fee0fd0352aa329adafa59a6b7d566b941d",
+        "mistral-nemo-minitron-8b-base-chatml-gguf.json": "sha256:13151126b68d672aa7b426d83668631a1280cca798c9d9a689560d88a3065969",
+        "mistral-nemo-minitron-8b-chat-gguf.json": "sha256:13fe4c30bbbb37122550e95108429958da0bc3f08fdc30dbefdccab70bb5d1c9",
+        "deepseek-r1-distill-qwen-1.5b-gguf.json": "sha256:2936d480755a745c846c4e42d5be333b99a10ba9ce918c92511b707857e280f0",
+        "qwen3-8b-gguf.json": "sha256:66e1a2e9311632eaaf3498f64ef3fe7bc519846915b5468c7cf870a046bd7a32",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
