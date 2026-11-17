@@ -196,7 +196,11 @@ def attn_point_validated(spec) -> bool:
               rotary_dim=s.rotary_dim, qk_norm=s.qk_norm, attn_gate=s.attn_gate,
               qk_norm_post_rope=s.qk_norm and s.family in D.QKNORM_POST_ROPE,
               qkv_bias=D.qkv_bias(s))
-    return any(c.value(kw) in c.points for c in tpl.combos)
+    # require() enforces EVERY combo (the main attn tuple AND the later
+    # Gemma-4 v_norm/scale/rope_pair group, whose default point is present for
+    # everyone). any() let that default group vouch for an unvalidated main
+    # tuple, so the gate was skipped and a plain export hit the catalogue wall.
+    return all(c.value(kw) in c.points for c in tpl.combos)
 
 
 def main() -> int:

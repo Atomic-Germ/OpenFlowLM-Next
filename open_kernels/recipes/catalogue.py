@@ -218,6 +218,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                                  # attention element yet at 512 B (OPEN-ATTN-QKV-BIAS)
                  (128, 40, 8, 128, True, False, False, False),   # qwen3-14b (the attention gate, designs/attn/probe_dense.py)
                  (512, 16, 2, 128, True, False, False, False),   # Gemma 4 12B's global layers: head dim 512, one kv head, proportional RoPE; attention gate PASS on Krackan NPU2 2026-11-12 (PR #225 verified on Strix Point)
+                 (64, 24, 8, 64, True, False, False, False),     # lfm2-700m-gguf (the attention gate, designs/attn/probe_dense.py)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them
