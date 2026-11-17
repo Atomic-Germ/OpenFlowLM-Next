@@ -29,74 +29,18 @@ def test_shipped_summary_has_paired_shapes_without_claiming_complete_acceptance(
     assert report['status'].startswith('DRAFT')
     assert report['validation']['full_model'].startswith('PASS: 64-layer captured logits/state')
     assert report['acceptance']['integration']['server_aba'].startswith('PASS for both private arms')
-    assert report['acceptance']['runtime_verification'].startswith('Benchmark: XRT 2.26.0 both arms')
-    server = report['acceptance']['server_candidate']
-    assert server['verdict'] == 'PASS' and server['runtime_comparable'] is True
-    assert server['same_answer_between_arms'] is True and server['arm_separation']['manifest_same'] is True
-    assert len(server['arm_separation']['changed']) == 10
-    for arm in ('before', 'after'):
-        assert server['arms'][arm]['graded_pass'] == 11
-        assert server['arms'][arm]['gemm_programs'] == 10
-        assert all('.2.25.' in p for p in server['arms'][arm]['libraries'])
-    provenance = report['acceptance']['runtime_provenance']
-    assert provenance['benchmark_comparable'] is True
-    assert provenance['benchmark_runtime'] == 'XRT 2.26.0 at /opt/xilinx/xrt/lib for both arms'
-    assert provenance['server'] == 'XRT 2.25.00 distro libraries for both arms'
-    scope = report['acceptance']['scope_review']
-    assert scope['option'].startswith('B:') and scope['pr2_tip_ancestor_of_upstream'] is False
-    assert scope['rebase_performed'] is False and scope['review_target'] == '836072db'
-    # Counts move with every review commit, so the record stores the structural
-    # fact (is the base in upstream?) and lets git answer the numbers.
-    import subprocess
-    check = subprocess.run(['git', 'merge-base', '--is-ancestor', scope['review_target'],
-                            'upstream/main'], cwd=ROOT, capture_output=True)
-    if check.returncode not in (0, 1):
-        pytest.skip('git history not available')
-    assert scope['verified']['pr2_tip_in_upstream'] == (check.returncode == 0)
-    assert scope['verified']['pr2_tip_in_upstream'] is False
-    diagnosis = report['validation']['context_diagnosis']
-    assert diagnosis['firmware_status'] == '0x2000003'
-    assert diagnosis['firmware_status_name'] == 'AIE2_STATUS_MGMT_ERT_NOAVAIL'
-    assert diagnosis['observed_ceiling_healthy'] == 16
-    assert diagnosis['observed_ceiling_degraded'] == 8
-    assert diagnosis['ceiling_is_stable'] is False
-    assert diagnosis['firmware_max_proven'] is False
-    assert diagnosis['capacity_returned_after_destroy'] is True
-    assert diagnosis['leak_after_64_churn_cycles'] is False
-    assert diagnosis['process_exit_leak'] is None
-    assert diagnosis['valid_control_substitute'] is False
-    assert diagnosis['trigger_identified'] is False
-    assert diagnosis['minimal_reproducer'] is None
-    assert diagnosis['exact_trigger_operation'] is None
-    assert diagnosis['recovery_validated'] is False
-    assert diagnosis['pre_reboot_observation']['held'] == [16, 16, 16]
-    assert 'create_ctx_resp' in diagnosis['root_cause_experiment']
-
-
-def test_fresh_boot_phase_a_preserves_draft_and_does_not_invent_a_trigger(report):
-    diagnosis = report['validation']['context_diagnosis']
-    phase = diagnosis['phase_a_fresh_boot']
-    assert phase['status'] == 'COMPLETED_NO_DECREASE'
-    assert phase['start_boot_age_s'] <= 900
-    assert phase['initial_capacity_controls'] == [16, 16, 16]
-    assert phase['post_process_capacity'] == [16] * 12
-    assert len(phase['processes']) == 12
-    assert all(p['returncode'] == 0 and p['runtime_verified'] and
-               p['capacity_before'] == p['capacity_after'] == 16 for p in phase['processes'])
-    assert len({p['pid'] for p in phase['processes']}) == 12
-    assert phase['kernel_windows_available'] == 27
-    assert phase['kernel_error_count'] == 0
-    assert phase['all_trajectories_match'] is True and len(phase['generated_ids']) == 16
-    assert len(phase['log_identities']) == 36
-    assert all(len(h) == 64 for h in phase['log_identities'].values())
-    assert phase['post_idle_observation']['capacity'] == [16, 16, 16]
-    assert phase['full_model_acceptance'] is False
-    assert diagnosis['trigger_identified'] is False
-    assert diagnosis['exact_trigger_operation'] is None
-    assert diagnosis['minimal_reproducer'] is None
-    assert diagnosis['recovery_validated'] is False
     assert report['end_to_end_acceptance'] is False
     assert report['production_default_dma_batch'] == 1
+    server = report['acceptance']['server_candidate']
+    assert server['verdict'] == 'PASS' and server['runtime_comparable'] is True
+    assert server['same_answer_between_arms'] is True
+    assert len(server['arm_separation']['changed']) == 10
+    assert server['capacity_validation'].startswith('NOT ESTABLISHED')
+    for arm in ('before', 'after'):
+        assert server['arms'][arm]['gemm_programs'] == 10
+        assert len(server['arms'][arm]['library_identity']) >= 2
+    assert report['acceptance']['runtime_verification'].startswith('Historical benchmark maps NOT RECORDED')
+    assert report['acceptance']['scope_review']['review_target'] == report['baseline_commit']
 
 
 @pytest.mark.parametrize('field,value', [('end_to_end_acceptance', True),
@@ -181,7 +125,6 @@ def test_confirmation_statistics_reproduce_from_retained_paired_timings(report):
 
 def test_acceptance_documents_match_their_recorded_hashes(report):
     acceptance = report['acceptance']
-    for item in (acceptance, acceptance['confirmation']):
-        assert hashlib.sha256((ROOT / item['report']).read_bytes()).hexdigest() == item['report_sha256']
+    assert hashlib.sha256((ROOT / acceptance['report']).read_bytes()).hexdigest() == acceptance['report_sha256']
     confirmation = acceptance['confirmation']
     assert hashlib.sha256((ROOT / confirmation['criterion']).read_bytes()).hexdigest() == confirmation['criterion_sha256']

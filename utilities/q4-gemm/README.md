@@ -99,23 +99,9 @@ requires exact logit and state bytes. Four-layer boundary sweeps do not replace
 the 64-layer gate. A numerical or isolated-kernel pass alone must not promote
 the recipe default; end-to-end performance and integration gates also apply.
 
-For a context-creation failure, isolate the unchanged export before changing
-the model, manifest or driver:
-
-```bash
-ironvenv/bin/python utilities/q4-gemm/context_probe.py \
-  --kernels Models/qwen38-27b/production-v2/kernels-model \
-  --harness "$ROOT/harness/run_kernel" --out "$ROOT/context-probe"
-```
-
-This probes each context alone and all of them together, with no inference.
-Its result is diagnostic evidence, not a numerical pass. Do not bypass paired
-precision or silently coalesce contexts to make a performance gate run.
-
 ## Candidate server and runtime provenance
 
-The Phase 27 server result used the production kernel directory, so it does
-not validate a kernel arm. This runs the real `oflm serve` once per arm with
+This runs the real `oflm serve` once per arm with
 `OFLM_OPEN_KERNELS_DIR` set and samples `/proc/<pid>/maps` while it is alive:
 
 ```bash
@@ -125,22 +111,31 @@ OPENBLAS_NUM_THREADS=1 ironvenv/bin/python \
   --out "$ROOT/accept-server-runtime"
 ```
 
-It records the engine's `open_qwen36: kernels <dir> (<how>)` line, per-arm
+It verifies the retained projection hashes before/after execution and records the engine's `open_qwen36: kernels <dir> (<how>)` line, per-arm
 manifest/GEMM hashes, A→B→A answers, a fresh-process B reference and resolved
 XRT paths and hashes. A shell-only `OFLM_OPEN_KERNELS_DIR` is not enough for
 the older helpers: `oflm_drive.env()` overwrites it.
 
-To see which runtime any command loads, without touching a timed window:
+To capture a command's runtime libraries (including timing-wrapper children):
 
 ```bash
 ironvenv/bin/python utilities/prefill-block/runtime_provenance.py \
   --out "$ROOT/runtime-check" -- <command...>
 ```
 
-`utilities/env.sh` puts `/opt/xilinx/xrt/lib` first, so the tree shell loads XRT
-2.26 even though `oflm` links the unversioned soname. The benchmark driver now
-stores `runtime_libraries` per process; a run that used a different runtime is
-reported as such, never relabelled.
+The benchmark and server share runtime parsing and hashing. The sampler follows
+child processes, uses file-backed output to avoid pipe deadlock, and kills/reaps
+the process group on timeout. Library hashing happens after execution or between
+server requests, not inside the inference timing window. Exact loaded paths,
+not the shell environment or link-time soname, identify the runtime. Historical
+captures without maps remain unverified. Server PASS requires coreutil and xdna
+plugin identities to match in all four processes, matching cross-arm answers,
+matching manifests and the recorded projection binary hashes.
+
+These are POSIX/Linux hardware drivers. They do not change production settings
+or install the private kernel arms. A successful server run alone does not prove
+stable context capacity: record a kernel-journal window and before/after capacity
+observations separately when making that claim.
 
 ## Evidence and review checks
 

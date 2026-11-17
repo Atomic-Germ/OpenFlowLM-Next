@@ -1,32 +1,12 @@
-"""Kernel-arm `oflm serve` isolation plus live XRT library provenance.
-
-The retained Phase 27 A->B->A run used the production kernel directory, so it
-cannot stand in for a kernel candidate. This tool runs the real server once per
-kernel arm with `OFLM_OPEN_KERNELS_DIR` pointed at that arm, samples
-`/proc/<pid>/maps` while the server is alive, and hashes the shared libraries it
-found. It also records the engine's own `open_qwen36: kernels <dir> (<how>)`
-line, so a silently ignored override fails the gate instead of passing.
-
-    python server_candidate_check.py \
-      --before-kernels Models/qwen38-27b/pr3-gemm/model-batch1 \
-      --after-kernels  Models/qwen38-27b/pr3-gemm/model-batch4 \
-      --out Models/qwen38-27b/pr3-gemm/accept-server
-
-Both arms run A->B->A in one process and B in a fresh process. The candidate arm
-is the one that must pass; the control arm is the same measurement for
-comparison. A missing runtime library, a non-matching kernel directory or a
-different answer all fail. No inference is timed for a performance claim.
-"""
+"""Validate explicit server kernel arms, A->B->A isolation and live XRT identity."""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -34,38 +14,14 @@ sys.path.insert(0, str(HERE))
 import oflm_drive as D  # noqa: E402
 import oflm_serve_check as S  # noqa: E402
 import isolation_aba as I  # noqa: E402
+from runtime_provenance import runtime_paths, describe, runtime_identity
 
 SELECTED = re.compile(r'open_qwen36: kernels (\S+) \(([^)]*)\)')
-# Full resolved path, ending in an XRT runtime or pyxrt shared object.
-RUNTIME = re.compile(r'\S*libxrt_[A-Za-z0-9_.+-]*\.so\S*|\S*pyxrt\S*\.so\S*')
 
 
 def digest(path: Path) -> str:
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-
-def runtime_libraries(maps_text: str) -> list[str]:
-    """Unique shared-library paths seen in a live process mapping."""
-    paths = []
-    for line in maps_text.splitlines():
-        match = re.search(r'(\S+)\s*$', line)
-        if match and RUNTIME.fullmatch(match.group(1)):
-            paths.append(match.group(1))
-    return sorted(set(paths))
-
-
-def library_record(paths: list[str]) -> dict:
-    record = {}
-    for seen in paths:
-        path = Path(seen)
-        try:
-            real = path.resolve(strict=True)
-            record[seen] = dict(resolved=str(real), bytes=real.stat().st_size,
-                                sha256=digest(real))
-        except OSError as exc:
-            record[seen] = dict(resolved=None, error=str(exc))
-    return record
 
 
 def selected_kernel(log: str) -> dict | None:
@@ -101,6 +57,23 @@ def differing_files(before: dict, after: dict) -> dict:
                 manifest_same=before['manifest'] == after['manifest'])
 
 
+def matches_evidence(artifacts: dict, report: dict, arm: str) -> bool:
+    expected = {case['name']: case['builds'][arm]['binaries'] for case in report['cases']}
+    return (bool(expected) and set(artifacts['gemm']) == set(expected) and
+            all(artifacts['gemm'][name] == hashes for name, hashes in expected.items()))
+
+
+def comparison_passes(arms: dict) -> bool:
+    before, after = (arms[arm] for arm in ('before', 'after'))
+    runs = [arm.get(name, {}) for arm in (before, after) for name in ('main', 'fresh')]
+    identities = [runtime_identity(run.get('libraries', {})) for run in runs]
+    return (all(arm.get('verdict') == 'PASS' for arm in (before, after)) and
+            all(identity is not None and identity == identities[0] for identity in identities) and
+            before['artifacts']['manifest'] == after['artifacts']['manifest'] and
+            all(before['main'].get(key, {}).get('content') == after['main'].get(key, {}).get('content')
+                for key in ('a1', 'b', 'a2')))
+
+
 def sample_maps(pid: int) -> str:
     try:
         return Path(f'/proc/{pid}/maps').read_text()
@@ -113,7 +86,14 @@ def one_server(port: int, kernels: Path, a_text: str, b_text: str, *, max_tokens
     """A->B->A plus a fresh-process B, sampling runtime maps while alive."""
     maps: dict[str, str] = {}
     extra = {'OFLM_OPEN_KERNELS_DIR': str(kernels)}
-    proc, _ = S.start(port, ctx=4096, extra=extra)
+    command = [str(D.OFLM), 'serve', 'qwen3.8:27b', '--ctx-len', '4096', '-p', str(port)]
+    stream = (out / f'{tag}-server.log').open('w')
+    try:
+        proc = subprocess.Popen(command, cwd=D.ROOT, env=D.env(block=True, extra=extra),
+                                stdout=stream, stderr=subprocess.STDOUT, text=True)
+    except BaseException:
+        stream.close()
+        raise
     run = dict(started=False, pid=proc.pid)
     try:
         err = S.wait_ready(port, proc, timeout=timeout)
@@ -132,15 +112,16 @@ def one_server(port: int, kernels: Path, a_text: str, b_text: str, *, max_tokens
     finally:
         proc.terminate()
         try:
-            log = proc.communicate(timeout=30)[0] or ''
-        except Exception:  # noqa: BLE001
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
             proc.kill()
-            log = ''
-        (out / f'{tag}-server.log').write_text(log)
+            proc.wait()
+        stream.close()
+        log = (out / f'{tag}-server.log').read_text()
         sample = '\n'.join(maps.values())
-        run.update(selection=selected_kernel(log),
-                   libraries=library_record(runtime_libraries(sample)),
-                   library_samples={k: runtime_libraries(v) for k, v in maps.items()})
+        run.update(command=command, selection=selected_kernel(log),
+                   libraries=describe(runtime_paths(sample)),
+                   library_samples={k: runtime_paths(v) for k, v in maps.items()})
 
 
 def run_arm(name: str, kernels: Path, out: Path, port: int, a: int, b: int,
@@ -189,9 +170,9 @@ def run_arm(name: str, kernels: Path, out: Path, port: int, a: int, b: int,
                  detail=dict(after_A=mid.get('content'),
                              fresh=fresh_b.get('content') if fresh_b else None)),
             dict(check='A_and_B_are_different_prompts', ok=a1.get('content') != mid.get('content')),
-            dict(check='runtime_libraries_loaded', ok=bool(run.get('libraries')),
+            dict(check='runtime_libraries_loaded', ok=runtime_identity(run.get('libraries', {})) is not None,
                  detail=sorted(run.get('libraries') or {})),
-            dict(check='fresh_runtime_libraries_loaded', ok=bool(fresh.get('libraries')),
+            dict(check='fresh_runtime_libraries_loaded', ok=runtime_identity(fresh.get('libraries', {})) is not None,
                  detail=sorted(fresh.get('libraries') or {})),
             dict(check='after_reset', ok=None, verdict='N/A',
                  detail=(run.get('reset') or {}).get('reason')),
@@ -200,7 +181,7 @@ def run_arm(name: str, kernels: Path, out: Path, port: int, a: int, b: int,
         rows.append(dict(check='server_starts', ok=False, detail=run.get('reason')))
     result = dict(arm=name, kernel_directory=str(kernels), model=D.MODEL, binary=D.OFLM,
                   binary_sha256=digest(D.OFLM), artifacts=artifacts, main=run,
-                  fresh_b=fresh_b, rows=rows,
+                  fresh=fresh, fresh_b=fresh_b, rows=rows,
                   graded_fail=[r for r in rows if r['ok'] is False])
     result['verdict'] = 'PASS' if rows and not result['graded_fail'] else 'FAIL'
     (folder / 'result.json').write_text(json.dumps(result, indent=1, default=str) + '\n')
@@ -225,25 +206,37 @@ def main() -> int:
     args = ap.parse_args()
     before, after = args.before_kernels.resolve(), args.after_kernels.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
+    evidence = json.loads((D.ROOT / 'specs/open-engine/reports/qwen38-q4-gemm-dma.json').read_text())
+    for arm, directory in (('before', before), ('after', after)):
+        if not matches_evidence(kernel_artifacts(directory), evidence, arm):
+            ap.error(f'{arm} kernel hashes do not match the recorded evidence')
     record = dict(tool='prefill-block-server-candidate', version=1,
                   gate='candidate kernel arms pass serve A->B->A with recorded runtime maps',
                   model_acceptance=False, a_text_tokens=args.a, b_text_tokens=args.b,
                   max_tokens=args.max_tokens)
     arms = {}
-    for index, (name, kernels) in enumerate((('before', before), ('after', after))):
-        arms[name] = run_arm(name, kernels, args.out, args.before_port + index * 2,
-                             args.a, args.b, args.max_tokens, args.timeout)
+    import fcntl
+    D.LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with D.LOCK.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for index, (name, kernels) in enumerate((('before', before), ('after', after))):
+            arms[name] = run_arm(name, kernels, args.out, args.before_port + index * 2,
+                                args.a, args.b, args.max_tokens, args.timeout)
+            if not matches_evidence(kernel_artifacts(kernels), evidence, name):
+                arms[name]['verdict'] = 'FAIL'
+                arms[name]['error'] = 'kernel artifacts changed during validation'
     record['arms'] = arms
     record['arm_separation'] = differing_files(arms['before']['artifacts'],
                                                arms['after']['artifacts'])
     control = arms['before']['main']
     candidate = arms['after']['main']
-    record['runtime_comparable'] = control.get('libraries') == candidate.get('libraries')
+    identity = runtime_identity(control.get('libraries', {}))
+    record['runtime_comparable'] = identity is not None and identity == runtime_identity(candidate.get('libraries', {}))
     record['same_answer_between_arms'] = (control.get('a1', {}).get('content') ==
                                           candidate.get('a1', {}).get('content') and
                                           control.get('b', {}).get('content') ==
                                           candidate.get('b', {}).get('content'))
-    record['verdict'] = 'PASS' if all(a['verdict'] == 'PASS' for a in arms.values()) else 'FAIL'
+    record['verdict'] = 'PASS' if comparison_passes(arms) else 'FAIL'
     (args.out / 'result.json').write_text(json.dumps(record, indent=1, default=str) + '\n')
     print(json.dumps(dict(verdict=record['verdict'],
                           arm_separation=record['arm_separation'],

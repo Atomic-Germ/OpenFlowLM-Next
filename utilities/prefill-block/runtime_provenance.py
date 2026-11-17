@@ -20,8 +20,10 @@ import json
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,12 +32,57 @@ VERSION = re.compile(r'(\d+\.\d+\.\d+)')
 
 
 def runtime_paths(maps_text: str) -> list[str]:
-    paths = []
+    paths = set()
     for line in maps_text.splitlines():
-        match = re.search(r'(\S+)\s*$', line)
-        if match and RUNTIME.fullmatch(match.group(1)):
-            paths.append(match.group(1))
-    return sorted(set(paths))
+        fields = line.split(None, 5)
+        if len(fields) == 6 and RUNTIME.fullmatch(fields[5]):
+            paths.add(fields[5])
+    return sorted(paths)
+
+
+def process_paths(pid: int) -> list[str]:
+    """Include inference children when the direct child is a timing wrapper."""
+    pending, visited, paths = [pid], set(), set()
+    while pending:
+        child = pending.pop()
+        if child in visited:
+            continue
+        visited.add(child)
+        try:
+            paths.update(runtime_paths(Path(f'/proc/{child}/maps').read_text()))
+            pending.extend(map(int, Path(f'/proc/{child}/task/{child}/children').read_text().split()))
+        except (OSError, ValueError):
+            pass
+    return sorted(paths)
+
+
+def run_sampled(command: list[str], env: dict, timeout: float):
+    """Collect output without blocking pipes and reap the process tree on timeout."""
+    with tempfile.TemporaryFile(mode='w+') as stdout, tempfile.TemporaryFile(mode='w+') as stderr:
+        proc = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr,
+                                start_new_session=os.name == 'posix')
+        seen, deadline = set(), time.monotonic() + timeout
+        try:
+            while proc.poll() is None:
+                seen.update(process_paths(proc.pid))
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                time.sleep(0.1)
+            proc.wait()
+        finally:
+            if proc.poll() is None:
+                if os.name == 'posix':
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    proc.kill()
+            proc.wait()
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(command, proc.returncode,
+                                           stdout.read(), stderr.read()), sorted(seen)
 
 
 def describe(paths: list[str]) -> dict:
@@ -55,6 +102,18 @@ def describe(paths: list[str]) -> dict:
     return out
 
 
+def runtime_identity(libraries: dict) -> dict | None:
+    """Missing core/plugin or an unhashable mapping is not verified provenance."""
+    required = ('libxrt_coreutil.so.', 'libxrt_driver_xdna.so.')
+    if not libraries or any(sum(Path(p).name.startswith(prefix) for p in libraries) != 1
+                            for prefix in required):
+        return None
+    if any(v.get('error') or not re.fullmatch('[0-9a-f]{64}', v.get('sha256', ''))
+           for v in libraries.values()):
+        return None
+    return {p: v['sha256'] for p, v in libraries.items()}
+
+
 def capture(command: list[str], out: Path, env: dict, sample_s: float) -> dict:
     out.mkdir(parents=True, exist_ok=False)
     record = dict(command=command, started=time.strftime('%Y-%m-%dT%H:%M:%S%z'),
@@ -63,31 +122,19 @@ def capture(command: list[str], out: Path, env: dict, sample_s: float) -> dict:
                       'LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONPATH', 'XILINX_XRT',
                       'XRT_ROOT', 'OFLM_OPEN_KERNELS_DIR', 'OFLM_OPEN_PREFILL_PRECISION',
                       'OFLM_OPEN_OMP_PASSIVE', 'OFLM_OPEN_LAYER_MAJOR')},
-                  samples=[])
-    with (out / 'stdout.log').open('w') as stdout, (out / 'stderr.log').open('w') as stderr:
-        proc = subprocess.Popen(command, cwd=str(Path.cwd()), env=env, stdout=stdout, stderr=stderr)
-        record['pid'] = proc.pid
-        seen: set[str] = set()
-        deadline = time.monotonic() + sample_s
-        while proc.poll() is None and time.monotonic() < deadline:
-            try:
-                text = Path(f'/proc/{proc.pid}/maps').read_text()
-            except OSError:
-                break
-            fresh = set(runtime_paths(text))
-            if fresh - seen:
-                seen |= fresh
-                record['samples'].append(dict(monotonic_s=round(time.monotonic() - deadline + sample_s, 3),
-                                              paths=sorted(fresh)))
-            time.sleep(0.02)
-        if proc.poll() is None:
-            record['termination'] = 'sampling window closed; child left running and reaped below'
-            proc.terminate()
-        record['returncode'] = proc.wait()
-    (out / 'stdout.log').read_text()
-    record['libraries'] = describe(sorted(seen))
+                  executable=str(Path(command[0]).resolve()))
+    try:
+        child, paths = run_sampled(command, env, sample_s)
+        record['returncode'] = child.returncode
+        (out / 'stdout.log').write_text(child.stdout)
+        (out / 'stderr.log').write_text(child.stderr)
+        record['libraries'] = describe(paths)
+    except subprocess.TimeoutExpired:
+        record.update(returncode=None, error='process timeout; process tree killed and reaped',
+                      libraries={})
     record['versions'] = sorted({v['version'] for v in record['libraries'].values() if v.get('version')})
     record['paths'] = sorted({v.get('resolved') for v in record['libraries'].values() if v.get('resolved')})
+    record['runtime_verified'] = runtime_identity(record['libraries']) is not None
     (out / 'provenance.json').write_text(json.dumps(record, indent=2) + '\n')
     return record
 
@@ -97,7 +144,7 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--seconds', type=float, default=1800,
-                    help='how long to keep sampling a live child')
+                    help='child timeout in seconds')
     ap.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
                     help='override one variable for the child')
     ap.add_argument('command', nargs=argparse.REMAINDER)
@@ -105,9 +152,13 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         ap.error('a command is required after --')
+    if not 0 < args.seconds < float('inf'):
+        ap.error('--seconds must be positive and finite')
     env = dict(os.environ)
     for item in args.env:
-        key, _, value = item.partition('=')
+        key, separator, value = item.partition('=')
+        if not separator or not key:
+            ap.error('--env requires KEY=VALUE')
         env[key] = value
     record = capture(command, args.out.resolve(), env, args.seconds)
     print(json.dumps(dict(returncode=record['returncode'], versions=record['versions'],

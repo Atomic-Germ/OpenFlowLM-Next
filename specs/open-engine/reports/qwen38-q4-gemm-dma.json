@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT: opt-in performance PASS (XRT 2.26, 14-pair); candidate server PASS (XRT 2.25); stacked on PR #2",
+  "status": "DRAFT: opt-in numerical/performance evidence retained; stacked dependency and provenance/capacity limitations explicit",
   "baseline_commit": "836072db",
   "candidate_commit": null,
   "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
@@ -662,347 +662,23 @@
     }
   },
   "validation": {
-    "pytest_passed": 2754,
-    "pytest_skipped": 172,
-    "ctest_passed": 5,
-    "settings_direct": "PASS",
-    "settings_merge_wrapper": "PASS: clean committed branch merged with actual upstream/main; temporary per-command fetch URL override",
     "full_model": "PASS: 64-layer captured logits/state and 16-token greedy equivalence; independent per-layer residual oracle NOT MEASURED",
-    "context_diagnosis": {
-      "observed_ceiling_healthy": 16,
-      "ceiling_evidence": "healthy-state arms (targets 17, 18, 20, 32; 11 distinct and 1 identical asset) stopped at exactly 16 on both installed runtimes; the same boot later returned 8",
-      "observed_ceiling_degraded": 8,
-      "ceiling_is_stable": false,
-      "degraded_state": "Historical capacity-8 observations occur after an eight-hour unobserved interval; no process-by-process data identifies the trigger",
-      "firmware_status": "0x2000003",
-      "firmware_status_name": "AIE2_STATUS_MGMT_ERT_NOAVAIL",
-      "driver_advertised_hwctx_limit": 16,
-      "firmware_max_proven": false,
-      "capacity_returned_after_destroy": true,
-      "leak_after_64_churn_cycles": false,
-      "process_exit_leak": null,
-      "contention": "with 4 contexts held by another process, 12 more were creatable (16 total); capacity returned after exit",
-      "width_dependence": "NOT MEASURED: no validated narrower-partition xclbin was available; all checked artifacts are width 8",
-      "fresh_boot_repeat": "MEASURED: Phase A completed on new boot, 12 processes, no decrease",
-      "partition": "all retained contexts request 8 columns at start column 0",
-      "accepted_binary_reproduced": true,
-      "initial_eight_context_failure_reproducible": true,
-      "best_remaining_explanation": "UNRESOLVED: resource retention, firmware restart/state and runtime PM require bracketed experiments",
-      "root_cause_experiment": "Fresh-boot one-process-at-a-time replay with probe-only controls and existing logs/traces; failed create_ctx_resp has no documented exhausted-resource reason beyond status",
-      "valid_control_substitute": false,
-      "end_to_end_256": "PASS before degradation: prefill 29.4s -> 28.75s (~2.2%), decode unchanged, RSS flat; 512/1024 blocked by the degraded capacity",
-      "trigger_identified": false,
-      "minimal_reproducer": null,
-      "exact_trigger_operation": null,
-      "recovery_validated": false,
-      "transition_interval": "Historical campaign ends 2026-11-15T04:49:07Z; next failed attempt 2026-11-15T13:00:12Z; transition unlocalized",
-      "current_capacity": "16 available throughout fresh-boot Phase A and in three post-idle probes on XRT 2.25",
-      "phase_a": "COMPLETED_NO_DECREASE: fresh boot, 12 pinned sequential processes, 16 contexts after every process",
-      "driver_identity": {
-        "version": "2.26.0_20260817,2b71d02b641561a40ab2db1c26a69620794f4e9f",
-        "srcversion": "D9A90D693FFE30975B52EBB",
-        "source_revision": "2b71d02b641561a40ab2db1c26a69620794f4e9f",
-        "installed_source_matches": [
-          "aie2_message.c",
-          "aie2_msg_priv.h",
-          "aie2_solver.c",
-          "amdxdna_debugfs.c"
-        ]
-      },
-      "phase_a_fresh_boot": {
-        "status": "COMPLETED_NO_DECREASE",
-        "raw_result": "Models/qwen38-27b/pr3-gemm/transition-fresh-01/result.json",
-        "raw_result_sha256": "0a0d6a2584f001529fbb38c0987d0ef76cdc24bac16e34b84bf2bf0eee4bcdf0",
-        "boot_id": "9285622f-257b-4e83-87b0-494393f16623",
-        "start_boot_age_s": 174.58,
-        "duration_s": 679.848984161,
-        "probe_sha256": "ed4a6d64229f36a8db4999915b96c52102599ebfdcf4f4e3184fa401134b6314",
-        "input_count": 192,
-        "initial_capacity_controls": [
-          16,
-          16,
-          16
-        ],
-        "post_process_capacity": [
-          16,
-          16,
-          16,
-          16,
-          16,
-          16,
-          16,
-          16,
-          16,
-          16,
-          16,
-          16
-        ],
-        "processes": [
-          {
-            "name": "process-00-after",
-            "pid": 14015,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:01:02.724083+00:00",
-            "finished_utc": "2026-11-15T14:01:48.269868+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-01-before",
-            "pid": 15159,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:01:57.278213+00:00",
-            "finished_utc": "2026-11-15T14:02:43.275948+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-02-before",
-            "pid": 15331,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:02:52.245791+00:00",
-            "finished_utc": "2026-11-15T14:03:37.747998+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-03-after",
-            "pid": 15697,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:03:46.731925+00:00",
-            "finished_utc": "2026-11-15T14:04:32.056605+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-04-after",
-            "pid": 15885,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:04:41.011884+00:00",
-            "finished_utc": "2026-11-15T14:05:26.614165+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-05-before",
-            "pid": 16079,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:05:35.673843+00:00",
-            "finished_utc": "2026-11-15T14:06:21.403712+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-06-before",
-            "pid": 16689,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:06:30.402085+00:00",
-            "finished_utc": "2026-11-15T14:07:15.789374+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-07-after",
-            "pid": 16927,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:07:24.771233+00:00",
-            "finished_utc": "2026-11-15T14:08:09.516525+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-08-after",
-            "pid": 17131,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:08:18.493685+00:00",
-            "finished_utc": "2026-11-15T14:09:03.523145+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-09-before",
-            "pid": 17354,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:09:12.507085+00:00",
-            "finished_utc": "2026-11-15T14:09:57.957324+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-10-before",
-            "pid": 18445,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:10:06.915496+00:00",
-            "finished_utc": "2026-11-15T14:10:52.264790+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          },
-          {
-            "name": "process-11-after",
-            "pid": 18635,
-            "returncode": 0,
-            "started_utc": "2026-11-15T14:11:01.237643+00:00",
-            "finished_utc": "2026-11-15T14:11:46.038214+00:00",
-            "capacity_before": 16,
-            "capacity_after": 16,
-            "runtime_verified": true
-          }
-        ],
-        "kernel_error_count": 0,
-        "kernel_windows_available": 27,
-        "all_trajectories_match": true,
-        "generated_ids": [
-          248046,
-          198,
-          248045,
-          248046,
-          198,
-          248045,
-          846,
-          198,
-          96220,
-          248046,
-          198,
-          248045,
-          248046,
-          198,
-          248045,
-          248046
-        ],
-        "log_identities": {
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-0-process-00-after/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-0-process-00-after/stderr.log": "e750ddfe85a4508656bac5508033041c2aebc36a599ec2e08c01a913b4a405ef",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-0-process-00-after/lifecycle.json": "8b90ffb01a0be3b2392b16f12bd4fc1cae59171f782b58b1f62a09f0e3f4420b",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-1-process-01-before/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-1-process-01-before/stderr.log": "d8975017e3d784270ced3b0ced0ef03e75f729cc442d96da3dc2321607224d69",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-1-process-01-before/lifecycle.json": "fab59cbc6b04a15d2786a08ac703cb33d71c7fa965bfc6e08275b2cdc6307309",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-2-process-02-before/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-2-process-02-before/stderr.log": "0a81eac5c6561c4026f195a207ae2f5359908f58026547fddf4426e7962f0117",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-2-process-02-before/lifecycle.json": "f8cbc5df04b55a9f0cd76cc2edb2e316e234288c1a395ad1fefe92b1a79174f6",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-3-process-03-after/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-3-process-03-after/stderr.log": "e2fa7f50ca23e1ef703c20a627082091b186ad822000fb7d71f2f6763d5f6b43",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-3-process-03-after/lifecycle.json": "11a00b9226efb0b655d754cc19d4a93e6a82d1ce719f041ab868bd4ad8fc953e",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-4-process-04-after/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-4-process-04-after/stderr.log": "084ade6399b606b5af00c773224d149fc1c5a00035da7872866ca2dba6fe695a",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-4-process-04-after/lifecycle.json": "797f05e125e64de5f434785f15806d6fd90a9f79e7a0b588401af32eeb14d046",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-5-process-05-before/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-5-process-05-before/stderr.log": "c47c8693f42ccf20bb404fd04f657cbbf91c2ff3475abc03b0f71084523c9575",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-5-process-05-before/lifecycle.json": "9df28e2ce328b0c358f16e6d5022c0c19b79659f06f0298dad449332b37471a8",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-6-process-06-before/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-6-process-06-before/stderr.log": "d19920623575eb3acb38ace27150969cc640464054133c27dd5c7c33ce89591f",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-6-process-06-before/lifecycle.json": "a1da54b3991e5e7c8973eabcb85e6fc04a0409e50daf0bd2d0d3ac11602e03de",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-7-process-07-after/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-7-process-07-after/stderr.log": "c4051ef9c81094a5ef3183fc27f54ad25cebff1cc2feff84a793e6a57ac0f9e1",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-7-process-07-after/lifecycle.json": "8985422f5c4e930f8304f46b7abd337a739db77675533c01759d88de376fd3c7",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-8-process-08-after/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-8-process-08-after/stderr.log": "2c3ebf9d0017c3f45293a81e362bddc938472265465189a2a73dbd0bce256d5e",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-8-process-08-after/lifecycle.json": "de7276b1d90c8bed5e2c4dabe52bf1b37b386315b8f8ce68d42178bc5482b2e6",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-9-process-09-before/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-9-process-09-before/stderr.log": "cc6114a502e605b60938ad1ac8e75b79c8f6a3b0363840c90c1fc3e6e7bc932f",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-9-process-09-before/lifecycle.json": "9008131a5268ef727732b34ba7de56605b6e1fd2bd280b2d0d2cece2bb600d95",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-10-process-10-before/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-10-process-10-before/stderr.log": "bb3512177be3148998279c87ec8a6e28708d208ff94b8e38402160f59974bb9a",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-10-process-10-before/lifecycle.json": "2b8e9cabf1478b5f6e2750eb18db15db07e77c7c00df3ac4b53fa27357d243fd",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-11-process-11-after/stdout.log": "158077ea915f0d6e97990f0be16e5d9b3575c914ff2ce83e900ca2d759d3f791",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-11-process-11-after/stderr.log": "c0830c0e0f1d558544ecc64515471735e92dfd8bfde1991ea452105d65a9c5e9",
-          "Models/qwen38-27b/pr3-gemm/transition-fresh-01/action-11-process-11-after/lifecycle.json": "aa2193ed9b1838155f1acef47e33a479cd6bfd05ba942c111f35d4ea852f9afd"
-        },
-        "attribution": "No decrease observed; no triggering operation identified; observer effects not excluded",
-        "post_idle_observation": {
-          "raw_result": "Models/qwen38-27b/pr3-gemm/transition-fresh-idle-observation-01/result.json",
-          "sha256": "787fd02c11ffbd83d729d37eef0cf5062dbbffdaa39a3ccd1e61e3675df04c16",
-          "status": "BASELINE_ONLY",
-          "capacity": [
-            16,
-            16,
-            16
-          ],
-          "preceding_pm": {
-            "power_state": "D3hot",
-            "power/control": "auto",
-            "power/runtime_status": "suspended",
-            "power/runtime_active_time": "633616",
-            "power/runtime_suspended_time": "373769",
-            "power/autosuspend_delay_ms": "5000"
-          }
-        },
-        "follow_up_cleanup_controls": "NOT RUN: separate start refused at 905.79 seconds uptime",
-        "full_model_acceptance": false
-      },
-      "pre_reboot_observation": {
-        "path": "Models/qwen38-27b/pr3-gemm/transition-current-observation/result.json",
-        "sha256": "21e0897524bf2b74746e52efa529f1593340d81ab0071d23a0b9bc54c309eacb",
-        "boot_id": "2335c9c7-064a-4ee0-8b13-0d941c6e4812",
-        "boot_age_s": 126006.52,
-        "status": "BASELINE_ONLY",
-        "held": [
-          16,
-          16,
-          16
-        ],
-        "libraries": {
-          "coreutil": "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
-          "driver": "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
-        },
-        "kernel_error_counts": [
-          0,
-          0,
-          0
-        ]
-      }
-    },
-    "context_probe": "Models/qwen38-27b/pr3-gemm/context-probe-recorded/result.json",
     "evidence_audit": {
       "summary": "PASS",
       "local_evidence": "PASS",
       "files_verified": 1955,
       "dispatches_verified": 1100
     },
-    "review_context_probes": {
-      "retained": {
-        "record": "Models/qwen38-27b/pr3-gemm/context-probe-review/result.json",
-        "sha256": "75e1a96d5a6c3c88df85fe292a44e23dc3ed431a715fb61354167fc52bca42c5",
-        "individual_contexts_passed": 11,
-        "combined_contexts_created": 8,
-        "combined_returncode": 1
-      },
-      "before": {
-        "record": "Models/qwen38-27b/pr3-gemm/context-probe-review-batch1/result.json",
-        "sha256": "88f8345789171772b4af4cae8ebe2b2c9eadb026816ffd5a14d132bc0ff01622",
-        "individual_contexts_passed": 11,
-        "combined_contexts_created": 8,
-        "combined_returncode": 1
-      },
-      "after": {
-        "record": "Models/qwen38-27b/pr3-gemm/context-probe-review-batch4/result.json",
-        "sha256": "1a3daf9e33012e073c4627c5179a39b9bf40e783964b325892ced3f7f3e2bfa7",
-        "individual_contexts_passed": 11,
-        "combined_contexts_created": 8,
-        "combined_returncode": 1
-      }
-    },
     "settings_merge_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
-    "transition_focused_tests_passed": 47,
-    "transition_settings_direct": "PASS: scan/regeneration matches committed registry"
+    "context_capacity": "Earlier 16/8 observations have no proven trigger/recovery; server campaign capacity brackets and journal NOT RECORDED"
   },
   "cli_sha256": "c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad",
   "end_to_end_acceptance": false,
   "production_default_dma_batch": 1,
   "acceptance": {
-    "report": "specs/open-engine/reports/qwen38-q4-gemm-acceptance.md",
-    "report_sha256": "7963828b9ecb613e0f574bbf1313d8ff3895648f5dedc2a060a36bc6754e542d",
-    "recommendation": "CONDITIONAL opt-in merge: scope prerequisite work and resolve or explicitly accept candidate-server/runtime evidence gaps; default unchanged",
+    "report": "specs/open-engine/reports/qwen38-q4-gemm-dma.md",
+    "report_sha256": "5f26721d3ccd9f62036ccf2bc5370257d239280b60bef821050bf365765c9cda",
+    "recommendation": "KEEP DRAFT for standalone upstream merge: stacked dependency; historical runtime and server capacity coverage remain qualified; default unchanged",
     "numerical": "PASS: 147 checks, byte-exact logits and state, identical 16-token greedy",
     "prefill": [
       {
@@ -1079,7 +755,7 @@
       "boundaries": "9/9 PASS exact bytes",
       "context_reset_endpoint": "N/A on this build"
     },
-    "context_capacity": "16 before and after campaign; earlier 16-to-8 transition did not reproduce",
+    "context_capacity": "NOT ESTABLISHED during server campaign: no before/after brackets or full journal capture",
     "arm_separation": "92 kernel files compared; only 20 GEMM files differ",
     "commits": {
       "baseline": "836072db",
@@ -1093,13 +769,13 @@
       "driver-owned NPU memory",
       "freshly rebuilt tiled exports",
       "14-pair re-timing on XRT 2.25",
-      "thermal-controlled re-runs"
+      "thermal-controlled re-runs",
+      "historical benchmark loaded-library identity",
+      "server campaign capacity brackets and kernel-journal coverage"
     ],
     "confirmation": {
       "criterion": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation-criterion.md",
       "criterion_sha256": "cd564a5fa4a5cd05238bda004f2226f64a029b1873a448d02b09b69284939a7a",
-      "report": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation.md",
-      "report_sha256": "d34da3058a70530e439a8039f5750e2326978633f45c28ef9e80fcd9263405c1",
       "stats": {
         "pairs": 14,
         "per_pair_delta_ms": [
@@ -1201,42 +877,22 @@
         "governor": "powersave",
         "thermal_c": "54 (acpitz, not NPU die)",
         "capacity_before_after": "Three observations of 16 before and after; no parsed errors in probe windows, not continuous campaign coverage",
-        "runtime": "XRT 2.26.0 under utilities/env.sh for both arms; established by re-running the benchmark shape with live /proc maps"
+        "runtime": "Historical process mappings NOT RECORDED; later benchmark-shape probes use matching XRT 2.26.0"
       },
-      "next_target": "Separate profiling of GEMM submit/wait accounting; device-active, bandwidth and dequantization contributions are not established",
       "raw_result": "Models/qwen38-27b/pr3-gemm/confirm-1024/result.json",
       "raw_result_sha256": "b7bb4994f5ed6e12b89368b39f50b22713b79ace930199992bdfb823318a1503",
-      "runtime": "XRT 2.26.0 both arms (reproduced; historical maps not captured)"
+      "runtime": "Historical process mappings NOT RECORDED; later benchmark-shape probes use matching XRT 2.26.0"
     },
-    "runtime_verification": "Benchmark: XRT 2.26.0 both arms (reproduced command shape, live maps). Candidate server: XRT 2.25.00 both arms (live maps). Historical benchmark maps not captured; the retained performance numbers are 2.26 results.",
+    "runtime_verification": "Historical benchmark maps NOT RECORDED. Later benchmark-shape processes match XRT 2.26.0; server main processes match XRT 2.25.00.",
     "scope_review": {
       "intended_base": "836072db",
       "upstream_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
       "prerequisites": "Earlier OpenMP startup-policy and manifest-mapping work must land first or be an explicit stacked base",
-      "option": "B: stacked; PR #2 not in upstream main",
-      "pr2_tip_ancestor_of_upstream": false,
+      "option": "Stacked on the prefill startup-policy and manifest-compatibility base, not yet in upstream main",
       "merge_base_check": "git merge-base --is-ancestor 836072db upstream/main exits 1",
       "review_target": "836072db",
       "rebase_performed": false,
-      "verified": {
-        "pr2_tip_in_upstream": false,
-        "counted_by": "git rev-list/diff at review time; counts move with each review commit"
-      }
-    },
-    "review_checks": {
-      "pytest_passed": 2757,
-      "pytest_skipped": 172,
-      "focused_passed": 214,
-      "local_evidence_files": 1955,
-      "dispatch_records": 1100,
-      "confirmation_provenance_paths": 187,
-      "settings_merge_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
-      "settings_merge": "PASS",
-      "hardware_rerun": "candidate server + runtime provenance only; no performance campaign",
-      "candidate_server": "PASS both arms (11/11 graded, reset N/A)",
-      "benchmark_runtime": "XRT 2.26.0 both arms, reproduced",
-      "server_runtime": "XRT 2.25.00 both arms, live maps",
-      "full_passed": 2759
+      "base_tip_ancestor_of_upstream": false
     },
     "server_candidate": {
       "verdict": "PASS",
@@ -1254,7 +910,24 @@
             "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
           ],
           "graded_pass": 11,
-          "not_applicable": 1
+          "not_applicable": 1,
+          "library_identity": {
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+              "bytes": 1306056,
+              "sha256": "0b6c3c09ba0b2461f2feeae8d30318cf80c653c795f70b60a3504478178576ca"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+              "bytes": 3230368,
+              "sha256": "52cf8a81d15b8eff1e34ceabe3d4b690575bd8fe377926f01f9c4dbe71c45026"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00",
+              "bytes": 534944,
+              "sha256": "1f9123632af30c5b422ac42535aed6c87e7ef5dbc578b007e25dd752a0c0d620"
+            }
+          }
         },
         "after": {
           "verdict": "PASS",
@@ -1267,7 +940,24 @@
             "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
           ],
           "graded_pass": 11,
-          "not_applicable": 1
+          "not_applicable": 1,
+          "library_identity": {
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+              "bytes": 1306056,
+              "sha256": "0b6c3c09ba0b2461f2feeae8d30318cf80c653c795f70b60a3504478178576ca"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+              "bytes": 3230368,
+              "sha256": "52cf8a81d15b8eff1e34ceabe3d4b690575bd8fe377926f01f9c4dbe71c45026"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00",
+              "bytes": 534944,
+              "sha256": "1f9123632af30c5b422ac42535aed6c87e7ef5dbc578b007e25dd752a0c0d620"
+            }
+          }
         }
       },
       "arm_separation": {
@@ -1293,7 +983,8 @@
         "result": "utilities/prefill-block/runs/isolation-aba-20261115-223324/result.json",
         "kernels": "production-v2/kernels-model",
         "status": "superseded for candidate validation"
-      }
+      },
+      "capacity_validation": "NOT ESTABLISHED: no before/after capacity brackets or journal window"
     },
     "runtime_provenance": {
       "benchmark": {
@@ -1331,9 +1022,9 @@
         }
       },
       "benchmark_comparable": true,
-      "benchmark_runtime": "XRT 2.26.0 at /opt/xilinx/xrt/lib for both arms",
+      "benchmark_runtime": "Later benchmark-shape probes: XRT 2.26.0 at /opt/xilinx/xrt/lib for both arms; historical run not verified",
       "server": "XRT 2.25.00 distro libraries for both arms",
-      "historical_claim": "NOT VERIFIED at run time; earlier XRT 2.25 claim corrected to 2.26",
+      "historical_claim": "Historical processes UNVERIFIED; later reproduction is not retroactive library provenance",
       "driver_records": "omp_policy.py now stores runtime_libraries per measured process",
       "evidence": {
         "envsh": "Models/qwen38-27b/pr3-gemm/accept-runtime-envsh/provenance.json",

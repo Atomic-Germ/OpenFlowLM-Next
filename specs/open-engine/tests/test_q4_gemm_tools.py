@@ -2,7 +2,6 @@
 import importlib.util
 import json
 from pathlib import Path
-import subprocess
 
 import numpy as np
 import pytest
@@ -99,73 +98,3 @@ def test_resource_gate_covers_all_cores_and_enforces_budgets(tmp_path, monkeypat
     else:
         with pytest.raises(ValueError, match='memory budget'):
             tool.resources(tmp_path)
-
-
-def test_context_probe_returns_recorded_results_and_cli_fails_on_context_error(tmp_path, monkeypatch):
-    pytest.importorskip('fcntl', reason='legacy context driver requires POSIX locking')
-    tool = load('context_probe')
-    kernels = tmp_path/'kernels'
-    kernels.mkdir()
-    (kernels/'manifest.json').write_text(json.dumps({'contexts': {'one': 'one.xclbin'}}))
-    (kernels/'one.xclbin').write_bytes(b'xclbin')
-    harness = tmp_path/'harness'
-    harness.write_bytes(b'harness')
-    monkeypatch.setattr(tool, 'ROOT', tmp_path)
-    monkeypatch.setattr(tool.subprocess, 'run', lambda *args, **kwargs: subprocess.CompletedProcess(
-        args[0], 1, stdout='device\n', stderr='NOAVAIL'))
-    result = tool.probe(kernels, harness, tmp_path/'out')
-    assert result['combined']['returncode'] == 1
-    assert json.loads((tmp_path/'out/result.json').read_text())['individual'][0]['returncode'] == 1
-    monkeypatch.setattr(tool, 'probe', lambda *a: result)
-    args = ['--kernels', str(kernels), '--harness', str(harness), '--out', str(tmp_path/'cli-out')]
-    assert tool.main(args) == 1
-    result['combined']['returncode'] = result['individual'][0]['returncode'] = 0
-    assert tool.main(args) == 0
-
-
-def test_capacity_reclaim_and_churn_plans_are_explicit():
-    tool = load('context_probe')
-    steps = tool.capacity_steps(['a', 'b'], 5, 'cap')
-    assert [s['asset'] for s in steps] == ['a', 'b', 'a', 'b', 'a']
-    reclaim = tool.reclaim_steps('a', 8)
-    assert [s['op'] for s in reclaim[-2:]] == ['destroy', 'create']
-    assert reclaim[-1]['tag'] == 'replacement'
-    churn = tool.churn_steps('a', 3, 4)
-    assert [s['op'] for s in churn[:6]] == ['create', 'destroy'] * 3
-    assert sum(1 for s in churn if str(s.get('tag', '')).startswith('after-churn')) == 4
-    for bad in (lambda: tool.capacity_steps([], 1, 'x'), lambda: tool.reclaim_steps('a', 0),
-                lambda: tool.churn_steps('a', 0, 1)):
-        with pytest.raises(ValueError):
-            bad()
-
-
-def test_kernel_log_status_decoding_and_capacity_classification():
-    tool = load('context_probe')
-    lines = tool.parse_kernel_log('amdxdna 0000:67:00.1: [drm] *ERROR* aie_send_mgmt_msg_wait: '
-                                  'command opcode 0x2 failed, status 0x2000003\nnoise\n')
-    assert lines == [{'line': lines[0]['line'], 'opcode': '0x2', 'status': '0x2000003',
-                      'status_name': 'AIE2_STATUS_MGMT_ERT_NOAVAIL'}]
-    failed = {'events': [{'op': 'create', 'ok': True, 'held': 8},
-                         {'op': 'create', 'ok': False, 'held': 8, 'error': 'EINVAL'},
-                         {'op': 'destroy', 'ok': True, 'held': 7},
-                         {'op': 'create', 'ok': True, 'tag': 'replacement', 'held': 8}],
-              'complete': True}
-    assert tool.max_held(failed) == 8 and tool.first_create_failure(failed)['error'] == 'EINVAL'
-    assert tool.reclaim_worked(failed) is True
-    assert tool.churn_leaked({'events': [{'op': 'create', 'ok': True, 'held': 13,
-                                          'tag': 'after-churn-12'}]}, 16) is True
-    steps17 = tool.capacity_steps(['a'], 17, 'x')
-    def arm(held):
-        events = [dict(op='create', ok=True, held=i + 1) for i in range(held)]
-        events.append(dict(op='create', ok=False, held=held))
-        return {'experiment': f'capacity-repeat-{held}', 'runtime': 'opt', 'max_held': held,
-                'assets': ['a'], 'steps': steps17, 'kernel': {'lines': []},
-                'result': {'events': events, 'complete': True, 'returncode': 0}}
-    consistent = tool.classify([arm(16), arm(16)], boot_age=5000, narrow=None)
-    assert consistent['firmware_max_proven'] is False
-    assert 'exactly 16' in consistent['conclusions'][0]
-    assert 'not proof' in consistent['conclusions'][0]
-    inconsistent = tool.classify([arm(16), arm(8)], boot_age=5000, narrow=None)
-    assert 'not established' in inconsistent['conclusions'][0]
-    assert any('partition-width' in r for r in inconsistent['remaining_experiments'])
-    assert any('fresh-boot' in r for r in inconsistent['remaining_experiments'])

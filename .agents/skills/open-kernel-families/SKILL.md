@@ -133,8 +133,7 @@ requires complete, finite, byte-identical outputs. Its optional reference
 uses the existing kernel gate. `verify.py --local-evidence` checks the recorded
 summary against hashes, raw timings, outputs and compiler/core evidence;
 without that option it explicitly reports local evidence as not checked.
-`context_probe.py` isolates context creation from inference, both singly and
-with the whole manifest resident. Private replay builders must copy the sibling
+Private replay builders must copy the sibling
 `dma_schedule.py` with the design. The paired model/state driver accepts
 `--before-kernels` / `--after-kernels`, holding the OpenMP policy constant.
 Keep a retained export's DeltaNet mapping when swapping only its GEMMs;

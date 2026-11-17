@@ -157,12 +157,96 @@ def test_runtime_paths_read_resolved_libraries_not_sonames():
 
 
 def test_run_sampled_records_child_libraries_and_exit(tmp_path):
-    pytest.importorskip('fcntl', reason='sampler depends on /proc mappings')
+    if not Path('/proc/self/maps').is_file():
+        pytest.skip('live runtime mappings require Linux procfs')
     code = 'import time; time.sleep(0.3)'
     command = [sys.executable, '-c', code]
     result, libraries = M.run_sampled(command, dict(os.environ), 10)
     assert result.returncode == 0
     assert isinstance(libraries, list)
+
+
+def test_runtime_sampler_follows_wrapper_and_drains_large_output(tmp_path):
+    if not Path('/proc/self/maps').is_file():
+        pytest.skip('live runtime mappings require Linux procfs')
+    import math
+    import shutil
+    _ = math.sin(1)
+    paths = [line.split()[-1] for line in Path('/proc/self/maps').read_text().splitlines()
+             if '/libm.so.' in line]
+    if not paths:
+        pytest.skip('a mapped libm shared library is needed for the fake runtime fixture')
+    library = tmp_path / 'libxrt_coreutil.so.2.25.00'
+    shutil.copyfile(paths[0], library)
+    child = ('import ctypes,sys,time; ctypes.CDLL(sys.argv[1]); '
+             'print("x"*200000); print("e"*200000,file=sys.stderr); time.sleep(0.4)')
+    wrapper = 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))'
+    command = [sys.executable, '-c', wrapper, sys.executable, '-c', child, str(library)]
+    result, libraries = M.run_sampled(command, dict(os.environ), 10)
+    assert result.returncode == 0
+    assert str(library) in libraries
+    assert len(result.stdout) > 200000 and len(result.stderr) > 200000
+
+
+def test_runtime_sampler_times_out_and_reaps_child():
+    command = [sys.executable, '-c', 'import time; time.sleep(30)']
+    with pytest.raises(subprocess.TimeoutExpired):
+        M.run_sampled(command, dict(os.environ), 0.1)
+
+
+def server_tool():
+    spec = importlib.util.spec_from_file_location(
+        'server_candidate_check', ROOT / 'utilities/prefill-block/server_candidate_check.py')
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    return tool
+
+
+def server_arms():
+    def arm():
+        libraries = {f'/runtime/{name}.so.2.25.00': {'sha256': 'a' * 64}
+                     for name in ('libxrt_coreutil', 'libxrt_driver_xdna')}
+        run = dict(libraries=libraries, a1={'content': 'A'}, b={'content': 'B'}, a2={'content': 'A'})
+        return dict(verdict='PASS', artifacts={'manifest': 'identical'}, main=run,
+                    fresh={'libraries': libraries})
+    return {'before': arm(), 'after': arm()}
+
+
+def test_server_comparison_requires_runtime_and_output_identity():
+    import copy
+    tool = server_tool()
+    arms = server_arms()
+    assert tool.comparison_passes(arms)
+    for section, key, value in [
+            ('main', 'b', {'content': 'DIFFERENT'}),
+            ('main', 'libraries', {}),
+            ('fresh', 'libraries', {'/missing.so': {}})]:
+        candidate = copy.deepcopy(arms)
+        candidate['after'][section][key] = value
+        assert not tool.comparison_passes(candidate)
+    candidate = copy.deepcopy(arms)
+    candidate['after']['main']['libraries']['/runtime/libxrt_driver_xdna.so.2.25.00']['sha256'] = 'b' * 64
+    assert not tool.comparison_passes(candidate)
+
+
+def test_server_artifacts_must_match_retained_evidence():
+    tool = server_tool()
+    evidence = {'cases': [{'name': 'gemm_n256_k256',
+                          'builds': {'after': {'binaries': {'final.xclbin': 'expected'}}}}]}
+    artifacts = {'gemm': {'gemm_n256_k256': {'final.xclbin': 'expected'}}}
+    assert tool.matches_evidence(artifacts, evidence, 'after')
+    artifacts['gemm']['gemm_n256_k256']['final.xclbin'] = 'changed'
+    assert not tool.matches_evidence(artifacts, evidence, 'after')
+    assert not tool.matches_evidence({'gemm': {}}, evidence, 'after')
+
+
+def test_runtime_identity_requires_core_plugin_and_hashes():
+    from runtime_provenance import runtime_identity
+    libraries = server_arms()['before']['main']['libraries']
+    assert runtime_identity(libraries) is not None
+    assert runtime_identity({}) is None
+    libraries.pop('/runtime/libxrt_driver_xdna.so.2.25.00')
+    assert runtime_identity(libraries) is None
 
 
 def test_boundary_state_coverage_includes_every_layer(monkeypatch):
