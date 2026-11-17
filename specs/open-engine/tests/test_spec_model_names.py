@@ -65,6 +65,14 @@ EXPECTED = {
     "deepseek-r1-distill-qwen-1.5b-gguf": "DeepSeek-R1-Distill-Qwen-1.5B-GGUF-NPU2",
     "qwen3-8b-gguf": "Qwen3-8B-GGUF-NPU2",
     "lfm2-700m-gguf": "LFM2-700M-GGUF-NPU2",
+    "qwen2.5-1.5b-instruct-gguf": "Qwen2.5-1.5B-Instruct-GGUF-NPU2",
+    "lfm2-350m-gguf": "LFM2-350M-GGUF-NPU2",
+    "qwen3-coder-30b-a3b-instruct-gguf": "Qwen3-Coder-30B-A3B-Instruct-GGUF-NPU2",
+    "qwen3-30b-a3b-instruct-2507-gguf": "Qwen3-30B-A3B-Instruct-2507-GGUF-NPU2",
+    "qwen3-30b-a3b-gguf": "Qwen3-30B-A3B-GGUF-NPU2",
+    "qwen3-4b-thinking-2507-gguf": "Qwen3-4B-Thinking-2507-GGUF-NPU2",
+    "phi-4-mini-reasoning-gguf": "Phi-4-mini-reasoning-GGUF-NPU2",
+    "hunyuan-a13b-instruct-gguf": "Hunyuan-A13B-Instruct-GGUF-NPU2",
 }
 
 
