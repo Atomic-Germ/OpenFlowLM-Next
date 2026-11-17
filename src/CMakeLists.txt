@@ -1382,9 +1382,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
     # The export leaves a build/ tree beside the insts (final.prj/objects_*, the
     # AIE core .o/.elf intermediates). Nothing at runtime reads them; RPM's
     # brp-strip cannot recognise them and aborts the package, so they stay out.
+    # The diffusion full-ELF export (open_kernels/compose_elf.py) keeps its work
+    # tree under elf_build/ instead -- same intermediate AIE .o/.ll/.pdi files,
+    # same strip failure -- so exclude that name too. The top-level
+    # diffusion_*.elf files ARE the runtime kernels and must stay.
     install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}"
         PATTERN "*/open_kernels/build" EXCLUDE
-        PATTERN "*/open_kernels/build/*" EXCLUDE)
+        PATTERN "*/open_kernels/build/*" EXCLUDE
+        PATTERN "*/open_kernels/elf_build" EXCLUDE
+        PATTERN "*/open_kernels/elf_build/*" EXCLUDE)
     # The derivative tags share their family bundle -- the kernels are geometry,
     # not weights, and each derivative's closed bundle was byte-identical to it.
     # Those closed bundles are removed, so resolve the derivative's own
