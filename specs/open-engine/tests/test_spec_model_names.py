@@ -60,6 +60,10 @@ EXPECTED = {
     "hy-mt1.5-7b-i1-gguf": "HY-MT1.5-7B-i1-GGUF-NPU2",
     "llama3-2b-base-i1-gguf": "Llama3-2B-Base-i1-GGUF-NPU2",
     "llama-3.1-minitron-4b-width-base-gguf": "Llama-3.1-Minitron-4B-Width-Base-GGUF-NPU2",
+    "mistral-nemo-minitron-8b-base-chatml-gguf": "Mistral-NeMo-Minitron-8B-Base-ChatML-GGUF-NPU2",
+    "mistral-nemo-minitron-8b-chat-gguf": "Mistral-NeMo-Minitron-8B-Chat-GGUF-NPU2",
+    "deepseek-r1-distill-qwen-1.5b-gguf": "DeepSeek-R1-Distill-Qwen-1.5B-GGUF-NPU2",
+    "qwen3-8b-gguf": "Qwen3-8B-GGUF-NPU2",
 }
 
 
