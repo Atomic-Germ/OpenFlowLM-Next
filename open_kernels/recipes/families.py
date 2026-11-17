@@ -53,5 +53,6 @@ NOT_IMPLEMENTED = {
               "and head (std_fuse, OPEN-PACK-CHUNK-FUSE) and knows where each expert's "
               "gate, up and down live (OPEN-PACK-EXPERT-ORDER), but has no op that PLACES "
               "them, because where they go waits on that layout. ATTN_SINK landed at "
-              "e0511bd7 and is no longer a gap. See .claude/plans/gptoss-bringup.md",
+              "e0511bd7 and is no longer a gap. See specs/open-engine/spec.md, "
+              "OPEN-FAMILY-GPTOSS and OPEN-MOE-WIDE-FF.",
 }

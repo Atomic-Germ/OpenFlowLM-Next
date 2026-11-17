@@ -220,6 +220,18 @@ def test_no_shipped_models_hash_moved():
         "deepseek-r1-distill-qwen-1.5b-gguf.json": "sha256:2936d480755a745c846c4e42d5be333b99a10ba9ce918c92511b707857e280f0",
         "qwen3-8b-gguf.json": "sha256:66e1a2e9311632eaaf3498f64ef3fe7bc519846915b5468c7cf870a046bd7a32",
         "lfm2-700m-gguf.json": "sha256:f3a57317114dcf6d495e1662e51e3877cebce2c01f9043cda957721ab28a3cb9",
+        "qwen2.5-1.5b-instruct-gguf.json": "sha256:85d4ad411ea47e3ea0070f6d2bd8c5509b7eae4b2ce42f2b0c605a35307c5bc1",
+        "lfm2-350m-gguf.json": "sha256:9e963189e0cd37d414b1990331fa94a8734893a5fb85d7537e69287e70005771",
+        "qwen3-coder-30b-a3b-instruct-gguf.json": "sha256:0cf16c97db5d452d32ca430b484553609dc428e1a473d7024b27f544524c1364",
+        "qwen3-30b-a3b-instruct-2507-gguf.json": "sha256:0cf16c97db5d452d32ca430b484553609dc428e1a473d7024b27f544524c1364",
+        "qwen3-30b-a3b-gguf.json": "sha256:4079c7c5800d1c8bb2c74d484638961a172fde59292c1708eb77a005c50af3f1",
+        "qwen3-4b-thinking-2507-gguf.json": "sha256:981fe2a61e060fe6751aa63d616d321f7e3c96794f7e5ddca0c2138ad985084e",
+        "phi-4-mini-reasoning-gguf.json": "sha256:7ed31beeedc09294c1b7e3e36ea034d19ff4d2aa72e94bca71ff993a64cf1ac5",
+        "medgemma-1.5-4b-it-gguf.json": "sha256:9b406f66e69f19f5e250389e8e12cb940eca69cea1f5f9a95ee84092079a23aa",
+        "translategemma-4b-it-i1-gguf.json": "sha256:9b406f66e69f19f5e250389e8e12cb940eca69cea1f5f9a95ee84092079a23aa",
+        "translategemma-12b-it-i1-gguf.json": "sha256:2816c320d098ea1e351742478bc4a8a25de05d45c7ea37b5af36ac9c3fc5ce57",
+        "hunyuan-a13b-instruct-gguf.json": "sha256:33d6847f9c134d14ef3980a83486d4ad665c7751286a0eeb80e0fede0901ed13",
+        "granite-4.0-h-small-gguf.json": "sha256:3b7d224b27b47f9a42dcc3cc1059ccfc42de4b2abc82bb33346a37f7bc86be44",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

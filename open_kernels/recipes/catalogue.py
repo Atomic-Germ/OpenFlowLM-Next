@@ -164,7 +164,7 @@ class Template:
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
              {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
-                          10752, 11264, 12288, 14336, 15360, 10496, 11008, 1536, 8960, 5376, 13824, 11520, 13312, 6912),
+                          10752, 11264, 12288, 14336, 15360, 10496, 11008, 1536, 8960, 5376, 13824, 11520, 13312, 6912, 4608, 768),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
@@ -177,7 +177,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                  # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
-              "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)  # Nanbeige4.1-3B (designs/gemv_q4 fixture, K=10496 PASS)  # qwen25-3b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # gemma-3-27b-it-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-14b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # mistral-nemo-minitron-8b-base-chatml-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen3-32b-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # lfm2-700m-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)
+              "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)  # Nanbeige4.1-3B (designs/gemv_q4 fixture, K=10496 PASS)  # qwen25-3b (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-1.5b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # gemma-3-27b-it-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen2.5-14b-instruct-i1-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # mistral-nemo-minitron-8b-base-chatml-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # qwen3-32b-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # lfm2-700m-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # lfm2-350m-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)  # granite-4.0-h-small-gguf (utilities/op-gate.py: the gemv_q4 fixture at this geometry)
              note="a new K needs gemv_q4/make_test.py + compare.py at that K first"),
     Template("gemv_q8", "designs/gemv_q4/gemv_q8.h",
              {"K": values(2048, 4096),           # 2048: the 35B's qkv / z / q / k / v / gate;
@@ -219,6 +219,9 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (128, 40, 8, 128, True, False, False, False),   # qwen3-14b (the attention gate, designs/attn/probe_dense.py)
                  (512, 16, 2, 128, True, False, False, False),   # Gemma 4 12B's global layers: head dim 512, one kv head, proportional RoPE; attention gate PASS on Krackan NPU2 2026-11-12 (PR #225 verified on Strix Point)
                  (64, 24, 8, 64, True, False, False, False),     # lfm2-700m-gguf (the attention gate, designs/attn/probe_dense.py)
+                 (128, 12, 2, 128, False, False, False, True),   # qwen2.5-1.5b-instruct-gguf (the attention gate, designs/attn/probe_dense.py)
+                 (64, 16, 8, 64, True, False, False, False),     # lfm2-350m-gguf (the attention gate, designs/attn/probe_dense.py)
+                 (128, 32, 4, 128, True, False, False, False),   # qwen3-coder-30b-a3b-instruct-gguf (the attention gate, designs/attn/probe_dense.py)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them
@@ -246,7 +249,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass, 48 (64 lanes, "
                   "glue_ab_w.cc) with its 27B pass"),
     Template("short_conv", "designs/short_conv/sc.h",
-             {"taps": values(3), "width": values(2048, 1536)},  # lfm2-700m-gguf (utilities/op-gate.py: the short_conv fixture at this geometry)
+             {"taps": values(3), "width": values(2048, 1536, 1024)},  # lfm2-700m-gguf (utilities/op-gate.py: the short_conv fixture at this geometry)  # lfm2-350m-gguf (utilities/op-gate.py: the short_conv fixture at this geometry)
              note="LFM2's depthwise causal conv, which REPLACES attention in a layer. (3, 2048) is "
                   "LFM2-1.2B, OPEN-SHORT-CONV-KERNEL's procedure through oflm serve on 2026-09-13; "
                   "the core holds taps - 1 state rows, so another tap count is a design change, "
