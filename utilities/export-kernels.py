@@ -73,6 +73,15 @@ BERT_SPEC = GEMM_RTP / "families.json"
 BERT_CHECK = GEMM_RTP / "check_design_sets.py"
 XCLBINS = REPO / "src" / "xclbins"
 
+# One entry per export attempt so the closing line can name WHICH sets worked
+# and which did not, instead of only counting them. Specs/exports run in
+# parallel; appends under the GIL are safe and ordering is not significant.
+RESULTS: dict[str, list[str]] = {"ok": [], "failed": []}
+
+
+def record(name: str, ok: bool) -> None:
+    RESULTS["ok" if ok else "failed"].append(name)
+
 # XILINX_XRT is honoured when set so a relocated XRT (the Nix builds combine
 # XRT with the amdxdna plugin in their own prefix) supplies pyxrt too.
 XRT_ROOT = Path(os.environ.get("XILINX_XRT") or "/opt/xilinx/xrt")
@@ -199,6 +208,7 @@ def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> 
             futures = {ex.submit(build_spec, spec): spec for spec in specs}
             for fut in as_completed(futures):
                 name, ok = fut.result()
+                record(name, ok)
                 if ok:
                     print(f"   ok: {name}", flush=True)
                 else:
@@ -207,6 +217,7 @@ def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> 
     else:
         for spec in specs:
             name, ok = build_spec(spec)
+            record(name, ok)
             if ok:
                 print(f"   ok: {name}", flush=True)
             else:
@@ -256,12 +267,16 @@ def export_diffusion_sets(py: Path, force: bool, jobs: int = 4,
             cmd.append("--force")
         if subprocess.run(cmd).returncode:
             failed += 1
+            record(f"diffusion:{fam}", False)
             continue
         # --install copies the runtime files only; src/ must not carry the build tree
         if subprocess.run([str(py), str(script), "--family", fam, "--resolutions", DIT_RESOLUTIONS,
                            "--edits", DIT_EDITS, "--out", str(scratch),
                            "--install", str(shipped)]).returncode:
             failed += 1
+            record(f"diffusion:{fam}", False)
+        else:
+            record(f"diffusion:{fam}", True)
     return failed
 
 
@@ -281,7 +296,9 @@ def export_whisper_set(py: Path, force: bool, no_fa: bool = False) -> int:
         cmd.append("--force")
     if no_fa:
         cmd.append("--no-fa")
-    return 0 if subprocess.run(cmd).returncode == 0 else 1
+    ok = subprocess.run(cmd).returncode == 0
+    record(WHISPER_DEFAULT_NAME, ok)
+    return 0 if ok else 1
 
 
 def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
@@ -323,6 +340,7 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
         for fam in group:
             name, ok = build_family(fam)
             results.append((name, ok))
+            record(name, ok)
             if ok:
                 print(f"   ok: {name}", flush=True)
             else:
@@ -344,6 +362,7 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
 
     # The built sets and the spec they were built from must agree.
     rc = subprocess.run([str(py), str(BERT_CHECK), "--xclbins", str(XCLBINS)]).returncode
+    record("check_design_sets", rc == 0)
     if rc != 0:
         failed.append("check_design_sets")
         print("   FAILED: check_design_sets (sets disagree with families.json)", flush=True)
@@ -462,8 +481,16 @@ def main() -> int:
         n_failed += export_whisper_set(py, a.force, a.whisper_no_fa)
 
     print(flush=True)
-    if n_failed:
-        print(f"kernel export failed: {n_failed} item(s)", flush=True)
+    ok_names, failed_names = RESULTS["ok"], RESULTS["failed"]
+    if failed_names or n_failed:
+        # Name both sides: a dev can decide in one glance whether to fix the
+        # few failures or drop them, without re-reading the interleaved log.
+        print(f"kernel export: {len(ok_names)} succeeded, "
+              f"{len(failed_names) or n_failed} failed", flush=True)
+        if failed_names:
+            print(f"  FAILED: {', '.join(failed_names)}", flush=True)
+        if ok_names:
+            print(f"  ok:     {', '.join(ok_names)}", flush=True)
         return 1
     if a.bert_only:
         print("kernel export ok: BERT design sets", flush=True)
