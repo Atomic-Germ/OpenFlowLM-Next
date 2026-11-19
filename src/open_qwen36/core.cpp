@@ -312,6 +312,19 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         // GGUF block prefill: enable only where the runtime supports it today
         // (dense gemm_block kinds). Hybrid/linear kinds are not implemented for
         // GGUF-direct block prefill yet, so keep them on the step path.
+        // A block route is GGUF-safe only when both: it is a dense kind, and its
+        // GEMM weight buffers come from the layer's already GGUF-packed pool.
+        // A "from: pack" weight re-packs directly from the source tensor with a
+        // container-only law (bfp16_dit / bf16_gemm / bfp16_gemm all call
+        // q4_source, which refuses a GGUF) -- Qwen3-VL's prefill does exactly
+        // that. Enabling that route on a GGUF dies at load with "not in a q4nx
+        // container"; keep such sets on the step path until a GGUF pack op exists.
+        auto gguf_gemm_ok = [](const GemmBlockProgram& gb) {
+            for (const auto* ws : {&gb.weights, &gb.shared_weights, &gb.ffn_weights})
+                for (const auto& [nm, w] : *ws)
+                    if (w.from == "pack") return false;
+            return true;
+        };
         bool enable_gguf_block = false;
         std::string gguf_block_skip_kind;
         for (const auto& [lt, g] : m.layer_types) {
@@ -321,22 +334,33 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             if (!gb.t) continue;
             if (gb.kind == "dense") enable_gguf_block = true;
             else { gguf_block_skip_kind = gb.kind; enable_gguf_block = false; break; }
+            if (!gguf_gemm_ok(gb)) {
+                gguf_block_skip_kind = "GEMM weights that re-pack from the tensor (no GGUF reader)";
+                enable_gguf_block = false;
+                break;
+            }
         }
         if (enable_gguf_block) {
             for (const auto& [lt, g] : m.layer_types) {
                 const auto it = b.layer_types.find(lt);
                 if (it == b.layer_types.end()) continue;
                 const auto& gb = it->second.gemm_block;
-                if (gb.t && gb.kind != "dense") {
+                if (!gb.t) continue;
+                if (gb.kind != "dense") {
                     gguf_block_skip_kind = gb.kind;
+                    enable_gguf_block = false;
+                    break;
+                }
+                if (!gguf_gemm_ok(gb)) {
+                    gguf_block_skip_kind = "GEMM weights that re-pack from the tensor (no GGUF reader)";
                     enable_gguf_block = false;
                     break;
                 }
             }
         }
         if (!enable_gguf_block && !gguf_block_skip_kind.empty())
-            log("GGUF-direct block prefill unavailable for layer kind '" + gguf_block_skip_kind +
-                "' (dense only for now); using step prefill");
+            log("GGUF-direct block prefill unavailable (" + gguf_block_skip_kind +
+                "); using step prefill");
         auto merge = [](std::vector<PackOp>& go, const std::vector<PackOp>& bo,
                         const std::string& lt) {
             if (go.size() != bo.size())

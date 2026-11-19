@@ -126,6 +126,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Output in JSON format (for list, validate, version commands)")
             ("ctx-len,c", po::value<int>(&parsed_args.ctx_length)->default_value(-1),
              "Set context length")
+            ("fit", po::bool_switch(&parsed_args.fit),
+             "Pick the largest context window that fits in currently free RAM, from the "
+             "installed kernel set's own pool/state geometry (run, serve, bench)")
             ("prefill-chunk-len,pcl", po::value<int>(&parsed_args.prefill_chunk_len)->default_value(-1),
              "Set prefill chunk length")
             ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
@@ -268,6 +271,17 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 // commands load one.
                 if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
                     std::cerr << "Error: --speculative is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+            }
+
+            if (parsed_args.fit) {
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --fit is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+                if (!vm["ctx-len"].defaulted()) {
+                    std::cerr << "Error: --fit and --ctx-len are mutually exclusive!" << std::endl;
                     return false;
                 }
             }

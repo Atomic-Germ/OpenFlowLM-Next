@@ -22,6 +22,12 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fstream>
+#endif
+
 #include "open_qwen36/prefill_route_reason.hpp"
 #include "open_qwen36/prefill_thresholds.hpp"
 #include "utils/utils.hpp"
@@ -81,6 +87,67 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     return {};
 }
 
+namespace {
+
+// Currently available RAM, in bytes. This is what --fit budgets against: the
+// peak committed host memory is pools + lm_head + layer state, and the state
+// grows with the context window. Reading it at load (not a fixed table) is the
+// point -- it accounts for whatever else the box is doing right now.
+size_t available_ram_bytes() {
+#ifdef _WIN32
+    MEMORYSTATUSEX st{};
+    st.dwLength = sizeof(st);
+    if (GlobalMemoryStatusEx(&st)) return static_cast<size_t>(st.ullAvailPhys);
+    return 0;
+#else
+    // Linux: MemFree, NOT MemAvailable. MemAvailable includes reclaimable page
+    // cache (the 36 GiB figure) which overstates what a --fit budget can spend:
+    // committed weights+state pages are pinned and not reclaimable, so budgeting
+    // against MemAvailable drove Gemma3-12B into the OOM killer. MemFree is the
+    // conservative "genuinely free" number we scale into a context length.
+    std::ifstream f("/proc/meminfo");
+    std::string key, unit;
+    unsigned long kb = 0;
+    // Each line is "Name: <number> kB" -- consume the unit token too, or the
+    // next iteration tries to read "MemFree:" as a number and the stream fails.
+    while (f >> key >> kb >> unit) {
+        if (key == "MemFree:") return static_cast<size_t>(kb) * 1024;
+    }
+    return 0;
+#endif
+}
+
+// --fit decision: context = (genuinely free GiB) x 1000 tokens. A deliberately
+// simple, conservative heuristic (not a derived pool/state budget): ~32 GiB free
+// -> 32000 tokens. Clamped to the model's advertised cap; only ever lowers it.
+// Returns 0 when free RAM is unreadable.
+size_t fit_context(size_t free_bytes, size_t cap) {
+    if (!free_bytes) return 0;
+    const size_t free_gb = free_bytes / (1024ull * 1024ull * 1024ull);
+    const size_t ctx = free_gb * 1000;
+    return ctx ? std::min(ctx, cap) : 0;
+}
+
+// Geometry prediction for the log only: the fixed weight/state cost and the
+// per-token KV cost of this kernel set, from its manifest (not arch/size guessing).
+void state_geometry(const Manifest& m, size_t* fixed_out, size_t* per_token_out) {
+    *fixed_out = *per_token_out = 0;
+    if (m.layers.empty() || !m.pool_bytes) return;
+    size_t fixed = m.pool_bytes * m.layers.size() + m.lmhead_pool_bytes;
+    size_t per_token = 0;
+    for (const auto& key : m.layers) {
+        auto it = m.layer_types.find(key);
+        if (it == m.layer_types.end()) continue;
+        const LayerType& lt = it->second;
+        if (lt.state_kind == "kv") per_token += lt.state_row;
+        else fixed += lt.state_bytes;
+    }
+    *fixed_out = fixed;
+    *per_token_out = per_token;
+}
+
+} // namespace
+
 Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(dev) {
     cfg_.model_dir = config.model_path;
     std::string how;
@@ -89,6 +156,36 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(
         throw std::runtime_error("open_qwen36: no open kernels found for " + config.model_name +
                                  " (set OFLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
+    // --fit (OFLM_CTX_FIT, delivered by the settings system for both run and
+    // serve): pick the largest context that fits in CURRENTLY free RAM, using
+    // this kernel set's own pool/state geometry. Works out of the box for
+    // models whose advertised context would OOM the box (Gemma3-12B: 48 kv
+    // layers x 8 KB/token = 384 KiB/token, ~24 GiB at 64k). Only ever lowers
+    // the context; an explicit --ctx-len is mutually exclusive with --fit.
+    const bool want_fit = [] {
+        const char* v = std::getenv("OFLM_CTX_FIT");
+        return v && *v && std::string(v) != "0" && std::string(v) != "false";
+    }();
+    if (want_fit) {
+        const size_t avail = available_ram_bytes();           // genuinely free (MemFree)
+        const size_t cap = cfg_.max_ctx;
+        size_t fixed = 0, per_token = 0;
+        state_geometry(Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string()),
+                       &fixed, &per_token);
+        const size_t fitted = fit_context(avail, cap);         // free_gb x 1000, clamped to cap
+        if (fitted) {
+            cfg_.max_ctx = fitted;
+            if (cfg_.verbose)
+                std::fprintf(stderr,
+                             "open_qwen36: --fit: %.1f GiB free -> context %zu (cap %zu); "
+                             "predicted %.1f GiB weights + %.0f KiB/token ~= %.1f GiB at this context\n",
+                             avail / (1024.0 * 1024.0 * 1024.0), cfg_.max_ctx, cap,
+                             fixed / (1024.0 * 1024.0 * 1024.0), per_token / 1024.0,
+                             (fixed + per_token * cfg_.max_ctx) / (1024.0 * 1024.0 * 1024.0));
+        } else if (cfg_.verbose) {
+            std::fprintf(stderr, "open_qwen36: --fit: no free-RAM reading; keeping context %zu\n", cfg_.max_ctx);
+        }
+    }
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
     if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) cfg_.prefill_mode = pm;   // oflm --prefill-mode

@@ -232,6 +232,7 @@ def test_no_shipped_models_hash_moved():
         "translategemma-12b-it-i1-gguf.json": "sha256:2816c320d098ea1e351742478bc4a8a25de05d45c7ea37b5af36ac9c3fc5ce57",
         "hunyuan-a13b-instruct-gguf.json": "sha256:33d6847f9c134d14ef3980a83486d4ad665c7751286a0eeb80e0fede0901ed13",
         "granite-4.0-h-small-gguf.json": "sha256:3b7d224b27b47f9a42dcc3cc1059ccfc42de4b2abc82bb33346a37f7bc86be44",
+        "nanbeige4.1-3b-i1-gguf.json": "sha256:24b44931f69caf6da34ceca67f68df6a909b0c9018e2c967a7d03ed2cb345981",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
