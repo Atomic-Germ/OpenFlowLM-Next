@@ -74,6 +74,7 @@ EXPECTED = {
     "phi-4-mini-reasoning-gguf": "Phi-4-mini-reasoning-GGUF-NPU2",
     "hunyuan-a13b-instruct-gguf": "Hunyuan-A13B-Instruct-GGUF-NPU2",
     "nanbeige4.1-3b-i1-gguf": "Nanbeige4.1-3B-i1-GGUF-NPU2",
+    "llama-3.2-3b-gguf": "Llama-3.2-3B-GGUF-NPU2",
 }
 
 
