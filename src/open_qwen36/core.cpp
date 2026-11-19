@@ -2544,7 +2544,11 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         std::memcpy(xres.map<float*>(), x, w_->hidden * 4);
     else
         embedding_row(static_cast<size_t>(token), xres.map<float*>());
-    if (cfg_.verbose && !x) {
+    // NaN diagnostics are bring-up tools, not verbose chatter: they do a host
+    // scan of the whole hidden row on EVERY step. Gate them on the same
+    // OFLM_OPEN_LAYER_NAN flag as the per-layer check, so a normal serve log is
+    // not 94% "nan=0" lines and does not pay the scan on every token.
+    if (layer_nan_ && !x) {
         const float* e = xres.map<float*>();
         int nnan = 0;
         float mx = 0.f;
@@ -2738,7 +2742,9 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         profile_pending_ = -1;
     }
     if (want_logits) {
-        if (cfg_.verbose) {
+        // Same gating as the embed diagnostic: this does a FROM_DEVICE sync plus
+        // a full hidden-row scan per step, so only when OFLM_OPEN_LAYER_NAN is on.
+        if (layer_nan_) {
             xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
             const float* x = xres.map<float*>();
             int nnan = 0;

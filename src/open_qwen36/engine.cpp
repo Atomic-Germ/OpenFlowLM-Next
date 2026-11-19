@@ -234,14 +234,18 @@ void Engine::note_failure(const char* what) {
 }
 
 void Engine::ensure_alive() {
+    std::lock_guard<std::mutex> lock(rebuild_mu_);
     if (!poisoned_) return;
+    // Clear the flag BEFORE the expensive rebuild: another thread that fails a
+    // dispatch during the rebuild must be able to mark it again so the next
+    // request rebuilds instead of using a context the new run poisoned.
+    poisoned_ = false;
     std::fprintf(stderr, "open_qwen36: a kernel failed on the last request; rebuilding the engine\n");
     core_.reset();
     core_ = std::make_unique<Core>(cfg_, dev_);
     core_->load_weights();
     core_->reset();
     has_snapshot_ = false;
-    poisoned_ = false;
 }
 
 bool Engine::save_pre_prompt_state() {
