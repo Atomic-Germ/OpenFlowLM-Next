@@ -699,6 +699,7 @@ CONFIG_MODEL_FAMILIES = {
     "k2_horizon": "k2",
     "lfm2": "lfm2",
     "lfm2_moe": "lfm2moe",
+    "lfm3": "lfm3",
     "gpt_oss": "gpt-oss",
     # Qwen3.5 / 3.8's own model_type (the tag is still qwen3.5)
     "qwen3_5": "qwen3.5",
