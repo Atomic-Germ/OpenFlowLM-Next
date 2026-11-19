@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <fstream>
+#include <thread>
 
 #include "models/qwen3_5vl/qwen3_5vl_npu.hpp"       // qwen3_5vl_image_payload_t
 #include "models/qwen3_6_moe/qwen3_6_moe_npu.hpp"   // qwen3_6_moe_image_payload_t
@@ -602,6 +603,19 @@ buffer<bf16> Engine::prefill_images(std::vector<int>& ids, const Payload& p_) {
                      deeps.back().empty() ? "" : (" + " + std::to_string(deeps.back().size()) + " deepstack").c_str(),
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
+    // The vision tower is host AVX2/OMP compute: N images are ~tens of seconds of
+    // 12-thread work with NO NPU dispatch in between. That pulls the array's clock
+    // down through the shared package power budget (see core.cpp's OpenMP note), so
+    // the first LLM dispatch after it can time out (ERT state 8) on an idled array.
+    // A sleep lets the clock recover before the first dispatch. Measured on this box:
+    // 30 ms did NOT prevent the timeout (both fixed and unfixed binaries tripped on
+    // the ~5th consecutive 3-image request as the package heated up); 2000 ms took
+    // 10 consecutive vision requests with zero ERT timeouts. The vision runs
+    // themselves take 8-22 s, so 2 s is proportionate and invisible next to them.
+    // OFLM_OPEN_VISION_SETTLE_MS overrides; 0 disables.
+    unsigned settle_ms = 2000;
+    if (const char* e = std::getenv("OFLM_OPEN_VISION_SETTLE_MS")) settle_ms = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    if (settle_ms) std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
     return guarded([&] {
         size_t img = 0, j = 0;
         int64_t base = 0;
