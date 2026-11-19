@@ -75,7 +75,17 @@ open_kernels/model/out*/
 open_kernels/designs/dense/*.cc
 open_kernels/designs/layer_x/*.cc
 open_kernels/designs/lm_head_q4/*.cc
+# Generated gemv_q4 entry points: one .cc per (per_call, per_band, rs, k-tile)
+# written by gemv_q4._mksrc during export. A new spec's geometry produces a new
+# p*b*r* family (p1b108r2, p25b100r2, ...) that must never be swept up by
+# `git add .`. The p4b* baselines and the two prep *_rt.cc helpers are checked-in
+# sources and are re-included below (tracked files are unaffected by ignore anyway).
+open_kernels/designs/gemv_q4/gemv_q4_p*b*r*_k*.cc
+open_kernels/designs/gemv_q4/gemv_q4s32_p*b*r*_k*.cc
+!open_kernels/designs/gemv_q4/gemv_q4_p4b*_k*.cc
+!open_kernels/designs/gemv_q4/gemv_q4s32_p4b*_k*.cc
 open_kernels/designs/gemv_q4/gemv_q4_prep_k*.cc
+open_kernels/designs/gemv_q4/gemv_q4_prep_blk_k*.cc
 open_kernels/designs/gemm_q4/*.cc
 open_kernels/designs/gemm_q4/layout_m*.txt
 
