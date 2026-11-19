@@ -88,7 +88,7 @@ cd "$REPO"
 
 # ------------------------------------------------------------------- version
 # Default to the version the tree is about to be tagged with: OFLM_VERSION in
-# the presets, the documented single source of truth (docs/semantic-versioning.md).
+# the presets, the documented single source of truth (docs/docs/contributing/semantic-versioning.md).
 if [ -z "$VERSION" ]; then
     # Both presets, and they have to agree. The release workflow checks this too,
     # but a disagreement found here is found twenty minutes before a forty-minute

@@ -1,0 +1,65 @@
+{
+  "slug": "qwen35-2b-ryzen-ai-350",
+  "title": "Qwen 3.5 2B Context Scaling (Community Average)",
+  "model": "qwen3.5:2b",
+  "hardware": "Framework Laptop 13 (AMD Ryzen AI 7 350 w/ Radeon 860M, 32 GB DDR5-5600)",
+  "cpu": "AMD Ryzen AI 7 350 w/ Radeon 860M",
+  "ram": "32 GB DDR5-5600",
+  "stack": "OpenFlowLM NPU + CPU · GGUF Q4_K_M · Community avg (n=3)",
+  "rows": [
+    {
+      "context": "1k",
+      "ttft_s": 3.115,
+      "ttft_std": 0.258,
+      "prefill_tps": 366.24,
+      "prefill_std": 30.78,
+      "decode_tps": 20.79,
+      "decode_std": 0.07
+    },
+    {
+      "context": "2k",
+      "ttft_s": 5.789,
+      "ttft_std": 0.182,
+      "prefill_tps": 363.34,
+      "prefill_std": 11.69,
+      "decode_tps": 19.40,
+      "decode_std": 0.06
+    },
+    {
+      "context": "4k",
+      "ttft_s": 10.547,
+      "ttft_std": 0.124,
+      "prefill_tps": 383.07,
+      "prefill_std": 4.49,
+      "decode_tps": 16.99,
+      "decode_std": 0.12
+    },
+    {
+      "context": "8k",
+      "ttft_s": 21.573,
+      "ttft_std": 0.301,
+      "prefill_tps": 366.97,
+      "prefill_std": 5.16,
+      "decode_tps": 13.68,
+      "decode_std": 0.02
+    },
+    {
+      "context": "16k",
+      "ttft_s": 48.022,
+      "ttft_std": 1.450,
+      "prefill_tps": 326.47,
+      "prefill_std": 9.86,
+      "decode_tps": 9.78,
+      "decode_std": 0.02
+    },
+    {
+      "context": "32k",
+      "ttft_s": 109.297,
+      "ttft_std": 2.097,
+      "prefill_tps": 285.03,
+      "prefill_std": 5.47,
+      "decode_tps": 6.21,
+      "decode_std": 0.06
+    }
+  ]
+}

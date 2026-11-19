@@ -1,0 +1,300 @@
+{
+  "engines": [
+    {
+      "name": "Standard Chat & Vision",
+      "summary": "Everyday local chat, coding, reasoning, tool calling, and image Q&A for dense transformer models.",
+      "status_class": "open",
+      "status_label": "NPU",
+      "accel_note": "Dense language layers run on the NPU (with host CPU ViT image encoding when Qwen-VL images are attached), keeping your CPU and GPU free.",
+      "modalities": ["LLM", "VLM"],
+      "family_chips": [
+        "Qwen 3 (0.6B–14B, VL 4B/8B) & Qwen 2.5 (3B)",
+        "Gemma 4 (12B Text)",
+        "Gemma 3 (4B, 12B), MedGemma & TranslateGemma",
+        "Llama 3, 3.1 & 3.2 (1B, 3B, 8B)",
+        "IBM Granite 4 (3B Dense)",
+        "Microsoft Phi-4-mini (4B)",
+        "DeepSeek-R1 Distill (8B)",
+        "Nanbeige 4.1 (3B)",
+        "Hunyuan-MT (7B)",
+        "K2 / Horizon (3.7B, 7B)",
+        "MiniCPM (2B)"
+      ],
+      "capability_badges": [
+        { "kind": "llm", "label": "Chat" },
+        { "kind": "vlm", "label": "Vision" },
+        { "kind": "think", "label": "Reasoning" },
+        { "kind": "tools", "label": "Tools" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "Up to 256k context" },
+        { "kind": "wip", "issue": "236", "label": "Gemma 4 E2B/E4B #236" },
+        { "kind": "wip", "issue": "73", "label": "Gemma multimodal #73" }
+      ]
+    },
+    {
+      "name": "Qwen 3.5 Long-Context Chat & Vision",
+      "summary": "Hybrid linear-attention runtime built for long documents, vision Q&A, and coding sessions from 0.8B up to 27B.",
+      "status_class": "hybrid",
+      "status_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill and ViT image encoding (when images are attached) run on the CPU.",
+      "accel_note": "Keeps KV-cache memory low across 32k to 256k token coding, document, and image Q&A sessions.",
+      "modalities": ["LLM", "VLM"],
+      "family_chips": [
+        "Qwen 3.5 (0.8B, 2B, 4B, 9B, 27B)"
+      ],
+      "capability_badges": [
+        { "kind": "llm", "label": "Chat" },
+        { "kind": "vlm", "label": "Vision" },
+        { "kind": "think", "label": "Reasoning" },
+        { "kind": "tools", "label": "Tools" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "Up to 256k context" },
+        { "kind": "neutral", "label": "32 GB+ RAM for 27B" }
+      ]
+    },
+    {
+      "name": "Mixture-of-Experts (MoE) Chat & Vision",
+      "summary": "Runs high-capacity 35B reasoning and vision models fast on unified memory by activating only 3B parameters per token.",
+      "status_class": "hybrid",
+      "status_label": "NPU + CPU",
+      "accel_tip": "Shared layers, active expert projections, and attention run on the NPU; Mixture-of-Experts token routing, long-prompt recurrent state updates, and ViT image encoding (when images are attached) run on the CPU.",
+      "accel_note": "Activates 3B parameters per token for fast 35B generation on unified memory.",
+      "modalities": ["LLM", "VLM"],
+      "family_chips": [
+        "Qwen 3.6 MoE (35B-A3B)"
+      ],
+      "capability_badges": [
+        { "kind": "llm", "label": "Chat" },
+        { "kind": "vlm", "label": "Vision" },
+        { "kind": "think", "label": "Reasoning" },
+        { "kind": "tools", "label": "Tools" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "32-64 GB+ RAM recommended" },
+        { "kind": "wip", "issue": "91", "label": "GPT-OSS 20B #91" }
+      ]
+    },
+    {
+      "name": "Liquid LFM2 Chat",
+      "summary": "Compact, low-memory runtime for Liquid AI 1.2B and 2.6B assistants on thin-and-light laptops.",
+      "status_class": "hybrid",
+      "status_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "accel_note": "Fits in ~1 to 2 GB of RAM alongside IDEs, browsers, or embedding models.",
+      "modalities": ["LLM"],
+      "family_chips": [
+        "Liquid LFM 2 (1.2B, 2.6B)",
+        "Liquid LFM 2.5 (1.2B)"
+      ],
+      "capability_badges": [
+        { "kind": "llm", "label": "Chat" },
+        { "kind": "think", "label": "Reasoning" },
+        { "kind": "tools", "label": "Tools" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "Up to 32k context" }
+      ]
+    },
+    {
+      "name": "Batched Text Embeddings",
+      "summary": "High-throughput document indexing and semantic search across 6 compiled BERT, BGE, Nomic, and GTE encoders.",
+      "status_class": "open",
+      "status_label": "NPU",
+      "accel_note": "Encoder matrix math runs on the NPU across batches up to 128 texts; CPU handles tokenization and final vector pooling.",
+      "modalities": ["Embed"],
+      "family_chips": [
+        "MiniLM-L6 (22M)",
+        "BGE (Small, Base, Large)",
+        "Nomic Embed v1.5",
+        "GTE Multilingual Base"
+      ],
+      "capability_badges": [
+        { "kind": "embed", "label": "Embeddings" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "safetensors", "label": "Safetensors" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q8_0" },
+        { "kind": "quant", "label": "BF16" },
+        { "kind": "quant", "label": "F16" },
+        { "kind": "quant", "label": "F32" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q4_0" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "512-token max chunk" },
+        { "kind": "neutral", "label": "Fastest at batch 64" }
+      ]
+    },
+    {
+      "name": "EmbeddingGemma",
+      "summary": "Longer-passage 2,048-token text embeddings for multilingual retrieval and single-query lookups.",
+      "status_class": "hybrid",
+      "status_label": "NPU + CPU",
+      "accel_tip": "Linear and FFN projections run on the NPU (npu_matmul_f32); bidirectional attention and vector pooling across 2,048-token inputs run on the CPU (falls back to CPU on source-built NixOS #244).",
+      "accel_note": "Encodes full 2,048-token passages in one pass without splitting long paragraphs.",
+      "modalities": ["Embed"],
+      "family_chips": [
+        "EmbeddingGemma 300M"
+      ],
+      "capability_badges": [
+        { "kind": "embed", "label": "Embeddings" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "safetensors", "label": "Safetensors" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q8_0" },
+        { "kind": "quant", "label": "BF16" },
+        { "kind": "quant", "label": "F16" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "Up to 2k tokens" },
+        { "kind": "neutral", "label": "Single text per call" }
+      ]
+    },
+    {
+      "name": "FLUX.2 Image Generation & Editing",
+      "summary": "Offline text-to-image synthesis and single-reference photo restyling in 4 steps.",
+      "status_class": "open",
+      "status_label": "NPU",
+      "accel_note": "Prompt encoding, diffusion steps, and image decoding all run on the NPU; CPU only resizes input photos and writes PNG files.",
+      "modalities": ["Image"],
+      "family_chips": [
+        "FLUX.2 [klein] 4B"
+      ],
+      "capability_badges": [
+        { "kind": "image", "label": "Text-to-Image" },
+        { "kind": "image", "label": "Image Editing" }
+      ],
+      "format_badges": [
+        { "kind": "bundle", "label": "Pre-packed" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "BF16 + 8-bit" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "512x512 & 1024x1024" },
+        { "kind": "wip", "issue": "240", "label": "Direct GGUF #240" }
+      ]
+    },
+    {
+      "name": "Whisper Speech-to-Text",
+      "summary": "Offline voice transcription for audio files, CLI voice input, and Open WebUI microphone dictation.",
+      "status_class": "closed",
+      "status_label": "Closed NPU",
+      "accel_tip": "Default whisper-v3:turbo .q4nx shortcut runs on inherited prebuilt Whisper NPU kernels + libwhisper_npu (omitted on source-built NixOS #244). Open NPU + CPU Whisper (32-layer encoder projections on NPU; conv/attention + 4-layer token decoder on CPU) is in source and awaits prebuilt kernel packaging (#240).",
+      "accel_note": "Transcribes 30-second audio windows via whisper-v3:turbo; open NPU + CPU GGUF kernel packaging is tracked in #240.",
+      "modalities": ["ASR"],
+      "family_chips": [
+        "Whisper Large V3 Turbo"
+      ],
+      "capability_badges": [
+        { "kind": "asr", "label": "Speech" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "safetensors", "label": "Safetensors" },
+        { "kind": "q4nx", "label": "Legacy Q4NX" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "BF16" },
+        { "kind": "quant", "label": "F16" },
+        { "kind": "quant", "label": "4-bit Fixed" }
+      ],
+      "limit_badges": [
+        { "kind": "neutral", "label": "30s audio windows" },
+        { "kind": "wip", "issue": "240", "label": "Open kernels & GGUF #240" },
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    },
+    {
+      "name": "Inherited Closed NPU Shortcuts",
+      "summary": "Temporary prebuilt NPU kernel and closed shared-library runtimes being phased out as remaining models move to open kernels.",
+      "status_class": "closed",
+      "status_label": "Closed NPU",
+      "accel_tip": "Uses inherited prebuilt NPU binaries and closed runtime libraries on fixed .q4nx shortcuts only; requires explicit OFLM_<FAMILY>_ENGINE=closed opt-in on most families (no silent fallback) and is omitted from source-built NixOS packages (#244).",
+      "accel_note": "Supports fixed .q4nx shortcuts only (no GGUF loading), requires explicit opt-in where open text engines exist, and is omitted on NixOS (#244).",
+      "modalities": ["LLM", "VLM"],
+      "family_chips": [
+        "GPT-OSS 20B (OFLM_GPTOSS_ENGINE=closed)",
+        "Gemma 4 E2B & E4B (.q4nx)",
+        "Gemma 3 / 4, MedGemma & TranslateGemma Vision",
+        "Qwen 2.5-VL 3B (.q4nx)"
+      ],
+      "capability_badges": [
+        { "kind": "llm", "label": "Chat" },
+        { "kind": "vlm", "label": "Vision" },
+        { "kind": "asr", "label": "Speech" },
+        { "kind": "think", "label": "Reasoning" }
+      ],
+      "format_badges": [
+        { "kind": "q4nx", "label": "Legacy Q4NX" }
+      ],
+      "quant_badges": [
+        { "kind": "quant", "label": "4-bit Fixed" }
+      ],
+      "limit_badges": [
+        { "kind": "wip", "issue": "91", "label": "GPT-OSS #91" },
+        { "kind": "wip", "issue": "236", "label": "Gemma 4 E2B/E4B #236" },
+        { "kind": "wip", "issue": "73", "label": "Gemma multimodal #73" },
+        { "kind": "wip", "issue": "244", "label": "Omitted on NixOS #244" }
+      ]
+    }
+  ]
+}

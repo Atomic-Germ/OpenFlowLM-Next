@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 272" width="100%" style="max-width: 620px; height: auto; display: block;" role="img" aria-labelledby="ht-title ht-desc">
+  <title id="ht-title">OpenFlowLM Local AI Terminal Workflow</title>
+  <desc id="ht-desc">Terminal window showing oflm pull qwen3.5:4b, oflm run qwen3.5:4b, oflm add unsloth/gemma-3-4b-it-GGUF, and oflm serve on an AMD Ryzen AI NPU.</desc>
+  <defs>
+    <linearGradient id="ht-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#141824"/>
+      <stop offset="100%" stop-color="#0d1018"/>
+    </linearGradient>
+    <filter id="ht-shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#090d16" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect x="10" y="8" width="600" height="252" rx="12" fill="url(#ht-bg)" stroke="#2e364f" stroke-width="1.5" filter="url(#ht-shadow)"/>
+
+  <path d="M10 20 C10 13.373 15.373 8 22 8 L598 8 C604.627 8 610 13.373 610 20 L610 42 L10 42 Z" fill="#1b2030"/>
+  <line x1="10" y1="42" x2="610" y2="42" stroke="#2e364f" stroke-width="1"/>
+  <circle cx="28" cy="25" r="5" fill="#ef4444"/>
+  <circle cx="45" cy="25" r="5" fill="#f59e0b"/>
+  <circle cx="62" cy="25" r="5" fill="#22c55e"/>
+  <text x="310" y="29" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="600">oflm &#183; AMD Ryzen AI NPU</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">
+    <text x="28" y="66" fill="#60a5fa" font-weight="700">$</text>
+    <text x="44" y="66" fill="#f1f5f9">oflm pull qwen3.5:4b</text>
+    <text x="28" y="85" fill="#34d399">[OK]   Downloaded qwen3.5:4b &#183; ready for local NPU chat</text>
+
+    <text x="28" y="112" fill="#60a5fa" font-weight="700">$</text>
+    <text x="44" y="112" fill="#f1f5f9">oflm run qwen3.5:4b</text>
+    <text x="28" y="131" fill="#cbd5e1">[NPU]  Loaded qwen3.5:4b (32k context, vision + tools)</text>
+    <text x="28" y="150" fill="#38bdf8">&gt;&gt;&gt; Summarize this pull request while my build runs.</text>
+
+    <text x="28" y="177" fill="#60a5fa" font-weight="700">$</text>
+    <text x="44" y="177" fill="#f1f5f9">oflm add unsloth/gemma-3-4b-it-GGUF</text>
+    <text x="28" y="196" fill="#34d399">[OK]   Registered gemma-3-4b-it from Hugging Face GGUF</text>
+
+    <text x="28" y="223" fill="#60a5fa" font-weight="700">$</text>
+    <text x="44" y="223" fill="#f1f5f9">oflm serve</text>
+    <text x="28" y="242" fill="#cbd5e1">[API]  Listening on http://127.0.0.1:52625/v1 (OpenAI &amp; Anthropic)</text>
+  </g>
+</svg>

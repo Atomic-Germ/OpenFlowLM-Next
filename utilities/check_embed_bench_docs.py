@@ -72,13 +72,13 @@ ADAPTER_FOUR = ["all-MiniLM-L6-v2", "bge-base-en-v1.5", "bge-large-en-v1.5", "Em
 
 TABLES = [
     # (file, heading substring, metric, batches, leading cols to skip, models)
-    ("docs/docs/benchmarks/embeddings_results.md",
+    ("docs/content/benchmarks/_index.md",
      "Throughput (texts per second", "texts", [1, 4, 8, 16, 32, 64, 128], 1, ALL_SEVEN),
-    ("docs/docs/benchmarks/embeddings_results.md",
+    ("docs/content/benchmarks/_index.md",
      "Latency (seconds", "lat", [1, 4, 16, 32, 64, 128], 0, ALL_SEVEN),
-    ("docs/docs/benchmarks/embeddings_results.md",
+    ("docs/content/benchmarks/_index.md",
      "Batch speedup", "sp", [1, 2, 4, 8, 16, 32, 64, 128], 0, ALL_SEVEN),
-    ("docs/docs/benchmarks/embeddings_results.md",
+    ("docs/content/benchmarks/_index.md",
      "Token throughput", "tok", [16, 32, 64, 128], 0, ALL_SEVEN),
     ("src/open_npue_adapter/README.md",
      "is now measured, on every model", "sp", [1, 4, 8, 16, 32, 64, 128], 0, ADAPTER_FOUR),
@@ -88,7 +88,7 @@ TABLES = [
 # the batch it occurs at, and the single-text latency in milliseconds. Derived
 # numbers are where a page drifts first, because re-measuring updates the big
 # tables and leaves the summary behind.
-ONE_NUMBER = ("docs/docs/benchmarks/embeddings_results.md",
+ONE_NUMBER = ("docs/content/benchmarks/_index.md",
               "| **Model** | **embeddings/s (peak)** |")
 
 

@@ -1,0 +1,25 @@
+{{- $dest := .Destination -}}
+{{- $alt := .PlainText | default .Text -}}
+{{- $title := .Title -}}
+{{- $isRemote := strings.HasPrefix $dest "http" -}}
+{{- $cleanPath := strings.TrimPrefix "/" $dest -}}
+{{- $img := false -}}
+{{- if not $isRemote -}}
+    {{- $img = .Page.Resources.GetMatch $dest -}}
+    {{- if not $img -}}
+        {{- $img = resources.Get $cleanPath -}}
+    {{- end -}}
+    {{- if and (not $img) (strings.HasPrefix $cleanPath "assets/") -}}
+        {{- $img = resources.Get (strings.TrimPrefix "assets/" $cleanPath) -}}
+    {{- end -}}
+{{- end -}}
+{{- if $img -}}
+    <figure class="figure my-3">
+        <img class="img-fluid rounded border" src="{{ $img.RelPermalink }}" alt="{{ $alt }}" loading="lazy" />
+        {{- with $title }}<figcaption class="figure-caption mt-1">{{ . | markdownify }}</figcaption>{{- end }}
+    </figure>
+{{- else if $isRemote -}}
+    <img class="img-fluid" src="{{ $dest | safeURL }}" alt="{{ $alt }}" loading="lazy" {{ with $title }}title="{{ . }}"{{ end }} />
+{{- else -}}
+    <img class="img-fluid rounded border" src="{{ $dest | relURL }}" alt="{{ $alt }}" loading="lazy" {{ with $title }}title="{{ . }}"{{ end }} />
+{{- end -}}

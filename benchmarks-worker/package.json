@@ -6,6 +6,6 @@
   "scripts": {
     "dev": "npx --yes wrangler@latest dev --local",
     "deploy": "npx --yes wrangler@latest deploy",
-    "test": "node --test test/"
+    "test": "node --test 'test/*.test.js'"
   }
 }

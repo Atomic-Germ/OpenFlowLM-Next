@@ -1,0 +1,85 @@
+<header id="topnav">
+    <div class="container d-flex justify-content-between align-items-center">
+        <a class="logo" aria-label="OpenFlowLM Home" href='{{ relLangURL "" }}'>
+            <div class="small">
+                {{ with resources.Get "images/logos/mark.svg" }}
+                    {{ .Content | safeHTML }}
+                {{ end }}
+            </div>
+            <div class="big">
+                {{ with resources.Get "images/logos/logo.svg" }}
+                    {{ .Content | safeHTML }}
+                {{ end }}
+            </div>
+        </a>
+
+        <div class="d-flex align-items-center">
+            <div id="navigation">
+                <ul class="navigation-menu nav-right">
+                    {{- $cur := .RelPermalink -}}
+                    {{- range .Site.Menus.primary }}
+                    {{- $target := .URL -}}
+                    <li class="{{ if or (eq $cur $target) (and (ne .URL "/") (hasPrefix $cur $target)) }}active{{ end }}">
+                        <a href="{{ $target }}">{{ .Name }}</a>
+                    </li>
+                    {{- end }}
+                </ul>
+            </div>
+
+            <ul class="social-link d-flex list-inline mb-0 align-items-center ms-2">
+                {{ with .Site.Params.discord_url }}
+                <li class="list-inline-item mb-0">
+                    <a href="{{ . }}" aria-label="Discord Community" rel="noopener noreferrer" target="_blank">
+                        <div class="btn btn-icon btn-landing border-0">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                            </svg>
+                        </div>
+                    </a>
+                </li>
+                {{ end }}
+                {{ with .Site.Params.github_url }}
+                <li class="list-inline-item mb-0">
+                    <a href="{{ . }}" aria-label="GitHub Repository" rel="noopener noreferrer" target="_blank">
+                        <div class="btn btn-icon btn-landing border-0">
+                            {{ with resources.Get "images/social/github.svg" }}
+                                {{ .Content | safeHTML }}
+                            {{ end }}
+                        </div>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if eq .Site.Params.docs.darkMode true }}
+                <li class="list-inline-item mb-0">
+                    <button id="mode" class="btn btn-icon btn-landing border-0" type="button" aria-label="Toggle color theme">
+                        <span class="toggle-dark">
+                            <svg xmlns="http://www.w3.org/2000/svg" height="22" width="22" viewBox="0 0 48 48" fill="currentColor">
+                                <title>Switch to dark mode</title>
+                                <path d="M24 42q-7.5 0-12.75-5.25T6 24q0-7.5 5.25-12.75T24 6q.4 0 .85.025.45.025 1.15.075-1.8 1.6-2.8 3.95-1 2.35-1 4.95 0 4.5 3.15 7.65Q28.5 25.8 33 25.8q2.6 0 4.95-.925T41.9 22.3q.05.6.075.975Q42 23.65 42 24q0 7.5-5.25 12.75T24 42Z"/>
+                            </svg>
+                        </span>
+                        <span class="toggle-light">
+                            <svg xmlns="http://www.w3.org/2000/svg" height="22" width="22" viewBox="0 0 48 48" fill="currentColor">
+                                <title>Switch to light mode</title>
+                                <path d="M24 31q2.9 0 4.95-2.05Q31 26.9 31 24q0-2.9-2.05-4.95Q26.9 17 24 17q-2.9 0-4.95 2.05Q17 21.1 17 24q0 2.9 2.05 4.95Q21.1 31 24 31Zm0 3q-4.15 0-7.075-2.925T14 24q0-4.15 2.925-7.075T24 14q4.15 0 7.075 2.925T34 24q0 4.15-2.925 7.075T24 34ZM3.5 25.5q-.65 0-1.075-.425Q2 24.65 2 24q0-.65.425-1.075Q2.85 22.5 3.5 22.5h5q.65 0 1.075.425Q10 23.35 10 24q0 .65-.425 1.075-.425.425-1.075.425Zm36 0q-.65 0-1.075-.425Q38 24.65 38 24q0-.65.425-1.075.425-.425 1.075-.425h5q.65 0 1.075.425Q46 23.35 46 24q0 .65-.425 1.075-.425.425-1.075.425ZM24 10q-.65 0-1.075-.425Q22.5 9.15 22.5 8.5v-5q0-.65.425-1.075Q23.35 2 24 2q.65 0 1.075.425.425.425.425 1.075v5q0 .65-.425 1.075Q24.65 10 24 10Zm0 36q-.65 0-1.075-.425-.425-.425-.425-1.075v-5q0-.65.425-1.075Q23.35 38 24 38q.65 0 1.075.425.425.425.425 1.075v5q0 .65-.425 1.075Q24.65 46 24 46Z"/>
+                            </svg>
+                        </span>
+                    </button>
+                </li>
+                {{ end }}
+            </ul>
+
+            <div class="menu-extras ms-2 me-1">
+                <div class="menu-item">
+                    <button class="navbar-toggle btn btn-icon btn-soft-light" id="isToggle" aria-label="Toggle navigation menu" onclick="toggleMenu()">
+                        <div class="lines">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</header>

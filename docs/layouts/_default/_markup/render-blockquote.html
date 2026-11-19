@@ -1,0 +1,31 @@
+{{- $contexts := dict
+    "note" "info"
+    "tip" "success"
+    "important" "primary"
+    "warning" "warning"
+    "caution" "danger"
+-}}
+{{- $icons := dict
+    "note" "info"
+    "tip" "lightbulb"
+    "important" "priority_high"
+    "warning" "warning"
+    "caution" "report"
+-}}
+{{- if eq .Type "alert" -}}
+    {{- $ctx := index $contexts .AlertType | default "info" -}}
+    {{- $icon := index $icons .AlertType | default "info" -}}
+    <div class="alert alert-{{ $ctx }} d-flex my-3" role="alert">
+        <div class="flex-shrink-1 alert-icon">
+            <span class="material-icons size-20 me-2">{{ $icon }}</span>
+        </div>
+        <div class="w-100">
+            {{- with .AlertTitle }}<div class="fw-semibold mb-1">{{ . }}</div>{{- end }}
+            {{ .Text }}
+        </div>
+    </div>
+{{- else -}}
+    <blockquote class="blockquote p-3 rounded border-start border-4" style="background: var(--oflm-bg-subtle); border-color: var(--oflm-accent) !important;">
+        {{ .Text }}
+    </blockquote>
+{{- end -}}

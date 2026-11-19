@@ -1,0 +1,109 @@
+name: Docs Build & Quality Checks
+
+on:
+  push:
+    branches:
+      - main
+      - website
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs-pages.yml'
+      - 'utilities/check_*docs*.py'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs-pages.yml'
+      - 'utilities/check_*docs*.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Quality Checks & Hugo Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify embedding benchmark docs
+        run: python3 utilities/check_embed_bench_docs.py
+
+      - name: Verify documentation quality
+        run: python3 utilities/check_docs_quality.py
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: docs/go.sum
+
+      - name: Set up Hugo Extended
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: '0.147.9'
+          extended: true
+
+      - name: Build static site (root and subpath verification)
+        working-directory: docs
+        run: |
+          hugo --minify --cleanDestinationDir -d /tmp/oflm-root
+          hugo --minify --cleanDestinationDir -b "https://example.github.io/OpenFlowLM-Next/" -d /tmp/oflm-subpath
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.repository == 'Atomic-Germ/OpenFlowLM-Next' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: docs/go.sum
+
+      - name: Set up Hugo Extended
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: '0.147.9'
+          extended: true
+
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build static site for Pages
+        working-directory: docs
+        run: hugo --minify --cleanDestinationDir --baseURL "${{ steps.pages.outputs.base_url }}/"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs/public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,46 @@
+<head>
+    <meta charset="utf-8" />
+    <title>{{ if .IsHome }}{{ .Site.Title }} | Open Ryzen AI NPU Runtime{{ else }}{{ .Title }} | {{ .Site.Title }}{{ end }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    {{- with .Description | default .Site.Params.description }}
+    <meta name="description" content="{{ . }}" />
+    {{- end }}
+    <meta name="author" content="OpenFlowLM Contributors" />
+    {{ block "head/favicon" . }}{{ partialCached "head/favicon.html" . }}{{ end }}
+    {{ if eq .Site.Params.docs.darkMode true -}}
+        {{ $darkModeInit := resources.Get "/docs/js/darkmode-init.js" | js.Build | minify -}}
+        <script>{{ $darkModeInit.Content | safeJS }}</script>
+    {{ end -}}
+    <script>document.documentElement.dataset.cbApi = {{ .Site.Params.cb_api | default "/api" | jsonify | safeJS }};</script>
+    {{- partial "google-fonts" . }}
+    {{- $options := dict "enableSourceMap" (not hugo.IsProduction) }}
+    {{- if hugo.IsProduction }}
+        {{- $options = dict "enableSourceMap" false "outputStyle" "compressed" }}
+    {{- end }}
+    {{- $style := resources.Get "/scss/style.scss" | resources.ExecuteAsTemplate "/scss/style.scss" . | css.Sass $options }}
+    {{- $oflmStyle := resources.Get "/scss/oflm-lotus.scss" | css.Sass $options }}
+    {{- if hugo.IsProduction }}
+        {{- $style = $style | minify | fingerprint "sha384" }}
+        {{- $oflmStyle = $oflmStyle | minify | fingerprint "sha384" }}
+    {{- end -}}
+    <link rel="stylesheet" href="{{ $style.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $style.Data.Integrity }}"{{ end }} />
+    <link rel="stylesheet" href="{{ $oflmStyle.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $oflmStyle.Data.Integrity }}"{{ end }} />
+    {{ $js := resources.Get "js/bootstrap.js" }}
+    {{ $sourceMap := cond hugo.IsProduction "" "inline" }}
+    {{ $opts := dict "sourceMap" $sourceMap "minify" hugo.IsProduction "target" "es2018" "params" (dict) }}
+    {{ $js = $js | js.Build $opts }}
+    {{ if hugo.IsProduction }}
+        {{ $js = $js | fingerprint "sha384" }}
+    {{ end }}
+    <script src="{{ $js.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $js.Data.Integrity }}"{{ end }} defer></script>
+    {{ if ($.Scratch.Get "image_compare_enabled") }}
+        {{ $imagecompare := resources.Get "js/image-compare-viewer.min.js" }}
+        {{- $icjs := (slice $imagecompare) | resources.Concat "/js/image-compare.js" }}
+        {{- if not hugo.IsServer }}
+            {{- $icjs = $icjs | minify | fingerprint "sha384" }}
+            <script src="{{ $icjs.RelPermalink }}" integrity="{{ $icjs.Data.Integrity }}"></script>
+        {{- else }}
+            <script src="{{ $icjs.RelPermalink }}"></script>
+        {{- end }}
+    {{- end }}
+</head>

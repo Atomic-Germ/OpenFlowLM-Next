@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+{{ $.Scratch.Delete "social_list" }}
+{{ $social_params := slice "github" "twitter" "bluesky" "instagram" "rss" }}
+{{ range $social_params }}
+    {{ if isset site.Params.social . }}
+        {{ $.Scratch.Add "social_list" (slice .) }}
+    {{ end }}
+{{ end }}
+
+{{ $ic := newScratch }}
+{{ range $value := .Site.Data.landing }}
+    {{ $template := string (replaceRE `( |-{1,})` "_" $value.template) }}
+    {{ if and (eq $template "image_compare") (eq $value.oflm true) }}
+        {{ if $value.enable }}
+        {{ $ic.Add "enabled" (slice $value.enable) }}
+            {{ range $value.items }}
+                {{ $ic.Add "config" (slice (.config | jsonify | safeJS)) }}
+            {{ end }}
+        {{ end }}
+    {{- end }}
+{{ end }}
+{{ $.Scratch.Set "image_compare_enabled" (in ($ic.Get "enabled") true) }}
+
+<html lang="{{ site.LanguageCode }}" dir="ltr">
+    {{- partial "head.html" . -}}
+    <body class="oflm-site-body">
+        <div>
+            {{- partial "header.html" . -}}
+        </div>
+        <div class="mb-4" id="content">
+            {{- block "main" . }}{{- end }}
+        </div>
+        {{- partial "footer.html" . -}}
+
+        {{ if eq .Site.Params.docs.darkMode true -}}
+            {{ $darkModeSwitch := resources.Get "/docs/js/darkmode-switch.js" | js.Build | minify }}
+            <script>{{ $darkModeSwitch.Content | safeJS }}</script>
+        {{ end -}}
+
+        {{ $app := resources.Get "/js/app.js" }}
+        {{- if not hugo.IsServer }}
+            {{- $js := (slice $app) | resources.Concat "/js/bundle.js" | minify | fingerprint "sha384" }}
+            <script src="{{ $js.RelPermalink }}" integrity="{{ $js.Data.Integrity }}"></script>
+        {{- else }}
+            {{- $js := (slice $app) | resources.Concat "/js/bundle.js" }}
+            <script src="{{ $js.RelPermalink }}"></script>
+        {{- end }}
+
+        {{ if ($.Scratch.Get "image_compare_enabled") }}
+        <script>
+            const viewers = document.querySelectorAll(".image-compare");
+            let configs = [{{ (delimit ($ic.Get `config`) `,`) | safeJS }}];
+            viewers.forEach((element, i) => {
+                new ImageCompare(element, configs[i]).mount();
+            });
+        </script>
+        {{ end }}
+
+        <script src="{{ "js/oflm-ui.js" | relURL }}" defer></script>
+        {{- if or (.Page.Store.Get "hasECharts") (.Params.echarts) }}
+            <script src="{{ "js/echarts.min.js" | relURL }}"></script>
+            <script src="{{ "js/oflm-charts.js" | relURL }}"></script>
+        {{- end }}
+        {{- if .Params.community_bench }}
+            <script src="{{ "js/community-bench.js" | relURL }}"></script>
+        {{- end }}
+    </body>
+</html>

@@ -1,0 +1,52 @@
+{{- if eq .Page.Site.Params.docs.prism true -}}
+  {{- $attributes := .Attributes -}}
+  {{- $ordinal := .Ordinal -}}
+  {{- $innerClean := strings.TrimRight "\r\n" .Inner -}}
+  {{- $innerRemoveLB := replaceRE "\r\n?|\n" "" $innerClean | string -}}
+  {{- $innerHash := substr (sha1 (printf "%s%s" $innerRemoveLB $ordinal)) 0 7 -}}
+  {{- $classes := slice (printf "language-%s" (.Type | default "text")) .Attributes.class -}}
+  {{- $options := .Options -}}
+  {{- $optionslist := newScratch -}}
+  {{- range $k, $v := $options -}}
+    {{- $optionslist.Add "options" (printf " %s" $k) -}}
+  {{- end -}}
+  {{- $optionsclasslist := $optionslist.Get "options" -}}
+  {{- if isset .Options "hl_lines" -}}
+    {{- $lines := .Options.hl_lines -}}
+    {{- $offset := 1 -}}
+    {{- if isset .Options "linenostart" -}}
+      {{- $offset = .Options.linenostart -}}
+    {{- end -}}
+    {{- $data := newScratch -}}
+    {{- range $value := $lines -}}
+      {{- $value = uniq $value -}}
+      {{- if lt (len $value) 2 -}}
+        {{- $value = slice (add $offset (index $value 0)) -}}
+      {{- else -}}
+        {{- $value = slice (delimit (slice (add $offset (index $value 0)) (add $offset (index $value 1))) "-") -}}
+      {{- end -}}
+      {{- $data.Add "lines" $value -}}
+    {{- end -}}
+    {{- $lines = delimit ($data.Get "lines") "," -}}
+    {{- $attributes = merge $attributes (dict "data-line" $lines) -}}
+    {{- if and (isset .Options "linenos") (ne .Options.linenos false) -}}
+      {{- $attributes = merge $attributes (dict "data-line-offset" (string $offset)) -}}
+    {{- else -}}
+      {{- $attributes = merge $attributes (dict "data-line-offset" (string (sub $offset 1))) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if and (isset .Options "linenos") (ne .Options.linenos false) -}}
+    {{- $classes = $classes | append "line-numbers" -}}
+  {{- end -}}
+  {{- if isset .Options "linenostart" -}}
+    {{- $attributes = merge $attributes (dict "data-start" (string .Options.linenostart)) -}}
+  {{- end -}}
+  {{- if and (isset .Options "anchorlinenos") (ne .Options.anchorlinenos false) -}}
+    {{- $classes = $classes | append "linkable-line-numbers" -}}
+  {{- end -}}
+  {{- $attributes = merge $attributes (dict "class" (delimit $classes " ")) -}}
+  <div class="prism-codeblock{{ $optionsclasslist }}"><pre id="{{ $innerHash }}"{{- range $k, $v := $attributes -}}{{- printf " %s=%q" $k $v | safeHTMLAttr -}}{{- end -}}><code>{{- $innerClean -}}</code></pre></div>
+{{- else -}}
+  {{- $innerClean := strings.TrimRight "\r\n" .Inner -}}
+  <div class="oflm-codeblock"><pre class="language-{{ .Type | default "text" }}"><code>{{- $innerClean -}}</code></pre></div>
+{{- end -}}

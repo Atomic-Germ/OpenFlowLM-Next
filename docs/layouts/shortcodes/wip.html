@@ -1,0 +1,9 @@
+{{- $issue := .Get "issue" -}}
+{{- $title := .Get "title" | default "Work in Progress" -}}
+<div class="oflm-wip-box" role="note">
+    <span class="material-icons size-20 oflm-wip-icon">construction</span>
+    <div class="w-100">
+        <span class="oflm-wip-title">{{ $title }}{{ with $issue }} (<a href="https://github.com/Atomic-Germ/OpenFlowLM-Next/issues/{{ . }}" target="_blank" rel="noopener noreferrer">#{{ . }}</a>){{ end }}:</span>
+        <span>{{ .Inner | $.Page.RenderString }}</span>
+    </div>
+</div>

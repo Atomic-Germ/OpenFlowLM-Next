@@ -1,96 +1,125 @@
 #!/usr/bin/env bash
 #
-# serve-docs.sh - preview this documentation site on your own machine.
+# serve-docs.sh - build or preview the OpenFlowLM Hugo Lotus Docs site locally.
 #
-# It installs what Jekyll needs (Homebrew, Ruby, the gems) and then serves the
-# site at http://127.0.0.1:4000. macOS only, and nothing to do with building
-# OpenFlowLM itself - for that see BUILD.md.
+# Uses Hugo Extended (v0.147.9). If a compatible Hugo Extended (>= 0.140.0) is
+# not on PATH, automatically downloads Hugo Extended v0.147.9 for Linux or
+# macOS into ${XDG_CACHE_HOME:-$HOME/.cache}/oflm-hugo/v0.147.9/hugo.
 #
-set -e
+# Usage:
+#   ./docs/serve-docs.sh           # Serve with live reload at http://127.0.0.1:1313
+#   PORT=8080 ./docs/serve-docs.sh # Serve on a custom port
+#   ./docs/serve-docs.sh --build   # Build minified static site into docs/public/
+#
+set -euo pipefail
 
-echo "=== Step 1: Checking command line tools (this may open a popup)..."
-if ! xcode-select -p >/dev/null 2>&1; then
-  echo "Command Line Tools not found. Installing..."
-  xcode-select --install || true
-  echo
-  echo "If you saw a popup, please click 'Install' and wait until it finishes."
-  echo "Then run this script again."
-  exit 0
-fi
+HUGO_VERSION="0.147.9"
+DOCS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo
-echo "=== Step 2: Installing Homebrew (the package manager) if needed... ==="
-if ! command -v brew >/dev/null 2>&1; then
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-  # Add Homebrew to PATH for Apple Silicon and Intel
-  if [ -d "/opt/homebrew/bin" ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [ -d "/usr/local/Homebrew/bin" ]; then
-    eval "$(/usr/local/Homebrew/bin/brew shellenv)"
-  fi
-else
-  echo "Homebrew already installed. Updating..."
-  brew update
-fi
-
-# Make sure brew is on PATH in this script
-if command -v brew >/dev/null 2>&1; then
-  eval "$(brew shellenv)"
-fi
-
-echo
-echo "=== Step 3: Installing Ruby via Homebrew... ==="
-brew install ruby
-
-# Ensure Homebrew Ruby is on PATH for this script run
-if [ -d "/opt/homebrew/opt/ruby/bin" ]; then
-  export PATH="/opt/homebrew/opt/ruby/bin:$PATH"
-elif [ -d "/usr/local/opt/ruby/bin" ]; then
-  export PATH="/usr/local/opt/ruby/bin:$PATH"
-fi
-
-echo
-echo "Ruby version:"
-ruby -v
-
-echo
-echo "=== Step 4: Installing Jekyll and Bundler gems (user-local)... ==="
-gem install --user-install bundler jekyll
-
-# Add gem user path to PATH so 'jekyll' is found
-GEM_BIN_DIR="$(ruby -e 'print Gem.user_dir')/bin"
-export PATH="$GEM_BIN_DIR:$PATH"
-
-echo
-echo "Gem bin directory is: $GEM_BIN_DIR"
-echo "If you want this permanently, add this line to your shell config (~/.zshrc):"
-echo "    export PATH=\"$GEM_BIN_DIR:\$PATH\""
-echo
-
-# The Jekyll site is the directory this script lives in.
-JEKYLL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if [ ! -f "$JEKYLL_DIR/_config.yml" ]; then
-  echo "ERROR: no _config.yml next to this script, so this is not the docs site:"
-  echo "  $JEKYLL_DIR"
+if [ ! -f "${DOCS_DIR}/hugo.toml" ]; then
+  echo "ERROR: hugo.toml not found in ${DOCS_DIR}" >&2
   exit 1
 fi
 
-echo "=== Step 5: Installing site dependencies and starting Jekyll server... ==="
-cd "$JEKYLL_DIR"
+is_valid_hugo() {
+  local bin="$1"
+  if [ ! -x "${bin}" ]; then
+    return 1
+  fi
+  local ver_out
+  ver_out="$("${bin}" version 2>/dev/null || true)"
+  if [[ "${ver_out}" != *"+extended"* ]] && [[ "${ver_out}" != *"extended"* ]]; then
+    return 1
+  fi
+  if [[ "${ver_out}" =~ v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    local major="${BASH_REMATCH[1]}"
+    local minor="${BASH_REMATCH[2]}"
+    if (( major > 0 || minor >= 140 )); then
+      return 0
+    fi
+  fi
+  return 1
+}
 
-if [ -f "Gemfile" ]; then
-  echo "Gemfile found. Running bundle install..."
-  bundle install
-  echo
-  echo "Starting Jekyll server with Bundler..."
-  bundle exec jekyll serve
-else
-  echo "No Gemfile found. Running jekyll serve directly..."
-  jekyll serve --watch --incremental --livereload
+resolve_hugo() {
+  if command -v hugo >/dev/null 2>&1; then
+    local sys_hugo
+    sys_hugo="$(command -v hugo)"
+    if is_valid_hugo "${sys_hugo}"; then
+      printf '%s\n' "${sys_hugo}"
+      return 0
+    fi
+  fi
+
+  local cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/oflm-hugo/v${HUGO_VERSION}"
+  local cached_bin="${cache_root}/hugo"
+  if is_valid_hugo "${cached_bin}"; then
+    printf '%s\n' "${cached_bin}"
+    return 0
+  fi
+
+  local os arch platform_slug
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "${os}" in
+    Linux)
+      case "${arch}" in
+        x86_64|amd64) platform_slug="linux-amd64" ;;
+        aarch64|arm64) platform_slug="linux-arm64" ;;
+        *)
+          echo "ERROR: Unsupported Linux architecture '${arch}' for automatic Hugo download." >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    Darwin)
+      platform_slug="darwin-universal"
+      ;;
+    *)
+      echo "ERROR: Unsupported OS '${os}'. Install Hugo Extended >= 0.140.0 manually." >&2
+      exit 1
+      ;;
+  esac
+
+  local archive_url="https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_${platform_slug}.tar.gz"
+  echo "Downloading Hugo Extended v${HUGO_VERSION} (${platform_slug}) to ${cached_bin} ..." >&2
+  mkdir -p "${cache_root}"
+  local tmp_tar="${cache_root}/hugo.tar.gz"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${archive_url}" -o "${tmp_tar}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${tmp_tar}" "${archive_url}"
+  else
+    echo "ERROR: Neither curl nor wget is available to download Hugo." >&2
+    exit 1
+  fi
+
+  tar -xzf "${tmp_tar}" -C "${cache_root}" hugo
+  rm -f "${tmp_tar}"
+  chmod +x "${cached_bin}"
+
+  if ! is_valid_hugo "${cached_bin}"; then
+    echo "ERROR: Downloaded Hugo binary at ${cached_bin} failed verification." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${cached_bin}"
+}
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "WARNING: 'go' was not found on PATH. Hugo Go modules (Lotus Docs) require Go >= 1.21 if modules are not cached." >&2
 fi
 
-echo
-echo "If the server started, open this in your browser:"
-echo "  http://127.0.0.1:4000"
+HUGO_BIN="$(resolve_hugo)"
+echo "Using $("${HUGO_BIN}" version)"
+
+if [ "${1:-}" = "--build" ]; then
+  shift
+  echo "Building minified site into ${DOCS_DIR}/public ..."
+  exec "${HUGO_BIN}" --source "${DOCS_DIR}" --minify "$@"
+else
+  PORT="${PORT:-1313}"
+  echo "Serving OpenFlowLM docs at http://127.0.0.1:${PORT} ..."
+  exec "${HUGO_BIN}" server --source "${DOCS_DIR}" --bind 127.0.0.1 --port "${PORT}" --buildFuture "$@"
+fi

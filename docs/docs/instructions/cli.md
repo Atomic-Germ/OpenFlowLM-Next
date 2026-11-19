@@ -1,709 +1,155 @@
 ---
-layout: docs
-title: System Command and CLI Mode
-nav_order: 1
-parent: Instructions
+title: "CLI Usage"
+description: "Interactive chat, GGUF model installation, NPU validation, and throughput benchmarking from the CLI."
+icon: "terminal"
+weight: 10
 ---
 
-# ⚡ CLI Mode
-
-OFLM CLI mode offers a familiar terminal-based interactive experience, fully offline and accelerated exclusively on AMD NPUs. Here are detailed descriptions of commands and setup for CLI mode usage. It includes:
-
-- **[🔧 Pre-Run PowerShell Commands (System)](#-pre-run-powershell-commands)**
-- **[💻 Commands Inside CLI Mode](#-commands-inside-cli-mode)**
-- **[🗂️ Others](#️-others)**
+- [System Commands](#system-commands)
+- [Commands Inside CLI Mode](#commands-inside-cli-mode)
+- [Benchmarking Tool](#benchmarking-tool)
+- [Configuration and Model Registration](#configuration-and-model-registration)
 
 ---
 
-## 🔧 Pre-Run PowerShell Commands (System)
+## System Commands
 
-### 🖥️ System Compatibility Check
+| Command | Purpose |
+|---|---|
+| `oflm validate [--json]` | Verify NPU driver, firmware, `memlock`, and XRT runtime |
+| `oflm add <repo-or-file>` | Download a GGUF repository or file and register it in `settings.json` |
+| `oflm run <tag>` | Start interactive terminal chat (downloads tag if missing) |
+| `oflm serve [tag]` | Start the OpenAI- and Ollama-compatible HTTP server ([Server Mode](/docs/instructions/server/)) |
+| `oflm image <tag> "<prompt>"` | Generate or edit an image on the NPU |
+| `oflm pull <tag> [--force]` | Download a built-in shortcut tag (`--force` overwrites corrupted files) |
+| `oflm list [--filter all\|installed\|not-installed] [--json] [--quiet]` | List available and installed models |
+| `oflm check <tag>` | Verify SHA-256 hashes of downloaded files |
+| `oflm remove <tag>` | Delete a downloaded model from local storage |
+| `oflm config [show\|set\|unset\|browse\|edit\|review]` | Manage persistent settings in `settings.json` |
+| `oflm bench <tag>` / `oflm bench-embed <tag>` | Measure LLM or embedding NPU throughput |
+| `oflm port` | Print the resolved default server port |
+| `oflm version [--json]` | Print the installed release version |
+| `oflm help` | Display CLI usage summary |
 
-Verify that your hardware meets the necessary requirements to run OpenFlowLM:
+{{< wip issue="240" title="Built-in Registry Migration" >}}`oflm add <hf-repo-or-file>` already loads compatible GGUF models directly. Built-in `oflm pull <tag>` shortcuts in `model_list.json` are migrating from legacy `.q4nx` archives to upstream GGUFs under #240, and speculative decoding (`--speculative` / `OFLM_SPECULATIVE`) is in progress under #189 and #240.{{< /wip >}}
 
-```shell
-oflm validate
+> [!NOTE]
+> On Linux, `oflm validate` checks your `/dev/accel/accel*` NPU device and XRT runtime. If `--json` reports `"runtime_ok": false`, run `xrt-smi examine` and verify `xrt-plugin-amdxdna` is installed (see [Packages](/docs/install/linux/packages/)).
+
+### Storage Paths & ModelScope
+
+Models default to `C:\Users\<USER>\.oflm\models` on Windows and `~/.config/oflm/models` on Linux. Set `OFLM_MODEL_PATH` to a custom parent folder (weights resolve in `$OFLM_MODEL_PATH/models`) and verify with `oflm config show`:
+
+```bash
+export OFLM_MODEL_PATH="/your/custom/oflm-root"
 ```
 
-Output the validation results as a JSON object:
+Pass `--modelscope` to `pull`, `add`, `check`, `run`, or `bench-embed` to fetch weights from ModelScope instead of Hugging Face:
 
-```shell
-oflm validate --json
-```
-
----
-
-### 🆘 Show Help
-
-```shell
-oflm help
-```
-
----
-
-### 🚀 Run a Model
-
-Run a model interactively from the terminal:
-
-```shell
-oflm run llama3.2:1b
-```
-
-> `oflm` is short for OpenFlowLM. If the model isn't available locally, it will be downloaded automatically. This launches OpenFlowLM in CLI mode.
-
-> **Linux note:** `oflm validate` checks the kernel DRM device and then opens the NPU through XRT, the way `oflm run` does. If it reports that the device runtime cannot open the NPU (`runtime_ok: false` with `--json`), confirm XRT can see the NPU:
-> ```shell
-> xrt-smi examine
-> ```
-> On Arch Linux, install `xrt-plugin-amdxdna` in addition to `xrt` and the `amdxdna` driver. See the [Linux install guide](/docs/install_lin/) for the full driver and firmware checklist.
-
----
-
-### ⬇️ Pull a Model (Download Only)
-
-Download a model from HuggingFace without launching it:
-
-```shell
-oflm pull llama3.2:3b
-```
-
-This code forces a re-download of the model, overwriting the current version.
-
-```shell
-oflm pull llama3.2:3b --force
-```
-
-> ⚠️ Use `--force` **only if the model file is corrupted** (e.g., incomplete download). Proceed with caution.
-
-#### 📁 Default Model Storage Location
-
-| Platform | Default Path |
-|----------|-------------|
-| Windows  | `C:\Users\<USER>\.oflm\models` |
-| Linux    | `~/.config/oflm/models` |
-
-#### 🔧 Changing the Model Storage Path
-
-You can override the default location by setting the `OFLM_MODEL_PATH` environment variable.
-
-**Windows** -- Update the existing system environment variable:
-1. Open **Start** and search for **"Edit the system environment variables"**.
-2. Click **Environment Variables…**.
-3. Under **System variables**, find `OFLM_MODEL_PATH`, select it, and click **Edit…**.
-4. Update the value to your desired path (e.g., `D:\models\oflm`).
-5. Click **OK** and restart any open terminals for the change to take effect.
-
-**Linux** -- Set temporarily for the current shell session:
-```shell
-export OFLM_MODEL_PATH="/your/custom/path"
-```
-
-To make the change permanent, add the line above to your `~/.bashrc`, then reload it:
-```shell
-echo 'export OFLM_MODEL_PATH="/your/custom/path"' >> ~/.bashrc
-source ~/.bashrc
-```
-
----
-
-### 🌍 Pull from ModelScope
-
-Every download command accepts `--modelscope` to fetch from ModelScope instead
-of HuggingFace:
-
-```shell
+```bash
 oflm pull llama3.2:3b --modelscope
-oflm check llama3.2:3b --modelscope
-oflm run llama3.2:3b --modelscope
-oflm bench-embed bge-base:en-v1.5 --modelscope
 ```
 
----
+### Runtime & Server Launch Flags
 
-### 📦 List Supported and Downloaded Models
+| Flag | Applies To | Default | Effect |
+|---|---|---|---|
+| `--pmode <mode>` | `run`, `serve` | `performance` | NPU power mode: `default`, `powersaver`, `balanced`, `performance`, `turbo` |
+| `--ctx-len`, `-c <N>` | `run`, `serve`, `bench` | model default | Context window (min 512; exact token count without power-of-two rounding) |
+| `--prefill-chunk-len <N>` | `run`, `serve` | `4096` | Tokens per prompt chunk (min 512) |
+| `--prefill-mode <mode>` | `run`, `serve` | `fast` | Prompt memory/speed preset: `fast`, `lean` (~1.1 GiB lower RAM on Qwen3.6 35B), or `bfp16` (Granite 4.2 3B) |
+| `--prefill-precision <p>` | `run`, `serve` | `paired` | Prompt math precision preset: `paired` (default), `three_term`, `weight_high`, or `single` (fastest) |
+| `--speculative` | `run`, `serve` | `false` | Speculative draft speedup where supported ({{< b "wip" "#189" >}} {{< b "wip" "#240" >}}) |
+| `--img-pre-resize`, `-r <0-8>` | `run`, `serve` | `0` | Resize vision input height (`0` original, `1` 480p, `2` 720p, `3` 1080p, up to `8` 4320p) |
+| `--asr`, `-a <0\|1>` | `run`, `serve` | `0` | Co-load Whisper speech-to-text (`--asrmodel`, default `whisper-v3:turbo`) |
+| `--embed`, `-e <0\|1>` | `serve` | `0` | Co-load embedding encoder (`--embeddingmodel`, default `embed-gemma:300m`) |
+| `--imagegen <0\|1>` | `serve` | `0` | Keep image generation model loaded (`--imagemodel`, default `flux2-klein:4b`) |
+| `--port`, `-p <N>` | `serve`, `port` | `52625` | HTTP port for current process (`OFLM_SERVE_PORT` sets persistent default) |
+| `--host <addr>` | `serve` | `127.0.0.1` | Bind address (`serve` only) |
+| `--cors <0\|1>` | `serve` | `1` | Toggle CORS headers (set `--cors 0` or add an auth proxy when binding off `127.0.0.1`) |
+| `--preemption <0\|1>` | `run`, `serve` | `0` | Experimental NPU job preemption (requires specialized driver support) |
 
-Display all available models and locally downloaded models:
-
-```shell
-oflm list
+```bash
+# Examples
+oflm run gemma3:4b --pmode balanced --ctx-len 8192
+oflm serve qwen3.6-moe:35b-a3b --prefill-mode lean --port 8000
+oflm serve llama3.2:1b --asr 1 --embed 1 --embeddingmodel bge-base:en-v1.5
 ```
 
-Output as JSON:
+### Generate or Edit an Image (`oflm image`)
 
-```shell
-oflm list --json
-```
+`oflm image` runs FLUX.2 [klein] 4B end-to-end on the NPU (~3.7 s at 512x512 and ~12.0 s at 1024x1024 warm in `turbo` mode). See [Image Generation and Editing](/docs/instructions/server/images/) for CLI and `/v1/images/*` details.
 
-
-Filters flag:
-
-```shell
-# Show everything
-oflm list --filter all
-
-# Only models already installed
-oflm list --filter installed
-
-# Only models not yet installed
-oflm list --filter not-installed
-```
-
-Quiet mode:
-
-```shell
-# Default view (pretty, with icons)
-oflm list
-
-# Quiet view (no emoji / minimal)
-oflm list --quiet
-
-# Show everything
-oflm list --filter all --quiet
-
-# Only models already installed
-oflm list --filter installed --quiet
-
-# Only models not yet installed
-oflm list --filter not-installed --quiet
-```
-
----
-
-### ❌ Remove a Downloaded Model
-
-Delete a model from local storage:
-
-```shell
-oflm remove llama3.2:3b
-```
-
-### ✅ Check a Downloaded Model
-
-Verify the file hashes for a downloaded model:
-
-```shell
-oflm check llama3.2:3b
-```
-
----
-
-### 🚀 Start Server Mode (Local)
-
-Launch OpenFlowLM as a local REST API server (also supports the OpenAI API):
-
-```shell
-oflm serve llama3.2:1b
-```
-
----
-
-### 🔌 Show Server Port 
-
-Show current OFLM port (default) in PowerShell:  
-  
-```shell
-oflm port
-```
-
----
-
-### ⚡ NPU Power Mode
-
-By default, **OFLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`default`, `powersaver`, `balanced`, `performance`, or `turbo`) using the `--pmode` flag:
-
-For **CLI mode**:
-```shell
-oflm run gemma3:4b --pmode balanced
-```
-
-For **Server mode**:
-```shell
-oflm serve gemma3:4b --pmode balanced
-```
-
----
-
-### 📏 Set Context Length at Launch
-
-The default context length for each model can be found [here](https://openflowlm.com/docs/models/).   
-
-Set the context length with `--ctx-len` (or `-c`).  
-
-In PowerShell, run:
-
-For **CLI mode**:
-```shell
-oflm run llama3.2:1b --ctx-len 8192
-```
-
-For **Server mode**:
-```shell
-oflm serve llama3.2:1b --ctx-len 8192
-```
-
-> - Internally, OFLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.
-> - The value is otherwise used **as given**. It is *not* rounded to a power of 2, so `--ctx-len 8000` gives you 8000.
-> - The same 512 minimum applies to `--prefill-chunk-len`.
-> - A context longer than the model's `default_context_length` may not be
->   supported by every architecture; check the model's card in
->   [Models](/docs/models/) for its maximum.
-
----
-
-### 🖧 Set Server Port at Launch
-
-Set a custom port at launch:
-
-  ```shell
-  oflm serve llama3.2:1b --port 8000
-  oflm serve llama3.2:1b -p 8000
-  ```
-
-> ⚠️ `--port` (`-p`) only affects the **current run**; it won’t change the default port.
-
----
-
-### 🛠️ Set Host at Launch
-
-Specify a custom host address when starting the server:
-
-```powershell
-oflm serve llama3.2:1b --host 127.0.0.1
-```
-
-⚠️ Note: --host applies only to the current session. It does not modify the default host configuration (default: `127.0.0.1`).
-
-> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. `bench`, `list`, `version`, `port` and `validate` refuse the serve-only options too; the one exception is `oflm port --port N`, which prints the port that value resolves to.
-
----
-
-### 🌐 Cross-Origin Resource Sharing (CORS)
-
-CORS lets browser apps hosted on a different origin call your OFLM server safely.
-
-- Enable CORS
-
-```shell
-oflm serve --cors 1
-```
-- Disable CORS
-
-```shell
-oflm serve --cors 0
-```
-
-> ⚠️ **Default:** CORS is **enabled**.  
-> 🔒 **Security tip:** Disable CORS (or restrict at your proxy) if your server is exposed beyond localhost (127.0.0.1).
-
----
-
-### ⏸️ Preemption
-
-Preemption allows high-priority tasks to interrupt ongoing NPU jobs, improving responsiveness for critical workloads. To enable preemption:
-
-For **CLI mode**:
-```shell
-oflm run llama3.2:1b --preemption 1
-```
-
-For **Server mode**:
-```shell
-oflm serve llama3.2:1b --preemption 1
-```
-
-> ⚠️ Note: Preemption is for **engineering testing/optimization** only. It requires a special driver + toolkit and is **not for public use**.
-
-
----
-
-### 🧩 Change Prefill Chunk Size at Launch
-
-The `--prefill-chunk-len` flag controls how many tokens are processed per chunk during the prefill phase of inference (default: 4096).
-
-For **CLI mode**:
-
-```shell
-oflm run llama3.2:1b --prefill-chunk-len 8192
-```
-
-For **Server mode**:
-
-```shell
-oflm serve llama3.2:1b --prefill-chunk-len 8192
-```
-
----
-
-### 🪶 Trade Prefill Speed for Memory
-
-Some models' kernels carry two ways to process a prompt. `--prefill-mode lean` loads the one that uses less memory and processes prompts more slowly; `fast` is the default. On Qwen3.6-35B, `lean` uses about 1.1 GiB less RAM and prefills about 20% slower (116 against 145 tokens/s on a 1024-token prompt). Models with only one way ignore the flag and say so in the log. On Granite 4.2 3B, `--prefill-mode bfp16` picks a third way: bfp16 operands for the projections and the whole attention step (RoPE, attention, cache write) on the NPU, about three times faster than `fast` at 512 to 2048 tokens for 1.7 GiB more memory. The mode is picked when the model loads, so changing it means restarting.
-
-For **CLI mode**:
-
-```shell
-oflm run qwen3.6-moe:35b-a3b --prefill-mode lean
-```
-
-For **Server mode**:
-
-```shell
-oflm serve qwen3.6-moe:35b-a3b --prefill-mode lean
-```
-
----
-
-### 🎙️ ASR (Automatic Speech Recognition)
-
-**Requirement:** The ASR model (e.g., `whisper-v3:turbo`) must run **with an LLM loaded concurrently**. Enabling `--asr 1` starts Whisper in the background **while** your chosen LLM loads.
-
-#### CLI mode
-```shell
-oflm run gemma3:4b --asr 1  # Load Whisper (whisper-v3:turbo) in the background and load the LLM (gemma3:4b) concurrently.
-```
-
-#### Server mode
-```shell
-oflm serve gemma3:4b --asr 1  # Background-load Whisper and initialize the LLM (gemma3:4b) concurrently.
-```
-
-Pick a different speech-to-text model with `--asrmodel` (default `whisper-v3:turbo`):
-
-```shell
-oflm serve gemma3:4b --asr 1 --asrmodel whisper-v3:turbo
-```
-
-> **Note:** ASR alone isn’t supported--an LLM must be present for end-to-end voice→text→LLM workflows.
-
----
-
-### 🔢 Serving an Embedding Model
-
-`--embed 1` starts an encoder alongside the LLM for `/v1/embeddings`. Pick the
-encoder with `--embeddingmodel` (default `embed-gemma:300m`):
-
-```shell
-oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
-```
-
-> ⚠️ `--embed` (`embed-gemma:300m`) is **server-only**. `oflm run` it drops the
-> embedding and advices using `oflm serve -e 1`.
->
-> The shipped encoders are `embed-gemma:300m` plus the BERT-family set
-> (`bge-base:en-v1.5`, `bge-small:en-v1.5`, `bge-large:en-v1.5`,
-> `all-minilm:l6-v2`, `nomic-embed-text:v1.5`, `gte-multilingual:base`) -- see
-> [EmbeddingGemma](/docs/models/embeddinggemma/).
-
-See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
-
----
-
-### 🖼️ Generate an Image
-
-`oflm image` turns a prompt into one image with FLUX.2 [klein] 4B. The text encoder, the 4 denoising steps and the VAE decoder all run on the NPU. The model is pulled on first use (about 9 GB).
-
-```shell
+```bash
 oflm image flux2-klein:4b "a red fox in fresh snow" -o fox.png
-oflm image flux2-klein:4b "a lighthouse at dusk" --size 512 --seed 7 -o lighthouse.jpg
+oflm image flux2-klein:4b "Make it a watercolor painting" --image coffee.jpg --seed 7 -o watercolor.png
 ```
 
-| Option | Default | |
+| Option | Default | Description |
 |---|---|---|
-| `-o`, `--out` | `oflm-<seed>.png` | `.png`, `.jpg` or `.jpeg`; any other extension is refused before loading |
-| `--size` | `1024` | `512` or `1024` (square) |
-| `--seed` | random | the same prompt, size and seed give the same image; the seed used is printed |
-
-The output reports the file, the seed and the time on the NPU, e.g. `14.1 s on the NPU (text 0.72, steps 11.95, vae 1.39)` at 1024² (5.5 s at 512²). `run` and `serve` refuse the image model: it is not a chat model.
-
----
-
-## 💻 Commands Inside CLI Mode
-
-Once inside the CLI, use the following commands. System commands always start with `/` (e.g., `/help`).
+| `-o`, `--out` | `oflm-<seed>.png` | Output `.png`, `.jpg`, or `.jpeg` |
+| `--size` | `1024` (auto on edits) | `512` or `1024` square pixels |
+| `--seed` | random | Non-negative 64-bit integer for deterministic output |
+| `--steps` | `0` (uses `4`) | Denoising steps (1 to 50) |
+| `--image` | *(none)* | Reference `.png` or `.jpg` to edit (centre-cropped, EXIF applied) |
 
 ---
 
-### 🆘 Help
+## Commands Inside CLI Mode
 
-```text
-/?
-/help
-```
+Inside `oflm run`, slash commands control the active session:
 
-> Displays all available interactive system commands. Highly recommended for first-time users.
-> `/help` is an alias for `/?`.
-
----
-
-### 🪪 Model Info
-
-```text
-/show
-```
-
-> View model architecture, size, **max context size (Adjustable – see bottom)** and more.
-
----
-
-### 🔄 Change Model
-
-```text
-/load [model_name]
-```
-
-> Unload the current model and load a new one. KV cache will be cleared.
-
----
-
-### ⬇️ Pull a Model
-
-```text
-/pull [model_name]
-```
-
-> Download a model without leaving the session. `model_name` is a full tag,
-> e.g. `/pull llama3.2:3b`.
-
----
-
-### 💾 Save Conversation
-
-```text
-/save
-```
-
-> Save the current conversation history to disk.
-
----
-
-### 🧹 Clear Memory
-
-```text
-/clear
-```
-
-> Clear the KV cache (model memory) for a fresh start.
-
----
-
-### 📊 Show Runtime Stats
-
-```text
-/status
-```
-
-> Display runtime statistics like token count, throughput, etc.
-
----
-
-### 🕰️ Show History
-
-```text
-/history
-```
-
-> Review the current session's conversation history.
-
----
-
-### 🔍 Toggle Verbose Mode
-
-```text
-/verbose
-```
-
-> Enable detailed performance metrics per turn. Run again to disable.
-
----
-
-### 📦 List Models
-
-Display all available models and locally downloaded models:
-
-```text
-/list
-```
-
----
-
-### 👋 Quit CLI Mode
-
-```text
-/bye
-```
-
-> Exit the CLI.
-
----
-
-### 🧠 Think Mode Toggle
-
-Type `/think` to toggle Think Mode on or off interactively in the CLI.
-
-> 💡 **Note**: This feature is only supported on certain models, such as **Qwen3**.
-
----
-
-### 📂 Load a Local Text File in CLI Mode
-
-Use any file that can be opened in Notepad (like `.txt`, `.json`, `.csv`, etc.).
-
-Format (in CLI mode):
-
-```shell
-/input "<file_path>" prompt
-```
-
-Example:
-
-```shell
-/input "C:\Users\Public\Desktop\alice_in_wonderland.txt" Summarize it into 200 words
-```
-
-> Notes:
-
-* Use quotes **only around the file path**
-* **No quotes** around the prompt
-* File must be plain text (readable in Notepad)
-
-👉 Any long plain-text file works -- `Alice in Wonderland` from Project Gutenberg is a convenient ~150k-character stress prompt. Note that a model's supported context length is limited by its own `default_context_length` **and** by available DRAM.
-
-> ⚠️ **Caution:** a model's supported context length is limited by available DRAM capacity. For example, with **32 GB** of DRAM, **LLaMA 3.1:8B** cannot run beyond a **32K** context length. Note that `llama3.1:8b` ships with a `default_context_length` of 16384, so raising it is an explicit opt-in.
-
-If DRAM is heavily used by other programs while running **OpenFlowLM**, you may encounter errors due to insufficient memory, such as:
-
-```error
-[XRT] ERROR: Failed to submit the command to the hw queue (0xc01e0200):
-Even after the video memory manager split the DMA buffer, the video memory manager
-could not page-in all of the required allocations into video memory at the same time.
-The device is unable to continue.
-```
-
-> 🤔 Interested in checking the DRAM usage?
-
-<!-- **Method 1 – Task Manager (Quick View)**   -->
-1. Press **Ctrl + Shift + Esc** (or **Ctrl + Alt + Del** and select **Task Manager**).  
-2. Go to the **Performance** tab.  
-3. Click **Memory** to see total, used, and available DRAM, as well as usage percentage.  
-
-<!-- **Method 2 – Resource Monitor (Detailed View)**  
-1. Press **Windows + R**.  
-2. Type:  ```resmon```
-3. Press **Enter**.  
-4. Go to the **Memory** tab to view detailed DRAM usage and a per-process breakdown. -->
-
----
-
-### 🌄 Loading Images in CLI Mode (for VLMs only, e.g. gemma3:4b)
-
-Supports **.png** and **.jpg** formats.  
-
-```shell
-/input "<image_path>" prompt
-```
-
-Example:
-
-```shell
-/input "C:\Users\Public\Desktop\cat.jpg" describe this image
-```
-
-> Notes:
-
-* Make sure the model you are using is a **vision model (VLM)** (e.g., gemma3:4b) 
-* Put quotes **only around the file path**  
-* Do **not** use quotes around the prompt  
-* Image must be in **.jpg** or **.png** format  
-
-#### Pre-resize the input image
-
-Vision models preprocess images, and time-to-first-token scales with the
-preprocessed resolution. `--img-pre-resize` (`-r`) picks a fixed height instead
-of using the original, trading detail for latency:
-
-| value | effect |
+| Slash Command | Action |
 |---|---|
-| `0` | use the original resolution |
-| `1` | height 480 |
-| `2` | height 720 |
-| `3` | height 1080 |
-| `4` … `8` | progressively larger heights, up to 4320 |
+| `/?`, `/help` | List interactive slash commands |
+| `/show` | Print model architecture, size, and active context length |
+| `/load <tag>` | Unload current model, clear KV cache, and load `<tag>` |
+| `/pull <tag>` | Download `<tag>` without leaving the session |
+| `/list` | Show available and installed models |
+| `/clear` | Reset KV cache for a fresh conversation |
+| `/history` / `/save` | Print or save conversation history |
+| `/status` / `/verbose` | Show session totals or toggle per-turn tok/s stats |
+| `/think` | Toggle reasoning output (Qwen3, Qwen3.5, and other thinking models) |
+| `/bye` | Exit interactive session |
 
-```shell
-oflm run qwen3vl-it:4b -r 1
+### File and Vision Inputs (`/input`)
+
+Quote **only** the UTF-8 text file or `.jpg`/`.png` image path, followed by your prompt:
+
+```text
+/input "/path/to/alice_in_wonderland.txt" Summarize it in 200 words
+/input "/path/to/cat.jpg" describe this image
 ```
 
-> ⚠️ Image understanding is served by the **closed** engine DLLs -- the open
-> kernels are text-only. Passing an image selects the closed path even for a
-> model whose text path runs open kernels. See the
-> [support-status matrix](/docs/models/).
+Vision inputs work automatically on open-engine GGUF VLMs when vision projector (`mmproj`) weights are installed (Qwen3-VL, Qwen3.5, and Qwen3.6-MoE; see [Models](/docs/models/)).
+
+> [!CAUTION]
+> KV-cache memory scales with `ctx-len` and system RAM (for example, Llama 3.1 8B fits up to 32k context on a 32 GB machine). If background apps exhaust free RAM when allocating NPU memory, XRT fails with `0xc01e0200` (`could not page-in all of the required allocations`).
+
+### Session Sampling Parameters (`/set`)
+
+Run `/set <key> <value>` using these exact key names (invalid `ctx-len` values abort the session):
+
+| Key | Parameter | Key | Parameter |
+|---|---|---|---|
+| `topk` / `topp` / `minp` | Top-k, top-p, min-p | `ctx-len` | Max context length |
+| `temp` | Temperature | `gen-lim` | Max generated tokens |
+| `rep-pen` / `freq-pen` / `pres-pen` | Penalties | `r-eff` | Reasoning effort (`low`, `medium`, `high`; GPT-OSS) |
+| `sys-msg` | System prompt | `prefill-chunk-len` | Compatibility no-op inside `/set` |
 
 ---
 
-### ⚙️ Set Variables
+## Benchmarking Tool
 
-```text
-/set
-```
+### LLM Sweep (`oflm bench`)
 
-`/set` takes a key and a value. The keys are exactly these -- an unrecognised
-key prints `Invalid context:` and the list below:
+Sweep context lengths from 1k to 32k (default 2 timed iterations per stage; keep JSON `max_length` within the model's context limit) and write a CSV to the working directory:
 
-| key | sets |
-|---|---|
-| `topk` | top-k |
-| `topp` | top-p |
-| `minp` | min-p |
-| `temp` | temperature |
-| `rep-pen` | repetition penalty |
-| `freq-pen` | frequency penalty |
-| `pres-pen` | presence penalty |
-| `sys-msg` | the system message |
-| `ctx-len` | the max context length |
-| `gen-lim` | the upper limit on tokens generated per response |
-| `r-eff` | reasoning effort (`low`\|`medium`\|`high`, GPT-OSS only, default `medium`) |
-| `prefill-chunk-len` | accepted but currently a no-op |
-
-Note the spellings: `topk`, not `top_k`, and `temp`, not `temperature`. An
-invalid value for `ctx-len` aborts the process rather than being ignored.
-
-```text
-/set gen-lim 128
-/set r-eff high
-```
-
-> ⚠️ **Note:** Providing invalid or extreme hyperparameter values may cause inference errors.
-
----
-
-## 📊 Benchmarking Tool
-
-Use the OFLM benchmarking tool to measure a model's performance across different context lengths.
-
-Each benchmark tests context lengths from `1k` to `32k`, running `2` iterations at each length.
-
-```shell
+```bash
 oflm bench llama3.2:1b
-```
-
-Change the iteration times by `bench-iterations`:
-
-```shell
 oflm bench llama3.2:1b --bench-iterations 4
-```
-
-Drive the sweep from a JSON config instead of the defaults with `-i` (the
-configs live in `utilities/bench-configs/`):
-
-```shell
 oflm bench llama3.2:3b -i utilities/bench-configs/bench-1k.json
 ```
-
-> ⚠️ The sweep runs context lengths from `1k` up to the config's `max_length`.
-> A stage longer than the model's `default_context_length` will not produce a
-> meaningful decode number, so keep `max_length` within what the model
-> supports.
-
-OFLM prints the results in your terminal and also saves them as a CSV file in the current folder for later reference.
 
 ```text
 [OFLM]  === Benchmark Results ===
@@ -719,30 +165,18 @@ OFLM prints the results in your terminal and also saves them as a CSV file in th
 ----------------------------------------------------------------------------------------------------
 ```
 
-### Embedding models: `bench-embed`
+### Embedding Sweep (`oflm bench-embed`)
 
-`bench` is for chat models. Encoders have no first token and no
-prefill/decode split, and their sequence length is fixed by the compiled
-design rather than by the request -- so they get their own command, which
-sweeps **batch size** instead of context length.
+`oflm bench-embed` sweeps power-of-two batch sizes (`1` to `128` by default) and compares batched execution against a single-item loop:
 
-```shell
+```bash
 oflm bench-embed bge-base:en-v1.5
 oflm bench-embed bge-base --max-batch 32 --bench-iterations 5
 oflm bench-embed nomic-embed-text:v1.5 --prompt-name query
 oflm bench-embed bge-base -i utilities/bench-configs/bench-embed-32.json
 ```
 
-| flag | meaning |
-|---|---|
-| `--max-batch N` | largest batch swept; it doubles 1, 2, 4 ... N (default 128). Must be a power of two. |
-| `--bench-iterations N` | timed iterations per stage (default 2), after one discarded warm-up. |
-| `--prompt-name NAME` | the task prompt, by its REST name (`query`, `document`, `clustering`, ...). **Required** for a model that declares prompt names (nomic). **Refused** for one with no task-prompt concept at all (the bge sizes, MiniLM, gte). `embed-gemma:300m` is the exception: it declares no names and still honours tasks through a hardcoded per-task prefix, so it accepts the flag and needs none. |
-| `-i FILE` | a JSON config: `max_batch`, `iterations`, `task`, `texts`. |
-
-Every stage times **two paths over the same texts**: one batched call, and the
-same texts one at a time -- which is what a caller doing one request per text
-gets. `Speedup` is the ratio, and on the NPU-backed encoders it is 5-10x.
+`--prompt-name` is required for models declaring named task prompts (Nomic), rejected for models without them (BGE, MiniLM, GTE), and optional on EmbeddingGemma.
 
 ```text
 [OFLM]  === Embedding Benchmark Results ===
@@ -756,116 +190,80 @@ gets. `Speedup` is the ratio, and on the NPU-backed encoders it is 5-10x.
 --------------------------------------------------------------------------------------------------
 ```
 
-Results also go to `bench_embed_<tag>_<date>[_<cpu>].csv` in the current
-folder, with a `#` provenance header naming the model, the task, the corpus and
-the identity-gate result.
+Runs write `bench_embed_<tag>_<date>[_<cpu>].csv`. See [Benchmarks](/benchmarks/) and [`utilities/bench-configs/README.md`](https://github.com/Atomic-Germ/OpenFlowLM-Next/blob/main/utilities/bench-configs/README.md).
 
-Full methodology, what it refuses and why, and what it does **not** measure:
-[`utilities/bench-configs/README.md`](https://github.com/Atomic-Germ/OpenFlowLM-Next/blob/main/utilities/bench-configs/README.md).
-Measured results for every model: [Benchmarks -> Embeddings](/docs/benchmarks/embeddings_results/).
+### Community Submission (`--submit`)
+
+Upload benchmark CSVs to the [Benchmarks](/benchmarks/) page:
+
+```bash
+oflm bench llama3.2:1b --submit
+oflm bench-embed bge-base:en-v1.5 --submit
+oflm bench qwen3.5:4b --submit --submit-consent yes
+```
+
+| Flag | Env Var | Purpose |
+|---|---|---|
+| `--submit` | *(none)* | Upload benchmark CSV on completion |
+| `--submit-consent yes\|no` | `OFLM_BENCH_SUBMIT_CONSENT` | Include or omit anonymous hardware survey (CPU, RAM, OS, NPU) |
+| `--submit-url URL` | `OFLM_BENCH_SUBMIT_URL` | Override API URL (default `https://oflm-bench.openflowlm.org`) |
+
+On first `--submit`, interactive terminals prompt once (`[y/N]`) and save your choice plus a hashed random `install_id` in `bench_consent.json` (non-interactive runs default survey consent to `no`).
 
 ---
 
-## 🗂️ Others
+## Configuration and Model Registration
 
-### 🛠 Change Default Context Length (max)
+<a id="change-default-context-length-max"></a>
 
-You can find more information about available models here:  
+### Persistent Settings (`oflm config`)
 
+Never edit the built-in `model_list.json` directly. Store overrides in your user `settings.json` via [`oflm config`](/docs/instructions/config/):
+
+```bash
+oflm config show
+oflm config set --config-model llama3.1:8b --config-key ctx_len --config-value 32768
+oflm config browse
 ```
-C:\Program Files\oflm\model_list.json
+
+| Environment Variable | Scope | Purpose |
+|---|---|---|
+| `OFLM_MODEL_PATH` | `global` | Parent directory containing `models/` |
+| `OFLM_SETTINGS_PATH` | `global` | User `settings.json` path |
+| `OFLM_SERVE_PORT` | `serve` | Default `oflm serve` port (`52625`) |
+| `OFLM_HF_OWNER` | `pull` | Override default repository owner for `oflm pull` |
+| `OFLM_CONFIG_PATH` / `OFLM_MODELINFO_PATH` | `global` | Custom paths to `model_list.json` / `model_info.json` |
+| `OFLM_XCLBIN_PATH` | `global` | Parent directory containing bundled NPU acceleration files |
+| `OFLM_OPEN_PREFILL_MODE` / `OFLM_OPEN_PREFILL_PRECISION` / `OFLM_SPECULATIVE` | `runtime` | Per-run performance and precision overrides |
+
+### Add a Model (`oflm add`)
+
+Install compatible GGUF models from Hugging Face, ModelScope, a URL, a local directory, or a `.gguf` file with no manual conversion:
+
+```bash
+oflm add unsloth/Qwen3.5-4B-GGUF
+oflm add unsloth/gemma-3-4b-it-GGUF:Q4_K_M
+oflm add ggml-org/embeddinggemma-300M-GGUF --name embed-gemma:300m
+oflm add ./local-model.gguf
+oflm add unsloth/Qwen3.5-4B-GGUF --dry-run
 ```
 
-You can also change the `default_context_length` setting.
+`oflm add` reads the GGUF header, matches it to a supported model family, and registers your new tag in `settings.json`. BERT and Nomic embedding GGUFs prepare a local `.npue` cache on first load, while EmbeddingGemma runs directly from GGUF.
 
-> ⚠️ **Note:** Be cautious! The system reserves DRAM space based on the context length you set.  
-> Setting a longer default context length may cause errors on systems with smaller DRAM.
-> Also, each model has its own default context length. These are the shipped
-> values, not hard limits -- the model's own `config.json` is the real ceiling:
->
-> | tag | `default_context_length` |
-> |---|---|
-> | `llama3.2:1b` | 131072 (128k) |
-> | `gemma3:4b`, `llama3.2:3b` | 65536 (64k) |
-> | `gemma3:1b`, `qwen3-tk:4b` | 32768 (32k) |
-> | `llama3.1:8b` | 16384 (16k) |
-
-`llama3.1:8b` ships with a deliberately small default; raise it with care.
-
-#### Where `model_list.json` lives
-
-| Platform | Path |
-|----------|------|
-| Windows (MSI install) | `C:\Program Files\oflm\model_list.json` |
-| Linux (packaged install) | `/opt/openflowlm/share/oflm/model_list.json` |
-| Relocatable bundle | `<dir of the oflm binary>/../share/oflm/model_list.json` |
-| User override | `~/.config/oflm/model_list.json` |
-
-The user override takes priority over the shipped copies. Set
-`OFLM_CONFIG_PATH` to point at one explicitly.
-
-#### Other environment variables
-
-| Variable | Effect |
+| Pipeline | Supported GGUF Quantizations |
 |---|---|
-| `OFLM_MODEL_PATH` | Where models are stored (default `~/.oflm/models` on Windows, `~/.config/oflm/models` on Linux) |
-| `OFLM_SERVE_PORT` | Default server port (default `52625`) |
-| `OFLM_CONFIG_PATH` | Explicit `model_list.json` to load |
-| `OFLM_MODELINFO_PATH` | Explicit `model_info.json` to load |
-| `OFLM_HF_OWNER` | Hugging Face account to pull OpenFlowLM's own models from, instead of `model_list.json`'s `hf_owner` |
-| `OFLM_XCLBIN_PATH` | Extra directory to search for xclbins |
-| `OFLM_OPEN_KERNELS_DIR` | Where the open engine looks for exported kernels |
+| {{< b "llm" "LLMs & VLMs" >}} | {{< quants "llm" >}} |
+| {{< b "embed" "Embeddings" >}} | {{< quants "embed" >}} |
 
-Every variable read through `getenv_oflm` also accepts its pre-rename `FLM_*`
-spelling and prints a one-line notice naming the new one -- so an install from
-before the `flm` -> `oflm` rename keeps working. `OFLM_OPEN_KERNELS_DIR` is the
-exception: the open engine reads it with plain `getenv`, so
-`FLM_OPEN_KERNELS_DIR` does nothing.
-
-### 📦 Add a Converted Model (`oflm add`)
-
-Register a pre-converted Q4NX model that is not in the shipped registry. This
-is the supported way to install a model you packed yourself with `q4nx-build`,
-or one published under a HuggingFace repo that is not yet in `model_list.json`:
-
-```shell
-oflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3
-```
-
-| flag | meaning |
+| Flag | Meaning |
 |---|---|
-| `--tag NAME` | local tag to register under (e.g. `mymodel:3b`) |
-| `--family NAME` | kernel family to link the xclbins from (required unless `--xclbin-dir` is given) |
-| `--config FILE` | a `model_list.json` entry to use verbatim instead of generating one |
-| `--models-root DIR` | install into this model store instead of the default |
-| `--xclbin-dir DIR` | take the xclbins from here instead of resolving by family |
-| `--xclbin-from REF` | source the family xclbins from another local model |
-| `--system-list` | also register the tag in the system `model_list.json` |
-| `--modelscope` | pull weights from ModelScope instead of HuggingFace |
-| `--open-kernels DIR` | point the tag at a locally exported open-kernel set |
-| `--no-xclbin` | register the weights without any xclbins |
-| `--no-verify` | skip the post-install verification pass |
-| `--force` | overwrite an existing installation |
-| `--dry-run` | print what would happen, change nothing |
-
-Every shape-identical model links to a **family** xclbin, so adding a new model
-of an existing shape needs no kernel work:
-
-```shell
-oflm add Someone/Nanbeige4.1-3B-finetune-OpenNPU2 --family nanbeige --tag nanbeige-ft:3b
-```
-
-### 🏷️ Print the Version
-
-```shell
-oflm version
-oflm version --json
-```
-
-`--json` prints `{ "version": "0.1.0" }`. The version is baked in at build time
-from `OFLM_VERSION` in `CMakePresets.json`.
-
-> ℹ️ Each registry entry carries an `oflm_min_version` -- the oldest `oflm`
-> that can load that model. The downloader compares it against the running
-> build and warns when the model is newer than the binary.
-
+| `--tag`, `--name <NAME>` | Custom local tag |
+| `--family <NAME>` | Explicit model family override |
+| `--dry-run` | Preview installation plan without writing files |
+| `--text-only` / `--mmproj <REPO>` | Skip vision projector or download it from another repo |
+| `--open-kernels <DIR>` / `--xclbin-from <REF>` / `--xclbin-dir <DIR>` | Explicit NPU acceleration directory override |
+| `--no-xclbin` | Download weights without linking NPU acceleration files |
+| `--config <FILE>` / `--models-root <DIR>` | Alternate `settings.json` or models folder |
+| `--modelscope` | Download from ModelScope |
+| `--no-verify` / `--force` | Skip SHA-256 verification or overwrite an existing tag |
+| `--quiet` / `--verbose` | Quiet output or list skipped GGUF files |

@@ -1,0 +1,18 @@
+{{- $u := urls.Parse .Destination -}}
+{{- $href := $u.String -}}
+{{- $isExternal := or (eq $u.Scheme "http") (eq $u.Scheme "https") -}}
+{{- if and (not $u.IsAbs) $u.Path -}}
+    {{- if strings.HasPrefix $u.Path "/" -}}
+        {{- $href = (strings.TrimPrefix "/" $u.Path) | relLangURL -}}
+        {{- with $u.RawQuery }}{{ $href = printf "%s?%s" $href . }}{{ end -}}
+        {{- with $u.Fragment }}{{ $href = printf "%s#%s" $href . }}{{ end -}}
+    {{- else -}}
+        {{- $clean := strings.TrimSuffix ".md" (strings.TrimSuffix "/_index.md" (strings.TrimSuffix "/index.md" $u.Path)) -}}
+        {{- with or ($.Page.GetPage $u.Path) ($.Page.GetPage $clean) -}}
+            {{- $href = .RelPermalink -}}
+            {{- with $u.RawQuery }}{{ $href = printf "%s?%s" $href . }}{{ end -}}
+            {{- with $u.Fragment }}{{ $href = printf "%s#%s" $href . }}{{ end -}}
+        {{- end -}}
+    {{- end -}}
+{{- end -}}
+<a href="{{ $href }}"{{ with .Title }} title="{{ . }}"{{ end }}{{ if and $isExternal (site.Params.docs.extLinkNewTab | default true) }} target="_blank" rel="noopener noreferrer"{{ end }}>{{ .Text | safeHTML }}</a>

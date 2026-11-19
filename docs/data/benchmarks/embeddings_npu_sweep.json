@@ -1,0 +1,198 @@
+{
+  "slug": "embeddings-npu-sweep",
+  "title": "Batched NPU Embedding Throughput Across 7 Models",
+  "subtitle": "AMD Ryzen AI 9 HX 370 (32 GB RAM) \u00b7 OpenFlowLM NPU Runtime \u00b7 End-to-end wall clock",
+  "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M (32 GB RAM)",
+  "stack": "OpenFlowLM NPU Runtime \u00b7 Performance mode",
+  "batches": [
+    "n=1",
+    "n=8",
+    "n=16",
+    "n=32",
+    "n=64"
+  ],
+  "models": [
+    {
+      "tag": "all-minilm:l6-v2",
+      "name": "all-MiniLM-L6-v2",
+      "backend": "Batched NPU",
+      "throughput_tps": [
+        108.0,
+        785.5,
+        850.2,
+        1035.7,
+        1305.0
+      ],
+      "speedup_x": [
+        0.99,
+        5.99,
+        6.64,
+        8.07,
+        10.05
+      ],
+      "latency_ms": [
+        9.3,
+        10.2,
+        18.8,
+        30.9,
+        49.1
+      ]
+    },
+    {
+      "tag": "bge-small:en-v1.5",
+      "name": "bge-small-en-v1.5",
+      "backend": "Batched NPU",
+      "throughput_tps": [
+        53.3,
+        379.4,
+        357.0,
+        395.8,
+        565.4
+      ],
+      "speedup_x": [
+        1.04,
+        6.63,
+        6.43,
+        7.0,
+        10.03
+      ],
+      "latency_ms": [
+        18.8,
+        21.2,
+        44.8,
+        80.9,
+        114.0
+      ]
+    },
+    {
+      "tag": "bge-base:en-v1.5",
+      "name": "bge-base-en-v1.5",
+      "backend": "Batched NPU",
+      "throughput_tps": [
+        39.5,
+        255.0,
+        228.3,
+        240.6,
+        311.3
+      ],
+      "speedup_x": [
+        0.99,
+        6.43,
+        5.44,
+        5.73,
+        7.55
+      ],
+      "latency_ms": [
+        25.3,
+        31.4,
+        70.1,
+        133.0,
+        205.6
+      ]
+    },
+    {
+      "tag": "nomic-embed-text:v1.5",
+      "name": "nomic-embed-text-v1.5",
+      "backend": "Batched NPU",
+      "throughput_tps": [
+        29.6,
+        188.9,
+        178.5,
+        175.1,
+        239.0
+      ],
+      "speedup_x": [
+        1.02,
+        5.59,
+        5.37,
+        5.01,
+        6.94
+      ],
+      "latency_ms": [
+        33.8,
+        43.0,
+        90.5,
+        186.4,
+        268.2
+      ]
+    },
+    {
+      "tag": "gte-multilingual:base",
+      "name": "gte-multilingual-base",
+      "backend": "Batched NPU",
+      "throughput_tps": [
+        28.0,
+        167.0,
+        143.7,
+        148.9,
+        231.1
+      ],
+      "speedup_x": [
+        1.01,
+        5.46,
+        4.97,
+        5.12,
+        7.99
+      ],
+      "latency_ms": [
+        35.7,
+        49.2,
+        111.3,
+        214.9,
+        276.9
+      ]
+    },
+    {
+      "tag": "bge-large:en-v1.5",
+      "name": "bge-large-en-v1.5",
+      "backend": "Batched NPU",
+      "throughput_tps": [
+        13.5,
+        81.8,
+        70.0,
+        71.6,
+        89.9
+      ],
+      "speedup_x": [
+        0.98,
+        5.79,
+        4.94,
+        5.01,
+        6.35
+      ],
+      "latency_ms": [
+        74.1,
+        97.8,
+        228.7,
+        446.8,
+        712.1
+      ]
+    },
+    {
+      "tag": "embed-gemma:300m",
+      "name": "EmbeddingGemma-300M",
+      "backend": "NPU + CPU",
+      "throughput_tps": [
+        1.4,
+        1.6,
+        1.6,
+        null,
+        null
+      ],
+      "speedup_x": [
+        0.98,
+        0.97,
+        1.07,
+        null,
+        null
+      ],
+      "latency_ms": [
+        699.2,
+        5156.8,
+        9937.8,
+        null,
+        null
+      ]
+    }
+  ]
+}
