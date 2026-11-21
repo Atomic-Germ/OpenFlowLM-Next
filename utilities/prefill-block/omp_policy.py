@@ -4,6 +4,8 @@ Benchmark: one warm-up pair, then at least five measured pairs in alternating
 order. Each process runs the full model; engine prefill/decode timings exclude
 model loading. /usr/bin/time records peak RSS. No profiler is enabled.
 Use --check production for a multi-turn shipped CLI comparison.
+For a kernel-only ablation, supply both --before-kernels and --after-kernels;
+benchmark and boundaries then hold the startup policy enabled on both arms.
 """
 from __future__ import annotations
 
@@ -20,12 +22,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layer_profile as P
 import oflm_drive as D
 import oracle as O
+from runtime_provenance import run_sampled, runtime_paths, describe
 
 
 def clean_env():
     env = clean_env_from(os.environ)
     env.update(OFLM_OPEN_PREFILL_PRECISION='paired', OFLM_OPEN_LAYER_MAJOR='0')
     return env
+
+
+def kernel_comparison(a):
+    before, after = (getattr(a, arm + '_kernels', None) for arm in ('before', 'after'))
+    if bool(before) != bool(after):
+        raise ValueError('kernel comparison requires both kernel directories')
+    return bool(before)
+
+
+def arm_kernels(a, arm):
+    return getattr(a, arm + '_kernels') if kernel_comparison(a) else a.kernels
+
+
+def arm_policy(a, arm):
+    return '1' if kernel_comparison(a) or arm == 'after' else '0'
 
 
 def summary(rows):
@@ -90,13 +108,17 @@ def benchmark(a, out):
     ids = O.fixture(a.tokens, seed=26026)
     ids_file = out / 'ids.txt'
     ids_file.write_text(','.join(map(str, ids)))
-    result = dict(check='omp-policy-benchmark', tokens=a.tokens, generated=a.generate,
+    kernels = {arm: arm_kernels(a, arm) for arm in ('before', 'after')}
+    artifacts = [a.before, a.after, a.model / 'model.q4nx']
+    for path in kernels.values():
+        artifacts += [path / 'manifest.json', *path.glob('*/final.xclbin'), *path.glob('*/insts.bin')]
+    result = dict(check='kernel-benchmark' if kernel_comparison(a) else 'omp-policy-benchmark',
+                  tokens=a.tokens, generated=a.generate,
                   prefill_definition='standalone engine prompt ingestion, excludes load',
                   source=source_provenance(a.before_commit, a.after_commit),
                   power=platform(), rows=[], summaries=None,
-                  provenance=P.provenance([a.before, a.after, a.model / 'model.q4nx',
-                                           a.kernels / 'manifest.json', *a.kernels.glob('*/final.xclbin'),
-                                           *a.kernels.glob('*/insts.bin')]))
+                  kernel_directories={arm: str(path) for arm, path in kernels.items()},
+                  provenance=P.provenance(artifacts))
     # One lock covers the complete paired campaign, including conditions sampling.
     import fcntl
     with O.LOCK.open('a') as lock:
@@ -106,13 +128,13 @@ def benchmark(a, out):
             for arm in order:
                 tag = f'{rep}-{arm}'
                 env = clean_env()
-                env['OFLM_OPEN_OMP_PASSIVE'] = '0' if arm == 'before' else '1'
-                cmd = [str(getattr(a, arm)), '--model', str(a.model), '--kernels', str(a.kernels),
+                env['OFLM_OPEN_OMP_PASSIVE'] = arm_policy(a, arm)
+                cmd = [str(getattr(a, arm)), '--model', str(a.model), '--kernels', str(kernels[arm]),
                        '--ids-file', str(ids_file), '--max-ctx', '4096', '--layers', '64',
                        '--max-tokens', str(a.generate), '--gemm-block', '--block-major', '--pmode', 'none', '--quiet']
                 before = P.conditions()
-                r = subprocess.run(['/usr/bin/time', '-f', '%M', '-o', str(out / f'{tag}.rss'), *cmd],
-                                   env=env, capture_output=True, text=True, timeout=1800)
+                r, libraries = run_sampled(
+                    ['/usr/bin/time', '-f', '%M', '-o', str(out / f'{tag}.rss'), *cmd], env, 1800)
                 log = r.stdout + '\n' + r.stderr
                 (out / f'{tag}.log').write_text(log)
                 if r.returncode:
@@ -127,6 +149,8 @@ def benchmark(a, out):
                     raise ValueError('NPU power mode changed during comparison')
                 row = dict(rep=rep, warmup=rep < 0, arm=arm, command=cmd,
                            omp_passive=env['OFLM_OPEN_OMP_PASSIVE'],
+                           runtime_libraries=libraries,
+                           runtime_provenance=describe(libraries),
                            prefill_ms=float(prefill[1]), decode_ms=float(decode[1]), ids=tokens,
                            rss_kib=int((out / f'{tag}.rss').read_text()),
                            conditions_before=before, conditions_after=P.conditions(), power_after=power)
@@ -210,12 +234,15 @@ def boundaries(a, out):
         records = {}
         for arm in ('before', 'after'):
             O.CLI = getattr(a, arm)
+            O.KERNELS = arm_kernels(a, arm)
             wd = out / f'{n}-{arm}'; wd.mkdir()
             flags = [f'{layer}:{offset}:{size}:{T.state_path(wd, layer, offset, size)}'
                      for layer, spans in slices.items() for _, offset, size in spans]
             saved = dict(os.environ)
             try:
                 os.environ.clear(); os.environ.update(clean_env_from(saved))
+                if kernel_comparison(a):
+                    os.environ['OFLM_OPEN_OMP_PASSIVE'] = '1'
                 records[arm] = T.run(ids, wd, arm, chunk=256, layers=a.layers, decode=a.generate,
                                     position=0, dump_state=flags, outdir=str(out))
             finally:
@@ -303,6 +330,8 @@ def main():
     ap.add_argument('--after-commit', help='source commit used to build the candidate binary')
     ap.add_argument('--model', type=Path, default=D.MODEL)
     ap.add_argument('--kernels', type=Path, default=D.KERNELS)
+    ap.add_argument('--before-kernels', type=Path, help='kernel-only control; requires --after-kernels')
+    ap.add_argument('--after-kernels', type=Path, help='kernel-only candidate; keeps the same OpenMP policy')
     ap.add_argument('--layers', type=int, default=4)
     ap.add_argument('--port', type=int, default=18762)
     ap.add_argument('--tokens', type=int, default=256)
@@ -311,11 +340,16 @@ def main():
     ap.add_argument('--reps', type=int, default=5)
     ap.add_argument('--out', type=Path, required=True)
     a = ap.parse_args()
+    try:
+        if kernel_comparison(a) and a.check not in ('benchmark', 'boundaries'):
+            ap.error('per-arm kernel directories apply to benchmark and boundaries only')
+    except ValueError as exc:
+        ap.error(str(exc))
     if a.reps < 5 or a.generate < 2 or (a.check in ('benchmark', 'boundaries') and not a.before):
         ap.error('benchmark requires --before, at least five pairs and two generated tokens')
     if a.check == 'benchmark' and not (a.before_commit and a.after_commit):
         ap.error('benchmark requires --before-commit and --after-commit')
-    for name in ('before', 'after', 'model', 'kernels'):
+    for name in ('before', 'after', 'model', 'kernels', 'before_kernels', 'after_kernels'):
         if getattr(a, name): setattr(a, name, getattr(a, name).resolve())
     if a.check in ('production', 'server') and a.model != D.MODEL.resolve():
         ap.error('production checks use the registered qwen3.8:27b model at ' + str(D.MODEL))

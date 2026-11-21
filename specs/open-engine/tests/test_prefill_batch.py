@@ -297,6 +297,7 @@ def test_the_sequential_program_is_untouched(m):
 def test_the_build_key_covers_the_gemm_sources():
     files = [f.as_posix() for f in source_files(default_spec())]
     for must in ("designs/gemm_q4_prefill/gemm_q4_prefill.py", "designs/gemm_q4_prefill/gemm_q4_dequant.h",
+                 "designs/gemm_q4_prefill/dma_schedule.py",
                  "designs/gemm_q4_prefill/gemm_q4_dequant_entry_k0.cc"):
         assert any(f.endswith(must) for f in files), must
 

@@ -1,0 +1,1035 @@
+{
+  "status": "DRAFT: opt-in numerical/performance evidence retained on current main; provenance/capacity limitations explicit",
+  "baseline_commit": "836072db",
+  "candidate_commit": null,
+  "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
+  "machine": {
+    "cpu": "AMD Ryzen AI 9 365",
+    "ram_gib": 91,
+    "npu": "Strix XDNA2 aie2p 6x8",
+    "os": "Linux-7.0.0-43-generic-x86_64-with-glibc2.43",
+    "xrt": "2.26.0 e9db9ab15f10173f8d2fc93ff92ab4c7eb09d2e6",
+    "driver": "2.26.0_20260817",
+    "firmware": "1.1.2.64",
+    "npu_power_mode": "default (externally observed)",
+    "cpu_governor": "powersave",
+    "one_minute_load_range": [
+      2.1044921875,
+      3.29736328125
+    ],
+    "load_note": "Desktop/services and some host compilation/tests active; shared lock excludes cooperating NPU jobs"
+  },
+  "methodology": {
+    "pairs": 5,
+    "warmup_dispatches_per_process": 1,
+    "measured_dispatches_per_process": 10,
+    "alternating_order": true,
+    "physical_tokens": 256,
+    "metric": "host submit-to-completion milliseconds; excludes BO sync and context creation",
+    "rel_fro_gate": 0.005,
+    "requires_exact_output": true
+  },
+  "sources": {
+    "open_kernels/designs/gemm_q4_prefill/compare.py": "4655c32d45f77a616e435265ce0bab7daf0a75d45e7715fc27bd044563eb2be0",
+    "open_kernels/designs/gemm_q4_prefill/dma_schedule.py": "13a4668fcabb5056926ca724be2a34dfacaa47ffdb9f742c6ec1aa0179ae3401",
+    "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py": "0e46209d025d843db92d1ed944667d93692dd31285022fc7e5fb18191d8330b9",
+    "open_kernels/designs/gemm_q4_prefill/make_test.py": "7fd33aba7f36dc6c9d1c8be92b3ff24deaa03c2b16526ea4931e1acdc02e0a98",
+    "open_kernels/designs/gemm_q4_prefill/gemm_q4_dequant.h": "0bd9959dd7030aaec8c4ad8c79ae4c1b8224cd885909ba5aed8c0e45f7ea9901",
+    "utilities/q4-gemm/build.py": "17a47db0eabcde311400d89324dce2cfeba359b8006ec6c1fcd39aa7ac5bd6ca",
+    "open_kernels/build_design.py": "b89a599386f6565b0f3a895a89466e24ceb5a70b18726a851a3ca9965933635a",
+    "utilities/core_sizes.py": "c303ba946c3c189036fe942b0747306a15ee0f5698ccd7c2c6dc1aaae5ce05ec"
+  },
+  "cases": [
+    {
+      "name": "gemm_n14336_k5120",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 17.426000000000002,
+          "min_ms": 17.329,
+          "max_ms": 17.664
+        },
+        "after": {
+          "median_ms": 16.9185,
+          "min_ms": 16.8855,
+          "max_ms": 17.025
+        },
+        "change_percent": -2.912314931711235,
+        "paired_wins": 5
+      },
+      "rel_fro": 0.0016666409480973854,
+      "output_sha256": "f7ea0ade5a660ecf249304e041b0bd7d3e500c24ecfc2a50743bef8fa2ed52c3",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n14336_k5120/result.json",
+      "raw_result_sha256": "23b10f15705f5d129c835f8fc0a6eb412532c047ff752afe8dbec63da229f669",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n14336_k5120/build.json",
+          "record_sha256": "265c62172914d5ec2e8aa5c355a4285417623ddf1f654ad94b7fe61094c29c3d",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "df2b1dac2b8331b53598d69879e9122b098dca0c552abb2fe41f68bc53b2426b",
+            "insts.bin": "032ec3405135f5d08e3406b7cd50e26292adc3a4947399b228932602ee111ea4",
+            "insts.elf": "583ba1ada734e5f23052953e73f5be40f2daa795fd1ac67e98ef4601f1c6173d"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n14336_k5120/build.json",
+          "record_sha256": "ae4c1acb25f84549f78f6608f3b36ae841e737183a3e2365ce33352046324294",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "f4819ec49fe5cec1f97b02d6f89a06a682466f0ce3c285201a41a3d78ac0dc57",
+            "insts.bin": "688f9978cb428605f615d9ac79a14926028f688c1cdb7fe4c7a356cb5e47193c",
+            "insts.elf": "9dc510da1c65195d107e1d457896a558657d8fcb3d8639dd08441dcd1564cdf3"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "ca98a79183331eef9fd1b917cbbdf14970f43f9847b21dc3c633ff5a55112b89",
+        "activations.bin": "39652edfa6a57117e2791b772b20cf27821c40e79493f4f98dec7dca6aa021a5",
+        "reference-high.bin": "a0ccbf18e5dd64e8ec9ff4f542bd7dab11902c850988b75697a1865df3b43760"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.1566029978193497,
+        "after": 2.22129407689807
+      }
+    },
+    {
+      "name": "gemm_n14336_k5120_low",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 18.713,
+          "min_ms": 18.619,
+          "max_ms": 19.1545
+        },
+        "after": {
+          "median_ms": 18.098999999999997,
+          "min_ms": 17.9935,
+          "max_ms": 18.406
+        },
+        "change_percent": -3.2811414524662186,
+        "paired_wins": 5
+      },
+      "rel_fro": 1.011978878255649e-07,
+      "output_sha256": "49995091310d05ba9eec9727bda6e7dba61dca07d4374ceba77e81c213301da5",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n14336_k5120_low/result.json",
+      "raw_result_sha256": "14be6f1df71c11058a9db28b25c3790fae3d7fa569f10867ed7346f930797a87",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n14336_k5120_low/build.json",
+          "record_sha256": "0b239c983ebb62d1e1a00a5ca7f47b1680cd70c9b39da3d0ae860961dc123349",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "2929de1372cf84851007d400bd306304996b27eebedcdaaead6454ab8f3f19f3",
+            "insts.bin": "032ec3405135f5d08e3406b7cd50e26292adc3a4947399b228932602ee111ea4",
+            "insts.elf": "583ba1ada734e5f23052953e73f5be40f2daa795fd1ac67e98ef4601f1c6173d"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n14336_k5120_low/build.json",
+          "record_sha256": "36ecd8057e7de4b595e63221948577c014f43d749678b1a639947ae29da0e842",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "24a3cd30fb4a488d7f5ce435331c2905cf75e5c6a618722a61c67acee5c5296f",
+            "insts.bin": "688f9978cb428605f615d9ac79a14926028f688c1cdb7fe4c7a356cb5e47193c",
+            "insts.elf": "9dc510da1c65195d107e1d457896a558657d8fcb3d8639dd08441dcd1564cdf3"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "ca98a79183331eef9fd1b917cbbdf14970f43f9847b21dc3c633ff5a55112b89",
+        "activations.bin": "39652edfa6a57117e2791b772b20cf27821c40e79493f4f98dec7dca6aa021a5",
+        "reference-low.bin": "ccd6c8914d1f9e45feec920b641131938afd9ed41bfbdbdbf7567f396b33175f"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.0082810794634747,
+        "after": 2.076411063594674
+      }
+    },
+    {
+      "name": "gemm_n16384_k5120",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 19.871,
+          "min_ms": 19.8095,
+          "max_ms": 20.012
+        },
+        "after": {
+          "median_ms": 19.366,
+          "min_ms": 19.185000000000002,
+          "max_ms": 19.426000000000002
+        },
+        "change_percent": -2.541391978259766,
+        "paired_wins": 5
+      },
+      "rel_fro": 0.0016978597136927869,
+      "output_sha256": "3d779ed56fa3e524c05786e4ab2b880c9cdc854cfc4923da66c32e773ac7e668",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n16384_k5120/result.json",
+      "raw_result_sha256": "056683c96753b80a7b1e91c2a9bcb53be31221f5e14a9c0a0aaadcf8ab1e513c",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n16384_k5120/build.json",
+          "record_sha256": "8a65522467cecf1d90df6c10270b9ffb2e7394239f96a59cf6da51493de83f98",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "c8c209f059207cb48b8711f78607eb89b6efacb3e4aa7c31e74d2bd04d2db86d",
+            "insts.bin": "35c90e689c5f179a8430ba9a2e7744f8e2f3ff7eaa83de528b1d8092e04d7d35",
+            "insts.elf": "4252566d704a53494c11cc5a52588bf597150e3969ac9e851aece766d319129e"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n16384_k5120/build.json",
+          "record_sha256": "d18564b70ffebd98eabd751ebe2031aeab0e6e229fab709920d8cf29342a430f",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "ca287f3ea0d20f99202b5b408b08ad4438ad75d699487b7971d48b626701e5bd",
+            "insts.bin": "7024a5311a94d3d2e265bc0b2c406361b1e1a33f8f59912d8b026abf7271a811",
+            "insts.elf": "e8a2d2a31f0a7bb1c9de62ea56b14e8fdc46548db4d86e07518c601f29b89e36"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "8a779c3c14af6f8a654155f8596add9fe1502577c2e08fe30693aa92dbf58dac",
+        "activations.bin": "85d8fc4d667a17fb9cb7fd94fd9ebf397a699d26d91d12f8b6827aff71b5d0ae",
+        "reference-high.bin": "0d3d02aa6aeaa3821b4ae2913c35b34f2252b457d1f8a1650038391fafe23294"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.1614248382064316,
+        "after": 2.217787512134669
+      }
+    },
+    {
+      "name": "gemm_n16384_k5120_low",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 21.3335,
+          "min_ms": 21.2485,
+          "max_ms": 21.950499999999998
+        },
+        "after": {
+          "median_ms": 20.631,
+          "min_ms": 20.5535,
+          "max_ms": 21.3505
+        },
+        "change_percent": -3.292943023882633,
+        "paired_wins": 5
+      },
+      "rel_fro": 1.0159722756341708e-07,
+      "output_sha256": "f354c607f2e3502a8f3ab71f80fd0be2b2698d96798e9495236bdbc959ec9c66",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n16384_k5120_low/result.json",
+      "raw_result_sha256": "fb4319b3452785096355070bdf9bfbbf3821095d55196a2f39b3b88923f74da6",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n16384_k5120_low/build.json",
+          "record_sha256": "3b2fc92844ea146d90bdcf3312903ae1a0a1ab61bb526ac0f6a333a156144a7c",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "7248771cc9d0b012e1e61834cd270909431810a19516a8b0fbb64fb305b730d9",
+            "insts.bin": "35c90e689c5f179a8430ba9a2e7744f8e2f3ff7eaa83de528b1d8092e04d7d35",
+            "insts.elf": "4252566d704a53494c11cc5a52588bf597150e3969ac9e851aece766d319129e"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n16384_k5120_low/build.json",
+          "record_sha256": "f26e7d0c6b75b5943d8c80146ff7719ecb38ad61596bc008cf7d99ad315c3a1c",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "4a6a8dc8b986f265dcf9c298306bbe20b8af204e2e28295f905d603b7b846720",
+            "insts.bin": "7024a5311a94d3d2e265bc0b2c406361b1e1a33f8f59912d8b026abf7271a811",
+            "insts.elf": "e8a2d2a31f0a7bb1c9de62ea56b14e8fdc46548db4d86e07518c601f29b89e36"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "8a779c3c14af6f8a654155f8596add9fe1502577c2e08fe30693aa92dbf58dac",
+        "activations.bin": "85d8fc4d667a17fb9cb7fd94fd9ebf397a699d26d91d12f8b6827aff71b5d0ae",
+        "reference-low.bin": "276a0f89b41836e09b6a37a7b2759af7cd73abf48f6a1f2d0c6ec8a1613c970d"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.013250191482879,
+        "after": 2.08180277058795
+      }
+    },
+    {
+      "name": "gemm_n34816_k5120",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 42.446,
+          "min_ms": 41.308499999999995,
+          "max_ms": 44.2205
+        },
+        "after": {
+          "median_ms": 40.828500000000005,
+          "min_ms": 40.519,
+          "max_ms": 41.378
+        },
+        "change_percent": -3.810724214295791,
+        "paired_wins": 5
+      },
+      "rel_fro": 0.0017295139232286721,
+      "output_sha256": "f7aca7ad42fbbecd9ceae57fad4dd72cc1db00106768a64885e4ae1089074e01",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n34816_k5120/result.json",
+      "raw_result_sha256": "08c2ce7c500831abfa6a0d7d4f087c42bf48d4eda094dc098b25def82b4b01f8",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n34816_k5120/build.json",
+          "record_sha256": "f24a3d71eccb5baf1904b063a7c808a50a0c1fd769173a4298c2620797856495",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "435f8140f63ce4acd57f57c0e3d202298ba96d0f9dbb88a3c06fd6c1d5ae1b4f",
+            "insts.bin": "74ba0e0fe1114a9480f566bd6b88f76d38b39903b3b70a9f71dc134a393794ca",
+            "insts.elf": "ba13d28fa9e1032dc1ea0db04c8a60d82245bc08a3bab50ae76ff47867c63ee3"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n34816_k5120/build.json",
+          "record_sha256": "c40ddcb63479db524c5530cfec965ce81f7a51f0e84ee36eaee13833de0db242",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "771b347e7b7860aee3c9f2284aeee8494c698ce6cef537b0ffcb222ea65da5f5",
+            "insts.bin": "17e4732c3c7cfdfcbb166512363ed509a62926642a367931e12977503dd58468",
+            "insts.elf": "1842330492c7f0c968951cb2baed6aad3d2bf250c4b59e4cf854066a87fcb93c"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "d72297c987c5e532fe325dd1f55f82e30d53053a23d72b7fc725fe27ad8ac1fc",
+        "activations.bin": "f685489bdf95947aeef11bdffe9f69a999b5461e0a9d832c95d5bc9cb8f72f57",
+        "reference-high.bin": "bfd91336af6d4e835e6cb14e0a577a6798964b411f6fccfcd83788fa285b9dcf"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.150215686754936,
+        "after": 2.2354006402390483
+      }
+    },
+    {
+      "name": "gemm_n34816_k5120_low",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 43.7395,
+          "min_ms": 43.674,
+          "max_ms": 43.7655
+        },
+        "after": {
+          "median_ms": 42.3145,
+          "min_ms": 42.2935,
+          "max_ms": 42.354
+        },
+        "change_percent": -3.257924759085029,
+        "paired_wins": 5
+      },
+      "rel_fro": 1.0016199818535365e-07,
+      "output_sha256": "2153e2aa726df616009027bac8646ab5114b56a32b35e333c98a9e2bcb8b40fc",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n34816_k5120_low/result.json",
+      "raw_result_sha256": "ceb16dbd715551f39380553661fc86b569c10773e45aca16f184cc0372a54634",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n34816_k5120_low/build.json",
+          "record_sha256": "36a07704a860108e6fdbeef052451ff011926c39762e24da13bffdad3f63af56",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "48f8ea2f81051854641f50e07739df0bf821cb6bbb2468f7449826ed716671c0",
+            "insts.bin": "74ba0e0fe1114a9480f566bd6b88f76d38b39903b3b70a9f71dc134a393794ca",
+            "insts.elf": "ba13d28fa9e1032dc1ea0db04c8a60d82245bc08a3bab50ae76ff47867c63ee3"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n34816_k5120_low/build.json",
+          "record_sha256": "1b6d3490ee5ca5865c0b33880bd24f024e2d02db728265853045ef7f6c46c6c9",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "8cd040355768c134f78962635094caaa78672c90d2af38b76d34f7afa320569e",
+            "insts.bin": "17e4732c3c7cfdfcbb166512363ed509a62926642a367931e12977503dd58468",
+            "insts.elf": "1842330492c7f0c968951cb2baed6aad3d2bf250c4b59e4cf854066a87fcb93c"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "d72297c987c5e532fe325dd1f55f82e30d53053a23d72b7fc725fe27ad8ac1fc",
+        "activations.bin": "f685489bdf95947aeef11bdffe9f69a999b5461e0a9d832c95d5bc9cb8f72f57",
+        "reference-low.bin": "bc4e787919e2899a616fb43ffc79c7af5baa80529328ae8c0463e85023f7a44a"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.0866277630059784,
+        "after": 2.1568978728331896
+      }
+    },
+    {
+      "name": "gemm_n5120_k17408",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 19.8645,
+          "min_ms": 19.860500000000002,
+          "max_ms": 19.8735
+        },
+        "after": {
+          "median_ms": 19.671,
+          "min_ms": 19.659,
+          "max_ms": 19.8505
+        },
+        "change_percent": -0.9740995242769723,
+        "paired_wins": 5
+      },
+      "rel_fro": 0.0016691757251604837,
+      "output_sha256": "f3a35cadff9b304ef580a872968b8753f618b44b4f9c36e58bed79e0643cd4a7",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n5120_k17408/result.json",
+      "raw_result_sha256": "bd59a820455d7c54183057d63d88be86e559ef4402857468ee0af07b9284d9a9",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n5120_k17408/build.json",
+          "record_sha256": "99746351527441300f4be9cc68f49a5d471e242b9030c89e8bf9f79ebc840745",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "af810ce304581cd56952161c7545d4094abc8738e870e4270d2e28c7459069fe",
+            "insts.bin": "3648779476135350291ab97dcc6e4fca24cd975cf8efd9bd5f7b4d371d818e26",
+            "insts.elf": "64246094ccc2d5fa8e4510b6b08d0e53d916063ed0005ec23d42413ae8df56d0"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n5120_k17408/build.json",
+          "record_sha256": "2e3421ca2b259656bf88a1b68f382af812cd1adab586b0f52919743a3311ef19",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "21517fbd674d39907f905d2a8686ae42bd03b183b37123766893c66347fc509c",
+            "insts.bin": "7f99d04a43800398891b69517d33cf044cf8ba1817763ee89b9676650f580a9c",
+            "insts.elf": "fd578a8617a51a75f31f2051857172bcc6eec6ebf77bd8bd7253f5b6be882a93"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "1571d74a63180f1913f89d9c4e727ceab0274f236082a1d60f880d812c474e26",
+        "activations.bin": "2abb1c7fff6bd31f64d7edf581ca050eff8c785e355a450d36cfdf242f21d54d",
+        "reference-high.bin": "de24bbfb08a8893e36b2dd0cd1fc8763856924d21dbe059bd39da4eb6e64a233"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.2972653487376977,
+        "after": 2.3198631243963193
+      }
+    },
+    {
+      "name": "gemm_n5120_k17408_low",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 21.255,
+          "min_ms": 21.250500000000002,
+          "max_ms": 21.3295
+        },
+        "after": {
+          "median_ms": 21.0755,
+          "min_ms": 21.042,
+          "max_ms": 21.133
+        },
+        "change_percent": -0.844507174782394,
+        "paired_wins": 5
+      },
+      "rel_fro": 2.1290202297128708e-07,
+      "output_sha256": "792b94b729ce5c9ed6c8d406bfa2330bc3571a87ea8707468d24ebd4869c61a1",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n5120_k17408_low/result.json",
+      "raw_result_sha256": "5d5213bd04c2973269b3c9f4d1750eb05506be9347fff72913025981a88bacef",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n5120_k17408_low/build.json",
+          "record_sha256": "2cc4b6c00c5ffa390a82a0290058c831274e1ffb97b8f825ead7b661c959cec6",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "72f60655b7b241776aca49a6ca14722c85b027ff15bb6b3ee3b5320b58b8824d",
+            "insts.bin": "3648779476135350291ab97dcc6e4fca24cd975cf8efd9bd5f7b4d371d818e26",
+            "insts.elf": "64246094ccc2d5fa8e4510b6b08d0e53d916063ed0005ec23d42413ae8df56d0"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n5120_k17408_low/build.json",
+          "record_sha256": "3805338e5ed6d9f037079a3673b965ceec88da6f2eaff54ab9990ae57830db55",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "53bccfe1ca5161a47998828d14cceb40035cc4355cea12e040fd13fd1a3488dc",
+            "insts.bin": "7f99d04a43800398891b69517d33cf044cf8ba1817763ee89b9676650f580a9c",
+            "insts.elf": "fd578a8617a51a75f31f2051857172bcc6eec6ebf77bd8bd7253f5b6be882a93"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "1571d74a63180f1913f89d9c4e727ceab0274f236082a1d60f880d812c474e26",
+        "activations.bin": "2abb1c7fff6bd31f64d7edf581ca050eff8c785e355a450d36cfdf242f21d54d",
+        "reference-low.bin": "e855fc6160dd8cc091d313b096119ba0af208e1f81a0b808dffc7f19115de9ed"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.1469784765937425,
+        "after": 2.165264288866219
+      }
+    },
+    {
+      "name": "gemm_n5120_k6144",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 7.2605,
+          "min_ms": 7.254,
+          "max_ms": 7.292
+        },
+        "after": {
+          "median_ms": 7.0405,
+          "min_ms": 7.0295000000000005,
+          "max_ms": 7.054
+        },
+        "change_percent": -3.0300943461194274,
+        "paired_wins": 5
+      },
+      "rel_fro": 0.0016623397955467813,
+      "output_sha256": "a6451c1a43d4bdebb995821a3bc56e893bf01f31bbc224c4878a8970fee6732f",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n5120_k6144/result.json",
+      "raw_result_sha256": "ccb466aeb87d7de7fa7bb4db29f732faa30bbed0c0d5c6965b72437e8ad7d95c",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n5120_k6144/build.json",
+          "record_sha256": "bb849c3f95dde85774b5ca69eb5dd0c6b424231c4e23bf33cbbfd171f8af9e3f",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "eeaacec713e6a75114c94caaae06930f8f7362c0410d304071ff1c35a0844897",
+            "insts.bin": "73b82f33a8423e6a41c9770104067c44b716c2b06247de1cac821b0fdcd41c1d",
+            "insts.elf": "283280d83616af39908f3da1151a5e63878817c575d92fd154176882b0193927"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n5120_k6144/build.json",
+          "record_sha256": "897af33c599e01375da444b76fdf486d9e7831aadc5060ed0c3b0965d59aacf1",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "cb0e915c4ef3a84300fe05111fa7bc5f2662052da10cdc7167da1a133f9c4f74",
+            "insts.bin": "f2c6a363395c002c2fa60bb9fe587c194bc07b9b757ed218d93969563adc2a86",
+            "insts.elf": "251d57fe6abab1c10057194ef648e75454ae616d1f44aa3ac440376ab64bf44b"
+          },
+          "max_text": 4784,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "1d2b28d4f30b9b4c49538f4807f28a473cf75c020a02e33fbc841b1ec910186d",
+        "activations.bin": "8d2ce3f60b76f53f214f0434303ea4968b019b776ebfd8e147721a307e3a84cd",
+        "reference-high.bin": "9439c7c8c01cd6adf99a28e019fce11c273903952eb41880cd9bea8d40bf508e"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.218322065973418,
+        "after": 2.2876397074071444
+      }
+    },
+    {
+      "name": "gemm_n5120_k6144_low",
+      "complete": true,
+      "exact_outputs": true,
+      "summary": {
+        "before": {
+          "median_ms": 7.7735,
+          "min_ms": 7.7364999999999995,
+          "max_ms": 7.9785
+        },
+        "after": {
+          "median_ms": 7.547499999999999,
+          "min_ms": 7.5115,
+          "max_ms": 7.5655
+        },
+        "change_percent": -2.90731330803371,
+        "paired_wins": 5
+      },
+      "rel_fro": 1.1169751506717114e-07,
+      "output_sha256": "7d0f530e8d18e92f23a7b4bf6171182c8950499f7e6813d0337440b8a359213b",
+      "raw_result": "Models/qwen38-27b/pr3-gemm/shapes/gemm_n5120_k6144_low/result.json",
+      "raw_result_sha256": "a18c906fb11e8a268ea7823381d907693bc3f86f84d8493c7d736d9689cb9fe0",
+      "builds": {
+        "before": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch1/gemm_n5120_k6144_low/build.json",
+          "record_sha256": "72e5ba56271528cb1471cda0d42d7f8cb7ab5c2f511e92aa96e05114f1c29655",
+          "dma_batch": 1,
+          "binaries": {
+            "final.xclbin": "73ee541f979a1d795746dfa4a728c91eccf08e8b2573d552f1c930c5831afd3d",
+            "insts.bin": "73b82f33a8423e6a41c9770104067c44b716c2b06247de1cac821b0fdcd41c1d",
+            "insts.elf": "283280d83616af39908f3da1151a5e63878817c575d92fd154176882b0193927"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        },
+        "after": {
+          "record": "Models/qwen38-27b/pr3-gemm/sets/batch4/gemm_n5120_k6144_low/build.json",
+          "record_sha256": "bcbcce81f549ac6f3074a138022ed9d58390691d7934b12c57e6e3ac60537768",
+          "dma_batch": 4,
+          "binaries": {
+            "final.xclbin": "ccadc276a9bbb45d735c76b68126ae19ae8c6b9379f9dc13acefb446c9823e86",
+            "insts.bin": "f2c6a363395c002c2fa60bb9fe587c194bc07b9b757ed218d93969563adc2a86",
+            "insts.elf": "251d57fe6abab1c10057194ef648e75454ae616d1f44aa3ac440376ab64bf44b"
+          },
+          "max_text": 5568,
+          "max_l1_buffer_end": 61448
+        }
+      },
+      "fixtures": {
+        "weights.bin": "1d2b28d4f30b9b4c49538f4807f28a473cf75c020a02e33fbc841b1ec910186d",
+        "activations.bin": "8d2ce3f60b76f53f214f0434303ea4968b019b776ebfd8e147721a307e3a84cd",
+        "reference-low.bin": "2f89b0b333e764e633e03e2e1ead8e47a6bf74b63d1ac85b91fe64bcab7134f7"
+      },
+      "harness_sha256": "ca884513c91a0e07a783f8f2fd190c809bd2d71ac3ad6738b5729345db519ad6",
+      "effective_tflops": {
+        "before": 2.0719273634784847,
+        "after": 2.1339685140775093
+      }
+    }
+  ],
+  "tail_cases": {
+    "tail-compare-high": {
+      "before": {
+        "median_ms": 0.3265,
+        "min_ms": 0.325,
+        "max_ms": 0.33
+      },
+      "after": {
+        "median_ms": 0.2705,
+        "min_ms": 0.266,
+        "max_ms": 0.2825
+      },
+      "change_percent": -17.15160796324655,
+      "paired_wins": 5
+    },
+    "tail-compare-low": {
+      "before": {
+        "median_ms": 0.336,
+        "min_ms": 0.3285,
+        "max_ms": 0.34
+      },
+      "after": {
+        "median_ms": 0.282,
+        "min_ms": 0.275,
+        "max_ms": 0.285
+      },
+      "change_percent": -16.07142857142858,
+      "paired_wins": 5
+    }
+  },
+  "validation": {
+    "full_model": "PASS: 64-layer captured logits/state and 16-token greedy equivalence; independent per-layer residual oracle NOT MEASURED",
+    "evidence_audit": {
+      "summary": "PASS",
+      "local_evidence": "PASS",
+      "files_verified": 1955,
+      "dispatches_verified": 1100
+    },
+    "settings_merge_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
+    "context_capacity": "Earlier 16/8 observations have no proven trigger/recovery; server campaign capacity brackets and journal NOT RECORDED"
+  },
+  "cli_sha256": "c8c1ec5eebebc6e7e1d28114393870d386a6eeb545b3277dac651b0ff1aa66ad",
+  "end_to_end_acceptance": false,
+  "production_default_dma_batch": 1,
+  "acceptance": {
+    "report": "specs/open-engine/reports/qwen38-q4-gemm-dma.md",
+    "report_sha256": "f235923f6a62348842e3d0dbef616375d33ae5369c2adeb40632309427fb04b7",
+    "recommendation": "Opt-in numerical/performance evidence retained; prerequisites merged; historical runtime and server capacity coverage remain qualified; default unchanged",
+    "numerical": "PASS: 147 checks, byte-exact logits and state, identical 16-token greedy",
+    "prefill": [
+      {
+        "tokens": 256,
+        "before_ms": 29432,
+        "after_ms": 28759,
+        "change_pct": -2.29,
+        "pairs_faster": "5/5",
+        "verdict": "PASS"
+      },
+      {
+        "tokens": 512,
+        "before_ms": 59365,
+        "after_ms": 58186,
+        "change_pct": -1.99,
+        "pairs_faster": "5/5",
+        "verdict": "PASS"
+      },
+      {
+        "tokens": 1024,
+        "before_ms": 118743,
+        "after_ms": 118029,
+        "change_pct": -0.6,
+        "pairs_faster": "4/5",
+        "verdict": "FAIL",
+        "campaign": "initial five-pair experiment"
+      },
+      {
+        "tokens": 1024,
+        "before_ms": 121395.0,
+        "after_ms": 118727.0,
+        "change_pct": -2.198,
+        "paired_median_change_pct": -2.432,
+        "pairs_faster": "14/14",
+        "verdict": "PASS",
+        "campaign": "fixed 14-pair confirmation",
+        "ci95_median_delta_ms": [
+          -3683.0,
+          -1984.0
+        ]
+      },
+      {
+        "tokens": 3008,
+        "before_ms": 377564.5,
+        "after_ms": 369279.5,
+        "change_pct": -2.19,
+        "pairs_faster": "2/2 (two runs per arm; supporting only)",
+        "verdict": "supporting",
+        "text_tokens": 3000
+      }
+    ],
+    "decode": [
+      {
+        "scenario": "256-token prompt",
+        "change_pct": -0.22
+      },
+      {
+        "scenario": "512-token prompt",
+        "change_pct": 0.64
+      },
+      {
+        "scenario": "1024-token prompt",
+        "change_pct": 0.63
+      },
+      {
+        "scenario": "3008-token engine prompt, context allocation 4096; two runs per arm",
+        "change_pct": -0.33
+      }
+    ],
+    "memory": "Measured process RSS within +3% gate; confirmation +0.001%; driver-owned NPU memory NOT MEASURED",
+    "integration": {
+      "oflm_run": "PASS both arms",
+      "server_aba": "PASS for both private arms on XRT 2.25 with arm selection and live maps",
+      "boundaries": "9/9 PASS exact bytes",
+      "context_reset_endpoint": "N/A on this build"
+    },
+    "context_capacity": "NOT ESTABLISHED during server campaign: no before/after brackets or full journal capture",
+    "arm_separation": "92 kernel files compared; only 20 GEMM files differ",
+    "commits": {
+      "baseline": "836072db",
+      "candidate": "34419a6b",
+      "diagnostics": "b4ee9f22"
+    },
+    "not_measured": [
+      "HTTP streaming TTFT",
+      "independent per-layer residual oracle",
+      "Windows",
+      "driver-owned NPU memory",
+      "freshly rebuilt tiled exports",
+      "14-pair re-timing on XRT 2.25",
+      "thermal-controlled re-runs",
+      "historical benchmark loaded-library identity",
+      "server campaign capacity brackets and kernel-journal coverage"
+    ],
+    "confirmation": {
+      "criterion": "specs/open-engine/reports/qwen38-q4-gemm-1024-confirmation-criterion.md",
+      "criterion_sha256": "cd564a5fa4a5cd05238bda004f2226f64a029b1873a448d02b09b69284939a7a",
+      "stats": {
+        "pairs": 14,
+        "per_pair_delta_ms": [
+          -4914.0,
+          -3663.0,
+          -1526.0,
+          -1092.0,
+          -3683.0,
+          -2815.0,
+          -2612.0,
+          -4479.0,
+          -3141.0,
+          -1984.0,
+          -1768.0,
+          -34047.0,
+          -2112.0,
+          -3146.0
+        ],
+        "per_pair_rel_pct": [
+          -4.046,
+          -3.037,
+          -1.267,
+          -0.901,
+          -3.032,
+          -2.324,
+          -2.153,
+          -3.635,
+          -2.541,
+          -1.612,
+          -1.45,
+          -22.264,
+          -1.757,
+          -2.616
+        ],
+        "faster": 14,
+        "median_rel_pct": -2.432,
+        "median_delta_ms": -2978,
+        "iqr_ms": [
+          -3683.0,
+          -1984.0
+        ],
+        "ci95_median_delta_ms": [
+          -3683.0,
+          -1984.0
+        ],
+        "decode_change_pct": -0.722,
+        "rss_change_pct": 0.001,
+        "verdicts": {
+          "median_at_least_1pct": true,
+          "at_least_12_of_14_faster": true,
+          "ci_entirely_below_zero": true,
+          "decode_ok": true,
+          "rss_ok": true
+        },
+        "PASS": true,
+        "before_prefill_ms": [
+          121447.0,
+          120619.0,
+          120482.0,
+          121139.0,
+          121457.0,
+          121137.0,
+          121343.0,
+          123202.0,
+          123616.0,
+          123049.0,
+          121952.0,
+          152926.0,
+          120171.0,
+          120266.0
+        ],
+        "after_prefill_ms": [
+          116533.0,
+          116956.0,
+          118956.0,
+          120047.0,
+          117774.0,
+          118322.0,
+          118731.0,
+          118723.0,
+          120475.0,
+          121065.0,
+          120184.0,
+          118879.0,
+          118059.0,
+          117120.0
+        ],
+        "bootstrap_seed": 20261115,
+        "bootstrap_resamples": 10000,
+        "bootstrap_indices": [
+          249,
+          9749
+        ]
+      },
+      "outlier": "pair 11 excluded in a sensitivity check: 13/13 faster, median -2.32%, CI (-3663,-1984)",
+      "conditions": {
+        "boot": "9285622f-257b-4e83-87b0-494393f16623",
+        "loadavg_start": "0.92 0.86 1.44",
+        "governor": "powersave",
+        "thermal_c": "54 (acpitz, not NPU die)",
+        "capacity_before_after": "Three observations of 16 before and after; no parsed errors in probe windows, not continuous campaign coverage",
+        "runtime": "Historical process mappings NOT RECORDED; later benchmark-shape probes use matching XRT 2.26.0"
+      },
+      "raw_result": "Models/qwen38-27b/pr3-gemm/confirm-1024/result.json",
+      "raw_result_sha256": "b7bb4994f5ed6e12b89368b39f50b22713b79ace930199992bdfb823318a1503",
+      "runtime": "Historical process mappings NOT RECORDED; later benchmark-shape probes use matching XRT 2.26.0"
+    },
+    "runtime_verification": "Historical benchmark maps NOT RECORDED. Later benchmark-shape processes match XRT 2.26.0; server main processes match XRT 2.25.00.",
+    "scope_review": {
+      "measurement_base": "836072db",
+      "intended_base": "9d77431a683ffafc4060c59debe463d696670f4a",
+      "upstream_target": "d7c145f55028c34321ccc78a4db35c026f2bc4dc",
+      "prerequisites": "Prefill startup-policy and manifest-compatibility support merged into upstream main",
+      "prerequisites_merged": true,
+      "option": "Based on current main; no stacked prerequisite",
+      "review_target": "9d77431a683ffafc4060c59debe463d696670f4a",
+      "rebase_performed": true
+    },
+    "server_candidate": {
+      "verdict": "PASS",
+      "record": "Models/qwen38-27b/pr3-gemm/accept-server-runtime/result.json",
+      "record_sha256": "05b23da97500dee92127121a5a7dad2ac6d4ed3de86f74ef3ce47b0c6b4c222e",
+      "arms": {
+        "before": {
+          "verdict": "PASS",
+          "kernel_directory": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr3-gemm/model-batch1",
+          "manifest_sha256": "744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee",
+          "gemm_programs": 10,
+          "libraries": [
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
+          ],
+          "graded_pass": 11,
+          "not_applicable": 1,
+          "library_identity": {
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+              "bytes": 1306056,
+              "sha256": "0b6c3c09ba0b2461f2feeae8d30318cf80c653c795f70b60a3504478178576ca"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+              "bytes": 3230368,
+              "sha256": "52cf8a81d15b8eff1e34ceabe3d4b690575bd8fe377926f01f9c4dbe71c45026"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00",
+              "bytes": 534944,
+              "sha256": "1f9123632af30c5b422ac42535aed6c87e7ef5dbc578b007e25dd752a0c0d620"
+            }
+          }
+        },
+        "after": {
+          "verdict": "PASS",
+          "kernel_directory": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr3-gemm/model-batch4",
+          "manifest_sha256": "744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee",
+          "gemm_programs": 10,
+          "libraries": [
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00"
+          ],
+          "graded_pass": 11,
+          "not_applicable": 1,
+          "library_identity": {
+            "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_core.so.2.25.00",
+              "bytes": 1306056,
+              "sha256": "0b6c3c09ba0b2461f2feeae8d30318cf80c653c795f70b60a3504478178576ca"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00",
+              "bytes": 3230368,
+              "sha256": "52cf8a81d15b8eff1e34ceabe3d4b690575bd8fe377926f01f9c4dbe71c45026"
+            },
+            "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00": {
+              "resolved": "/usr/lib/x86_64-linux-gnu/libxrt_driver_xdna.so.2.25.00",
+              "bytes": 534944,
+              "sha256": "1f9123632af30c5b422ac42535aed6c87e7ef5dbc578b007e25dd752a0c0d620"
+            }
+          }
+        }
+      },
+      "arm_separation": {
+        "gemm_programs": 10,
+        "changed": [
+          "gemm_n14336_k5120",
+          "gemm_n14336_k5120_low",
+          "gemm_n16384_k5120",
+          "gemm_n16384_k5120_low",
+          "gemm_n34816_k5120",
+          "gemm_n34816_k5120_low",
+          "gemm_n5120_k17408",
+          "gemm_n5120_k17408_low",
+          "gemm_n5120_k6144",
+          "gemm_n5120_k6144_low"
+        ],
+        "unchanged": 0,
+        "manifest_same": true
+      },
+      "runtime_comparable": true,
+      "same_answer_between_arms": true,
+      "historical": {
+        "result": "utilities/prefill-block/runs/isolation-aba-20261115-223324/result.json",
+        "kernels": "production-v2/kernels-model",
+        "status": "superseded for candidate validation"
+      },
+      "capacity_validation": "NOT ESTABLISHED: no before/after capacity brackets or journal window"
+    },
+    "runtime_provenance": {
+      "benchmark": {
+        "batch1": {
+          "versions": [
+            "2.26.0"
+          ],
+          "paths": [
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+          ],
+          "sha256": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068"
+          },
+          "record_sha256": "19f28d9c4622f0bba48ffa491d2d12e1457998142ee64581784b41d3a2442435"
+        },
+        "batch4": {
+          "versions": [
+            "2.26.0"
+          ],
+          "paths": [
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+          ],
+          "sha256": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068"
+          },
+          "record_sha256": "32ba2480220dec11806dcded6be281fca0a7689793036ac264c15a0a06fb8cd8"
+        }
+      },
+      "benchmark_comparable": true,
+      "benchmark_runtime": "Later benchmark-shape probes: XRT 2.26.0 at /opt/xilinx/xrt/lib for both arms; historical run not verified",
+      "server": "XRT 2.25.00 distro libraries for both arms",
+      "historical_claim": "Historical processes UNVERIFIED; later reproduction is not retroactive library provenance",
+      "driver_records": "omp_policy.py now stores runtime_libraries per measured process",
+      "evidence": {
+        "envsh": "Models/qwen38-27b/pr3-gemm/accept-runtime-envsh/provenance.json",
+        "envsh_sha256": "63503c71c1702add9766b26e6dd7a7a66b75415230da611e6a970eaf7acb05cf"
+      }
+    }
+  }
+}

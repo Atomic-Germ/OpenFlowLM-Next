@@ -64,8 +64,17 @@ from recipes.load import default_spec, load_spec, spec_from_model_dir  # noqa: E
 from recipes.manifest import dumps, manifest  # noqa: E402
 
 # knobs that must NOT leak in from the caller's shell
-CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC", "DX_HEAD", "GQP_WEIGHT_LOW")
+CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES",
+         "OPEN_KERNELS_SPEC", "DX_HEAD", "GQP_WEIGHT_LOW", "GQP_DMA_BATCH")
 FILES = ("final.xclbin", "insts.bin")
+
+
+def build_environment(knobs: dict, spec_file: Path) -> dict:
+    """Only recipe knobs, never ambient experimental overrides, select a build."""
+    env = {k: v for k, v in os.environ.items() if k not in CLEAR}
+    env.update(knobs)
+    env["OPEN_KERNELS_SPEC"] = str(spec_file)
+    return env
 
 
 # ————————————————————————————————————————————————————————————————
@@ -391,9 +400,7 @@ def _build_one(name: str, sets: dict, spec_file: Path, stage_root: Path | None =
 
     out = _bdir(name, sets)
     knobs = sets[name]["env"]
-    env = {k: v for k, v in os.environ.items() if k not in CLEAR}
-    env.update(knobs)
-    env["OPEN_KERNELS_SPEC"] = str(spec_file)
+    env = build_environment(knobs, spec_file)
     t0 = time.time()
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
