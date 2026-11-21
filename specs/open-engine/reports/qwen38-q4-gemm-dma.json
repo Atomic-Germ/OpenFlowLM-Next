@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT: opt-in numerical/performance evidence retained; stacked dependency and provenance/capacity limitations explicit",
+  "status": "DRAFT: opt-in numerical/performance evidence retained on current main; provenance/capacity limitations explicit",
   "baseline_commit": "836072db",
   "candidate_commit": null,
   "candidate_identity": "measured source SHA-256 snapshot recorded below; containing review commit records the draft",
@@ -677,8 +677,8 @@
   "production_default_dma_batch": 1,
   "acceptance": {
     "report": "specs/open-engine/reports/qwen38-q4-gemm-dma.md",
-    "report_sha256": "5f26721d3ccd9f62036ccf2bc5370257d239280b60bef821050bf365765c9cda",
-    "recommendation": "KEEP DRAFT for standalone upstream merge: stacked dependency; historical runtime and server capacity coverage remain qualified; default unchanged",
+    "report_sha256": "f235923f6a62348842e3d0dbef616375d33ae5369c2adeb40632309427fb04b7",
+    "recommendation": "Opt-in numerical/performance evidence retained; prerequisites merged; historical runtime and server capacity coverage remain qualified; default unchanged",
     "numerical": "PASS: 147 checks, byte-exact logits and state, identical 16-token greedy",
     "prefill": [
       {
@@ -885,14 +885,14 @@
     },
     "runtime_verification": "Historical benchmark maps NOT RECORDED. Later benchmark-shape processes match XRT 2.26.0; server main processes match XRT 2.25.00.",
     "scope_review": {
-      "intended_base": "836072db",
-      "upstream_target": "9b1409d3e150e3602936307f5ff725c7bb4ac8af",
-      "prerequisites": "Earlier OpenMP startup-policy and manifest-mapping work must land first or be an explicit stacked base",
-      "option": "Stacked on the prefill startup-policy and manifest-compatibility base, not yet in upstream main",
-      "merge_base_check": "git merge-base --is-ancestor 836072db upstream/main exits 1",
-      "review_target": "836072db",
-      "rebase_performed": false,
-      "base_tip_ancestor_of_upstream": false
+      "measurement_base": "836072db",
+      "intended_base": "9d77431a683ffafc4060c59debe463d696670f4a",
+      "upstream_target": "d7c145f55028c34321ccc78a4db35c026f2bc4dc",
+      "prerequisites": "Prefill startup-policy and manifest-compatibility support merged into upstream main",
+      "prerequisites_merged": true,
+      "option": "Based on current main; no stacked prerequisite",
+      "review_target": "9d77431a683ffafc4060c59debe463d696670f4a",
+      "rebase_performed": true
     },
     "server_candidate": {
       "verdict": "PASS",

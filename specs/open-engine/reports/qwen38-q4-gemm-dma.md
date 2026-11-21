@@ -13,12 +13,11 @@ weights, kernel ABI, manifest schema, routing, attention or DeltaNet arithmetic
 changes. Ordinary exports clear ambient tuning; the five private replay builders
 copy/hash the new planner. No new model support or precompiled assets are shipped.
 
-Review the DMA optimization against the prefill-startup-policy and
-manifest-compatibility base `836072db` (branch `perf/npu-prefill-scheduling`).
-At the checked upstream main `9b1409d3`, that tip is not an ancestor. Land those
-prerequisites first or review against their branch. The broad upstream diff
-includes earlier OpenMP and manifest-mapping work and is not the GEMM-only
-review range.
+The DMA optimization is based on main `9d77431a`, which includes upstream main
+`d7c145f5`. The prefill-startup-policy and manifest-compatibility prerequisites
+are merged upstream, so the review diff contains only the GEMM change and its
+validation assets. Historical measurements retain their original source base
+`836072db`; rebasing does not turn those captures into measurements of current main.
 
 ## Evidence and machine
 
@@ -118,6 +117,6 @@ Production promotion is not requested. Remaining NOT MEASURED / unverified:
 independent per-layer residual oracle, HTTP streaming TTFT, driver-owned NPU
 memory, Windows, rebuilt tiled exports, device-active/transfer attribution,
 thermal-controlled repetition, verified historical runtime identity and the
-server campaign's capacity brackets/journal. The upstream dependency must land
-before a standalone upstream merge. Do not start another optimization campaign
+server campaign's capacity brackets/journal. The upstream dependency is merged;
+the remaining validation qualifications still apply. Do not start another optimization campaign
 to conceal an unmeasured gate or change precision/defaults to bypass one.

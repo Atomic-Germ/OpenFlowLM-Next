@@ -40,7 +40,10 @@ def test_shipped_summary_has_paired_shapes_without_claiming_complete_acceptance(
         assert server['arms'][arm]['gemm_programs'] == 10
         assert len(server['arms'][arm]['library_identity']) >= 2
     assert report['acceptance']['runtime_verification'].startswith('Historical benchmark maps NOT RECORDED')
-    assert report['acceptance']['scope_review']['review_target'] == report['baseline_commit']
+    scope = report['acceptance']['scope_review']
+    assert scope['measurement_base'] == report['baseline_commit']
+    assert scope['review_target'] == scope['intended_base']
+    assert scope['prerequisites_merged'] is True and scope['rebase_performed'] is True
 
 
 @pytest.mark.parametrize('field,value', [('end_to_end_acceptance', True),
