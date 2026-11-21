@@ -189,7 +189,8 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // calls. On by default (#109); OFLM_OPEN_GEMM_BLOCK=0 turns it off. The
         // whole prompt runs in GT-wide blocks, the tail padded with a repeated
         // in-range id (hardware-proven exact: the real columns' output does not
-        // depend on the padding), never falling back to step(). A kernel set with
+        // depend on the padding), falling back to step() only for a padded tail that
+        // would pass the context capacity. A kernel set with
         // no gemm_block program (GT == 0) runs exactly the sequential path this
         // engine always has.
         return guarded([&] {
@@ -271,9 +272,12 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                     // is available even when the route then fails. The tail is padded to a
                     // block only when it is at least `min_prompt` long; below that it is
                     // stepped, because a block costs its full width regardless.
+                    // n_block drops a padded tail that would write KV rows past max_ctx
+                    const size_t n_block = host::block_prefill_tokens(static_cast<size_t>(core_->position()), ids.size(), GT,
+                                                                      core_->max_ctx(), core_->gemm_block_pads_cache());
                     const size_t full_blocks = ids.size() / GT;
                     const size_t tail = ids.size() % GT;
-                    const size_t padded_tail = (tail >= min_prompt) ? 1 : 0;
+                    const size_t padded_tail = (n_block == ids.size() && tail >= min_prompt) ? 1 : 0;
                     const size_t passes = full_blocks + padded_tail;
                     if (report_route)
                         std::fprintf(stderr,
@@ -368,8 +372,8 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                         // remain; anything shorter is stepped one at a time, which Phase 26
                         // proved produces the same state and the same token. Without this a
                         // 257-token prompt cost two passes instead of one plus one token.
-                        while (i < ids.size()) {
-                            const size_t remaining = ids.size() - i;
+                        while (i < n_block) {
+                            const size_t remaining = n_block - i;
                             if (remaining < min_prompt) break;
                             const size_t t_real = std::min(GT, remaining);
                             std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
