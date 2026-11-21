@@ -133,7 +133,7 @@ struct OmpWaitPolicy {
         g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
-        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+        // Linux installs the default through omp_policy.cpp before libgomp loads.
 #endif
     }
 };
@@ -4414,6 +4414,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
+    g.key_head_tiled = gb.key_head_tiled;
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
@@ -5028,6 +5029,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
     host::DeltaGeom g;
     g.T = T; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
+    g.key_head_tiled = gb.key_head_tiled;
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     // DeltaNet still goes block by block in order: S and the conv rows chain through it
     gemm_phase(l, gb.program[0], B, T, hid, nch + vw,

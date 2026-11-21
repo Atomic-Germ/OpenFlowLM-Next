@@ -45,7 +45,7 @@ def build(a):
         helpers = [Path(__file__), Path(trace.__file__), Path(trace.paired.__file__),
                    Path(repeat_tool.__file__), trace.HERE/'trace.hpp']
         r['sources'].update({str(p): digest(p) for p in helpers})
-        for rel in ('src/include', 'open_kernels', 'specs'):
+        for rel in ('src/include', 'src/gguf', 'open_kernels', 'specs'):
             (out/'source'/rel).symlink_to(ROOT/rel, target_is_directory=True)
         cpp, cli = instrument((dst/'core.cpp').read_text(), (dst/'cli.cpp').read_text(), a.repeat, plain)
         (dst/'core.cpp').write_text(cpp)

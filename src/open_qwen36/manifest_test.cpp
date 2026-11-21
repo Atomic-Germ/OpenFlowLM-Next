@@ -322,6 +322,23 @@ int main(int argc, char** argv) {
     // the block prefill route (OPEN-PREFILL-BATCH)
     const auto& lg = lin.gemm_block;
     const auto& fg = full.gemm_block;
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layer_types"]["linear_attention"]["gemm_block"].erase("key_head_mapping");
+        check(!Manifest::parse(j, "legacy DeltaNet").layer_types.at("linear_attention").gemm_block.key_head_tiled,
+              "unmarked DeltaNet export retains grouped key heads");
+    }
+    for (const char* mapping : {"grouped", "tiled"}) {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layer_types"]["linear_attention"]["gemm_block"]["key_head_mapping"] = mapping;
+        const auto parsed = Manifest::parse(j, "DeltaNet head mapping");
+        check(parsed.layer_types.at("linear_attention").gemm_block.key_head_tiled ==
+                  (std::string(mapping) == "tiled"), std::string("DeltaNet mapping: ") + mapping);
+    }
+    refused_manifest(argv[1], "key_head_mapping", "unknown DeltaNet mapping refused",
+                     [](json& j) { j["layer_types"]["linear_attention"]["gemm_block"]["key_head_mapping"] = "unknown"; });
+    refused_manifest(argv[1], "key_heads", "zero DeltaNet key heads refused",
+                     [](json& j) { j["layer_types"]["linear_attention"]["gemm_block"]["key_heads"] = 0; });
     check(lg.t == 256 && lg.kind == "linear" && lg.program.size() == 2 && lg.program[0].kernel == "gemm_n12288_k2048" &&
           lg.program[1].kernel == "gemm_n2048_k4096" && lg.program[0].args[0] == "gqkvz_w" && lg.program[1].args[2] == "gemm_y_n2048",
           "linear route: two GEMM steps");

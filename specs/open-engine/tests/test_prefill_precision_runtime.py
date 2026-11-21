@@ -76,6 +76,18 @@ def test_four_product_order_and_output_ownership(native):
     subprocess.run([str(native)],check=True)
 
 
+def test_linear_head_mapping_is_exported_and_unknown_mapping_refused(native, tmp_path):
+    m = paired_manifest()
+    g = m['layer_types']['linear_attention']['gemm_block']
+    assert g['key_head_mapping'] == 'tiled'
+    assert run_manifest(native, tmp_path, m).returncode == 0
+    g['key_head_mapping'] = 'unknown'
+    result = run_manifest(native, tmp_path, m)
+    assert result.returncode != 0 and 'key_head_mapping' in result.stderr
+    del g['key_head_mapping']
+    assert run_manifest(native, tmp_path, m).returncode == 0
+
+
 def test_paired_manifest_and_legacy_both_load(native,tmp_path):
     m=paired_manifest()
     assert run_manifest(native,tmp_path,m).returncode == 0

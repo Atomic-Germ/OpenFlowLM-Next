@@ -91,7 +91,7 @@ def build(a):
                    Path(parent.parent.trace.__file__), Path(parent.parent.paired.__file__),
                    Path(parent.parent.kernels.__file__), Path(repeat.__file__), *headers]
         evidence['sources'].update({str(p): digest(p) for p in helpers})
-        for rel in ('src/include', 'open_kernels', 'specs'):
+        for rel in ('src/include', 'src/gguf', 'open_kernels', 'specs'):
             (out/'source'/rel).symlink_to(ROOT/rel, target_is_directory=True)
         cpp, hpp = patch((dst/'core.cpp').read_text(), (dst/'core.hpp').read_text(), a.variant, lows)
         cpp, cli = parent.parent.trace.patch(cpp, (dst/'cli.cpp').read_text())

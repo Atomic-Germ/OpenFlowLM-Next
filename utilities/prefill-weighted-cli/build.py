@@ -72,7 +72,7 @@ def build(a):
         helpers=[Path(__file__),HERE/'weighted_gemm.hpp',Path(trace.__file__),trace.HERE/'trace.hpp',
                  Path(paired.__file__),paired.HERE/'paired_gemm.hpp',Path(kernels.__file__)]
         e['sources'].update({str(p):digest(p) for p in helpers})
-        for rel in ('src/include','open_kernels','specs'):
+        for rel in ('src/include','src/gguf','open_kernels','specs'):
             (out/'source'/rel).symlink_to(ROOT/rel,target_is_directory=True)
         cpp,hpp=(dst/'core.cpp').read_text(),(dst/'core.hpp').read_text()
         cpp,hpp=patch(cpp,hpp,low) if a.variant=='candidate' else paired.patch(cpp,hpp)

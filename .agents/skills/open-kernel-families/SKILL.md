@@ -118,6 +118,17 @@ Container facts that matter:
 
 ## Qwen3.6-MoE (`recipes/qwen36moe.py`)
 
+The linear block route's `key_head_mapping` is part of the export contract.
+Current recipes emit `tiled`: value head `h` reads key head `h % key_heads`,
+matching `dn_glue.h`. An absent field means the legacy `grouped` mapping,
+`h / (value_heads / key_heads)`. Host prefill and speculative rollback both
+read it from the manifest; never infer it from the model name or quant type.
+Unmarked exports compiled with modulo-head kernels must be re-exported to
+declare `tiled`; do not relabel a grouped binary as tiled. The parser refuses
+unknown mappings. Host numerical tests cover both mappings and reject a tape
+recorded with a different one. No weight conversion or kernel rebuild is
+needed to run an existing grouped export.
+
 The whole-layer designs are `designs/layer_x`:
 
 - `lx.py` — linear-attention (DeltaNet) layer.
