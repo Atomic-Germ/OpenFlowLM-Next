@@ -76,6 +76,11 @@ static std::optional<std::string> get_cli_flag_value(const program_args_t& args,
         if (args.speculative) return "true";
         return std::nullopt;
     }
+    if (flag == "--fit") {
+        // Same switch semantics as --speculative: only an explicit --fit wins.
+        if (args.fit) return "true";
+        return std::nullopt;
+    }
     return std::nullopt;
 }
 

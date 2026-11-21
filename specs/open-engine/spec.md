@@ -2812,8 +2812,11 @@ before it, both misread the container identically and every comparison passed.
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `designs/dense/dx.py`,
 `recipes/dense.py`, `model/replica_dense.py`)
 **Test category:** unit (`tests/test_qwen2.py`, `tests/test_op_range.py`) for the layout and
-the refusal; manual (the procedure below, needs the NPU and a Qwen2.5 container) for the
-numbers
+the refusal; `designs/attn/probe_dense.py` for the numbers -- the attention gate now streams
+the bias fifo the production worker uses, so a new qwen2 geometry is validated by
+`oflm dev build-new-spec` like any other family (Qwen2.5-1.5B, 2026-11-16). The manual
+procedure below remains the historical record and the fallback when a whole-layer run is
+wanted; it is no longer required to enter a new bias tuple.
 
 A family whose q, k and v projections carry a per-channel bias shall have it added to
 each projection's output before the q/k norm and the rotation -- `q = q + b_q`, and the

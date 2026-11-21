@@ -73,6 +73,15 @@ BERT_SPEC = GEMM_RTP / "families.json"
 BERT_CHECK = GEMM_RTP / "check_design_sets.py"
 XCLBINS = REPO / "src" / "xclbins"
 
+# One entry per export attempt so the closing line can name WHICH sets worked
+# and which did not, instead of only counting them. Specs/exports run in
+# parallel; appends under the GIL are safe and ordering is not significant.
+RESULTS: dict[str, list[str]] = {"ok": [], "failed": []}
+
+
+def record(name: str, ok: bool) -> None:
+    RESULTS["ok" if ok else "failed"].append(name)
+
 # XILINX_XRT is honoured when set so a relocated XRT (the Nix builds combine
 # XRT with the amdxdna plugin in their own prefix) supplies pyxrt too.
 XRT_ROOT = Path(os.environ.get("XILINX_XRT") or "/opt/xilinx/xrt")
@@ -199,6 +208,7 @@ def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> 
             futures = {ex.submit(build_spec, spec): spec for spec in specs}
             for fut in as_completed(futures):
                 name, ok = fut.result()
+                record(name, ok)
                 if ok:
                     print(f"   ok: {name}", flush=True)
                 else:
@@ -207,6 +217,7 @@ def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> 
     else:
         for spec in specs:
             name, ok = build_spec(spec)
+            record(name, ok)
             if ok:
                 print(f"   ok: {name}", flush=True)
             else:
@@ -256,13 +267,38 @@ def export_diffusion_sets(py: Path, force: bool, jobs: int = 4,
             cmd.append("--force")
         if subprocess.run(cmd).returncode:
             failed += 1
+            record(f"diffusion:{fam}", False)
             continue
         # --install copies the runtime files only; src/ must not carry the build tree
         if subprocess.run([str(py), str(script), "--family", fam, "--resolutions", DIT_RESOLUTIONS,
                            "--edits", DIT_EDITS, "--out", str(scratch),
                            "--install", str(shipped)]).returncode:
             failed += 1
+            record(f"diffusion:{fam}", False)
+        else:
+            record(f"diffusion:{fam}", True)
     return failed
+
+
+WHISPER_EXPORT = REPO / "open_kernels" / "export_whisper_kernels.py"
+WHISPER_DEFAULT_NAME = "Whisper-V3-Turbo-NPU2"
+
+
+def export_whisper_set(py: Path, force: bool, no_fa: bool = False) -> int:
+    """The open whisper_gemm kernel set (+ fa/ by default). Failures count."""
+    script = WHISPER_EXPORT
+    if not script.is_file():
+        print(f"-- whisper: exporter not found at {script}", flush=True)
+        return 1
+    print(f"-- whisper: {WHISPER_DEFAULT_NAME}", flush=True)
+    cmd = [str(py), str(script), "--model-name", WHISPER_DEFAULT_NAME]
+    if force:
+        cmd.append("--force")
+    if no_fa:
+        cmd.append("--no-fa")
+    ok = subprocess.run(cmd).returncode == 0
+    record(WHISPER_DEFAULT_NAME, ok)
+    return 0 if ok else 1
 
 
 def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
@@ -304,6 +340,7 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
         for fam in group:
             name, ok = build_family(fam)
             results.append((name, ok))
+            record(name, ok)
             if ok:
                 print(f"   ok: {name}", flush=True)
             else:
@@ -325,6 +362,7 @@ def export_bert_sets(py: Path, force: bool, jobs: int = 1) -> int:
 
     # The built sets and the spec they were built from must agree.
     rc = subprocess.run([str(py), str(BERT_CHECK), "--xclbins", str(XCLBINS)]).returncode
+    record("check_design_sets", rc == 0)
     if rc != 0:
         failed.append("check_design_sets")
         print("   FAILED: check_design_sets (sets disagree with families.json)", flush=True)
@@ -348,6 +386,14 @@ def main() -> int:
     ap.add_argument("--diffusion-family", default="",
                     help="comma-separated diffusion families (default: every family the "
                          "exporter can build -- FLUX.2-klein-4B-NPU2, -9B-NPU2, ...)")
+    ap.add_argument("--whisper", action="store_true",
+                    help="also build the open whisper_gemm kernel set (Whisper-V3-Turbo-NPU2)")
+    ap.add_argument("--whisper-only", action="store_true",
+                    help="only build the open whisper_gemm kernel set")
+    ap.add_argument("--skip-whisper", action="store_true",
+                    help="skip the open whisper_gemm kernel set")
+    ap.add_argument("--whisper-no-fa", action="store_true",
+                    help="when building whisper, skip fa/ (host attention fallback)")
     ap.add_argument("-j", "--jobs", type=int, default=0,
                    help="parallel kernel builds (default: 0 = auto-detect CPU count)")
     a = ap.parse_args()
@@ -359,8 +405,21 @@ def main() -> int:
         print("FATAL: --skip-bert and --bert-only are mutually exclusive", file=sys.stderr)
         return 1
     if a.diffusion_only:
-        # --diffusion-only is the narrow run: no dense specs, no BERT
+        # --diffusion-only is the narrow run: no dense specs, no BERT, no whisper unless requested
         a.skip_bert = True
+    if a.whisper_only:
+        # --whisper-only is the narrow run
+        a.skip_bert = True
+        a.skip_diffusion = True
+
+    only_modes = sum([bool(a.bert_only), bool(a.diffusion_only), bool(a.whisper_only)])
+    if only_modes > 1:
+        print("FATAL: --bert-only, --diffusion-only, and --whisper-only are mutually exclusive", file=sys.stderr)
+        return 1
+
+    # Whisper is built only when explicitly requested (--whisper/--whisper-only)
+    # to avoid surprising long builds in existing export flows.
+    do_whisper = (a.whisper or a.whisper_only) and not a.skip_whisper
 
     skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
 
@@ -400,35 +459,51 @@ def main() -> int:
     if mlir_aie.is_dir():
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
-    # ---- the three kernel families -------------------------------------------
+    # ---- kernel families -----------------------------------------------------
     n_failed = 0
     specs = []
-    if not a.bert_only and not a.diffusion_only:
+    run_specs = not a.bert_only and not a.diffusion_only and not a.whisper_only
+    if run_specs:
         specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
         if not specs:
             print("FATAL: no kernel specs found", file=sys.stderr)
             return 1
         n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
-    if not a.skip_bert and not a.diffusion_only:
+    if not a.skip_bert and not a.diffusion_only and not a.whisper_only:
         n_failed += export_bert_sets(py, a.force, a.jobs)
 
-    if not a.skip_diffusion:
+    if not a.skip_diffusion and not a.whisper_only:
         fams = [f.strip() for f in a.diffusion_family.split(",") if f.strip()] or None
         n_failed += export_diffusion_sets(py, a.force, a.jobs, fams)
 
+    if do_whisper:
+        n_failed += export_whisper_set(py, a.force, a.whisper_no_fa)
+
     print(flush=True)
-    if n_failed:
-        print(f"kernel export failed: {n_failed} item(s)", flush=True)
+    ok_names, failed_names = RESULTS["ok"], RESULTS["failed"]
+    if failed_names or n_failed:
+        # Name both sides: a dev can decide in one glance whether to fix the
+        # few failures or drop them, without re-reading the interleaved log.
+        print(f"kernel export: {len(ok_names)} succeeded, "
+              f"{len(failed_names) or n_failed} failed", flush=True)
+        if failed_names:
+            print(f"  FAILED: {', '.join(failed_names)}", flush=True)
+        if ok_names:
+            print(f"  ok:     {', '.join(ok_names)}", flush=True)
         return 1
     if a.bert_only:
         print("kernel export ok: BERT design sets", flush=True)
     elif a.diffusion_only:
         print("kernel export ok: diffusion sets", flush=True)
+    elif a.whisper_only:
+        print("kernel export ok: whisper kernel set", flush=True)
     else:
         suffix = " + BERT design sets" if not a.skip_bert else ""
         if not a.skip_diffusion:
             suffix += " + diffusion sets"
+        if do_whisper:
+            suffix += " + whisper kernel set"
         print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 

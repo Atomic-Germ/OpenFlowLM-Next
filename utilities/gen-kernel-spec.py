@@ -37,7 +37,7 @@ except Exception:
 # go through it. The hand-rolled family+hidden match linked Llama-3.2-1B to
 # minicpm5-2b (same family+hidden, HEAD DIM 64 vs 128 -- different kernels).
 sys.path.insert(0, str(ROOT / "open_kernels"))
-from recipes.spec import ModelSpec, SpecError  # noqa: E402
+from recipes.spec import ModelSpec, SpecError, GGUF_FAMILIES  # noqa: E402
 
 
 def _repo_cache(repo: str) -> str:
@@ -111,11 +111,26 @@ def spec_config(repo: str) -> tuple[dict, int | None]:
     return cfg, real_vocab
 
 
+# Some model types are registry families whose kernels are a DIFFERENT recipe's
+# (Nanbeige's GGUF/Config says `nanbeige`, and the shipped Nanbeige4.1 spec is a
+# llama3). Keep that mapping here, next to the spec derivation, rather than
+# adding a recipe alias for a name that is not an architecture.
+RECIPE_ALIASES = {"nanbeige": ("llama", "llama3"), "nanbeige4": ("llama", "llama3")}
+
+
+def recipe_model_type(mt: str) -> str:
+    """The model_type the family's ModelSpec builder reads, not the card's."""
+    return RECIPE_ALIASES.get(mt.strip().lower(), (mt,))[0]
+
+
 def family_from_config(cfg: dict) -> str | None:
     mt = cfg.get("model_type")
     if isinstance(mt, str):
         fam = CONFIG_MODEL_FAMILIES.get(mt.strip().lower())
         if fam:
+            low = fam.strip().lower()
+            if low in RECIPE_ALIASES:
+                return RECIPE_ALIASES[low][1]
             return fam
     for arch in (cfg.get("architectures") or []):
         low = arch.lower()
@@ -151,10 +166,41 @@ def repo_gguf_url(repo: str) -> str | None:
     return f"https://huggingface.co/{repo}/resolve/main/{chosen}"
 
 
+def spec_config_via_base_chain(repo: str):
+    """(base, cfg, real_vocab) from the repo's README base_model chain.
+
+    A quantized repo holds only the GGUF: no config.json, no tokenizer. Its model
+    card names the checkpoint it quantizes, and that checkpoint's repo does carry
+    both. `oflm add` already climbs that chain (finetune -> base -> base, closest
+    first, cycles/depth bounded); do the same here before giving up on config.json
+    and deriving from the GGUF header -- the GGUF names the geometry, but an HF
+    config is what the family builders (LFM2's FF/rope law, layer types, ...) read.
+    """
+    try:
+        from oflm_add import readme_base_chain
+        bases = readme_base_chain(repo)
+    except Exception as exc:                      # noqa: BLE001 - offline / no README
+        print(f"warn: could not read base_model chain for {repo}: {exc}", file=sys.stderr)
+        return None, None, None
+    for base in bases:
+        try:
+            cfg = text_config(fetch_config(base))
+        except Exception:
+            continue
+        real_vocab = fetch_real_vocab(base)
+        if not cfg.get("vocab_size") and real_vocab:
+            cfg["vocab_size"] = real_vocab
+        print(f"config.json not in {repo}; using base model {base}'s config.json")
+        return base, cfg, real_vocab
+    return None, None, None
+
+
 def base_model_from_readme(repo: str) -> str | None:
     try:
         from huggingface_hub import hf_hub_download
-        p = hf_hub_download(repo_id=repo, filename="README.md", local_dir="/tmp/hf_cfg")
+        # Per-repo cache: one shared /tmp/hf_cfg made every repo's README land on
+        # the same path, so a second repo could read the first one's base_model.
+        p = hf_hub_download(repo_id=repo, filename="README.md", local_dir=_repo_cache(repo))
         text = Path(p).read_text(errors="ignore")
     except Exception:
         return None
@@ -230,18 +276,19 @@ def main():
     args = ap.parse_args()
 
     cfg = real_vocab = None
-    if not args.gguf and args.repo:
-        try:
-            cfg, real_vocab = spec_config(args.repo)
-        except Exception as exc:                  # noqa: BLE001 - 404 on config.json
-            # A GGUF-only repo has no config.json, but the file names its own
-            # geometry. Derive from the same file `oflm add` would install.
-            url = repo_gguf_url(args.repo)
-            if not url:
-                raise
-            print(f"no config.json for {args.repo} ({exc}); "
-                  f"deriving the spec from the GGUF header")
-            args.gguf = url
+    base_from_chain = None
+    gguf_url = None
+    gguf_spec = None
+    gguf_error = None
+
+    def write_gguf_spec(spec, source="the GGUF metadata"):
+        stem = args.model_name or (args.repo.split("/")[-1] if args.repo else "model") + "-NPU2"
+        spec["extra"] = {**(spec.get("extra") or {}), "model": stem}
+        out = Path(args.out) if args.out else SPECS_DIR / f"{stem.lower()}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+        print(f"Wrote candidate spec to {out} (from {source})")
+        return 0
 
     if args.gguf:
         # A GGUF names its own geometry: architecture, dimensions, vocab, rope. A gated
@@ -253,14 +300,48 @@ def main():
         if not inv:
             print(f"ERROR: could not read {args.gguf}", file=sys.stderr)
             return 1
-        spec = ModelSpec.from_gguf_metadata(inv[0]).to_dict()
-        stem = args.model_name or (args.repo.split("/")[-1] if args.repo else "model") + "-NPU2"
-        spec["extra"] = {**(spec.get("extra") or {}), "model": stem}
-        out = Path(args.out) if args.out else SPECS_DIR / f"{stem.lower()}.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(spec, indent=2), encoding="utf-8")
-        print(f"Wrote candidate spec to {out} (from the GGUF metadata)")
-        return 0
+        try:
+            spec = ModelSpec.from_gguf_metadata(inv[0]).to_dict()
+        except SpecError as exc:
+            print(f"ERROR: the GGUF header cannot derive a spec ({exc})", file=sys.stderr)
+            return 1
+        return write_gguf_spec(spec)
+
+    if args.repo:
+        # THE FILE FIRST, the same rule `oflm add` uses. A quantized repo's config
+        # is a hint for what the GGUF does not carry, never the source of geometry:
+        # a base config can be a stub (Llama3-2B-Base claims hidden 4096 / 6 layers),
+        # or describe a different family entirely (Nanbeige's card says nanbeige,
+        # the GGUF says llama). Try the header first; use config only when the
+        # header has no recipe or lacks a key the family builder needs.
+        url = repo_gguf_url(args.repo)
+        if url:
+            sys.path.insert(0, str(ROOT / "utilities" / "oflm-add"))
+            from oflm_add import read_gguf_inventory
+            try:
+                inv = read_gguf_inventory(url, limit_mb=96)
+                if inv:
+                    gguf_spec = ModelSpec.from_gguf_metadata(inv[0]).to_dict()
+            except SpecError as exc:
+                gguf_error = exc
+        if gguf_spec is not None:
+            return write_gguf_spec(gguf_spec)
+        try:
+            cfg, real_vocab = spec_config(args.repo)
+        except Exception as exc:                  # noqa: BLE001 - 404 on config.json
+            base, base_cfg, base_rv = spec_config_via_base_chain(args.repo)
+            if base_cfg is not None:
+                base_from_chain, cfg, real_vocab = base, base_cfg, base_rv
+                if gguf_error is not None:
+                    print(f"GGUF header lacks a needed key ({gguf_error}); "
+                          f"using base model {base}'s config.json")
+            else:
+                detail = (str(gguf_error) if gguf_error is not None
+                          else "no config.json at the repo root")
+                print(f"ERROR: cannot derive a spec for {args.repo}: {detail}; "
+                      "no base config and no usable GGUF header",
+                      file=sys.stderr)
+                return 1
     if cfg is None:
         cfg, real_vocab = spec_config(args.repo)
     family = family_from_config(cfg)
@@ -268,15 +349,19 @@ def main():
         print(f"ERROR: could not derive family from config for {args.repo}", file=sys.stderr)
         sys.exit(1)
 
-    bm = base_model_from_readme(args.repo)
+    bm = base_from_chain or base_model_from_readme(args.repo)
     if bm:
         print(f"base_model detected: {bm}")
-        try:
-            base_cfg = text_config(fetch_config(bm))
-            family = family_from_config(base_cfg) or family
-            cfg = base_cfg
-        except Exception as e:
-            print(f"warn: could not fetch base config: {e}")
+        if base_from_chain is None:
+            # The config came from this repo; the base is a family hint only.
+            # When the chain already supplied cfg (and its real_vocab), do not
+            # refetch/overwrite it with a raw config that lost the vocab repair.
+            try:
+                base_cfg = text_config(fetch_config(bm))
+                family = family_from_config(base_cfg) or family
+                cfg = base_cfg
+            except Exception as e:
+                print(f"warn: could not fetch base config: {e}")
 
     out_path = Path(args.out) if args.out else SPECS_DIR / f"{family}-candidate.json"
     kept_model = ""
@@ -307,8 +392,11 @@ def main():
     # one (layer types off full_attn_idxs / layer_types, the family's FF and
     # rope law); the template derivation stays for unknown model types.
     cand = None
+    builder_cfg = dict(cfg)
+    if isinstance(builder_cfg.get("model_type"), str):
+        builder_cfg["model_type"] = recipe_model_type(builder_cfg["model_type"])
     try:
-        cand = ModelSpec.from_hf_config(cfg, real_vocab=real_vocab)
+        cand = ModelSpec.from_hf_config(builder_cfg, real_vocab=real_vocab)
     except SpecError as e:
         print(f"(the family builder refuses this config: {e}; using the derivation)")
 
@@ -329,8 +417,12 @@ def main():
     spec["family"] = family
     spec["hidden"] = cfg.get("hidden_size", spec.get("hidden"))
     spec["num_layers"] = cfg.get("num_hidden_layers", spec.get("num_layers"))
-    if "layer_types" in spec:
-        spec["layer_types"] = ["dense"] * spec["num_layers"]
+    # The derivation for an unknown model_type starts from a template of the
+    # recipe family (or a bare dict). A ModelSpec always needs per-layer types,
+    # so fill them in -- otherwise load_spec dies with a KeyError on a spec this
+    # script itself wrote.
+    if not spec.get("layer_types"):
+        spec["layer_types"] = ["dense"] * int(spec["num_layers"])
     spec["intermediate"] = cfg.get("intermediate_size", spec.get("intermediate"))
     spec["num_heads"] = cfg.get("num_attention_heads", spec.get("num_heads"))
     spec["num_kv_heads"] = cfg.get("num_key_value_heads", spec.get("num_kv_heads"))

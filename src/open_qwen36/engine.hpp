@@ -31,6 +31,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <vector>
@@ -101,6 +102,12 @@ private:
     Snapshot snapshot_;
     bool has_snapshot_ = false;
     std::vector<bf16> logits_;
+    // poisoned_ is set by any I/O thread whose dispatch failed and consumed by
+    // ensure_alive() on the next request. With a multi-threaded server two
+    // threads can observe it true at once and both rebuild the engine (two full
+    // weight loads, two Cores, one left as a race loser). The mutex makes the
+    // check-and-clear atomic: exactly one thread rebuilds.
+    std::mutex rebuild_mu_;
     bool poisoned_ = false;
     std::mt19937 uno_rng_{0};                   ///< the draft rows' noise ids
     SpecPolicy spec_;
@@ -138,11 +145,11 @@ private:
         try {
             return f();
         } catch (const std::exception& e) {
-            poisoned_ = true;
+            { std::lock_guard<std::mutex> lock(rebuild_mu_); poisoned_ = true; }
             note_failure(e.what());
             throw;
         } catch (...) {
-            poisoned_ = true;
+            { std::lock_guard<std::mutex> lock(rebuild_mu_); poisoned_ = true; }
             note_failure("a non-std exception");
             throw;
         }

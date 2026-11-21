@@ -72,8 +72,6 @@ SPEC = load_spec(Path(SPEC_PATH))
 # has head dim 512, a doubled kv head and proportional RoPE). dx.py does the
 # same through `for_spec`; G4_KIND=local|global selects which one this probe builds.
 G = for_spec(SPEC).geometry(SPEC)
-if G.QKVB:
-    raise SystemExit("probe_dense: a family with a q/k/v bias is not covered by this gate")
 if G.RB not in (1, 2, 4):
     raise SystemExit("probe_dense: only the single-row path and the block path (RB 2 or 4) are covered")
 
@@ -96,6 +94,12 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
         return np.ndarray[(n,), np.dtype[dtype]]
 
     elem = ty(E_A, np.uint8)
+    # A q/k/v-bias family streams the three bias vectors on their own fifo,
+    # one element per projection element (dx.py's of_abias). Its element is
+    # half an `elem`: the projection carries KVH/2 heads of f32, the bias
+    # those same heads of bf16.
+    abias = ty(E_A // 2, np.uint8) if G.QKVB else None
+    bz = [abias] if G.QKVB else []
     bhd = ty(HD, bfloat16)            # qn / kn: the norm weights
     brow = ty(KVW, bfloat16)          # a cache row half: KVH heads of bf16
     og_ty = ty(OGH * HD, bfloat16)    # attn_fin writes kOGH heads at a time
@@ -116,9 +120,9 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
     pz = [elem] if NPTAB > 1 else []                       # the record's second element
     h0_arg = [i32] if ACORES > 1 else []                   # only a split needs the head offset
     f_meta = ef("attn_meta", HERE / "attn_meta.cc", [elem, elem] + pz + [bhd, bhd, fcs, pb_ty])
-    f_q = ef("attn_q", HERE / "attn_q.cc", [elem, bhd, fcs, fq, i32])
-    f_k = ef("attn_k", HERE / "attn_k.cc", [elem, bhd, fcs, fhd, brow, i32])
-    f_v = ef("attn_v", HERE / "attn_v.cc", [elem, brow, i32])
+    f_q = ef("attn_q", HERE / "attn_q.cc", [elem] + bz + [bhd, fcs, fq, i32])
+    f_k = ef("attn_k", HERE / "attn_k.cc", [elem] + bz + [bhd, fcs, fhd, brow, i32])
+    f_v = ef("attn_v", HERE / "attn_v.cc", [elem] + bz + [brow, i32])
     f_init = ef("attn_init", HERE / "attn_init.cc", [foacc, fml])
     f_step = ef("attn_step", HERE / "attn_step.cc", [elem, elem, fq, foacc, fml, pb_ty] + h0_arg)
     f_stepn = ef("attn_step_new", HERE / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg)
@@ -127,10 +131,42 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
     f_fin = ef("attn_fin_ng", HERE / "attn_fin_ng.cc", [foacc, fml, og_ty, i32])
 
     inp = ObjectFifo(elem, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))
+    bias_in = ObjectFifo(abias, name="abias", depth=4) if G.QKVB else None
     aout = ObjectFifo(brow, name="aout", depth=2)
     ogs = [ObjectFifo(og_ty, name=f"og{c}", depth=2) for c in range(ACORES)]
 
-    if RB > 1:
+    # The production worker takes the bias fifo as an optional argument after
+    # h0. A q/k/v-bias family passes it; every other family presents IRON the
+    # EXACT function it presented before (no extra fn_arg, no changed build).
+    if G.QKVB and RB > 1:
+        def attn_body(ain, bias, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
+            BODY(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                 f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_, 0, bias)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+
+            def body(ain, bias, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
+                BODY(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_, h0, bias)
+            return body
+    elif G.QKVB:
+        def attn_body(ain, bias, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_):
+            BODY(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                 f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, None, 0, bias)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+
+            def body(ain, bias, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_):
+                BODY(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                     f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, None, h0, bias)
+            return body
+    elif RB > 1:
         def attn_body(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                       f_meta_, f_q_, f_k_, f_v_, f_init_, f_step_, f_stepn_, f_fin_, f_stepb_):
             BODY(ain, aout_, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
@@ -167,34 +203,65 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
                 Buffer(pb_ty, name=f"pb{s}")]
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
-    workers = [Worker(attn_body, fn_args=[inp.cons(), aout.prod(), ogs[0].prod()] + abufs(0) + afns,
+    # A fresh consumer endpoint per worker: sharing one handle across cores makes
+    # IRON refuse the second Worker ("Endpoint already set"). dx.py does the same.
+    bc = lambda: [bias_in.cons()] if G.QKVB else []
+    workers = [Worker(attn_body, fn_args=[inp.cons()] + bc() + [aout.prod(), ogs[0].prod()] + abufs(0) + afns,
                       tile=Tile(0, 2), stack_size=0x1800)]
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[inp.cons(), ogs[c].prod()] + abufs(c) + afns,
+        workers.append(Worker(make_attn_body(c), fn_args=[inp.cons()] + bc() + [ogs[c].prod()] + abufs(c) + afns,
                               tile=Tile(c, 2), stack_size=0x1800))
 
-    def sequence(a_meta, a_qg, a_kvn, a_cache, a_new, a_og, ip, outs):
-        def tap(n, o, l):
-            return TensorAccessPattern((1, n), o, [1, 1, 1, l], [0, 0, 0, 1])
+    def tap(n, o, l):
+        return TensorAccessPattern((1, n), o, [1, 1, 1, l], [0, 0, 0, 1])
 
-        pipe = Pipeline(3)
-        # out: the new row [k' | v'], then each core's own og element
-        pipe.drain(outs[0], a_new, tap(2 * KVW, 0, KVW))
-        pipe.drain(outs[0], a_new, tap(2 * KVW, KVW, KVW))
-        for c in range(ACORES):
-            pipe.drain(outs[1 + c], a_og, tap(NH * HD, c * NHL * HD, NHL * HD))
-        # in: [qn | kn], the position record, q, k, v, the window
-        pipe.fill(ip, a_meta, tap((1 + NPTAB) * E_A, 0, E_A))
-        pipe.fill(ip, a_meta, tap((1 + NPTAB) * E_A, E_A, NPTAB * E_A))
-        pipe.fill(ip, a_qg, tap(QW, 0, QW))
-        pipe.fill(ip, a_kvn, tap(2 * KVW, 0, KVW))
-        pipe.fill(ip, a_kvn, tap(2 * KVW, KVW, KVW))
-        pipe.fill(ip, a_cache, tap(ROWS * 2 * KVW, 0, ROWS * 2 * KVW))
-        pipe.finish()
+    out_args = [ty(2 * KVW, bfloat16), ty(NH * HD, bfloat16)]
+    out_fifos = [aout.cons()] + [o.cons() for o in ogs]
+    if G.QKVB:
+        # Bias vector, bf16 [q | k | v] in head-major order, byte-addressed like
+        # dx.py's consts slots: QW*2 for q, KVW*2 each for k and v.
+        bias_bytes = (QW + 2 * KVW) * 2
+        bias_ty = ty(bias_bytes, np.uint8)
 
-    rt = Runtime(sequence, [ty((1 + NPTAB) * E_A, np.uint8), ty(QW, np.float32), ty(2 * KVW, np.float32),
-                            ty(ROWS * 2 * KVW, bfloat16), ty(2 * KVW, bfloat16), ty(NH * HD, bfloat16),
-                            inp.prod(), [aout.cons()] + [o.cons() for o in ogs]])
+        def sequence(a_meta, a_qg, a_kvn, a_cache, a_bias, a_new, a_og, ip, bp, outs):
+            pipe = Pipeline(3)
+            pipe.drain(outs[0], a_new, tap(2 * KVW, 0, KVW))
+            pipe.drain(outs[0], a_new, tap(2 * KVW, KVW, KVW))
+            for c in range(ACORES):
+                pipe.drain(outs[1 + c], a_og, tap(NH * HD, c * NHL * HD, NHL * HD))
+            pipe.fill(ip, a_meta, tap((1 + NPTAB) * E_A, 0, E_A))
+            pipe.fill(ip, a_meta, tap((1 + NPTAB) * E_A, E_A, NPTAB * E_A))
+            pipe.fill(ip, a_qg, tap(QW, 0, QW))
+            pipe.fill(ip, a_kvn, tap(2 * KVW, 0, KVW))
+            pipe.fill(ip, a_kvn, tap(2 * KVW, KVW, KVW))
+            pipe.fill(ip, a_cache, tap(ROWS * 2 * KVW, 0, ROWS * 2 * KVW))
+            pipe.fill(bp, a_bias, tap(bias_bytes, 0, QW * 2))
+            pipe.fill(bp, a_bias, tap(bias_bytes, QW * 2, KVW * 2))
+            pipe.fill(bp, a_bias, tap(bias_bytes, (QW + KVW) * 2, KVW * 2))
+            pipe.finish()
+
+        in_args = [ty((1 + NPTAB) * E_A, np.uint8), ty(QW, np.float32), ty(2 * KVW, np.float32),
+                   ty(ROWS * 2 * KVW, bfloat16), bias_ty]
+        rt = Runtime(sequence, in_args + out_args + [inp.prod(), bias_in.prod(), out_fifos])
+    else:
+        def sequence(a_meta, a_qg, a_kvn, a_cache, a_new, a_og, ip, outs):
+            pipe = Pipeline(3)
+            # out: the new row [k' | v'], then each core's own og element
+            pipe.drain(outs[0], a_new, tap(2 * KVW, 0, KVW))
+            pipe.drain(outs[0], a_new, tap(2 * KVW, KVW, KVW))
+            for c in range(ACORES):
+                pipe.drain(outs[1 + c], a_og, tap(NH * HD, c * NHL * HD, NHL * HD))
+            # in: [qn | kn], the position record, q, k, v, the window
+            pipe.fill(ip, a_meta, tap((1 + NPTAB) * E_A, 0, E_A))
+            pipe.fill(ip, a_meta, tap((1 + NPTAB) * E_A, E_A, NPTAB * E_A))
+            pipe.fill(ip, a_qg, tap(QW, 0, QW))
+            pipe.fill(ip, a_kvn, tap(2 * KVW, 0, KVW))
+            pipe.fill(ip, a_kvn, tap(2 * KVW, KVW, KVW))
+            pipe.fill(ip, a_cache, tap(ROWS * 2 * KVW, 0, ROWS * 2 * KVW))
+            pipe.finish()
+
+        rt = Runtime(sequence, [ty((1 + NPTAB) * E_A, np.uint8), ty(QW, np.float32), ty(2 * KVW, np.float32),
+                                ty(ROWS * 2 * KVW, bfloat16)] + out_args + [inp.prod(), out_fifos])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

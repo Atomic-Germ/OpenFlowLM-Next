@@ -619,8 +619,16 @@ def down_split(spec: ModelSpec, chunk: int = CHUNK, stack: int = STACK) -> tuple
     e = ELEM // 4
     k0 = ff // 2 // e * e
     pieces = (k0, ff - k0)
-    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1, chunk, stack) > L1_BUDGET
-                               for k in pieces):
+    if ff % e:
+        # Every piece is a whole f32 element (dense_prep_f32 prepares ELEM/4
+        # values per call), and any sum of whole elements is a multiple of e --
+        # so NO number of pieces covers a remainder. This is not a split-count
+        # limit: the tail needs partial-element prep, which it does not have.
+        raise OpRangeError(f"dense: an FF of {ff} is {ff % e} values short of a whole f32 "
+                           f"element ({e}); the down GEMV needs partial-element prep, which "
+                           f"is not implemented (a different split count cannot help)")
+    if not k0 or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1, chunk, stack) > L1_BUDGET
+                     for k in pieces):
         raise OpRangeError(f"dense: an FF of {ff} does not fit a main core's L1 in two pieces of "
                            f"whole f32 elements ({pieces}); a three-way split is not implemented")
     return pieces

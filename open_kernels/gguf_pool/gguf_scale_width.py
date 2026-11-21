@@ -48,9 +48,23 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 # CH_Q8 is defined in open_kernels.gguf_pool; we need it for Q8_CH_F32
-# Import from the package to avoid circular dependency
-from open_kernels.q4_1_pack import pack_q4_1_pool
-from open_kernels.gguf_pool import CH_Q8
+# Support package-relative use, and script contexts where either the repo root
+# or the open_kernels directory is on sys.path.
+try:
+    from ..q4_1_pack import pack_q4_1_pool
+    from .gguf_pool import CH_Q8
+except ImportError:
+    try:
+        from open_kernels.q4_1_pack import pack_q4_1_pool
+        from open_kernels.gguf_pool import CH_Q8
+    except ImportError:
+        from pathlib import Path
+        import sys
+        _repo = Path(__file__).resolve().parents[2]
+        if str(_repo) not in sys.path:
+            sys.path.insert(0, str(_repo))
+        from open_kernels.q4_1_pack import pack_q4_1_pool
+        from open_kernels.gguf_pool import CH_Q8
 
 Q8_CH_BF16 = 8704       # q4nx q8 chunk: 256 bf16 scales, then 8192 int8 codes
 Q8_CH_F32 = CH_Q8  # 9216: pool chunk bytes, 32 rows x 256 k (q8 lm_head, f32 scales)

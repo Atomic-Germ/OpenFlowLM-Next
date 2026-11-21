@@ -67,6 +67,18 @@
       "registry_key": "default_context_length"
     },
     {
+      "key": "fit",
+      "cli_flag": "--fit",
+      "env_var": "OFLM_CTX_FIT",
+      "description": "Pick the largest context window that fits in currently free RAM, from the installed kernel set's pool/state geometry (mutually exclusive with --ctx-len)",
+      "type": "bool",
+      "scope": "per_model",
+      "delivery": "env_var",
+      "category": "memory",
+      "reload_required": true,
+      "default_value": false
+    },
+    {
       "key": "prefill_chunk_len",
       "cli_flag": "--prefill-chunk-len",
       "description": "Maximum prefill chunk length (overrides model default)",

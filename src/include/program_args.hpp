@@ -26,6 +26,7 @@ struct program_args_t {
     std::string asr_model = "";
     bool json_output = false;
     int ctx_length = -1; // let model decide
+    bool fit = false;   // pick ctx_length from currently free RAM + the kernel set's geometry
     int prefill_chunk_len = -1; // let model decide
     std::string prefill_mode = ""; // fast | lean | bfp16; empty leaves OFLM_OPEN_PREFILL_MODE as it is
     std::string prefill_precision = ""; // paired | weight_high | single; empty leaves OFLM_OPEN_PREFILL_PRECISION as it is

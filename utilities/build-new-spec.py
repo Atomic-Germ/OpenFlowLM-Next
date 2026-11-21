@@ -177,6 +177,33 @@ def attn_gate(py: Path, env: dict, spec_path: Path, work: Path, rows: int) -> bo
     return rc == 0
 
 
+def attn_gate_support(spec_path: Path) -> tuple[bool, str]:
+    """Whether designs/attn/probe_dense.py can gate this spec, and why not.
+
+    The probe covers the single-row and RB 1/2/4 block paths. A q/k/v-bias
+    family used to be refused here (that point needed the manual OPEN-ATTN-QKV-BIAS
+    whole-layer procedure), but the probe now streams the bias fifo the production
+    worker uses, so those specs gate like any other. The capability is still
+    decided from the spec BEFORE exporting kernels: a refusal at step 3b used to
+    arrive after a full, successful export and read as a hard failure.
+    """
+    sys.path.insert(0, str(ROOT / "open_kernels"))
+    from recipes.families import for_spec
+    from recipes.load import load_spec
+    s = load_spec(spec_path)
+    mod = for_spec(s)
+    if not hasattr(mod, "geometry"):
+        # The attention probe is the DENSE worker's gate. MoE families expose
+        # recipe()/layout() instead; their attention point enters through the
+        # family bring-up procedure, not this probe. Say so instead of crashing.
+        return False, (f"the attention probe only gates dense-family geometries; "
+                       f"family {s.family!r} needs its family procedure")
+    g = mod.geometry(s)
+    if g.RB not in (1, 2, 4):
+        return False, f"RB={g.RB} (the probe covers only RB 1/2/4)"
+    return True, ""
+
+
 def attn_point_validated(spec) -> bool:
     """True when the spec's attention tuple is already in the catalogue.
 
@@ -196,7 +223,11 @@ def attn_point_validated(spec) -> bool:
               rotary_dim=s.rotary_dim, qk_norm=s.qk_norm, attn_gate=s.attn_gate,
               qk_norm_post_rope=s.qk_norm and s.family in D.QKNORM_POST_ROPE,
               qkv_bias=D.qkv_bias(s))
-    return any(c.value(kw) in c.points for c in tpl.combos)
+    # require() enforces EVERY combo (the main attn tuple AND the later
+    # Gemma-4 v_norm/scale/rope_pair group, whose default point is present for
+    # everyone). any() let that default group vouch for an unvalidated main
+    # tuple, so the gate was skipped and a plain export hit the catalogue wall.
+    return all(c.value(kw) in c.points for c in tpl.combos)
 
 
 def main() -> int:
@@ -296,6 +327,21 @@ def main() -> int:
     work = Path(a.work) if a.work else ROOT / "build" / "attn-gate" / name
     work.mkdir(parents=True, exist_ok=True)
 
+    # Decide attention-gate capability NOW, before any export. A family the probe
+    # cannot gate still builds; saying so here is a notification, not a late hard
+    # failure after a successful export.
+    attn_validated = attn_point_validated(spec_path)
+    # Only ask the probe about capability when there is actually a gate to run:
+    # an already-validated tuple (or a family the probe does not build) must not
+    # crash on a family module with no geometry() just to be skipped.
+    attn_supported, attn_why = ((True, "") if attn_validated or a.skip_gate
+                                else attn_gate_support(spec_path))
+    if not attn_validated and not attn_supported and not a.skip_gate:
+        print(f"-- attention gate: NOTIFICATION: the probe cannot gate this spec: {attn_why}",
+              flush=True)
+        print("   building the kernel set anyway; the attention point stays unvalidated "
+              "(a plain export needs the manual validation before it passes)", flush=True)
+
     # 3a. every op EXCEPT attention: run its own fixture and write the point.
     # Attention is 3b, because its gate builds the model's worker, not a fixture.
     if missing:
@@ -308,8 +354,14 @@ def main() -> int:
                                  harness_binary(work), skip=("attn",))
         except mod_gate.GateError as exc:
             print(exc, file=sys.stderr)
-            print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
-                  "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
+            msg = str(exc)
+            if "has no automated gate" in msg or "NOT_AUTOMATED" in msg:
+                print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
+                      "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
+            else:
+                print("   (fixture/gate failed for this geometry; see the error above. "
+                      "This may be a fixture/layout limit rather than a missing op fixture.)",
+                      file=sys.stderr)
             return 1
 
     # 2. the kernel set compiles at this geometry
@@ -323,11 +375,12 @@ def main() -> int:
             return rc
 
     # 3. the attention gate
-    if not a.skip_gate and attn_point_validated(spec_path):
-        # the tuple is already in the catalogue: nothing to run and nothing to add, and
-        # some families (a q/k/v bias) are not expressible in the probe at all
+    if not a.skip_gate and attn_validated:
+        # the tuple is already in the catalogue: nothing to run and nothing to add
         print("-- attention gate: this tuple is already validated in the catalogue; skipping",
               flush=True)
+    elif not a.skip_gate and not attn_supported:
+        print(f"-- attention gate: skipped (notification above: {attn_why})", flush=True)
     elif not a.skip_gate:
         print("-- attention gate: the production worker at this geometry, against an fp64 oracle",
               flush=True)
@@ -360,9 +413,18 @@ def main() -> int:
     if rc != 0:
         return rc
 
-    print(f"\n{name} is ready: the spec, the built kernels and the catalogue entry.")
-    print(f"  commit: {spec_path.relative_to(ROOT)}, open_kernels/recipes/catalogue.py and "
-          "the two test files register-spec.py touched")
+    if not a.skip_gate and not attn_validated and not attn_supported:
+        print(f"\n{name}: spec and built kernels are ready; the ATTENTION point is still "
+              "unvalidated.", flush=True)
+        print(f"  {attn_why}", flush=True)
+        print("  A plain `oflm dev export-kernels --spec ...` will hit the catalogue wall until "
+              "that point is validated by its family procedure.", flush=True)
+        print(f"  commit: {spec_path.relative_to(ROOT)} and the two test files "
+              "register-spec.py touched")
+    else:
+        print(f"\n{name} is ready: the spec, the built kernels and the catalogue entry.")
+        print(f"  commit: {spec_path.relative_to(ROOT)}, open_kernels/recipes/catalogue.py and "
+              "the two test files register-spec.py touched")
     return 0
 
 
