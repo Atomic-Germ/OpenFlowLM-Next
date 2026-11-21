@@ -2,7 +2,21 @@
 // as its own argument, so the pointers are gathered back into an array here.
 #include "attn.h"
 extern "C" {
-#if ATTN_RB == 4
+#if ATTN_KVH == 1 && ATTN_RB == 4
+// one kv head: each cached row is ONE element, [K_t | V_t]
+void attn_stepb(const bfloat16 *__restrict R0, const bfloat16 *__restrict R1,
+                const bfloat16 *__restrict R2, const bfloat16 *__restrict R3,
+                const ATTN_QT *__restrict qs, float *__restrict oacc, float *__restrict ml,
+                int32_t *__restrict pb ATTN_H0_PARM) {
+  const bfloat16 *K[4] = {R0, R1, R2, R3};
+  const bfloat16 *V[4] = {R0 + kHD, R1 + kHD, R2 + kHD, R3 + kHD};
+#elif ATTN_KVH == 1 && ATTN_RB == 2
+void attn_stepb(const bfloat16 *__restrict R0, const bfloat16 *__restrict R1,
+                const ATTN_QT *__restrict qs, float *__restrict oacc, float *__restrict ml,
+                int32_t *__restrict pb ATTN_H0_PARM) {
+  const bfloat16 *K[2] = {R0, R1};
+  const bfloat16 *V[2] = {R0 + kHD, R1 + kHD};
+#elif ATTN_RB == 4
 void attn_stepb(const bfloat16 *__restrict K0, const bfloat16 *__restrict V0,
                 const bfloat16 *__restrict K1, const bfloat16 *__restrict V1,
                 const bfloat16 *__restrict K2, const bfloat16 *__restrict V2,

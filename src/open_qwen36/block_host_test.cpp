@@ -199,12 +199,139 @@ float spread(size_t i, float amp, float off) {
     return amp * (static_cast<float>((i * 7919) % 2003) / 1001.f - 1.f) + off;
 }
 
+// Traces: OPEN-PREFILL-G4. Gemma 4's block attention against a naive double-precision walk of the same definition
+// (replica_gemma4.py's attention): rows already cached, the block's own, a window, a shared layer, a partial rotation.
+void gemma4_attention_cases() {
+    // Traces: OPEN-PREFILL-ATTN-WIDE. The automatic choice: the host's up to 4096 tokens, fa_wide past them, forced either way
+    // by the mode, and never fa_wide on a model without per-layer inputs unless forced.
+    check(!host::gemma4_use_wide(2, true, 256, 4096) && !host::gemma4_use_wide(2, true, 4096, 4096),
+          "attention choice: auto keeps the host's attention while the block ends at or before 4096");
+    check(host::gemma4_use_wide(2, true, 4097, 4096) && host::gemma4_use_wide(2, true, 31000, 4096),
+          "attention choice: auto takes fa_wide for a block that ends past 4096");
+    check(!host::gemma4_use_wide(2, false, 31000, 4096), "attention choice: auto leaves the 12B on the host's attention");
+    check(host::gemma4_use_wide(1, false, 256, 4096) && !host::gemma4_use_wide(0, true, 31000, 4096),
+          "attention choice: 1 forces fa_wide, 0 forces the host's, whatever the length");
+    struct Case { const char* name; size_t nh, kvh, hd, rot, pos0, T, t_real, window; bool shared; };
+    const Case cases[] = {
+        {"sliding, whole-head rotation, window cuts into old rows", 4, 1, 32, 32, 50, 16, 11, 24, false},
+        {"global, first quarter of the pairs, two kv heads, no window", 4, 2, 64, 16, 20, 16, 16, 0, false},
+        {"shared: the rows are already in the cache", 4, 2, 32, 32, 40, 16, 9, 20, true},
+        {"first block, nothing cached", 2, 1, 32, 16, 0, 16, 16, 0, false},
+    };
+    for (const Case& c : cases) {
+        const size_t qw = c.nh * c.hd, kvw = c.kvh * c.hd, row = 2 * kvw, rows = c.pos0 + c.T, grp = c.nh / c.kvh;
+        auto fill = [&](size_t n, unsigned seed, float amp) {
+            std::vector<float> v(n);
+            unsigned s = seed;
+            for (auto& x : v) { s = s * 1664525u + 1013904223u; x = amp * (static_cast<float>(s >> 8) / 8388608.f - 1.f); }
+            return v;
+        };
+        const auto q = fill(c.T * qw, 1, 2.f), k = fill(c.T * kvw, 2, 2.f), v = fill(c.T * kvw, 3, 2.f);
+        std::vector<float> qn = fill(c.hd, 4, 1.f), kn = fill(c.hd, 5, 1.f);
+        for (auto& x : qn) x += 1.5f;
+        for (auto& x : kn) x += 1.5f;
+        std::vector<double> inv(c.rot / 2);
+        for (size_t i = 0; i < inv.size(); ++i) inv[i] = std::pow(10000.0, -2.0 * static_cast<double>(i) / static_cast<double>(c.hd));
+        auto rms = [&](const float* x, const float* w, std::vector<double>& out) {
+            double ss = 0;
+            for (size_t j = 0; j < c.hd; ++j) ss += static_cast<double>(x[j]) * x[j];
+            const double r = 1.0 / std::sqrt(ss / static_cast<double>(c.hd) + 1e-6);
+            out.resize(c.hd);
+            for (size_t j = 0; j < c.hd; ++j) out[j] = x[j] * r * (w ? w[j] : 1.0);
+        };
+        auto rot = [&](std::vector<double>& x, size_t pos) {
+            for (size_t i = 0; i < c.rot / 2; ++i) {
+                const double a = static_cast<double>(pos) * inv[i], cs = std::cos(a), sn = std::sin(a);
+                const double x1 = x[i], x2 = x[c.hd / 2 + i];
+                x[i] = x1 * cs - x2 * sn;
+                x[c.hd / 2 + i] = x2 * cs + x1 * sn;
+            }
+        };
+        std::vector<uint16_t> cache(rows * row, 0);
+        const auto old = fill(c.pos0 * row, 6, 1.5f);
+        for (size_t i = 0; i < c.pos0 * row; ++i) cache[i] = f32_to_bf16(old[i]);
+        std::vector<std::vector<double>> K(rows, std::vector<double>(kvw)), V(rows, std::vector<double>(kvw));
+        for (size_t r = 0; r < c.pos0; ++r)
+            for (size_t j = 0; j < kvw; ++j) { K[r][j] = bf16_to_f32(cache[r * row + j]); V[r][j] = bf16_to_f32(cache[r * row + kvw + j]); }
+        for (size_t t = 0; t < c.t_real; ++t)
+            for (size_t h = 0; h < c.kvh; ++h) {
+                std::vector<double> kh, vh;
+                rms(k.data() + t * kvw + h * c.hd, kn.data(), kh);
+                rot(kh, c.pos0 + t);
+                rms(v.data() + t * kvw + h * c.hd, nullptr, vh);
+                for (size_t j = 0; j < c.hd; ++j) {
+                    const uint16_t kb = f32_to_bf16(static_cast<float>(kh[j])), vb = f32_to_bf16(static_cast<float>(vh[j]));
+                    K[c.pos0 + t][h * c.hd + j] = bf16_to_f32(kb);
+                    V[c.pos0 + t][h * c.hd + j] = bf16_to_f32(vb);
+                    if (c.shared) { cache[(c.pos0 + t) * row + h * c.hd + j] = kb; cache[(c.pos0 + t) * row + kvw + h * c.hd + j] = vb; }
+                }
+            }
+        std::vector<float> og_ref(c.T * qw, 0.f);
+        for (size_t t = 0; t < c.t_real; ++t) {
+            const size_t p = c.pos0 + t, first = c.window && p + 1 > c.window ? p + 1 - c.window : 0;
+            for (size_t h = 0; h < c.nh; ++h) {
+                std::vector<double> qh;
+                rms(q.data() + t * qw + h * c.hd, qn.data(), qh);
+                rot(qh, p);
+                std::vector<double> s(p + 1 - first), o(c.hd, 0.0);
+                double mx = -1e300;
+                for (size_t r = first; r <= p; ++r) {
+                    double d = 0;
+                    for (size_t j = 0; j < c.hd; ++j) d += qh[j] * K[r][(h / grp) * c.hd + j];
+                    s[r - first] = d;
+                    mx = std::max(mx, d);
+                }
+                double den = 0;
+                for (auto& x : s) { x = std::exp(x - mx); den += x; }
+                for (size_t r = first; r <= p; ++r)
+                    for (size_t j = 0; j < c.hd; ++j) o[j] += s[r - first] / den * V[r][(h / grp) * c.hd + j];
+                for (size_t j = 0; j < c.hd; ++j) og_ref[t * qw + h * c.hd + j] = static_cast<float>(o[j]);
+            }
+        }
+        host::G4AttnGeom g;
+        g.T = c.T; g.t_real = c.t_real; g.nh = c.nh; g.kvh = c.kvh; g.hd = c.hd; g.rot = c.rot; g.pos0 = c.pos0;
+        g.window = c.window; g.eps = 1e-6;
+        std::vector<float> og(c.T * qw);
+        std::vector<uint16_t> kv_out = cache;
+        host::gemma4_attention(g, q.data(), c.shared ? nullptr : k.data(), c.shared ? nullptr : v.data(), qn.data(), kn.data(),
+                               inv.data(), kv_out.data(), row, og.data());
+        double worst = 0;
+        for (size_t i = 0; i < og.size(); ++i) worst = std::max(worst, std::fabs(static_cast<double>(og[i]) - og_ref[i]));
+        check(worst < 2e-4, std::string("gemma4_attention, ") + c.name + " (max |diff| " + std::to_string(worst) + ")");
+        bool rows_ok = true;
+        for (size_t t = 0; t < c.t_real && !c.shared; ++t)
+            for (size_t j = 0; j < kvw; ++j)
+                rows_ok = rows_ok && bf16_to_f32(kv_out[(c.pos0 + t) * row + j]) == static_cast<float>(K[c.pos0 + t][j]) &&
+                          bf16_to_f32(kv_out[(c.pos0 + t) * row + kvw + j]) == static_cast<float>(V[c.pos0 + t][j]);
+        check(rows_ok, std::string("gemma4_attention caches the block's K and V rows, ") + c.name);
+        bool zero_tail = true;
+        for (size_t i = c.t_real * qw; i < og.size(); ++i) zero_tail = zero_tail && og[i] == 0.f;
+        check(zero_tail, std::string("gemma4_attention: og past t_real is zero, ") + c.name);
+    }
+    {
+        const size_t N = 37, K = 72, T = 5;
+        std::vector<float> W(N * K), X(T * K), Y(T * N);
+        for (size_t i = 0; i < W.size(); ++i) W[i] = static_cast<float>((i * 31) % 17) / 8.f - 1.f;
+        for (size_t i = 0; i < X.size(); ++i) X[i] = static_cast<float>((i * 13) % 11) / 5.f - 1.f;
+        host::matmul_nt(W.data(), N, K, X.data(), T, Y.data());
+        double worst = 0;
+        for (size_t t = 0; t < T; ++t)
+            for (size_t n = 0; n < N; ++n) {
+                double s = 0;
+                for (size_t k = 0; k < K; ++k) s += static_cast<double>(W[n * K + k]) * X[t * K + k];
+                worst = std::max(worst, std::fabs(s - Y[t * N + n]));
+            }
+        check(worst < 1e-4, "matmul_nt: Y = X W^T (max |diff| " + std::to_string(worst) + ")");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    gemma4_attention_cases();
     if (argc < 2) {
-        std::fprintf(stderr, "usage: block_host_test <fixture dir>\n");
-        return 2;
+        std::printf("%s\n", failures ? "FAIL" : "PASS (no fixture dir: the fixture stages were skipped)");
+        return failures ? 1 : 0;
     }
     const std::string dir = argv[1];
     const auto S = shapes(dir);

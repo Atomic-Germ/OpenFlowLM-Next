@@ -14,6 +14,7 @@
 //   moeroute  <kernel> <rout-buf>           MoE expert fills -> the router's 8 experts
 //   moeroute2 <kernel> <buf> <idx-offset>   ditto, pool-layout placeholder fills
 //   attnpos <kernel> <pos>                  KV window / new-row / RoPE record for this token
+//   fwpos   <kernel> <pos0> <window> <hd> <kv_ld> <passes>   an fa_wide stream's position and window
 //
 // Relative paths resolve against the .cfg's directory. `#` starts a comment.
 // Every `run` prints its ERT state and wall time (start -> wait), which is the
@@ -109,6 +110,8 @@ struct Kernel {
     std::vector<stream_patch::AttnRowPatch> attn_rows;
     bool moe_built = false, moe2_built = false, attn_built = false, attn_rows_built = false;
 
+    std::vector<stream_patch::FwPatch> fw;
+    bool fw_built = false;
     uint32_t* instr_words() { return instr->map<uint32_t*>(); }
 };
 
@@ -392,6 +395,22 @@ struct Host {
             stream_patch::attn_rows_apply(k.instr_words(), k.attn_rows, pos0, ag);
             k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
             std::printf("attnrows %s pos0 %zu rows %u\n", kn.c_str(), pos0, rows);
+        } else if (cmd == "fwpos") {
+            // fwpos <kernel> <pos0> <window> <head dim> <kv row elems> <passes>: an fa_wide stream's position and window
+            auto kn = need(it, "fwpos kernel");
+            size_t pos0 = num(need(it, "fwpos pos0"), "fwpos pos0");
+            size_t win = num(need(it, "fwpos window"), "fwpos window");
+            size_t hd = num(need(it, "fwpos hd"), "fwpos hd");
+            size_t ld = num(need(it, "fwpos kv_ld"), "fwpos kv_ld");
+            size_t passes = num(need(it, "fwpos passes"), "fwpos passes");
+            Kernel& k = kernel(kn);
+            if (!k.fw_built) {
+                k.fw = stream_patch::fw_table(k.words, kn, hd, ld, passes);
+                k.fw_built = true;
+            }
+            stream_patch::fw_apply(k.instr_words(), k.fw, pos0, win, hd, ld);
+            k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            std::printf("fwpos %s pos0 %zu window %zu (%zu words)\n", kn.c_str(), pos0, win, k.fw.size());
         } else {
             throw std::runtime_error("unknown directive: " + cmd);
         }

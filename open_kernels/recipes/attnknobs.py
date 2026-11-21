@@ -69,8 +69,9 @@ BLOCK_ONLY_MEASURED = ("qwen36moe",)
 # (head dim 512, 16 heads) cannot be built on the single-core path at all -- the output
 # accumulator alone is 16 x 512 fp32 = 32 KB of the core's 64 -- so there is no slow kernel to
 # measure against. Its sliding layers are Gemma 3 12B's shape, measured above.
+# gemma4e (2026-10-16) likewise has no slow-path build to compare against: OPEN-FAMILY-GEMMA4's replica slice measured it.
 FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3",
-                  "qwen2", "lfm2", "k2", "gemma4")
+                  "qwen2", "lfm2", "k2", "gemma4", "gemma4e")
 # Measured bit-identical (OPEN-ATTN-SCORE-TREE); ATTN_TREE8=0 / 1 forces it off / on for an A/B build.
 TREE8_MEASURED = ("granite",)
 TREE8_STACK = 0x3000       # the tree spills past the usual 0x1800 stack, and the overrun reads back as NaN

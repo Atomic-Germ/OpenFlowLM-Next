@@ -94,7 +94,7 @@ PackOp parse_op(const json& j, const std::string& where) {
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_gemm" ||
-        p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "expert_down_gguf" ||
+        p.op == "bfp16_dit" || p.op == "put" || p.op == "put_f32" || p.op == "expert_down" || p.op == "expert_down_gguf" ||
         p.op == "conv_transpose" ||
         p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
@@ -113,7 +113,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
     else if (p.op == "expert_down" || p.op == "expert_down_gguf")
         need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
-    else if (p.op == "put") need_all({{"cap", p.cap}});
+    else if (p.op == "put" || p.op == "put_f32") need_all({{"cap", p.cap}});
     else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}, {"in_dim", p.in_dim}});
     else if (p.op == "conv_transpose") need_all({{"taps", p.taps}, {"groups", p.groups}, {"width", p.width}});
     return p;
@@ -286,8 +286,16 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         " needs the attnpos or attnrows patch table, rb 1 and 2, 4 or 8 rows an element");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
-            d.patch != "attnrows")
+            d.patch != "attnrows" && d.patch != "fawpos")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
+        if (d.patch == "fawpos") {
+            d.fw_hd = get<uint64_t>(v, "hd", where + " kernel " + k);
+            d.fw_kv_ld = get<uint64_t>(v, "kv_ld", where + " kernel " + k);
+            d.fw_passes = get<uint64_t>(v, "passes", where + " kernel " + k);
+            if ((d.fw_hd != 256 && d.fw_hd != 512) || d.fw_kv_ld == 0 || d.fw_kv_ld % d.fw_hd || d.fw_passes == 0 ||
+                d.fw_passes > 8)
+                fail(where, "kernel " + k + ": fawpos wants hd 256 or 512, kv_ld whole heads and 1 to 8 passes");
+        }
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
         d.weight_component = v.value("weight_component", "");
@@ -334,7 +342,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         const json& st = need(b, "state", tw);
         t.state_kind = get<std::string>(st, "kind", tw);
         if (t.state_kind == "linear") t.state_bytes = get<uint64_t>(st, "bytes", tw);
-        else if (t.state_kind == "kv") t.state_row = get<uint64_t>(st, "row", tw);
+        else if (t.state_kind == "kv" || t.state_kind == "kv_shared") t.state_row = get<uint64_t>(st, "row", tw);
         else fail(tw, "unknown state kind " + t.state_kind);
         if (v.contains("post_output")) {
             const auto& post = v["post_output"];
@@ -345,6 +353,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 offset > t.act_bytes || bytes > t.act_bytes - offset)
                 fail(tw, "invalid FP32 post_output region or scratch size");
         }
+        t.ple_in = v.value("ple_in", static_cast<int64_t>(-1));
+        t.scalar_in_program = v.value("scalar_in_program", false);
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
         // the block prefill route, independent of the sequential `program`
@@ -510,6 +520,42 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                             fail(gw, "dit step " + s.kernel + ": its weight " + s.args[0] + " is not packed by bfp16_dit");
                     }
                 }
+            } else if (g.kind == "gemma4") {
+                g.ple_dim = get<uint64_t>(gj, "ple_dim", gw);
+                if (g.program.size() != (g.ple_dim ? 7u : 5u))
+                    fail(gw, "a gemma4 route has exactly 7 steps (qkv or q, o, gate, up, down, per-layer gate, per-layer projection), "
+                             "or 5 without per-layer inputs; has " + std::to_string(g.program.size()));
+                g.qw = get<uint64_t>(gj, "qw", gw);
+                g.kvw = get<uint64_t>(gj, "kvw", gw);
+                g.ff = get<uint64_t>(gj, "ff", gw);
+                g.hd = get<uint64_t>(gj, "hd", gw);
+                g.kvh = get<uint64_t>(gj, "kvh", gw);
+                g.rot = get<uint64_t>(gj, "rot", gw);
+                g.window = get<uint64_t>(gj, "window", gw);
+                g.ptab = get<std::string>(gj, "ptab", gw);
+                g.sandwich = gj.value("sandwich", true);
+                g.act = gj.value("act", std::string("gelu_tanh"));
+                if (g.hd == 0 || g.hd % 8 || g.qw % g.hd || g.kvh == 0 || (g.qw / g.hd) % g.kvh || g.rot > g.hd || g.rot % 2)
+                    fail(gw, "hd / qw / kvh / rot disagree");
+                if (g.kvw != 0 && g.kvw != g.kvh * g.hd) fail(gw, "kvw is neither 0 (a shared layer) nor kvh * hd");
+                if ((g.kvw == 0) != (t.state_kind == "kv_shared"))
+                    fail(gw, "a gemma4 route reads an earlier layer's cache (kvw 0) exactly when its state is kv_shared");
+                if (!g.sandwich || g.act != "gelu_tanh") fail(gw, "a gemma4 route is sandwich norms with gelu_tanh");
+                if (gj.contains("attn_wide")) {
+                    const json& wj = gj["attn_wide"];
+                    const std::string ww = gw + ".attn_wide";
+                    AttnWide& a = g.attn_wide;
+                    a.kernel = get<std::string>(wj, "kernel", ww);
+                    a.q = get<std::string>(wj, "q", ww);
+                    a.o = get<std::string>(wj, "o", ww);
+                    a.hd = get<uint64_t>(wj, "hd", ww);
+                    a.window = wj.value("window", 0ull);
+                    const auto it = m.kernels.find(a.kernel);
+                    if (a.hd != g.hd || it == m.kernels.end() || it->second.patch != "fawpos" || it->second.fw_hd != a.hd ||
+                        it->second.fw_passes * (a.hd == 256 ? 256 : 128) != g.t || a.window != g.window)
+                        fail(ww, "kernel " + a.kernel + " is not an fa_wide stream (fawpos) of this route's head dim, block and window");
+                }
+                if (g.weights.empty()) fail(gw, "a gemma4 route names its weights");
             } else if (g.kind == "linear" || g.kind == "full") {
                 if (g.program.size() != 2)
                     fail(gw, "a " + g.kind + " route has exactly 2 steps (the fused input projection, the output projection), has " +
@@ -613,7 +659,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         fail(gw, "qw / kvw / rot disagree with the heads and the layout rotary dim");
                 }
             } else {
-                fail(gw, "unknown kind " + g.kind + " (dense | linear | full)");
+                fail(gw, "unknown kind " + g.kind + " (dense | linear | full | gemma4)");
             }
             // K2's grouped host norms (Stage 2.2): 1 -- also the default when the
             // field is absent -- keeps the plain whole-row RMSNorm byte for byte.
@@ -788,10 +834,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
             rg.rotary_dim = v.value("rotary_dim", static_cast<uint64_t>(m.rotary_dim));
+            rg.cs_off = v.value("cs_off", 512ull);
             if (rg.inv_freq.size() != rg.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
-            if (512 + 8 * (rg.rotary_dim / 2) > rg.per_row)
-                fail(where, "global " + k + ": " + std::to_string(rg.rotary_dim) + " rotated dims do not fit a " +
-                     std::to_string(rg.per_row) + "-byte record");
+            if (rg.cs_off + 8 * (rg.rotary_dim / 2) > rg.per_row)
+                fail(where, "global " + k + ": " + std::to_string(rg.rotary_dim) + " rotated dims at offset " +
+                     std::to_string(rg.cs_off) + " do not fit a " + std::to_string(rg.per_row) + "-byte record");
             const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
             if (has_long != has_switch)
                 fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
@@ -839,6 +886,72 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];
     }
+    // ---- Gemma 4's host stages (recipes/gemma4.py host_stages); absent on every other family
+    if (j.contains("kv_source")) {
+        m.kv_source = j["kv_source"].get<std::vector<int>>();
+        if (m.kv_source.size() != m.layers.size())
+            fail(where, "kv_source has " + std::to_string(m.kv_source.size()) + " entries for " +
+                            std::to_string(m.layers.size()) + " layers");
+    }
+    for (size_t l = 0; l < m.layers.size(); ++l) {
+        const LayerType& t = m.layer_types.at(m.layers[l]);
+        const int s = l < m.kv_source.size() ? m.kv_source[l] : -1;
+        if ((t.state_kind == "kv_shared") != (s >= 0))
+            fail(where, "layer " + std::to_string(l) + ": a kv_shared state and a kv_source entry go together");
+        if (s < 0) continue;
+        if (static_cast<size_t>(s) >= l) fail(where, "layer " + std::to_string(l) + " shares the cache of a later layer");
+        const LayerType& src = m.layer_types.at(m.layers[static_cast<size_t>(s)]);
+        if (src.state_kind != "kv" || src.state_row != t.state_row)
+            fail(where, "layer " + std::to_string(l) + " shares layer " + std::to_string(s) + "'s cache, which is not a kv state of its row");
+    }
+    if (j.contains("ple")) {
+        const json& p = j["ple"];
+        const std::string pw = where + " ple";
+        m.ple.dim = get<size_t>(p, "dim", pw);
+        m.ple.embed = get<std::string>(p, "embed", pw);
+        m.ple.model_proj = get<std::string>(p, "model_proj", pw);
+        m.ple.model_norm = get<std::string>(p, "model_norm", pw);
+        m.ple.gate = get<std::string>(p, "gate", pw);
+        m.ple.proj = get<std::string>(p, "proj", pw);
+        m.ple.norm = get<std::string>(p, "norm", pw);
+        m.ple.act = get<std::string>(p, "act", pw);
+        m.ple.embed_scale = get<double>(p, "embed_scale", pw);
+        m.ple.model_proj_scale = get<double>(p, "model_proj_scale", pw);
+        m.ple.input_scale = get<double>(p, "input_scale", pw);
+        m.ple.eps = get<double>(p, "eps", pw);
+        if (m.ple.act != "gelu_tanh") fail(pw, "act " + m.ple.act + " (gelu_tanh only)");
+    }
+    size_t n_npu = 0;
+    for (const auto& [name, t] : m.layer_types) {
+        if (t.scalar_in_program) {
+            if (m.ple.present()) fail(where, "layer type " + name + ": scalar_in_program is for a model without per-layer inputs");
+            ++n_npu;
+            continue;
+        }
+        if (t.ple_in < 0) continue;
+        ++n_npu;
+        if (!m.ple.present()) fail(where, "layer type " + name + " has ple_in but the manifest has no ple");
+        if (static_cast<uint64_t>(t.ple_in) + m.ple.dim * 4 > t.act_bytes)
+            fail(where, "layer type " + name + ": ple_in runs past its act buffer");
+    }
+    if (n_npu && n_npu != m.layer_types.size())
+        fail(where, "ple_in on some layer types only: the per-layer inputs run on the host or in every program");
+    m.ple.on_npu = n_npu != 0;
+    for (const auto& [name, t] : m.layer_types)
+        for (const GemmBlockProgram* g : routes(t)) {
+            if (!g->t || g->kind != "gemma4") continue;
+            if (g->ple_dim != m.ple.dim)
+                fail(where, "layer type " + name + " gemma4 route: ple_dim " + std::to_string(g->ple_dim) +
+                                " disagrees with the manifest's per-layer input width " + std::to_string(m.ple.dim));
+            const auto pt = m.per_row_globals.find(g->ptab);
+            if (pt == m.per_row_globals.end() || pt->second.inv_freq.size() != g->rot / 2)
+                fail(where, "layer type " + name + " gemma4 route: ptab " + g->ptab + " is not a position table of " +
+                                std::to_string(g->rot / 2) + " rotary pairs");
+            if (t.state_row < 4 * g->kvh * g->hd)
+                fail(where, "layer type " + name + " gemma4 route: its kv state row cannot hold [k | v] of " + std::to_string(g->kvh) +
+                                " heads of " + std::to_string(g->hd) + " in bf16");
+        }
+    m.ple.scalar = j.value("layer_scalar", "");
     if (j.contains("gguf")) m.gguf = std::make_unique<Manifest>(parse(j["gguf"], where + " gguf"));
     return m;
 }
@@ -919,6 +1032,18 @@ std::string Manifest::host_attention_refusal() const {
                "this manifest has heads " + std::to_string(nh) + "/" + std::to_string(kvh) + ", head_dim " +
                std::to_string(hd) + ", rotary_dim " + std::to_string(rotary_dim);
     return "";
+}
+
+bool Manifest::reads_gguf_only() const {
+    auto direct = [](const std::vector<PackOp>& ops) {
+        for (const PackOp& p : ops)
+            if (p.op == "std_perm_gguf") return true;
+        return false;
+    };
+    if (direct(lmhead_ops)) return true;
+    for (const auto& [name, t] : layer_types)
+        if (direct(t.pool) || direct(t.consts)) return true;
+    return false;
 }
 
 void Manifest::check_model(const json& config, const std::string& where, bool model_type) const {

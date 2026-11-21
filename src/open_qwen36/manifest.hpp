@@ -160,6 +160,15 @@ struct AttnFa {
     bool has_prep() const { return !prep_kernel.empty(); }
 };
 
+/// A block's attention as ONE dispatch of open_kernels/designs/fa_wide (OPEN-PREFILL-ATTN-WIDE): head dim 256 or 512, the
+/// block's Q bf16 token-major in `q`, K / V in place from the layer's (or its source layer's) cache rows, bf16 [T, qw] out
+/// in `o`; the stream (patch `fawpos`) takes the block's cache position and the layer's sliding window per dispatch.
+struct AttnWide {
+    std::string kernel, q, o;
+    size_t hd = 0, window = 0;
+    bool present() const { return !kernel.empty(); }
+};
+
 struct GemmBlockProgram {
     uint64_t t = 0;               ///< 0 = no route for this layer type
     std::string kind;             ///< dense | linear | full
@@ -193,6 +202,12 @@ struct GemmBlockProgram {
     bool conv_f32 = false;
     // full: heads, kv heads, head dim, rotary dim (qw / kvw as above)
     uint64_t nh = 0, kvh = 0, hd = 0, rot = 0;
+    // gemma4 (OPEN-PREFILL-G4): seven steps -- input projection (q|k|v, or q alone when kvw is 0: a layer that reads
+    // an earlier layer's cache), o, gate, up, down, the per-layer input's gate and projection; the sliding window in
+    // rows (0 = every row), that input's width, and the per-row global whose inv_freq the layer rotates by
+    uint64_t window = 0, ple_dim = 0;
+    std::string ptab;
+    AttnWide attn_wide;          ///< gemma4: the block attention on the NPU (absent: the host's)
     // linear and full: the per-token MoE dispatch (moeroute2-patched, its own xclbin), its
     // buffer args, and where in act it reads xm, the router record and the residual
     std::string moe_kernel;
@@ -223,8 +238,10 @@ struct GemmBlockProgram {
 struct LayerType {
     std::string name;
     uint64_t consts_bytes = 0, act_bytes = 0;
-    std::string state_kind;                  ///< "linear" (a fixed-size state BO) | "kv" (max_ctx x state_row)
+    std::string state_kind;                  ///< "linear" | "kv" (max_ctx x state_row) | "kv_shared" (Manifest::kv_source's)
     uint64_t state_bytes = 0, state_row = 0;
+    int64_t ple_in = -1;                     ///< act offset the host writes this layer's per-layer input to; -1 = host applies it
+    bool scalar_in_program = false;          ///< the program applies the layer's output scale (a model without per-layer inputs)
     std::vector<Step> program;
     GemmBlockProgram gemm_block;
     std::map<std::string, GemmBlockProgram> gemm_block_variants;   ///< OPEN-PREFILL-MODE: routes loadable in its place
@@ -235,7 +252,8 @@ struct KernelDesc {
     std::string weight_component;            ///< empty (normal) | bf16_residual (paired prefill only)
     std::string context;                     ///< name in Manifest::contexts
     std::string insts;                       ///< relative path of insts.bin
-    std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows
+    std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows | fawpos
+    uint64_t fw_hd = 0, fw_kv_ld = 0, fw_passes = 0;   ///< fawpos: head dim, cache row in bf16 elements, passes
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
     /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
     /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
@@ -283,6 +301,17 @@ struct RowGlobal {
     std::vector<double> long_inv_freq;
     static constexpr uint64_t kSwitchNever = ~uint64_t{0};
     uint64_t switch_row = kSwitchNever;
+    uint64_t cs_off = 512;                   ///< where [cos | sin] start in the record (attn.h ATTN_PTAB_CS_OFF)
+};
+
+/// Gemma 4's per-layer inputs (recipes/gemma4.py host_stages, OPEN-FAMILY-GEMMA4): the host computes each
+/// layer's input once per token; the gate / projection / norm run on the host or in the layer program.
+struct PleSpec {
+    size_t dim = 0;                            ///< 0 = no per-layer inputs
+    std::string embed, model_proj, model_norm, gate, proj, norm, scalar, act;
+    double embed_scale = 1.0, model_proj_scale = 1.0, input_scale = 1.0, eps = 1e-6;
+    bool present() const { return dim != 0; }
+    bool on_npu = false;                       ///< every layer type's program applies it (LayerType::ple_in)
 };
 
 struct Manifest {
@@ -327,6 +356,8 @@ struct Manifest {
     double embed_scale = 1.0;                 ///< applied to token lookup only; never the tied lm_head
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
+    std::vector<int> kv_source;              ///< per layer: -1, or the earlier layer whose KV cache it reads; empty = all own
+    PleSpec ple;
     nlohmann::json hf_config_check;
     /// What a key ABSENT from config.json means, for the keys of hf_config_check a config
     /// may omit (Phi-3's head_dim, partial_rotary_factor, rope_scaling, ...): check_model
@@ -335,7 +366,7 @@ struct Manifest {
     /// The same kernel set for GGUF-direct weight files (f32-scale pool chunks,
     /// open_kernels/gguf_pool.py): a complete manifest of its own, parsed with
     /// this same code; the engine swaps it in when the model ships a .gguf.
-    std::unique_ptr<Manifest> gguf;
+    std::shared_ptr<Manifest> gguf;          ///< shared, so a Manifest stays copyable (manifest_test copies one)
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);
@@ -354,6 +385,8 @@ struct Manifest {
     bool select_prefill_route(const std::string& name);
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
+    /// This view packs GGUF-direct (std_perm_gguf), which no .q4nx can feed (Gemma 4's only view).
+    bool reads_gguf_only() const;
 };
 
 }  // namespace open_qwen36

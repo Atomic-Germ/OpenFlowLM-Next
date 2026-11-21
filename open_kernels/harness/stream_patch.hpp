@@ -387,4 +387,92 @@ inline void attn_rows_apply(uint32_t* iw, const std::vector<AttnRowPatch>& table
     }
 }
 
+/// OPEN-PREFILL-ATTN-WIDE: an fa_wide stream (designs/fa_wide) built at fa_wide.py's POS0_PLACEHOLDER. Its query rows sit at
+/// cache position pos0; pass p (fw_pass_rows(hd) rows) reads the key chunks fw_chunks gives, from the cache rows [K | V].
+constexpr uint32_t kFwPlaceholder = 1000, kFwKeyChunk = 32, kFwGroups = 4, kFwRtpC0 = 8;
+inline uint64_t fw_pass_rows(uint64_t hd) { return hd == 256 ? 256 : 128; }
+/// (first key chunk, chunk count) of pass p: the window's oldest row (or 0) through the pass's last row.
+inline void fw_chunks(uint64_t pos0, uint64_t p, uint64_t window, uint64_t pass_rows, uint64_t* c0, uint64_t* n) {
+    const uint64_t first = pos0 + p * pass_rows, lo = window && first + 1 > window ? first + 1 - window : 0;
+    *c0 = lo / kFwKeyChunk;
+    *n = (pos0 + (p + 1) * pass_rows + kFwKeyChunk - 1) / kFwKeyChunk - *c0;
+}
+/// kind 0: a K / V fill's BD length; 1: its DDR offset (base = the column's byte offset); 2: a core's pos0 RTP;
+/// 3: its window RTP; 4: pass p's first-chunk RTP; 5: pass p's chunk-count RTP.
+struct FwPatch {
+    size_t word;
+    uint8_t kind;
+    uint32_t pass = 0;
+    uint64_t base = 0;
+};
+
+/// K and V are buffer args 1 and 2, filled in sequence order (head round, pass, group), so the f-th K fill is pass
+/// (f / 4) % passes; each core's RTP buffer is op-0 writes, pos0 in slot 3, the window in slot 4, pass p's first chunk in
+/// 8 + p and its count in 8 + passes + p.
+inline std::vector<FwPatch> fw_table(const std::vector<uint32_t>& w, const std::string& kn, uint64_t hd, uint64_t kv_ld,
+                                     uint64_t passes) {
+    if ((hd != 256 && hd != 512) || !kv_ld || !passes) throw std::runtime_error("fawpos: " + kn + ": bad geometry");
+    const uint64_t prow = fw_pass_rows(hd);
+    std::vector<FwPatch> t;
+    std::map<uint32_t, size_t> rtp_at;          // every write32 address -> its value word
+    std::vector<uint32_t> pos_addr;
+    size_t bd_write = 0, fills[3] = {0, 0, 0};
+    bool have_bd = false;
+    for (size_t i = 4; i < w.size(); i += op_len(w[i])) {
+        if (w[i] == 0 && i + 5 < w.size()) {
+            rtp_at[w[i + 2]] = i + 4;
+            if (w[i + 4] == kFwPlaceholder) pos_addr.push_back(w[i + 2]);
+            continue;
+        }
+        if (w[i] == 1) { bd_write = i; have_bd = true; continue; }
+        if (w[i] != 0x81 || i + 11 >= w.size()) continue;
+        const uint32_t arg = w[i + 8];
+        if (arg != 1 && arg != 2) continue;
+        if (!have_bd || bd_write + 4 >= w.size() || w[bd_write + 2] + 4 != w[i + 6])
+            throw std::runtime_error("fawpos: " + kn + ": no BD write before a K / V fill");
+        const uint32_t p = static_cast<uint32_t>((fills[arg]++ / kFwGroups) % passes);
+        uint64_t c0, n;
+        fw_chunks(kFwPlaceholder, p, 0, prow, &c0, &n);
+        if (w[bd_write + 4] != n * kFwKeyChunk * hd / 2)
+            throw std::runtime_error("fawpos: " + kn + ": a K / V fill of " + std::to_string(w[bd_write + 4]) +
+                                     " words is not pass " + std::to_string(p) + " at the placeholder (built with a window?)");
+        t.push_back({bd_write + 4, 0, p});
+        t.push_back({i + 10, 1, p, static_cast<uint64_t>(w[i + 10]) - c0 * kFwKeyChunk * kv_ld * 2});
+    }
+    if (pos_addr.empty() || fills[1] != fills[2] || !fills[1] || fills[1] % (kFwGroups * passes))
+        throw std::runtime_error("fawpos: " + kn + ": no pos0 RTP writes or unpaired K / V fills (not an fa_wide stream?)");
+    for (uint32_t a : pos_addr) {
+        const uint32_t base = a - 4 * 3;
+        auto slot = [&](uint32_t s) {
+            const auto it = rtp_at.find(base + 4 * s);
+            if (it == rtp_at.end()) throw std::runtime_error("fawpos: " + kn + ": a core lacks RTP slot " + std::to_string(s));
+            return it->second;
+        };
+        t.push_back({slot(3), 2});
+        t.push_back({slot(4), 3});
+        for (uint32_t p = 0; p < passes; ++p) {
+            t.push_back({slot(kFwRtpC0 + p), 4, p});
+            t.push_back({slot(kFwRtpC0 + static_cast<uint32_t>(passes) + p), 5, p});
+        }
+    }
+    return t;
+}
+
+/// Point an fa_wide stream at cache position pos0 with a sliding window (0: none).
+inline void fw_apply(uint32_t* iw, const std::vector<FwPatch>& table, uint64_t pos0, uint64_t window, uint64_t hd,
+                     uint64_t kv_ld) {
+    const uint64_t prow = fw_pass_rows(hd);
+    for (const auto& p : table) {
+        uint64_t c0 = 0, n = 0;
+        fw_chunks(pos0, p.pass, window, prow, &c0, &n);
+        const uint64_t v = p.kind == 0   ? n * kFwKeyChunk * hd / 2
+                           : p.kind == 1 ? p.base + c0 * kFwKeyChunk * kv_ld * 2
+                           : p.kind == 2 ? pos0
+                           : p.kind == 3 ? window
+                           : p.kind == 4 ? c0
+                                         : n;
+        iw[p.word] = static_cast<uint32_t>(v);
+    }
+}
+
 }  // namespace stream_patch

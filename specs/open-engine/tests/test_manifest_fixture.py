@@ -7,8 +7,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from make_fixtures import (FIXTURE, FIXTURE_G3, FIXTURE_HY, FIXTURE_PH, FIXTURE_Q3, fixture_manifest,
-                           fixture_manifest_g3, fixture_manifest_hy, fixture_manifest_ph, fixture_manifest_q3)
+from make_fixtures import (FIXTURE, FIXTURE_G3, FIXTURE_G4, FIXTURE_HY, FIXTURE_PH, FIXTURE_Q3, fixture_manifest,
+                           fixture_manifest_g3, fixture_manifest_g4, fixture_manifest_hy, fixture_manifest_ph,
+                           fixture_manifest_q3)
 
 
 def test_fixture_is_current():
@@ -36,3 +37,10 @@ def test_hunyuan_fixture_is_current():
 def test_phi3_fixture_is_current():
     assert FIXTURE_PH.is_file(), "run make_fixtures.py"
     assert json.loads(FIXTURE_PH.read_text(encoding="utf-8")) == fixture_manifest_ph(), "fixtures/manifest_phi4_mini_4b.json is stale"
+
+
+def test_gemma4_fixture_is_current(monkeypatch):
+    # Traces: OPEN-FAMILY-GEMMA4 (manifest_test.cpp reads this fixture); its points are in the catalogue
+    monkeypatch.delenv("OPEN_KERNELS_UNVALIDATED", raising=False)
+    assert FIXTURE_G4.is_file(), "run make_fixtures.py"
+    assert json.loads(FIXTURE_G4.read_text(encoding="utf-8")) == fixture_manifest_g4(), "fixtures/manifest_gemma4_e4b.json is stale"

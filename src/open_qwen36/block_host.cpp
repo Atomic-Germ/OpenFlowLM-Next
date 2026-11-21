@@ -653,6 +653,180 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
     }
 }
 
+namespace {
+
+// pairs (i, i + hd/2) for i < rot/2: Gemma 4's rotation, whole-head on sliding layers and the first quarter on global ones
+void rope_pairs(float* x, size_t hd, size_t rot, const double* inv_freq, double pos) {
+    const size_t half = hd / 2;
+    for (size_t i = 0; i < rot / 2; ++i) {
+        const double a = pos * inv_freq[i];
+        const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
+        const float x1 = x[i], x2 = x[half + i];
+        x[i] = x1 * c - x2 * s;
+        x[half + i] = x2 * c + x1 * s;
+    }
+}
+
+void rms_plain(const float* x, size_t d, double eps, float* out) {
+    double ss = 0;
+    for (size_t j = 0; j < d; ++j) ss += static_cast<double>(x[j]) * x[j];
+    const float r = static_cast<float>(1.0 / std::sqrt(ss / static_cast<double>(d) + eps));
+    for (size_t j = 0; j < d; ++j) out[j] = x[j] * r;
+}
+
+inline float dot_avx(const float* a, const float* b, size_t n) {
+    __m256 s0 = _mm256_setzero_ps(), s1 = _mm256_setzero_ps();
+    size_t j = 0;
+    for (; j + 16 <= n; j += 16) {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j), s0);
+        s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + j + 8), _mm256_loadu_ps(b + j + 8), s1);
+    }
+    s0 = _mm256_add_ps(s0, s1);
+    __m128 r = _mm_add_ps(_mm256_castps256_ps128(s0), _mm256_extractf128_ps(s0, 1));
+    r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+    r = _mm_add_ss(r, _mm_shuffle_ps(r, r, 1));
+    float out = _mm_cvtss_f32(r);
+    for (; j < n; ++j) out += a[j] * b[j];
+    return out;
+}
+
+inline void axpy_avx(float* acc, float w, const float* x, size_t n) {
+    const __m256 vw = _mm256_set1_ps(w);
+    size_t j = 0;
+    for (; j + 8 <= n; j += 8)
+        _mm256_storeu_ps(acc + j, _mm256_fmadd_ps(vw, _mm256_loadu_ps(x + j), _mm256_loadu_ps(acc + j)));
+    for (; j < n; ++j) acc[j] += w * x[j];
+}
+
+}  // namespace
+
+void gemma4_attention_prep(const G4AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
+                           const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, uint16_t* dq) {
+    const size_t qw = g.nh * g.hd, kvw = g.kvh * g.hd, R = g.t_real;
+    if (g.kvh == 0 || g.nh % g.kvh || g.t_real > g.T || g.rot > g.hd || g.hd % 8 || kv_row_elems < 2 * kvw)
+        throw std::runtime_error("open_qwen36: gemma4_attention_prep: inconsistent geometry");
+    std::fill(dq, dq + g.T * qw, uint16_t(0));
+#pragma omp parallel
+    {
+        std::vector<float> kh(kvw), vh(kvw), qh(g.hd);
+#pragma omp for
+        for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
+            const size_t t = static_cast<size_t>(tt), p = g.pos0 + t;
+            if (k) {
+                for (size_t h = 0; h < g.kvh; ++h) {
+                    rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
+                    rope_pairs(kh.data() + h * g.hd, g.hd, g.rot, inv_freq, static_cast<double>(p));
+                    rms_plain(v + t * kvw + h * g.hd, g.hd, g.eps, vh.data() + h * g.hd);
+                }
+                for (size_t j = 0; j < kvw; ++j) {
+                    kv[p * kv_row_elems + j] = f32_to_bf16(kh[j]);
+                    kv[p * kv_row_elems + kvw + j] = f32_to_bf16(vh[j]);
+                }
+            }
+            for (size_t h = 0; h < g.nh; ++h) {
+                rms_vec(q + t * qw + h * g.hd, g.hd, qn, g.eps, qh.data());
+                rope_pairs(qh.data(), g.hd, g.rot, inv_freq, static_cast<double>(p));
+                for (size_t j = 0; j < g.hd; ++j) dq[t * qw + h * g.hd + j] = f32_to_bf16(qh[j]);
+            }
+        }
+    }
+}
+
+void gemma4_attention(const G4AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
+                      const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* og) {
+    const size_t qw = g.nh * g.hd, kvw = g.kvh * g.hd, R = g.t_real;
+    if (g.kvh == 0 || g.nh % g.kvh || g.t_real > g.T || g.rot > g.hd || g.hd % 8 || kv_row_elems < 2 * kvw)
+        throw std::runtime_error("open_qwen36: gemma4_attention: inconsistent geometry");
+    const size_t grp = g.nh / g.kvh;
+    std::fill(og, og + g.T * qw, 0.f);
+    if (R == 0) return;
+
+    if (k) {
+#pragma omp parallel
+        {
+            std::vector<float> kh(kvw), vh(kvw);
+#pragma omp for
+            for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
+                const size_t t = static_cast<size_t>(tt), p = g.pos0 + t;
+                for (size_t h = 0; h < g.kvh; ++h) {
+                    rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
+                    rope_pairs(kh.data() + h * g.hd, g.hd, g.rot, inv_freq, static_cast<double>(p));
+                    rms_plain(v + t * kvw + h * g.hd, g.hd, g.eps, vh.data() + h * g.hd);
+                }
+                for (size_t j = 0; j < kvw; ++j) {
+                    kv[p * kv_row_elems + j] = f32_to_bf16(kh[j]);
+                    kv[p * kv_row_elems + kvw + j] = f32_to_bf16(vh[j]);
+                }
+            }
+        }
+    }
+
+    std::vector<float> Q(R * qw);
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(R * g.nh); ++i) {
+        const size_t t = static_cast<size_t>(i) / g.nh, h = static_cast<size_t>(i) % g.nh;
+        float* dst = Q.data() + t * qw + h * g.hd;
+        rms_vec(q + t * qw + h * g.hd, g.hd, qn, g.eps, dst);
+        rope_pairs(dst, g.hd, g.rot, inv_freq, static_cast<double>(g.pos0 + t));
+    }
+
+    const size_t end = g.pos0 + R;
+    const size_t lo = g.window && g.pos0 + 1 > g.window ? g.pos0 + 1 - g.window : 0;   // the oldest row any query needs
+    const size_t nrows = end - lo;
+    std::vector<float> Kf(g.kvh * nrows * g.hd), Vf(g.kvh * nrows * g.hd);
+#pragma omp parallel for
+    for (long long rr = 0; rr < static_cast<long long>(nrows); ++rr) {
+        const size_t r = lo + static_cast<size_t>(rr);
+        for (size_t h = 0; h < g.kvh; ++h) {
+            float* kd = Kf.data() + (h * nrows + static_cast<size_t>(rr)) * g.hd;
+            float* vd = Vf.data() + (h * nrows + static_cast<size_t>(rr)) * g.hd;
+            const uint16_t* ks = kv + r * kv_row_elems + h * g.hd;
+            const uint16_t* vs = ks + kvw;
+            for (size_t j = 0; j < g.hd; ++j) {
+                kd[j] = bf16_to_f32(ks[j]);
+                vd[j] = bf16_to_f32(vs[j]);
+            }
+        }
+    }
+
+#pragma omp parallel
+    {
+        std::vector<float> s, acc(grp * g.hd);
+#pragma omp for schedule(dynamic, 2)
+        for (long long task = 0; task < static_cast<long long>(g.kvh * R); ++task) {
+            const size_t h0 = static_cast<size_t>(task) / R, t = static_cast<size_t>(task) % R, p = g.pos0 + t;
+            const size_t first = g.window && p + 1 > g.window ? p + 1 - g.window : 0, n = p + 1 - first;
+            s.resize(grp * n);
+            const float* Kh = Kf.data() + (h0 * nrows + (first - lo)) * g.hd;
+            const float* Vh = Vf.data() + (h0 * nrows + (first - lo)) * g.hd;
+            const float* qh = Q.data() + t * qw + h0 * grp * g.hd;
+            for (size_t r = 0; r < n; ++r)
+                for (size_t a = 0; a < grp; ++a) s[a * n + r] = dot_avx(qh + a * g.hd, Kh + r * g.hd, g.hd);
+            std::fill(acc.begin(), acc.end(), 0.f);
+            for (size_t a = 0; a < grp; ++a) {
+                float* sa = s.data() + a * n;
+                float mx = sa[0];
+                for (size_t r = 1; r < n; ++r) mx = std::max(mx, sa[r]);
+                double denom = 0;
+                for (size_t r = 0; r < n; ++r) {
+                    sa[r] = std::exp(sa[r] - mx);
+                    denom += sa[r];
+                }
+                const float inv = static_cast<float>(1.0 / denom);
+                for (size_t r = 0; r < n; ++r) axpy_avx(acc.data() + a * g.hd, sa[r] * inv, Vh + r * g.hd, g.hd);
+            }
+            std::copy(acc.begin(), acc.end(), og + t * qw + h0 * grp * g.hd);
+        }
+    }
+}
+
+void matmul_nt(const float* W, size_t N, size_t K, const float* X, size_t T, float* Y) {
+    if (K % 8) throw std::runtime_error("open_qwen36: matmul_nt: K is not a multiple of 8");
+#pragma omp parallel for schedule(static)
+    for (long long n = 0; n < static_cast<long long>(N); ++n)
+        for (size_t t = 0; t < T; ++t) Y[t * N + static_cast<size_t>(n)] = dot_avx(W + static_cast<size_t>(n) * K, X + t * K, K);
+}
+
 void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
                     const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q) {
     if (g.kv_pair)

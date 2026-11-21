@@ -14,6 +14,7 @@
 #include "open_qwen36/manifest.hpp"
 
 using open_qwen36::AttnFa;
+using open_qwen36::GemmBlockProgram;
 using open_qwen36::Manifest;
 using open_qwen36::PackOp;
 using nlohmann::json;
@@ -1195,6 +1196,81 @@ int main(int argc, char** argv) {
             }
         } catch (const std::exception& e) {
             check(false, std::string("host attention guard: ") + e.what());
+        }
+    }
+
+    // Gemma 4 E4B (OPEN-FAMILY-GEMMA4): KV-shared layers, two attention widths, per-layer inputs, soft cap
+    if (argc >= 8) {
+        try {
+            Manifest g = Manifest::load(argv[7]);
+            check(g.family == "gemma4e" && g.layers.size() == 42 && g.gguf && g.gguf->kv_source.size() == 42,
+                  "gemma4: 42 layers and a GGUF view");
+            const Manifest& v = *g.gguf;
+            check(v.kv_source[23] == -1 && v.kv_source[24] == 22 && v.kv_source[29] == 23 && v.kv_source[41] == 23,
+                  "gemma4: the shared layers read layer 22's (sliding) or 23's (global) cache");
+            check(v.layer_type(24).state_kind == "kv_shared" && v.layer_type(23).state_kind == "kv" &&
+                      v.layer_type(29).state_row == v.layer_type(23).state_row,
+                  "gemma4: a shared layer's state is its source's row");
+            check(v.kernels.at("dx").kv_row == 4096 && v.kernels.at("dx_local").kv_row == 2048 && v.kv_row == 2048,
+                  "gemma4: the global kind's kernels carry their own KV row");
+            const auto& pg = v.per_row_globals.at("ptab");
+            const auto& pl = v.per_row_globals.at("ptab_local");
+            check(pg.inv_freq.size() == 64 && pg.cs_off == 512 && pl.inv_freq.size() == 128 && pl.cs_off == 1024,
+                  "gemma4: each position table carries its own rotation width and cos / sin offset");
+            check(v.ple.present() && v.ple.dim == 256 && v.ple.gate == "blk.{l}.inp_gate.weight" &&
+                      v.ple.scalar == "blk.{l}.layer_output_scale.weight" && v.final_logit_softcapping == 30.0,
+                  "gemma4: the per-layer inputs and the soft cap");
+            check(v.ple.on_npu && v.layer_type(0).ple_in > 0 && v.layer_type(23).ple_in > 0 &&
+                      static_cast<uint64_t>(v.layer_type(23).ple_in) + 1024 <= v.layer_type(23).act_bytes,
+                  "gemma4: the one-context set applies the per-layer inputs in every layer program");
+            const GemmBlockProgram& lg = v.layer_type(0).gemm_block;
+            const GemmBlockProgram& gg = v.layer_type(23).gemm_block;
+            const GemmBlockProgram& ls = v.layer_type(24).gemm_block;
+            const GemmBlockProgram& gs = v.layer_type(29).gemm_block;
+            check(lg.kind == "gemma4" && lg.t == 256 && lg.program.size() == 7 && lg.hd == 256 && lg.kvh == 2 &&
+                      lg.kvw == 512 && lg.qw == 2048 && lg.window == 512 && lg.rot == 256 && lg.ptab == "ptab_local" &&
+                      lg.ple_dim == 256,
+                  "gemma4 route: the sliding kind's seven steps, widths, window and position table");
+            check(gg.hd == 512 && gg.kvw == 1024 && gg.qw == 4096 && gg.window == 0 && gg.rot == 128 && gg.ptab == "ptab",
+                  "gemma4 route: the global kind's wider heads, partial rotation and no window");
+            check(ls.kvw == 0 && ls.program[0].args[0] == "gq_w" && ls.window == 512 && gs.kvw == 0 && gs.window == 0,
+                  "gemma4 route: a KV-shared kind projects q alone");
+            refused_manifest(argv[7], "reads an earlier layer's cache", "gemma4 route: a shared kind with a k / v width is refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense_local_shared"]["gemm_block"]["kvw"] = 512; });
+            refused_manifest(argv[7], "position table of 64 rotary pairs", "gemma4 route: a position table of another width is refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense"]["gemm_block"]["ptab"] = "ptab_local"; });
+            refused_manifest(argv[7], "exactly 7 steps", "gemma4 route: a route without the per-layer input's projection is refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense"]["gemm_block"]["program"].erase(6); });
+            refused_manifest(argv[7], "per-layer input width", "gemma4 route: a different per-layer input width is refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense"]["gemm_block"]["ple_dim"] = 128; });
+            refused_manifest(argv[7], "ple_in on some layer types only", "gemma4: per-layer inputs on the NPU for some kinds only are refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense"].erase("ple_in"); });
+            refused_manifest(argv[7], "scalar_in_program is for a model without per-layer inputs",
+                             "gemma4: the scalar-only program flag on a model with per-layer inputs is refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense"]["scalar_in_program"] = true; });
+            refused_manifest(argv[7], "runs past its act buffer", "gemma4: a per-layer input slot past the act buffer is refused",
+                             [](json& j) { j["gguf"]["layer_types"]["dense"]["ple_in"] = j["gguf"]["layer_types"]["dense"]["buffers"]["act"]; });
+            refused_manifest(argv[7], "kv_shared state and a kv_source", "gemma4: a shared layer without a source is refused",
+                             [](json& j) { j["gguf"]["kv_source"][24] = -1; });
+            refused_manifest(argv[7], "later layer", "gemma4: a source after the layer is refused",
+                             [](json& j) { j["gguf"]["kv_source"][24] = 30; });
+            refused_manifest(argv[7], "not a kv state of its row", "gemma4: a source of the other kind is refused",
+                             [](json& j) { j["gguf"]["kv_source"][24] = 23; });
+            json cfg = matching_config(v);
+            v.check_model(cfg, "gemma4");
+            check(true, "gemma4: a matching config is accepted");
+            json gh = cfg; gh["global_head_dim"] = 256;
+            refused(v, gh, "global_head_dim", "gemma4: a different global head width is refused by name");
+            check(g.reads_gguf_only(), "gemma4: the set packs GGUF-direct, so find_kernels declines it for a .q4nx model");
+        } catch (const std::exception& e) {
+            check(false, std::string("gemma4 fixture: ") + e.what());
+        }
+    }
+    for (int i = 1; i < argc && i < 7; ++i) {
+        try {
+            check(!Manifest::load(argv[i]).reads_gguf_only(), std::string("a .q4nx model can feed ") + argv[i]);
+        } catch (const std::exception& e) {
+            check(false, std::string(argv[i]) + ": " + e.what());
         }
     }
 
