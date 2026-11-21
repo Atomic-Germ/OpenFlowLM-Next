@@ -71,13 +71,15 @@ declare -A UNIT_FLAGS=(
     [block_host]="-mavx2 -mfma -ffp-contract=off"
 )
 
-UNITS=(cli core block_host pools manifest q4nx_file gguf_file)
+UNITS=(cli core block_host pools manifest q4nx_file gguf_file omp_policy)
 
 echo "build-cli: $CXX -> $OUT/open_qwen36_cli"
 for u in "${UNITS[@]}"; do
     printf '  %-12s ' "$u"
+    unit_source="$SRC/$u.cpp"
+    if [ "$u" = gguf_file ]; then unit_source="$ROOT/src/gguf/gguf_file.cpp"; fi
     # shellcheck disable=SC2086
-    "$CXX" "${FLAGS[@]}" ${UNIT_FLAGS[$u]:-} -c "$SRC/$u.cpp" -o "$OBJ/$u.o"
+    "$CXX" "${FLAGS[@]}" ${UNIT_FLAGS[$u]:-} -c "$unit_source" -o "$OBJ/$u.o"
     echo ok
 done
 

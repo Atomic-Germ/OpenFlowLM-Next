@@ -319,6 +319,8 @@ file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp"
 
 list(APPEND SOURCES ${OFLM_CONFIG_SOURCES})
 
+# Startup policy is backend-independent; HRX builds must not include XRT core.hpp.
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/omp_policy.cpp")
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/npu_matmul.cpp")

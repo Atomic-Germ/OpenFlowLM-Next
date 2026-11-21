@@ -53,6 +53,7 @@ inline const float* bfp16_c_row(const float* c, size_t M, size_t N, const Bfp16T
 
 struct DeltaGeom {
     bool conv_f32 = false; ///< FP32 history; legacy BF16 is the default
+    bool key_head_tiled = true; ///< modulo mapping; manifests select grouped for legacy exports
     size_t T = 0, t_real = 0, hid = 0;
     size_t key_heads = 0, value_heads = 0, head_dim = 0, taps = 0;
     size_t lanes = 0;       ///< columns of the packed alpha / beta projection (the value heads, padded)
@@ -65,6 +66,7 @@ struct DeltaGeom {
 /// replays forwards from it, so it is the tape's business to keep it rather than the caller's.
 struct DeltaTape {
     bool conv_f32 = false;             ///< the history format of the recorded block
+    bool key_head_tiled = true;        ///< must match the mapping used to record the block
     std::vector<uint16_t> conv_state0;  ///< [taps-1, nch] bf16: the conv state the block started from
     std::vector<float> conv_state0_f32; ///< FP32 history instead, when conv_f32; the unused vector is empty
     std::vector<float> S0;              ///< [value_heads, s_rows, head_dim]: the S it started from
@@ -155,6 +157,11 @@ void softmax_chunk(size_t M, size_t L, size_t hd, size_t c0, const float* s, con
 /// idx [T, topk], renormalised into w [T, topk].
 void router_block(size_t T, size_t hid, size_t E, size_t topk, const float* xm, const float* Wr, float* probs,
                   int32_t* idx, float* w);
+
+/// How many of the n prompt tokens at `pos` run as gt-wide blocks; the rest prefill one token
+/// at a time. A block whose padding writes KV rows (`pads_cache`) must fit whole in max_ctx, so
+/// a padded tail that would pass it is left to the sequential path; otherwise all n run as blocks.
+size_t block_prefill_tokens(size_t pos, size_t n, size_t gt, size_t max_ctx, bool pads_cache);
 
 }  // namespace host
 }  // namespace open_qwen36

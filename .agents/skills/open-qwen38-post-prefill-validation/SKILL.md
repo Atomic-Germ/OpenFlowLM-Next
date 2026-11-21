@@ -188,6 +188,18 @@ All gates passed; this is a layer-slice regression, not full-model validation.
 
 ## Building the standalone CLI
 
+The shared GGUF reader now lives in `src/gguf/`. Standalone targets must link
+`../gguf/gguf_file.cpp`, including `vit_test`; private source stages must expose
+`src/gguf` alongside `src/include`. Preserve `omp_policy.cpp` in the standalone
+CLI target when resolving source-list merges. The serial trace patch anchors on
+`submit_ahead_ > 0 && !layer_nan_ && !deepstack` and must still refuse source drift.
+
+The DeltaNet block route's `key_head_mapping` must match its compiled export:
+absent/`grouped` preserves grouped legacy heads; `tiled` selects the modulo-head
+kernel layout. See `open-kernel-families` for the manifest and rollback contract.
+Compare every layer's state and logits against the accepted binary with the same
+export; identical greedy IDs alone are not a numerical gate.
+
 `utilities/prefill-block/build-cli.sh` needs `-mavx2 -mfma` for `cli.cpp`: its
 argmax is vectorised. `core.cpp` includes the intrinsics header for `_mm_mfence`
 explicitly — do not rely on transitive includes from build flags.

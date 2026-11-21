@@ -154,8 +154,9 @@ void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z,
     for (size_t h = 0; h < g.value_heads; ++h) {
         float* Sh = S + h * g.s_rows * dim;
         for (size_t t = 0; t < R; ++t) {
-            const float* kk = Kk.data() + t * key_w + (h % g.key_heads) * dim;
-            const float* qq = Q.data() + t * key_w + (h % g.key_heads) * dim;
+            const size_t kh = g.key_head_tiled ? h % g.key_heads : h / (g.value_heads / g.key_heads);
+            const float* kk = Kk.data() + t * key_w + kh * dim;
+            const float* qq = Q.data() + t * key_w + kh * dim;
             const float* v = V.data() + t * vw + h * dim;
             const float dc = decay[t * g.value_heads + h], bt = beta[t * g.value_heads + h];
             std::fill(tv.begin(), tv.end(), 0.f);
@@ -210,6 +211,17 @@ int main(int argc, char** argv) {
     const auto S = shapes(dir);
     const size_t T = S.at("T"), t_real = S.at("t_real"), hid = S.at("hid");
     const double tol = 1e-4;
+
+    // ---- which prompt tokens run as blocks near the context capacity (OPEN-PREFILL-BATCH)
+    {
+        // padding caches rows: max_ctx 4096, pos 512, 3584 tokens -> the 512-token tail would pad past 4096
+        check(host::block_prefill_tokens(512, 3584, 1024, 4096, true) == 3072, "block_prefill_tokens: a padded tail past max_ctx steps");
+        check(host::block_prefill_tokens(512, 3584, 256, 4096, true) == 3584, "block_prefill_tokens: an aligned prompt runs whole");
+        check(host::block_prefill_tokens(0, 1100, 1024, 2048, true) == 1100, "block_prefill_tokens: a padded tail inside max_ctx runs");
+        check(host::block_prefill_tokens(3900, 100, 1024, 4096, true) == 0, "block_prefill_tokens: no whole block fits");
+        // only real rows cached: the same prompt runs whole
+        check(host::block_prefill_tokens(512, 3584, 1024, 4096, false) == 3584, "block_prefill_tokens: real rows only, all blocks");
+    }
 
     // ---- rmsnorm: a row of ones with a unit weight is 1 / sqrt(1 + eps)
     {
@@ -329,10 +341,12 @@ int main(int argc, char** argv) {
         static const Case cases[] = {
             {1, 19, 5, 4, 7, 19, 6, 6, 5},   // nch 105: one channel past the last 8-wide step; three lanes past the group
             {2, 4, 3, 4, 9, 4, 3, 4, 2},     // nch 24: no remainder; lanes 4: the projection all scalar; t_real < taps - 1
+            {2, 6, 5, 4, 7, 8, 6, 4, 3},     // 3 value heads per key: grouped and tiled are distinct
             {1, 19, 3, 4, 11, 32, 4, 5, 5},  // nch 63: seven past the step; lanes 32: two whole groups, no remainder
         };
-        for (const auto& cse : cases) {
+        for (bool tiled : {false, true}) for (const auto& cse : cases) {
             host::DeltaGeom g;
+            g.key_head_tiled = tiled;
             g.T = cse.T; g.t_real = cse.t_real; g.hid = cse.hid;
             g.key_heads = cse.key_heads; g.value_heads = cse.value_heads; g.head_dim = cse.head_dim;
             g.taps = cse.taps; g.lanes = cse.lanes; g.s_rows = cse.s_rows;
@@ -356,14 +370,31 @@ int main(int argc, char** argv) {
             auto st_v = st0, st_r = st0;
             auto S_v = S0, S_r = S0;
             std::vector<float> og_v(g.T * vw, 3.f), og_r(g.T * vw, 7.f);
+            host::DeltaTape tape;
             host::deltanet_block(g, qkv.data(), z.data(), xn.data(), convw.data(), Wa.data(), Wb.data(), A.data(),
-                                 dtb.data(), nw.data(), st_v.data(), S_v.data(), og_v.data());
+                                 dtb.data(), nw.data(), st_v.data(), S_v.data(), og_v.data(), nullptr, &tape);
             deltanet_scalar(g, qkv.data(), z.data(), xn.data(), convw.data(), Wa.data(), Wb.data(), A.data(),
                             dtb.data(), nw.data(), st_r.data(), S_r.data(), og_r.data());
             const bool same = std::memcmp(og_v.data(), og_r.data(), og_v.size() * sizeof(float)) == 0 &&
                               std::memcmp(S_v.data(), S_r.data(), S_v.size() * sizeof(float)) == 0 && st_v == st_r;
             check(same, "deltanet_block: the scalar loops' bits exactly, at nch " + std::to_string(nch) +
-                            " and lanes " + std::to_string(g.lanes));
+                            " and lanes " + std::to_string(g.lanes) + (tiled ? " tiled" : " grouped"));
+            for (size_t k = 0; k <= g.t_real; ++k) {
+                auto rolled_conv = st0, prefix_conv = st0;
+                auto rolled_state = S0, prefix_state = S0;
+                host::deltanet_rollback(g, tape, k, qkv.data(), rolled_conv.data(), rolled_state.data());
+                auto prefix = g; prefix.t_real = k;
+                deltanet_scalar(prefix, qkv.data(), z.data(), xn.data(), convw.data(), Wa.data(), Wb.data(),
+                                A.data(), dtb.data(), nw.data(), prefix_conv.data(), prefix_state.data(), og_r.data());
+                check(rolled_conv == prefix_conv && rolled_state == prefix_state,
+                      "DeltaNet rollback matches scalar prefix " + std::to_string(k) +
+                      (tiled ? " tiled" : " grouped"));
+            }
+            auto mismatched = g; mismatched.key_head_tiled = !tiled;
+            bool rejected = false;
+            try { host::deltanet_rollback(mismatched, tape, 0, qkv.data(), st_v.data(), S_v.data()); }
+            catch (const std::runtime_error&) { rejected = true; }
+            check(rejected, "DeltaNet rollback refuses a different head mapping");
         }
     }
 

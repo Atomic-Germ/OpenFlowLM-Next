@@ -14,13 +14,14 @@ from attention_heads import read_attention
 ROOT=Path(__file__).resolve().parents[3]
 
 
-def test_export_can_use_a_separate_build_workspace(tmp_path):
+def test_no_build_reads_export_instead_of_build_workspace(tmp_path):
     p=subprocess.run([sys.executable,str(ROOT/'open_kernels/export_qwen36_kernels.py'),
         '--spec',str(ROOT/'open_kernels/recipes/specs/qwen35-27b.json'),
         '--out',str(tmp_path/'export'),'--build-root',str(tmp_path/'work'),
         '--only','ax','--no-build'],capture_output=True,text=True)
     assert p.returncode!=0
-    assert str(tmp_path/'work/ax/final.xclbin') in p.stderr and 'missing after build' in p.stderr
+    assert str(tmp_path/'export/ax/final.xclbin') in p.stderr and 'missing after build' in p.stderr
+    assert not (tmp_path/'work').exists()
 
 
 def spec27():return load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json')
