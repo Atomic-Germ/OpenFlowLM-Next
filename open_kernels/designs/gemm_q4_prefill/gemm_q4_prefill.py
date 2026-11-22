@@ -63,6 +63,8 @@ from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
 
+from dma_schedule import dma_batches
+
 HERE = Path(__file__).parent
 
 # the activation's pre-tiling (npu_offload/gemm_rtp/npue.py's tile_b) is the
@@ -175,6 +177,7 @@ def gemm_q4_prefill(
     tile_n: CompileTime[int] = 32, b_reuse: CompileTime[bool] = True,
     srchash: CompileTime[int] = 0, fmt: CompileTime[str] = "q4_1",
     weight_low: CompileTime[bool] = False,
+    dma_batch: CompileTime[int] = 1,
 ):
     assert not weight_low or fmt == "q4_1", "low dequantization requires q4_1 weights"
     m, k_tile = M_TILE, K_TILE
@@ -191,6 +194,9 @@ def gemm_q4_prefill(
     NKT = k // k_tile                    # matmul k-tile steps == NBG*kys
     T_TILES = t // (n * n_aie_cols)      # T-tile iterations per core
     assert NKT == NBG * kys
+    batches = dma_batches(NRB, T_TILES, dma_batch)
+    if b_reuse and dma_batch != 1:
+        raise ValueError("DMA batching requires the non-reuse activation stream")
 
     dtype_in = str_to_dtype("bf16")
     dtype_out = str_to_dtype("f32")
@@ -354,22 +360,10 @@ def gemm_q4_prefill(
 
     workers = Worker.grid(n_aie_rows, n_aie_cols, _mk)
 
-    # ---- weight taps: one per (row, row-block-group) -- NOT one compound tap
-    # across all NRB, and NOT (see below) all issued into one TaskGroup. The
-    # shim DMA has 16 buffer descriptors PER TILE (CLAUDE.md trap 17); a
-    # naive "issue everything, finish() once at the end" schedule was tried
-    # first here and failed to compile with exactly that error ("Too many
-    # simultaneously active buffer descriptors on tile (3,0), which supports
-    # up to 16") once activation had to be refetched NRB times per column
-    # (b_reuse does not build at n_aie_cols=8 -- see recommend_b_reuse). The
-    # fix is the same one CLAUDE.md trap 18 already names for the reference
-    # design: chunk the sequence and call tg.finish() between chunks so BDs
-    # are freed (aiex.dma_await_task) before the next batch is issued. Here
-    # chunked at the finest granularity, one (row-block-group, T-tile) pair
-    # per TaskGroup, since correctness -- not dispatch-count -- is this
-    # build's priority; this is strictly more barriers than necessary and a
-    # real, reported inefficiency (trap 18's "+4.9%" cost applies again here,
-    # likely worse given the finer granularity).
+    # Weight taps remain one per (row, row group). Bounded TaskGroups let DMA
+    # for the next visit queue before waiting for the current drains. Never
+    # submit all visits together: the shim has only 16 BDs per tile. The
+    # compiler checks the actual allocation for each selected batch/shape.
     row_k_bytes = NBG * elem_bytes // w_unit   # W units for one band_idx across the WHOLE K
     band_idx_stride = n_aie_rows * row_k_bytes
 
@@ -416,16 +410,16 @@ def gemm_q4_prefill(
             for col in range(n_aie_cols):
                 rtp_bufs[row][col][0] = T_TILES
                 rtp_bufs[row][col][1] = NBG
-        for rbg in range(NRB):
-            for ntile in range(T_TILES):
-                tg = TaskGroup()
+        for batch in batches:
+            tg = TaskGroup()
+            for rbg, ntile in batch:
                 for row in range(n_aie_rows):
                     A_prod_hs[row].fill(a_W, tap=a_tap(row, rbg), group=tg)
                 for col in range(n_aie_cols):
                     B_prod_hs[col].fill(a_X, tap=b_tap(col, ntile), group=tg)
                 for col in range(n_aie_cols):
                     C_cons_hs[col].drain(c_Y, tap=c_tap(rbg, ntile, col), wait=True, group=tg)
-                tg.finish()
+            tg.finish()
 
     rt = Runtime(sequence, [W_ty, X_ty, Y_ty, A_prods, B_prods, C_conss])
     program = Program(iron.get_current_device(), rt, workers=[w for row in workers for w in row])
@@ -445,6 +439,11 @@ if _weight_low == "1":
     if FMT != "q4_1":
         raise ValueError("GQP_WEIGHT_LOW requires q4_1")
     SPECIALIZE["weight_low"] = True
+
+_dma_batch = int(os.environ.get("GQP_DMA_BATCH", "1"))
+dma_batches(N_WEIGHT // (M_TILE * N_AIE_ROWS), T // (TILE_N * N_AIE_COLS), _dma_batch)
+if _dma_batch != 1:
+    SPECIALIZE["dma_batch"] = _dma_batch
 
 if __name__ == "__main__":
     b = mem_tile_budget_bytes(K, T, TILE_N)

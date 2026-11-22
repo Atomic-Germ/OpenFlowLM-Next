@@ -287,7 +287,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     auto* conv_fp32 = static_cast<float*>(history);
     const auto tp0 = std::chrono::steady_clock::now();
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
-    if (g.value_heads % g.key_heads || g.t_real > g.T || g.s_rows < dim || g.lanes < g.value_heads)
+    if (!g.key_heads || !g.value_heads || g.value_heads % g.key_heads || g.t_real > g.T || g.s_rows < dim || g.lanes < g.value_heads)
         throw std::runtime_error("open_qwen36: deltanet_block: inconsistent geometry");
     const size_t R = g.t_real;
     const float inv_sqrt = 1.0f / std::sqrt(static_cast<float>(dim));
@@ -306,6 +306,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
         if (g.conv_f32) tape->conv_state0_f32.assign(conv_fp32, conv_fp32 + pre * nch);
         else tape->conv_state0.assign(conv_state, conv_state + pre * nch);
         tape->S0.assign(S, S + g.value_heads * g.s_rows * dim);
+        tape->key_head_tiled = g.key_head_tiled;
     }
     std::vector<float> carry(pre * nch);
     for (size_t r = 0; r < pre; ++r)
@@ -401,8 +402,9 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     for (long long h = 0; h < static_cast<long long>(g.value_heads); ++h) {
         std::vector<float> tv(dim), delta(dim), o(dim), on(dim);
         float* Sh = S + h * g.s_rows * dim;
+        const size_t kh = g.key_head_tiled ? h % g.key_heads : h / (g.value_heads / g.key_heads);
         for (size_t t = 0; t < R; ++t) {
-            delta_token(dim, Sh, Kk.data() + t * key_w + (h % g.key_heads) * dim, Q.data() + t * key_w + (h % g.key_heads) * dim,
+            delta_token(dim, Sh, Kk.data() + t * key_w + kh * dim, Q.data() + t * key_w + kh * dim,
                         V.data() + t * vw + h * dim, decay[t * g.value_heads + h], beta[t * g.value_heads + h],
                         tv.data(), delta.data(), o.data());
             for (size_t j = 0; j < dim; ++j) o[j] *= inv_sqrt;
@@ -424,7 +426,8 @@ void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, cons
                        void* history, float* S) {
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     const size_t pre = g.taps - 1;
-    if (!g.key_heads || g.value_heads % g.key_heads || g.s_rows < dim || g.t_real != tape.t_real ||
+    if (!g.key_heads || !g.value_heads || g.value_heads % g.key_heads || g.s_rows < dim || g.t_real != tape.t_real ||
+        g.key_head_tiled != tape.key_head_tiled ||
         k > tape.t_real || g.conv_f32 != tape.conv_f32 ||
         (g.conv_f32 ? (tape.conv_state0_f32.size() != pre * nch || !tape.conv_state0.empty())
                     : (tape.conv_state0.size() != pre * nch || !tape.conv_state0_f32.empty())) ||
@@ -442,10 +445,11 @@ void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, cons
 #pragma omp parallel for
     for (long long hh = 0; hh < static_cast<long long>(g.value_heads); ++hh) {
         const size_t h = static_cast<size_t>(hh);
+        const size_t kh = g.key_head_tiled ? h % g.key_heads : h / (g.value_heads / g.key_heads);
         std::vector<float> tv(dim), delta(dim);
         float* Sh = S + h * g.s_rows * dim;
         for (size_t t = 0; t < k; ++t)
-            delta_token(dim, Sh, tape.key.data() + t * key_w + (h % g.key_heads) * dim, nullptr,
+            delta_token(dim, Sh, tape.key.data() + t * key_w + kh * dim, nullptr,
                         tape.val.data() + t * vw + h * dim, tape.decay[t * g.value_heads + h],
                         tape.beta[t * g.value_heads + h], tv.data(), delta.data(), nullptr);
     }
@@ -796,6 +800,12 @@ void router_block(size_t T, size_t hid, size_t E, size_t topk, const float* xm, 
         }
         for (size_t s = 0; s < topk; ++s) w[t * topk + s] = static_cast<float>(w[t * topk + s] / wsum);
     }
+}
+
+size_t block_prefill_tokens(size_t pos, size_t n, size_t gt, size_t max_ctx, bool pads_cache) {
+    const size_t tail = n % gt;
+    if (pads_cache && tail && pos + (n - tail) + gt > max_ctx) return n - tail;
+    return n;
 }
 
 }  // namespace host

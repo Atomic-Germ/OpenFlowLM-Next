@@ -135,11 +135,13 @@ def test_prepare_failure_is_not_a_success_and_cannot_overwrite(tmp_path):
         preparer().prepare(a)
 
 
-def test_manifest_geometry_gate_accepts_actual_vocab_but_rejects_role_changes():
+@pytest.mark.parametrize('gguf_companion', [False, True])
+def test_manifest_geometry_gate_accepts_actual_vocab_but_rejects_role_changes(gguf_companion):
     m = preparer()
     spec = load_spec(ROOT/'open_kernels/recipes/specs/qwen35-27b.json')
     data = manifest(spec)
     assert m.check_manifest(data, spec) == data
-    data['layer_types']['linear_attention']['gemm_block']['program'][1]['args'][0] = 'go_w'
+    changed = data['gguf'] if gguf_companion else data
+    changed['layer_types']['linear_attention']['gemm_block']['program'][1]['args'][0] = 'go_w'
     with pytest.raises(ValueError, match='manifest'):
         m.check_manifest(data, spec)

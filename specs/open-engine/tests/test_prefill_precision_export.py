@@ -40,6 +40,28 @@ def test_other_sizes_and_moe_do_not_enable_paired_projection():
         assert all('GQP_WEIGHT_LOW' not in b['env'] for b in m['builds'].values())
 
 
+@pytest.mark.parametrize('name', ['qwen35-27b', 'qwen35-9b', 'qwen36-35b-a3b'])
+def test_dma_experiment_is_not_selected_by_production_recipes(name, monkeypatch):
+    monkeypatch.setenv('GQP_DMA_BATCH', '4')
+    m = manifest(spec(name))
+    assert all('GQP_DMA_BATCH' not in b['env'] for b in m['builds'].values())
+
+
+def test_export_build_environment_drops_ambient_experiments_but_keeps_recipe_choice(monkeypatch):
+    import export_qwen36_kernels as exporter
+    monkeypatch.setenv('GQP_DMA_BATCH', '4')
+    monkeypatch.setenv('GQP_WEIGHT_LOW', '1')
+    monkeypatch.setenv('OPEN_KERNELS_SPEC', 'ambient-spec')
+    path = ROOT / 'open_kernels/recipes/specs/qwen35-27b.json'
+    default = exporter.build_environment({'GQP_N': '14336'}, path)
+    assert 'GQP_DMA_BATCH' not in default
+    assert 'GQP_WEIGHT_LOW' not in default
+    assert default['OPEN_KERNELS_SPEC'] == str(path)
+    explicit = exporter.build_environment({'GQP_DMA_BATCH': '2', 'GQP_WEIGHT_LOW': '1'}, path)
+    assert explicit['GQP_DMA_BATCH'] == '2'
+    assert explicit['GQP_WEIGHT_LOW'] == '1'
+
+
 @pytest.mark.parametrize('field,value',[('hidden',4096),('intermediate',12288),('lin_value_heads',32),
                                       ('num_heads',16),('norm_eps',1e-5),('quant','q8')])
 def test_precision_gate_is_geometry_and_quantization_scoped(field,value):

@@ -133,7 +133,7 @@ struct OmpWaitPolicy {
         g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
-        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+        // Linux installs the default through omp_policy.cpp before libgomp loads.
 #endif
     }
 };
@@ -3589,6 +3589,16 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T, siz
     timing_.tail_ms += ms_since(th);
 }
 
+bool Core::gemm_block_pads_cache() const {
+    // the same test step_gemm_block_layer uses to pick dense_attention_block, the one path that caches only real rows
+    if (host_attn_on_ || in_host_decode_ || !attn_block_on_) return true;
+    for (int l = 0; l < nl_; ++l) {
+        const GemmBlockProgram& gb = types_[l]->gemm_block;
+        if (gb.kind != "dense" || !gb.attn_block.present() || gb.attn_block.prep.empty()) return true;
+    }
+    return false;
+}
+
 void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits) {
     apply_thread_budget();
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_gemm_block before load_weights");
@@ -3599,14 +3609,12 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
                                  " tokens, but this kernel set's gemm-route block size is " +
                                  std::to_string(gemm_block_t_) + " (0 = no gemm_block program loaded)");
     if (t_real == 0 || t_real > T) throw std::runtime_error("open_qwen36: step_gemm_block: t_real must be in (0, T]");
-    // Positions [pos_, pos_+T) are all touched (padding columns included --
-    // hardware-proven exact: the real columns' output does not depend on
-    // what the padding columns carry), so the CAPACITY check must cover T,
-    // not just the real tokens -- even though only t_real of them advance
-    // pos_ afterward.
-    if (static_cast<size_t>(pos_) + T > cfg_.max_ctx)
+    // Where the padding columns write KV rows too, the capacity check must cover all T of them,
+    // even though only t_real advance pos_; Engine::prefill keeps such a tail off this route.
+    const size_t rows = gemm_block_pads_cache() ? T : t_real;
+    if (static_cast<size_t>(pos_) + rows > cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: gemm-block [" + std::to_string(pos_) + ", " +
-                                 std::to_string(pos_ + T) + ") would exceed the context capacity " +
+                                 std::to_string(pos_ + rows) + ") would exceed the context capacity " +
                                  std::to_string(cfg_.max_ctx));
     for (int tok : ids)
         if (tok < 0 || static_cast<size_t>(tok) >= w_->vocab) throw std::runtime_error("open_qwen36: token id out of range");
@@ -4406,6 +4414,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
+    g.key_head_tiled = gb.key_head_tiled;
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
@@ -5020,6 +5029,7 @@ void Core::layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N)
     host::DeltaGeom g;
     g.T = T; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
+    g.key_head_tiled = gb.key_head_tiled;
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps; g.conv_f32 = gb.conv_f32;
     // DeltaNet still goes block by block in order: S and the conv rows chain through it
     gemm_phase(l, gb.program[0], B, T, hid, nch + vw,
