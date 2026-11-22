@@ -1,7 +1,9 @@
 """Acceptance gates for the matched OpenMP measurement driver."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -80,20 +82,171 @@ def test_same_binary_benchmark_changes_only_the_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(M, 'source_provenance', lambda *args: {})
     monkeypatch.setattr(M, 'platform', lambda: dict(mode='default'))
     policies = []
-    def invoke(command, *, env, **kwargs):
+    def invoke(command, env, timeout):
         policy = env['OFLM_OPEN_OMP_PASSIVE']
         policies.append(policy)
         assert 'OMP_WAIT_POLICY' not in env
         Path(command[4]).write_text('1000')
         ms = 100 if policy == '0' else 85
         return subprocess.CompletedProcess(command, 0, stdout=(
-            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr='')
-    monkeypatch.setattr(M.subprocess, 'run', invoke)
+            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr=''), \
+            ['/usr/lib/libxrt_coreutil.so.2.25.00']
+    monkeypatch.setattr(M, 'run_sampled', invoke)
     result = M.benchmark(a, tmp_path)
     assert result['verdict'] == 'PASS'
     assert policies == ['1', '0', '0', '1', '1', '0', '0', '1', '1', '0', '0', '1']
     assert all(row['omp_passive'] == ('0' if row['arm'] == 'before' else '1')
                for row in result['rows'])
+    assert all(row['runtime_libraries'] == ['/usr/lib/libxrt_coreutil.so.2.25.00']
+               for row in result['rows'])
+
+
+def test_kernel_ablation_changes_only_kernel_path_not_policy(tmp_path, monkeypatch):
+    pytest.importorskip('fcntl', reason='hardware driver uses POSIX locking')
+    a = SimpleNamespace(tokens=2, generate=2, reps=5, before=tmp_path/'cli',
+                        after=tmp_path/'cli', before_commit='same', after_commit='same',
+                        model=tmp_path, kernels=tmp_path/'unused',
+                        before_kernels=tmp_path/'control', after_kernels=tmp_path/'candidate')
+    monkeypatch.setattr(M.O, 'LOCK', tmp_path/'lock')
+    monkeypatch.setattr(M.O, 'fixture', lambda *args, **kwargs: [1, 2])
+    monkeypatch.setattr(M.P, 'provenance', lambda *args: {})
+    monkeypatch.setattr(M.P, 'conditions', lambda: {})
+    monkeypatch.setattr(M, 'source_provenance', lambda *args: {})
+    monkeypatch.setattr(M, 'platform', lambda: dict(mode='default'))
+    calls = []
+    def invoke(command, env, timeout):
+        calls.append((command, env))
+        assert env['OFLM_OPEN_OMP_PASSIVE'] == '1'
+        kernel = command[command.index('--kernels') + 1]
+        Path(command[4]).write_text('1000')
+        ms = 100 if kernel == str(a.before_kernels) else 95
+        return subprocess.CompletedProcess(command, 0, stdout=(
+            f'prefill 2 tokens: {ms} ms\ndecode 2 tokens: 10 ms/token\ntoken 1\ntoken 2\n'), stderr=''), []
+    monkeypatch.setattr(M, 'run_sampled', invoke)
+    result = M.benchmark(a, tmp_path)
+    assert result['verdict'] == 'PASS'
+    assert result['check'] == 'kernel-benchmark'
+    assert len(calls) == 12
+    for before, after in zip(calls[::2], calls[1::2]):
+        assert before[1] == after[1]
+        left, right = list(before[0][5:]), list(after[0][5:])
+        index = left.index('--kernels') + 1
+        assert {left[index], right[index]} == {str(a.before_kernels), str(a.after_kernels)}
+        left[index] = right[index]
+        assert left == right
+
+
+def test_partial_kernel_ablation_is_refused():
+    a = SimpleNamespace(before_kernels=Path('control'), after_kernels=None)
+    with pytest.raises(ValueError, match='both kernel directories'):
+        M.kernel_comparison(a)
+
+
+def test_runtime_paths_read_resolved_libraries_not_sonames():
+    maps = '\n'.join([
+        '7f00-7f01 r-xp 0 08:02 1 /usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00',
+        '7f02-7f03 r-xp 0 08:02 1 /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0',
+        '7f04-7f05 r-xp 0 08:02 1 /opt/xilinx/xrt/python/pyxrt.cpython-314-x86_64-linux-gnu.so',
+        '7f06-7f07 r-xp 0 08:02 1 /usr/lib/x86_64-linux-gnu/libstdc++.so.6',
+    ])
+    assert M.runtime_paths(maps) == [
+        '/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0',
+        '/opt/xilinx/xrt/python/pyxrt.cpython-314-x86_64-linux-gnu.so',
+        '/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so.2.25.00',
+    ]
+
+
+def test_run_sampled_records_child_libraries_and_exit(tmp_path):
+    if not Path('/proc/self/maps').is_file():
+        pytest.skip('live runtime mappings require Linux procfs')
+    code = 'import time; time.sleep(0.3)'
+    command = [sys.executable, '-c', code]
+    result, libraries = M.run_sampled(command, dict(os.environ), 10)
+    assert result.returncode == 0
+    assert isinstance(libraries, list)
+
+
+def test_runtime_sampler_follows_wrapper_and_drains_large_output(tmp_path):
+    if not Path('/proc/self/maps').is_file():
+        pytest.skip('live runtime mappings require Linux procfs')
+    import math
+    import shutil
+    _ = math.sin(1)
+    paths = [line.split()[-1] for line in Path('/proc/self/maps').read_text().splitlines()
+             if '/libm.so.' in line]
+    if not paths:
+        pytest.skip('a mapped libm shared library is needed for the fake runtime fixture')
+    library = tmp_path / 'libxrt_coreutil.so.2.25.00'
+    shutil.copyfile(paths[0], library)
+    child = ('import ctypes,sys,time; ctypes.CDLL(sys.argv[1]); '
+             'print("x"*200000); print("e"*200000,file=sys.stderr); time.sleep(0.4)')
+    wrapper = 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))'
+    command = [sys.executable, '-c', wrapper, sys.executable, '-c', child, str(library)]
+    result, libraries = M.run_sampled(command, dict(os.environ), 10)
+    assert result.returncode == 0
+    assert str(library) in libraries
+    assert len(result.stdout) > 200000 and len(result.stderr) > 200000
+
+
+def test_runtime_sampler_times_out_and_reaps_child():
+    command = [sys.executable, '-c', 'import time; time.sleep(30)']
+    with pytest.raises(subprocess.TimeoutExpired):
+        M.run_sampled(command, dict(os.environ), 0.1)
+
+
+def server_tool():
+    spec = importlib.util.spec_from_file_location(
+        'server_candidate_check', ROOT / 'utilities/prefill-block/server_candidate_check.py')
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    return tool
+
+
+def server_arms():
+    def arm():
+        libraries = {f'/runtime/{name}.so.2.25.00': {'sha256': 'a' * 64}
+                     for name in ('libxrt_coreutil', 'libxrt_driver_xdna')}
+        run = dict(libraries=libraries, a1={'content': 'A'}, b={'content': 'B'}, a2={'content': 'A'})
+        return dict(verdict='PASS', artifacts={'manifest': 'identical'}, main=run,
+                    fresh={'libraries': libraries})
+    return {'before': arm(), 'after': arm()}
+
+
+def test_server_comparison_requires_runtime_and_output_identity():
+    import copy
+    tool = server_tool()
+    arms = server_arms()
+    assert tool.comparison_passes(arms)
+    for section, key, value in [
+            ('main', 'b', {'content': 'DIFFERENT'}),
+            ('main', 'libraries', {}),
+            ('fresh', 'libraries', {'/missing.so': {}})]:
+        candidate = copy.deepcopy(arms)
+        candidate['after'][section][key] = value
+        assert not tool.comparison_passes(candidate)
+    candidate = copy.deepcopy(arms)
+    candidate['after']['main']['libraries']['/runtime/libxrt_driver_xdna.so.2.25.00']['sha256'] = 'b' * 64
+    assert not tool.comparison_passes(candidate)
+
+
+def test_server_artifacts_must_match_retained_evidence():
+    tool = server_tool()
+    evidence = {'cases': [{'name': 'gemm_n256_k256',
+                          'builds': {'after': {'binaries': {'final.xclbin': 'expected'}}}}]}
+    artifacts = {'gemm': {'gemm_n256_k256': {'final.xclbin': 'expected'}}}
+    assert tool.matches_evidence(artifacts, evidence, 'after')
+    artifacts['gemm']['gemm_n256_k256']['final.xclbin'] = 'changed'
+    assert not tool.matches_evidence(artifacts, evidence, 'after')
+    assert not tool.matches_evidence({'gemm': {}}, evidence, 'after')
+
+
+def test_runtime_identity_requires_core_plugin_and_hashes():
+    from runtime_provenance import runtime_identity
+    libraries = server_arms()['before']['main']['libraries']
+    assert runtime_identity(libraries) is not None
+    assert runtime_identity({}) is None
+    libraries.pop('/runtime/libxrt_driver_xdna.so.2.25.00')
+    assert runtime_identity(libraries) is None
 
 
 def test_boundary_state_coverage_includes_every_layer(monkeypatch):

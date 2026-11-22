@@ -57,7 +57,9 @@ def build(a):
  try:
   generated=out/'generated';generated.mkdir()
   paths=[DESIGN/'gemm_q4_prefill.py',DESIGN/'gemm_q4_dequant.h',Path(__file__),ROOT/'open_kernels/build_design.py']
+  paths.append(DESIGN/'dma_schedule.py')
   record['sources']={str(p):digest(p) for p in paths}
+  (generated/'dma_schedule.py').write_bytes((DESIGN/'dma_schedule.py').read_bytes())
   (generated/'design.py').write_text((DESIGN/'gemm_q4_prefill.py').read_text())
   header=(DESIGN/'gemm_q4_dequant.h').read_text()
   (generated/'gemm_q4_dequant.h').write_text(low_header(header) if a.mode=='low' else header)
