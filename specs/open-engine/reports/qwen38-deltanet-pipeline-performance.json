@@ -402,7 +402,7 @@
   "validation": {
     "profile_checks": "PASS",
     "decode_phase": "generated steps, lmhead>0",
-    "settings": "PASS (detached snapshot)",
+    "settings": "PASS (detached snapshot merged with upstream main)",
     "pytest": "2592 passed, 172 skipped",
     "output_equivalence": "pre-repair vs repaired CLI: identical greedy tokens on a 32-token/4-layer smoke"
   },
