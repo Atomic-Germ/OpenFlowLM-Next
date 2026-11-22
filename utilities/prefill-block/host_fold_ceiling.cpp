@@ -1,94 +1,90 @@
-// Estimate the ceiling of two arithmetic-preserving host-fold changes, using the
-// real production fold for the baseline and a bit-identical re-association for
-// the candidate. Diagnostic only: nothing here is production code.
+// Paired host-fold benchmark with numerically equivalent, allocation-comparable
+// arms. Fails closed if the outputs are not byte-identical.
 //
-// Baseline (prefill_precision::Workspace::run):
-//   high.run: split x (K*T), copy A (N*T), A += B
-//   outer:    copy (A+B) (N*T)
-//   low.run:  split x AGAIN (K*T), copy C (N*T), C += D
-//   outer:    (A+B) += (C+D)
-// Candidate:
-//   split x once, copy A, A += B, copy C, C += D, (A+B) += (C+D)
-// Every element's association is unchanged: ((A+B) + (C+D)) in both.
+//   g++ -O3 -DNDEBUG -std=c++20 -fopenmp -I. -Isrc \
+//       utilities/prefill-block/host_fold_ceiling.cpp -o models/host_fold_ceiling
+//   ./host_fold_ceiling 7
 //
-//   g++ -O3 -DNDEBUG -std=c++20 -fopenmp -Isrc utilities/prefill-block/host_fold_ceiling.cpp -o /tmp/ceiling
-//   /tmp/ceiling 7
+// Both arms perform the same four products in the same association; the
+// candidate only removes a duplicate input split and one intermediate copy.
+// Workspaces persist across calls in both arms, as Core's do. One warm-up pair is
+// discarded, then alternating paired measurements are retained and summarised.
 #include <algorithm>
-#include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <numeric>
 #include <vector>
 
-#include "open_qwen36/prefill_precision.hpp"
+#include "host_fold_probe.hpp"
 
 namespace {
 
+// Qwen3.8-27B block route at T=256. Linear layers: fused qkv+z, out, up+gate,
+// down. Full layers: fused q+k+v+gate, out, up+gate, down.
 struct Shape { const char* name; size_t n, k; };
 const Shape kLinear[] = {{"qkvz", 16384, 5120}, {"out", 5120, 6144},
                          {"ffn_up", 34816, 5120}, {"ffn_down", 5120, 17408}};
 const Shape kFull[] = {{"attn_in", 14336, 5120}, {"out", 5120, 5120},
                        {"ffn_up", 34816, 5120}, {"ffn_down", 5120, 17408}};
 constexpr size_t T = 256;
+constexpr size_t LINEAR_LAYERS = 48, FULL_LAYERS = 16;
 
-using Clock = std::chrono::steady_clock;
-static double ms(Clock::time_point t) {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
-}
-
-// Baselines are timed through the real header; the candidate mirrors its
-// statements exactly, minus the second split and the intermediate copy.
-struct Buffers {
-    std::vector<float> x, lo, a, b, c, d, out;
+struct ShapeState {
+    std::vector<fold_probe::Fixture> linear_fixtures, full_fixtures;
+    fold_probe::BaselineState linear_base, full_base;
+    fold_probe::CandidateState linear_cand, full_cand;
 };
 
-void prepare(Buffers& b, const Shape& s) {
-    b.x.assign(s.k * T, 1.0f);
-    b.out.assign(s.n * T, 0.0f);
-    b.a.assign(s.n * T, 1.0f);
-    b.b.assign(s.n * T, 2.0f);
-    b.c.assign(s.n * T, 3.0f);
-    b.d.assign(s.n * T, 4.0f);
+// Build fixtures once. `kind` is normally "random"; the caller may select the
+// rounding fixture for the numerical gate.
+ShapeState state(const std::string& kind) {
+    ShapeState s;
+    for (const auto& sh : kLinear) s.linear_fixtures.push_back(fold_probe::make_fixture(sh.n, sh.k, T, kind));
+    for (const auto& sh : kFull) s.full_fixtures.push_back(fold_probe::make_fixture(sh.n, sh.k, T, kind));
+    return s;
 }
 
-double baseline(const Shape& s, Buffers& b) {
-    using namespace open_qwen36::prefill_precision;
-    Workspace ws;
-    auto dispatch = [&](bool low, const float*) { return low ? b.b.data() : b.a.data(); };
-    const auto t = Clock::now();
-    const float* r = ws.run(b.x.data(), s.k * T, s.n * T, dispatch);
-    const double e = ms(t);
-    if (!r || !std::isfinite(r[0])) std::abort();
-    return e;
+// Byte-exact gate over every projection of both layer kinds. Returns false and
+// prints the first mismatch, so a benchmark can never publish a timing for
+// arms that compute different answers.
+bool validate(const ShapeState& s) {
+    auto check = [](const std::vector<fold_probe::Fixture>& fixtures, const char* kind) {
+        for (size_t i = 0; i < fixtures.size(); ++i) {
+            std::string why;
+            if (!fold_probe::equivalent(fixtures[i], &why)) {
+                std::fprintf(stderr, "fold validation FAILED (%s projection %zu): %s\n", kind, i, why.c_str());
+                return false;
+            }
+        }
+        return true;
+    };
+    return check(s.linear_fixtures, "linear") && check(s.full_fixtures, "full");
 }
 
-double candidate(const Shape& s, Buffers& b) {
-    const size_t inputs = s.k * T, outputs = s.n * T;
-    const auto t = Clock::now();
-    b.lo.resize(inputs);
-    for (size_t i = 0; i < inputs; ++i) {
-        const float hi = open_qwen36::bf16_to_f32(open_qwen36::f32_to_bf16(b.x[i]));
-        b.lo[i] = b.x[i] - hi;
-    }
-    // W_hi X_hi, then W_hi X_lo, exactly as InputWorkspace::run does.
-    b.out.assign(b.a.begin(), b.a.end());
-    for (size_t i = 0; i < outputs; ++i) b.out[i] += b.b[i];
-    // W_lo X_hi + W_lo X_lo kept as its own sum so the association is unchanged.
-    // c is the W_lo X_hi stub output, d the W_lo X_lo one; copy then add, as the
-    // baseline's InputWorkspace::run does.
-    std::vector<float> lo_sum(outputs);
-    std::copy(b.c.begin(), b.c.end(), lo_sum.begin());
-    for (size_t i = 0; i < outputs; ++i) lo_sum[i] += b.d[i];
-    for (size_t i = 0; i < outputs; ++i) b.out[i] = (b.out[i] + lo_sum[i]);
-    const double e = ms(t);
-    if (!std::isfinite(b.out[0])) std::abort();
-    return e;
-}
-
-template <class Fn>
-double block(const Shape* set, size_t layers, std::vector<Buffers>& bufs, Fn fn) {
+// One whole 256-token block: every projection of every layer, with each arm's
+// workspace persistent across the whole measurement (as Core keeps them).
+double block_ms(bool baseline, ShapeState& s) {
     double total = 0;
-    for (size_t i = 0; i < 4; ++i) total += fn(set[i], bufs[i]) * static_cast<double>(layers);
+    auto run = [&](const std::vector<fold_probe::Fixture>& fixtures, size_t layers,
+                   fold_probe::BaselineState& base, fold_probe::CandidateState& cand) {
+        for (size_t i = 0; i < fixtures.size(); ++i) {
+            for (size_t layer = 0; layer < layers; ++layer) {
+                if (baseline) {
+                    double t = 0;
+                    if (!fold_probe::run_baseline(base, fixtures[i], nullptr, &t)) std::abort();
+                    total += t;
+                } else {
+                    // The candidate times its whole call; a per-phase total would
+                    // double-count the clock reads inside the fold.
+                    const auto t0 = fold_probe::Clock::now();
+                    if (!fold_probe::run_candidate(cand, fixtures[i], nullptr)) std::abort();
+                    total += fold_probe::ms_since(t0);
+                }
+            }
+        }
+    };
+    run(s.linear_fixtures, LINEAR_LAYERS, s.linear_base, s.linear_cand);
+    run(s.full_fixtures, FULL_LAYERS, s.full_base, s.full_cand);
     return total;
 }
 
@@ -96,20 +92,42 @@ double block(const Shape* set, size_t layers, std::vector<Buffers>& bufs, Fn fn)
 
 int main(int argc, char** argv) {
     const int reps = argc > 1 ? std::atoi(argv[1]) : 7;
-    if (reps < 5) { std::fprintf(stderr, "use at least five repetitions\n"); return 2; }
-    std::vector<Buffers> lin(4), full(4);
-    for (size_t i = 0; i < 4; ++i) { prepare(lin[i], kLinear[i]); prepare(full[i], kFull[i]); }
-    double best_base = 1e30, best_cand = 1e30;
-    for (int r = 0; r < reps; ++r) {
-        const double base = block(kLinear, 48, lin, baseline) + block(kFull, 16, full, baseline);
-        const double cand = block(kLinear, 48, lin, candidate) + block(kFull, 16, full, candidate);
-        best_base = std::min(best_base, base);
-        best_cand = std::min(best_cand, cand);
+    if (reps < 5) { std::fprintf(stderr, "use at least five measured pairs (after warm-up)\n"); return 2; }
+    const std::string kind = argc > 2 ? argv[2] : "random";
+    ShapeState s = state(kind);
+    if (!validate(s)) {
+        std::fprintf(stderr, "refusing to benchmark numerically different arms\n");
+        return 3;
     }
-    std::printf("host fold, 256-token block, minimum of %d\n", reps);
-    std::printf("  baseline  (2 splits, 1 intermediate copy) : %8.1f ms\n", best_base);
-    std::printf("  candidate (1 split,  no intermediate copy) : %8.1f ms\n", best_cand);
-    std::printf("  ceiling saved                              : %8.1f ms  (%.1f%% of the fold)\n",
-                best_base - best_cand, 100.0 * (best_base - best_cand) / best_base);
+    // One warm-up pair, discarded: persistent workspaces reach steady state.
+    (void)block_ms(true, s);
+    (void)block_ms(false, s);
+    std::vector<double> base, cand;
+    for (int r = 0; r < reps; ++r) {
+        // Alternate order so drift does not favour one arm.
+        if (r % 2 == 0) {
+            base.push_back(block_ms(true, s));
+            cand.push_back(block_ms(false, s));
+        } else {
+            cand.push_back(block_ms(false, s));
+            base.push_back(block_ms(true, s));
+        }
+    }
+    const fold_probe::Stats st = fold_probe::summarise(base, cand);
+    std::printf("host fold, T=%zu, fixture=%s, %d measured pairs (one warm-up pair excluded)\n",
+                T, kind.c_str(), reps);
+    std::printf("  baseline median  %.1f ms   candidate median %.1f ms\n",
+                st.median_baseline, st.median_candidate);
+    std::printf("  paired median difference %.1f ms (%.2f%%), wins %d/%zu\n",
+                st.median_delta, st.median_change_pct, st.wins, st.delta_ms.size());
+    std::printf("  bootstrap 95%% CI of median difference [%.1f, %.1f] ms\n",
+                st.ci95_low, st.ci95_high);
+    std::printf("samples_baseline");
+    for (double v : st.baseline_ms) std::printf(" %.3f", v);
+    std::printf("\nsamples_candidate");
+    for (double v : st.candidate_ms) std::printf(" %.3f", v);
+    std::printf("\nsamples_delta");
+    for (double v : st.delta_ms) std::printf(" %.3f", v);
+    std::printf("\n");
     return 0;
 }

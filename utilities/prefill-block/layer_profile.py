@@ -189,7 +189,11 @@ def run(ids: list[int], route: str, *, layers: int, max_ctx: int, max_tokens: in
     env.pop('OFLM_OPEN_PREFILL_ROLES', None)
     env.pop('OFLM_OPEN_PREFILL_ROLE_MODE', None)
     env['OFLM_OPEN_PROFILE'] = str(prof)
-    env['OFLM_OPEN_PROFILE_STEPS'] = str(steps)
+    # A sequential route is a prompt: prefill:N keeps it explicit. A block route's
+    # `steps` are the post-prompt decode steps, and decode:N prevents the prompt's
+    # own step() calls from consuming the generation budget.
+    env['OFLM_OPEN_PROFILE_STEPS'] = (
+        f'prefill:{steps}' if route == 'sequential' else f'decode:{steps}')
     # Dense Qwen defaults to block-loop even without --block-major.
     if route == 'block':
         env['OFLM_OPEN_LAYER_MAJOR'] = '0'

@@ -74,6 +74,8 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
     # Per-layer accounting and its sequential-step budget are measurement-only diagnostics.
     "OFLM_OPEN_PROFILE", "OFLM_OPEN_PROFILE_STEPS",
+    # exclusive host-fold phase accounting, opt-in measurement only (PR #4A)
+    "OFLM_OPEN_FOLD_PROFILE",
     # Granite prefill/dispatch A/B switches; these force experimental paths
     # for kernel parity and timing checks, rather than model preferences.
     "OFLM_OPEN_FUSED_NORM", "OFLM_OPEN_PREFILL_PREP", "OFLM_OPEN_RUN_REUSE",
