@@ -1,208 +1,177 @@
-# Qwen3.8-27B DeltaNet and CPU/NPU pipeline: profiling report (PR #4)
+# Qwen3.8-27B DeltaNet and CPU/NPU pipeline (PR #4, corrected by PR #4A)
 
-Profiling only. No production source, kernel, recipe, default, precision or
-scheduling change is in this branch. Machine-readable evidence:
+Profiling and measurement repair only. No production optimisation, kernel,
+recipe, precision, threshold or default is changed. Machine-readable evidence:
 [qwen38-deltanet-pipeline-performance.json](qwen38-deltanet-pipeline-performance.json).
+
+## Decision
+
+**NEEDS MORE EVIDENCE.** The previous GO rested on a host-fold microbenchmark
+whose two arms computed different values (6.0 versus 10.0) and on a decode
+profile of prompt tokens. Both are repaired. The corrected evidence shows a
+real, directly measured host cost, but not a trustworthy end-to-end ceiling:
+
+* the production fold is **2,522.5 ms** per 256-token block (exclusive measured
+  windows: split 1,263.6, copy 610.1, accumulate 648.9), 8.6% of the
+  **29,481 ms** median prefill;
+* the corrected cache-hot microbenchmark removes **21.0%** of that operation
+  (436.5 ms median paired), not the withdrawn 57%;
+* applying a cache-hot microbenchmark saving to a production cost dominated by
+  mapped-buffer reads is not justified without an engine-level trial.
+
+That is enough to justify a small, gated experiment, not enough to promise a
+prefill or TTFT gain. PR #4B should not start until the review accepts this
+scope; if it does, it must be time-boxed and stop if the engine gain is absent.
+
+## Withdrawn claims
+
+The earlier version of this report is superseded. **Withdrawn:** the 57%
+host-fold improvement, the 1.47 s saving, the 5% end-to-end estimate and the
+quantitative GO justification. The old decode capture is retained and marked
+**INVALID FOR DECODE ANALYSIS** in the JSON: its three profiled steps were
+sequential prompt steps (`lmhead_ms = 0`), not generated tokens.
 
 ## 1. Baseline and runtime
 
 | item | value |
 |---|---|
-| branch | `perf/npu-deltanet-pipeline` (created from the tree at `9d77431a`) |
-| baseline commit | **`9d77431a683ffafc4060c59debe463d696670f4a`** (fork `main`; upstream `main` `d7c145f5` is its merge base for `src/`) |
-| excluded | PR #3B/3D experiments (activation replay, dequant variants); they are preserved on their own branches and are absent here |
-| model | `Models/qwen38-27b/Qwen3.8-27B-NPU2` (`model.q4nx`, 19,150,596,832 B) |
-| kernels | `Models/qwen38-27b/production-v2/kernels-model` (manifest spec hash recorded in the JSON) |
-| CLI | built from this branch by `utilities/prefill-block/build-cli.sh`; sha256 in the JSON |
-| precision / route | paired prefill, block loop (`OFLM_OPEN_LAYER_MAJOR=0`), decode route `npu` |
-| runtime | XRT **2.26.0** `libxrt_core`, `libxrt_coreutil`, `libxrt_driver_xdna` from `/opt/xilinx/xrt/lib`, hashes captured from the live process |
-| driver / firmware | amdxdna `2.26.0_20260817` (`2b71d02b…`), firmware `1.1.2.64` (previously recorded) |
-| machine | Ryzen AI 9 365, 91 GiB RAM, XDNA2 Strix, 8 columns, Ubuntu 26.04.1, Linux 7.0.0-43-generic |
-| power | NPU power mode `default` (unchanged), CPU governor `powersave` (unchanged) |
+| branch | `perf/npu-deltanet-pipeline` |
+| baseline | `9d77431a683ffafc4060c59debe463d696670f4a` (upstream `d7c145f5`) |
+| excluded | activation-replay (`f207e675`) and dequant (`dc46bdad`) experiments |
+| model | `Models/qwen38-27b/Qwen3.8-27B-NPU2` (`model.q4nx` sha256 in JSON) |
+| kernels | `Models/qwen38-27b/production-v2/kernels-model` (manifest sha256 in JSON) |
+| CLI | `Models/qwen38-27b/pr4a/cli/open_qwen36_cli`, sha256 in JSON |
+| route / precision | paired prefill, block loop; decode route `npu` |
+| runtime | XRT 2.26.0 core/coreutil/xdna, paths and hashes sampled **from each measured process** |
+| machine | Ryzen AI 9 365, XDNA2 Strix 8 columns, Ubuntu 26.04.1, kernel from the capture |
+| power | NPU `default`, CPU governor `powersave` (unchanged) |
 
-Measured 2026-11-22 (UTC). No NPU or compiler workload ran concurrently with a
-timed capture. This desktop is not a controlled-latency laboratory; load and
-thermal snapshots are recorded per capture.
+## 2. Host fold: corrected benchmark and direct production measurement
 
-`oflm` was not used because the model directory has no `open_kernels` link; the
-profiler's own CLI drives the same engine, weights and kernel set.
+### 2.1 Numerical equivalence (was broken)
 
-## 2. Measured breakdown
+The shared probe (`utilities/prefill-block/host_fold_probe.hpp`) feeds **both**
+arms the same four products `a,b,c,d`, applies the production validation, and
+compares complete buffers. `compare()` reports acceptance separately, so "both
+reject NaN" cannot masquerade as a numeric result. Both arms keep persistent
+workspaces, as `Core` keeps `precision_workspaces_`.
 
-### 2.1 Prefill, 256 tokens (production block route)
+Behavioural tests compile and run the probe: random and rounding fixtures must
+be byte-identical; NaN must be rejected by both; a deliberately corrupted arm
+must fail. These fail on the old implementation.
 
-Two independent captures of the same request; both pass the profiler's three
-accounting checks (layer walls + lm_head inside the request, named host stages
-inside `host_ms`, DeltaNet conv+rule inside `mid_ms`).
+### 2.2 Fair, warmed, paired benchmark
 
-| column | capture A | capture B | share of request (A) |
-|---|---:|---:|---:|
-| request total | 29,243.1 ms | 29,002.6 ms | 100% |
-| GEMM dispatches (`part0`, submit-to-completion) | 24,580.0 ms | 24,326.6 ms | 84.1% |
-| host stages (`part1`) | 1,912.1 ms | 1,912.4 ms | 6.5% |
-| **not in part0/part1** | **2,725.2 ms** | **2,738.0 ms** | **9.3%** |
-| lm_head (outside layer walls) | 25.9 ms | 27.6 ms | 0.1% |
+The benchmark validates every projection before timing, discards one warm-up
+pair, alternates arm order, retains each sample and bootstraps the paired median.
+T=256, 48 linear + 16 full layers, all four projections each.
 
-Host-stage detail (A): `gemm_tile` 463.6, `gemm_tr` 316.5, `sync` 290.0,
-`mid` 786.2 (of which `attn` 290.5, **`dn_conv` 217.8**, **`dn_rule` 277.8**),
-`shared` 147.1, `tail` 36.4, `prenorm` 19.3, `state` 4.9.
-
-Per layer kind: 48 linear layers 451.6 ms each (GEMM 387.3, host 27.9),
-16 full layers 456.0 ms each (GEMM 372.4, host 35.7). **DeltaNet layers are not
-disproportionate**; the full-attention layers cost 4.4 ms more each.
-
-### 2.2 What the 2.7 s is
-
-The profiler's "unattributed to stages" column is
-`request − lm_head − part0 − part1`. It is **not** unmeasured CPU code inside
-the layer body. Reading `core.cpp`/`prefill_precision.hpp`:
-
-- `part0` is `run()` = submit + blocking `wait_run()`, and `wait_run` books only
-  `xrt::run::wait` into `part1`. So a blocking GEMM dispatch's **device time is
-  in `part0`, and any host work between two dispatches falls in neither column.**
-- The paired-prefill fold runs exactly there. `prefill_precision::Workspace::run`
-  splits the input (`K·T`), copies the high product (`N·T`), adds the low input
-  product (`N·T`), then `InputWorkspace::run` splits the **same** input again and
-  the outer `run` copies and accumulates once more — all on the CPU, strictly
-  between blocking dispatches.
-- Two tagged windows also sit outside `part1` by construction: `shared_ms`
-  (147.1 ms, silu·up/accumulate) and `state_ms` (4.9 ms). Subtracting them,
-  **2,573 ms of the 2,725 ms is the precision fold and other untagged folds.**
-
-Independent confirmation: a probe compiled against the **real**
-`prefill_precision.hpp` with a work-free dispatch, on the same 64-layer shape
-(48 linear + 16 full, T=256), measures the fold alone at **3,944.7 ms**
-(minimum of 7; 4,490.9 ms first run). The in-engine figure is lower because the
-dispatch outputs are already-mapped BOs and some copies land in cache, but the
-magnitude and the serial placement agree.
-
-### 2.3 Decode
-
-Sequential route, 3 profiled steps after a 32-token prompt: **1,264 ms for 3
-tokens** (about 421 ms/token), of which `part0` is 4 ms and `part1` 1,258 ms.
-`dispatch_ms` is 650 ms per step against 424 ms of wall — the intervals
-**overlap** under the decode pipeline, so this column is queue residence and not
-CPU work.
-
-Process-level CPU time makes the split explicit:
-
-| capture | wall | CPU time | CPU fraction |
-|---|---:|---:|---:|
-| 256-token prefill block | 35.50 s | 21.32 s | 0.60 |
-| 32-token prompt + 8 decoded tokens | 23.52 s | 6.86 s | 0.29 |
-
-Decode is predominantly **NPU wait**, and it is already pipelined
-(`OPEN-DECODE-PIPELINE`, submit-ahead level 1, one context). There is no
-DeltaNet-specific decode cost visible in the columns: `dn_conv`/`dn_rule`/`mid`
-are ~0 because the fused per-layer `lx` dispatch performs the recurrence on the
-device on that route.
-
-## 3. Critical-path analysis
-
-The block route is a chain of **blocking** GEMM dispatches: `run()` starts a
-command and immediately waits. The precision fold, tiling, transposes, DeltaNet
-conv/rule and state syncs all execute on the CPU **between** those waits, so
-their time is additive to prefill latency; none of it overlaps the NPU. That is
-why `wall ≈ part0 + part1 + untagged` holds to 0.1% in both captures.
-
-Ranked by additive critical-path cost per 256-token block:
-
-| suboperation | ms | % of request | notes |
-|---|---:|---:|---|
-| paired-prefill host fold (split/copy/accumulate) | ~2,573 | ~8.8% | 64 layers × 4 projections |
-| GEMM output tiling (`gemm_tile`) | 463.6 | 1.6% | AVX2, writes mapped BO |
-| GEMM output transpose (`gemm_tr`) | 316.5 | 1.1% | AVX2 |
-| BO host↔device syncs (`sync`) | 290.0 | 1.0% | `x` up / `y` down per dispatch |
-| DeltaNet rule on S (`dn_rule`) | 277.8 | 1.0% | 48 layers, 128 threads of work |
-| DeltaNet conv + q/k norm + α/β (`dn_conv`) | 217.8 | 0.7% | 48 layers |
-| full-attention host half (`attn`) | 290.5 | 1.0% | 16 layers |
-| fused FFN silu·up/accumulate (`shared`) | 147.1 | 0.5% | |
-| residuals / post-norm / router (`tail`) | 36.4 | 0.1% | |
-| input RMSNorm (`prenorm`) | 19.3 | 0.1% | |
-| DeltaNet state syncs (`state`) | 4.9 | 0.02% | |
-
-**DeltaNet is not the bottleneck.** Conv + rule + its state syncs total
-**500.5 ms, 1.7%** of the request, and both phases are already parallelised
-(tokens for the conv, value heads for the rule).
-
-## 4. Ranked optimization candidates
-
-| # | candidate | est. saved per 256-token block | % of prefill | complexity | numerical risk | sync/memory risk |
-|---|---|---:|---:|---|---|---|
-| 1 | **Host fold de-duplication** (one input split, no redundant intermediate copy) | **~1.47 s** (measured ceiling, 57% of the fold) | **~5.0%** | low–moderate | low: association `(A+B)+(C+D)` kept elementwise | none: no dispatch, context or buffer-size change |
-| 2 | Fuse `gemm_tr` transpose into the consumer (DeltaNet conv reads `[N,T]` directly) | ≤0.32 s | ≤1.1% | high | medium: indexing rewrite across consumer kernels | none |
-| 3 | Overlap the fold with the next dispatch (split GEMM into submit-ahead phases) | up to ~2.6 s on paper | ≤8.8% | very high | low | high: reorders host/device access to shared BOs; the engine already documents why cross-context queue-ahead is unsafe |
-| 4 | Tune `gemm_tile`/`sync` (prefetch, non-temporal stores, fewer syncs) | ≤0.75 s | ≤2.6% | moderate–high | low | medium: BO mapping lifetime |
-| 5 | DeltaNet conv/rule micro-tuning | ≤0.25 s | ≤0.9% | moderate | medium (FP32 state, causal order) | none |
-| 6 | Move the DeltaNet recurrence to the NPU | negative to ~0.5 s | ≤1.7% | very high | high | adds dispatches; the plan forbids assuming a win |
-
-Candidate 1 is the only one that is simultaneously **measurable, arithmetic
-preserving, dispatch-free and isolated to one header**. Candidate 3 has the
-largest theoretical ceiling but conflicts with the engine's documented
-submit-ahead safety invariant and is disproportionate for this PR.
-
-### Measured ceiling for candidate 1
-
-Probe: the real `prefill_precision.hpp` baseline versus a bit-identical
-re-association (`((A+B) + (C+D))` in both), T=256, 48 linear + 16 full layers,
-minimum of 7 runs.
-
-| variant | ms |
+| statistic | value |
 |---|---:|
-| baseline: two input splits + redundant intermediate copy | 3,432.8 |
-| candidate: one split, no redundant copy | 1,477.4 |
-| **ceiling saved** | **1,955.4 (57.0% of the fold)** |
+| baseline median | 2,070.9 ms |
+| candidate median | 1,644.5 ms |
+| paired median difference | −436.5 ms |
+| paired median change | −21.01% |
+| wins | 5/5 |
+| bootstrap 95% CI of median difference | [−456.3, −295.1] ms |
+| warm-up pairs excluded | 1 |
 
-Applied to the observed untagged fold (2,573 ms), that ceiling is **≈1.47 s per
-256-token block**, i.e. **≈5.0% of the 29.0 s prefill request** and essentially
-the whole TTFT improvement available from host-side work at this shape. A
-256-token prefill would move from ~29.0 s to ~27.5 s if the engine realises the
-ceiling; the real figure must be measured, not assumed.
+The candidate removes the duplicate input split and one intermediate copy while
+keeping `(A+B)+(C+D)` per element.
 
-## 5. Decision
+### 2.3 Directly measured production fold
 
-**GO — narrowly.** A real, serial, arithmetic-preserving host cost of ~2.6 s per
-prefill block is on the critical path, and a measured ceiling of ~1.47 s exists
-without touching kernels, precision, dispatch count or context count. DeltaNet
-is *not* the target; the precision fold is.
+`OFLM_OPEN_FOLD_PROFILE` adds exclusive, non-overlapping windows inside
+`prefill_precision`; dispatch time is outside every window. It is off unless set.
 
-The decision is **not** a general GO on "DeltaNet optimization": conv/rule
-together are 1.7% of the block and are already parallel. Candidates 2–4 are
-recorded but not recommended for the next phase.
+| phase | ms / 256-token block | share of fold |
+|---|---:|---:|
+| input split (both, one is redundant) | 1,263.6 | 50.1% |
+| intermediate copy (+ final copy) | 610.1 | 24.2% |
+| accumulate | 648.9 | 25.7% |
+| **total, 256 folds** | **2,522.5** | 100% |
 
-## 6. Proposed PR #4B scope (awaiting review)
+Context: uninstrumented 256-token prefill is **29,481 ms** median of five runs
+(29,404–29,544); the fold is therefore **8.6%** of prefill wall. Instrumentation
+did not materially inflate this run (29,390 ms), so the fold figure is usable;
+even so it is one instrumented run and is labelled single-run.
 
-`perf/npu-prefill-fold`:
+Note the microbenchmark totals (~2.07 s) are below the production split+copy
+alone (1.87 s): production reads mapped buffers and cache-cold memory, so its
+cost is not the cache-hot arithmetic the probe measures. The **21%** applies to
+the probe's own baseline, not to the 2,522.5 ms.
 
-1. Rewrite `prefill_precision::Workspace::run`/`InputWorkspace::run` to split the
-   input once per projection and to drop one intermediate `N·T` copy, keeping the
-   per-element association `((W_hiX_hi + W_hiX_lo) + (W_loX_hi + W_loX_lo))`
-   and FP32 accumulation unchanged.
-2. No kernel, recipe, manifest, quantisation, dispatch-count, context-count or
-   default change; the fold stays on the host.
-3. Gates: byte-identical outputs against the current binary on the existing
-   prefill precision fixtures; the existing paired-vs-sequential oracle
-   (`cosine ≥ 0.9999`, unchanged); 256/512/1024-token prefill and short + ~4K
-   decode with matched arms; `OFLM_OPEN_PROFILE` off for the timed arms.
-4. Expected: ~5% prefill/TTFT improvement if the ceiling holds; **no decode
-   claim** (decode does not run the fold and is NPU-wait bound).
-5. Stop and report if the measured engine gain is below 2%.
+## 3. Prefill
+
+Five fresh 256-token captures, no fold instrumentation, no profile overhead in
+the timed path beyond the optional layer profile:
+
+| statistic | value |
+|---|---:|
+| median prompt wall | 29,481 ms |
+| range | 29,404–29,544 ms |
+| model load (separate) | ~6.5 s |
+| real prompt tokens | 256 |
+| physical block | 256 |
+
+One capture's layer accounting (single run) gives dispatch 24.5 s, host stages
+~1.9 s, DeltaNet conv 226.0 ms + rule 280.0 ms + state 4.7 ms. **DeltaNet is
+510.7 ms, 1.7%** of the block: not the bottleneck. Linear layers average
+6.5 ms more wall each than full layers in capture A (458.1 vs 451.6), so the
+earlier "full layers are more expensive" statement was wrong and is corrected.
+
+## 4. Decode (genuine generated tokens)
+
+Captured with `OFLM_OPEN_PROFILE_STEPS=decode:N`, so prompt steps cannot consume
+the budget. Seven generated steps at positions 32–38, every one with
+`lmhead_ms ≈ 25.5 ms`:
+
+| statistic | value |
+|---|---:|
+| generated tokens | 7 |
+| generated latency | **452.0 ms/token** |
+| prompt (32 tokens) | 13,743 ms |
+| model load | 6.4 s |
+| per-step total | 444.7–451.4 ms |
+| per-step `dispatch_ms` | 668.8–678.3 ms (overlaps wall under submit-ahead) |
+
+Decode is dominated by waiting, not CPU: `dispatch_ms` exceeds step wall, so the
+intervals are pipelined. Aggregate process CPU over load+prompt+generation is
+**not** a decode CPU fraction and is not reported as one; a decode-only CPU/wait
+split remains **NOT MEASURED**.
+
+## 5. Ranked candidates (recomputed)
+
+| # | candidate | evidence | expected engine gain | confidence |
+|---|---|---|---|---|
+| 1 | Host fold de-duplication | 2,522.5 ms fold; 21.0% cache-hot probe gain | 0.4–1.8% of prefill if a quarter to all of the cache-hot share transfers | low–moderate |
+| 2 | Tiling/transpose/sync tuning | 1.9 s attributed host stages | ≤2.6% | low |
+| 3 | Fuse GEMM transpose into consumers | 316–330 ms | ≤1.1% | low, high complexity |
+| 4 | DeltaNet conv/rule tuning | 510.7 ms | ≤1.7% | low, already parallel |
+| 5 | Overlap fold with dispatches | — | theoretical only | rejected: reorders shared BO access, engine documents the hazard |
+
+## 6. Why NEEDS MORE EVIDENCE
+
+A directly measured 2.5 s cost exists, so the target is real. But the only
+reliable saving measured is on a cache-hot model of the operation; the
+production split+copy alone is larger than the entire probe, and no corrected
+engine-level A/B of the rewrite has been run. Promising a percentage now would
+repeat the error this repair exists to fix.
+
+**Proposed, if approved:** a time-boxed PR #4B that implements only the fold
+de-duplication, gates on byte-identical prefill outputs and the existing
+`cosine ≥ 0.9999` oracle, and measures 5 alternating prefill pairs at 256 tokens
+plus decode preservation. Stop and report if the median engine gain is < 1%.
 
 ## 7. Verification and limitations
 
-- Both prefill captures pass `layer_profile.py` validation (64 ordered layers,
-  complete requests, three accounting checks); the decode capture passes the
-  same checks.
-- Runtime libraries were sampled from the live benchmark process; hashes and
-  paths are in the JSON.
-- **NOT MEASURED**: end-to-end TTFT through `oflm run`/`oflm serve`; ~4K-context
-  decode; 512/1024-token blocks; other model families; native Windows. The
-  2.75 s figure in the task description matches the profiler's *stage-unaccounted*
-  column, not a measured CPU-only time; this report replaces it with the
-  `part0`/`part1` decomposition and process CPU accounting.
-- The ceiling probe excludes BO mapping, cache warmth and dispatch interference;
-  it bounds host cost, not engine gain.
-- `part0` is host-observed submit-to-completion and includes queue residence; it
-  is not device-only execution time, and no NPU utilisation claim is made.
-- The profiling branch adds only diagnostics and this report. No production
-  default was changed, and nothing was pushed or merged.
+* Behavioural probe tests, five-pair prefill, genuine decode, settings and
+  whitespace checks are recorded in the JSON and re-run by the spec suite.
+* Only 256-token prefill and 32+8 decode were measured; 512/1024, ~4K decode,
+  TTFT through `oflm run`/`serve`, other families and Windows are **NOT
+  MEASURED**.
+* `part0`/`dispatch_ms` are host-observed and include queue residence; no
+  NPU-utilisation claim is made.
+* Fold instrumentation is opt-in and absent from timed arms; its single run is
+  labelled as such.
+* Production kernels, thresholds and defaults are unchanged; nothing was pushed.

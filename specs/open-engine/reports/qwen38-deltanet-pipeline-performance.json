@@ -1,8 +1,7 @@
 {
   "tool": "pr4-deltanet-cpu-npu-pipeline-profiling",
-  "version": 1,
-  "status": "GO",
-  "scope": "profiling only; no production change",
+  "version": 2,
+  "scope": "profiling only; correctness repair of PR #4A; no production optimisation",
   "baseline_commit": "9d77431a683ffafc4060c59debe463d696670f4a",
   "upstream_main": "d7c145f55028c34321ccc78a4db35c026f2bc4dc",
   "excluded": [
@@ -11,436 +10,458 @@
   ],
   "model": {
     "path": "Models/qwen38-27b/Qwen3.8-27B-NPU2",
-    "artifact": {
-      "path": "Models/qwen38-27b/Qwen3.8-27B-NPU2/model.q4nx",
-      "sha256": "5f5c282ae81b63df34e5f9ce42c616d73b454691c4b8d253027b2e08a1fe3d84"
-    }
+    "q4nx": "5f5c282ae81b63df34e5f9ce42c616d73b454691c4b8d253027b2e08a1fe3d84"
   },
   "kernels": {
     "path": "Models/qwen38-27b/production-v2/kernels-model",
-    "manifest": {
-      "path": "Models/qwen38-27b/production-v2/kernels-model/manifest.json",
-      "sha256": "744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee"
-    }
+    "manifest": "744879192c49d2399b18cc6a50692ded1d6c86208387b3307ee5b172a54a3cee"
   },
   "cli": {
-    "path": "Models/qwen38-27b/pr4-profile/cli/open_qwen36_cli",
-    "sha256": "0124e36f5d14fdc8e10f2f081df0224232108c45353a90cadc776ae8f4317ae6"
+    "path": "Models/qwen38-27b/pr4a/cli/open_qwen36_cli",
+    "sha256": "47f220965a98d69a9f80f624e7409938d66c2f7cac0e63b0ba3e04a56e30b571"
   },
   "runtime": {
-    "returncode": 0,
     "paths": [
       "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
       "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
       "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
     ],
     "libraries": {
-      "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
-      "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
-      "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068"
+      "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+        "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+        "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1"
+      },
+      "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+        "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+        "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478"
+      },
+      "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+        "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+        "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068"
+      }
     }
   },
   "machine": {
-    "cpu": "AMD Ryzen AI 9 365",
-    "npu": "Strix XDNA2, 8 columns",
-    "os": "Ubuntu 26.04.1 LTS",
+    "cpu": "x86_64",
+    "system": "Linux-7.0.0-44-generic-x86_64-with-glibc2.43",
     "kernel": "7.0.0-44-generic",
-    "driver": "2.26.0_20260817,2b71d02b641561a40ab2db1c26a69620794f4e9f",
-    "firmware": "1.1.2.64 (previously recorded)",
-    "npu_power_mode": "default",
-    "cpu_governor": "powersave",
-    "host_threads": 20,
-    "measurement_date_utc": "2026-11-22"
+    "governor": "powersave"
   },
   "prefill": [
     {
-      "capture": "prefill-256",
-      "request_total_ms": 29243.123,
-      "part0_ms": 24579.983,
-      "part1_ms": 1912.066,
-      "unattributed_ms": 2725.194999999999,
-      "lmhead_ms": 25.879,
-      "layer_total_ms": 29214.347,
-      "host_stages": {
-        "wall_ms": 29214.347,
-        "gemm_ms": 24579.983,
-        "host_ms": 1912.066,
-        "prenorm_ms": 19.318,
-        "gemm_tile_ms": 463.645,
-        "gemm_tr_ms": 316.505,
-        "mid_ms": 786.213,
-        "dn_conv_ms": 217.836,
-        "dn_rule_ms": 277.761,
-        "attn_ms": 290.504,
-        "tail_ms": 36.434,
-        "shared_ms": 147.1,
-        "state_ms": 4.853,
-        "sync_ms": 290.012
-      },
-      "by_kind": [
-        {
-          "kind": "linear_attention",
-          "n": 48,
-          "wall_ms": 21988.914,
-          "gemm_ms": 18590.893,
-          "host_ms": 1341.272,
-          "per_token_ms": 0.0,
-          "lmhead_ms": 0.0,
-          "prenorm_ms": 14.392,
-          "gemm_tile_ms": 347.401,
-          "gemm_tr_ms": 236.508,
-          "mid_ms": 495.709,
-          "dn_conv_ms": 217.836,
-          "dn_rule_ms": 277.761,
-          "attn_ms": 0.0,
-          "tail_ms": 27.221,
-          "shared_ms": 111.111,
-          "state_ms": 4.461,
-          "sync_ms": 220.094,
-          "qkv_scatter_ms": 0.0,
-          "moe_prep_ms": 0.0,
-          "moe_patch_ms": 0.0,
-          "moe_run_ms": 0.0,
-          "moe_read_ms": 0.0,
-          "setup_ms": 0.0,
-          "mean_wall_ms": 458.102
-        },
-        {
-          "kind": "full_attention",
-          "n": 16,
-          "wall_ms": 7225.433,
-          "gemm_ms": 5989.09,
-          "host_ms": 570.794,
-          "per_token_ms": 0.0,
-          "lmhead_ms": 0.0,
-          "prenorm_ms": 4.926,
-          "gemm_tile_ms": 116.244,
-          "gemm_tr_ms": 79.997,
-          "mid_ms": 290.504,
-          "dn_conv_ms": 0.0,
-          "dn_rule_ms": 0.0,
-          "attn_ms": 290.504,
-          "tail_ms": 9.213,
-          "shared_ms": 35.989,
-          "state_ms": 0.392,
-          "sync_ms": 69.918,
-          "qkv_scatter_ms": 0.0,
-          "moe_prep_ms": 0.0,
-          "moe_patch_ms": 0.0,
-          "moe_run_ms": 0.0,
-          "moe_read_ms": 0.0,
-          "setup_ms": 0.0,
-          "mean_wall_ms": 451.59
-        }
+      "capture": "prefill-t1",
+      "prompt_wall_ms": 29509.0,
+      "model_load_s": 6.7,
+      "cpu_utime_s": 25.59,
+      "cpu_stime_s": 4.7,
+      "wall_s": 37.089,
+      "runtime_paths": [
+        "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
       ],
-      "checks": [
-        {
-          "check": "layer wall + lm_head fit inside the request",
-          "a_ms": 29240.2,
-          "b_ms": 29243.1,
-          "ok": true
-        },
-        {
-          "check": "named host stages fit inside host_ms",
-          "a_ms": 1912.1,
-          "b_ms": 1912.1,
-          "ok": true
-        },
-        {
-          "check": "dn conv + dn rule fit inside mid_ms",
-          "a_ms": 495.6,
-          "b_ms": 786.2,
-          "ok": true
-        }
-      ],
-      "verdict": "PASS",
       "raw": {
-        "path": "Models/qwen38-27b/pr4-profile/prefill-256/result.json",
-        "sha256": "8c74cc7abee3814cf1377d092774550e6934a7c22dc17783dcb1c8e833ab6bb1"
+        "path": "Models/qwen38-27b/pr4a/prefill-t1/capture.json",
+        "sha256": "635db8089d52053aab990a3fb94d4d5809b27a82dca6fe4aa4cf4d315aba3a20"
+      },
+      "layers": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t1/layers.jsonl",
+        "sha256": "71665c91ed939e935cd195c15a5743970068cee09a15ee7afcdad4b850357e7a"
       }
     },
     {
-      "capture": "prefill-256-repeat",
-      "request_total_ms": 29002.58,
-      "part0_ms": 24326.587,
-      "part1_ms": 1912.439,
-      "unattributed_ms": 2738.0070000000032,
-      "lmhead_ms": 25.547,
-      "layer_total_ms": 28973.856,
-      "host_stages": {
-        "wall_ms": 28973.856,
-        "gemm_ms": 24326.587,
-        "host_ms": 1912.439,
-        "prenorm_ms": 19.563,
-        "gemm_tile_ms": 472.891,
-        "gemm_tr_ms": 316.044,
-        "mid_ms": 781.538,
-        "dn_conv_ms": 215.589,
-        "dn_rule_ms": 265.697,
-        "attn_ms": 300.125,
-        "tail_ms": 38.952,
-        "shared_ms": 144.222,
-        "state_ms": 4.752,
-        "sync_ms": 283.596
-      },
-      "by_kind": [
-        {
-          "kind": "linear_attention",
-          "n": 48,
-          "wall_ms": 21767.848,
-          "gemm_ms": 18368.444,
-          "host_ms": 1337.319,
-          "per_token_ms": 0.0,
-          "lmhead_ms": 0.0,
-          "prenorm_ms": 15.033,
-          "gemm_tile_ms": 355.28,
-          "gemm_tr_ms": 240.823,
-          "mid_ms": 481.413,
-          "dn_conv_ms": 215.589,
-          "dn_rule_ms": 265.697,
-          "attn_ms": 0.0,
-          "tail_ms": 29.724,
-          "shared_ms": 108.046,
-          "state_ms": 4.343,
-          "sync_ms": 215.158,
-          "qkv_scatter_ms": 0.0,
-          "moe_prep_ms": 0.0,
-          "moe_patch_ms": 0.0,
-          "moe_run_ms": 0.0,
-          "moe_read_ms": 0.0,
-          "setup_ms": 0.0,
-          "mean_wall_ms": 453.497
-        },
-        {
-          "kind": "full_attention",
-          "n": 16,
-          "wall_ms": 7206.008,
-          "gemm_ms": 5958.143,
-          "host_ms": 575.12,
-          "per_token_ms": 0.0,
-          "lmhead_ms": 0.0,
-          "prenorm_ms": 4.53,
-          "gemm_tile_ms": 117.611,
-          "gemm_tr_ms": 75.221,
-          "mid_ms": 300.125,
-          "dn_conv_ms": 0.0,
-          "dn_rule_ms": 0.0,
-          "attn_ms": 300.125,
-          "tail_ms": 9.228,
-          "shared_ms": 36.176,
-          "state_ms": 0.409,
-          "sync_ms": 68.438,
-          "qkv_scatter_ms": 0.0,
-          "moe_prep_ms": 0.0,
-          "moe_patch_ms": 0.0,
-          "moe_run_ms": 0.0,
-          "moe_read_ms": 0.0,
-          "setup_ms": 0.0,
-          "mean_wall_ms": 450.375
-        }
+      "capture": "prefill-t2",
+      "prompt_wall_ms": 29544.0,
+      "model_load_s": 6.5,
+      "cpu_utime_s": 26.16,
+      "cpu_stime_s": 4.66,
+      "wall_s": 37.089,
+      "runtime_paths": [
+        "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
       ],
-      "checks": [
-        {
-          "check": "layer wall + lm_head fit inside the request",
-          "a_ms": 28999.4,
-          "b_ms": 29002.6,
-          "ok": true
-        },
-        {
-          "check": "named host stages fit inside host_ms",
-          "a_ms": 1912.6,
-          "b_ms": 1912.4,
-          "ok": true
-        },
-        {
-          "check": "dn conv + dn rule fit inside mid_ms",
-          "a_ms": 481.3,
-          "b_ms": 781.5,
-          "ok": true
-        }
-      ],
-      "verdict": "PASS",
       "raw": {
-        "path": "Models/qwen38-27b/pr4-profile/prefill-256-repeat/result.json",
-        "sha256": "6d8d8e7359000dc55b98d270c015effa4ed6ab1d574e0010a3b97f486ef76327"
+        "path": "Models/qwen38-27b/pr4a/prefill-t2/capture.json",
+        "sha256": "2a1e51cc5ef39fc8c6a93b387b4191166577eda8bb7a62562d517758267bb8ea"
+      },
+      "layers": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t2/layers.jsonl",
+        "sha256": "eca29a28721918435cb8a398d3690eedcdfe37ec186625f9fed6cc76010ac129"
+      }
+    },
+    {
+      "capture": "prefill-t3",
+      "prompt_wall_ms": 29410.0,
+      "model_load_s": 6.5,
+      "cpu_utime_s": 26.4,
+      "cpu_stime_s": 4.53,
+      "wall_s": 36.841,
+      "runtime_paths": [
+        "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+      ],
+      "raw": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t3/capture.json",
+        "sha256": "0010936edbb61376f45ae04768280d4936014289b3bff0e162b28ce70f71195a"
+      },
+      "layers": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t3/layers.jsonl",
+        "sha256": "25bf5e1443744693c72232bca3ac2e6a1d66c0e5e01862067dafc2570b98829e"
+      }
+    },
+    {
+      "capture": "prefill-t4",
+      "prompt_wall_ms": 29481.0,
+      "model_load_s": 6.6,
+      "cpu_utime_s": 26.24,
+      "cpu_stime_s": 4.77,
+      "wall_s": 37.096,
+      "runtime_paths": [
+        "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+      ],
+      "raw": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t4/capture.json",
+        "sha256": "e9c87d943418cf19f232f39592e13d9dcf3433d660c22b017218a2988c91ef80"
+      },
+      "layers": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t4/layers.jsonl",
+        "sha256": "9d7b93c0f67dda4f65c40a31b7a48123408666b44d8b7f5521ac1e8784ccb952"
+      }
+    },
+    {
+      "capture": "prefill-t5",
+      "prompt_wall_ms": 29404.0,
+      "model_load_s": 6.5,
+      "cpu_utime_s": 26.49,
+      "cpu_stime_s": 4.48,
+      "wall_s": 36.837,
+      "runtime_paths": [
+        "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+        "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0"
+      ],
+      "raw": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t5/capture.json",
+        "sha256": "2c3eaedeaddf9664cf3b311c553bd3d226fc20f471ac808568d32cb463138b6d"
+      },
+      "layers": {
+        "path": "Models/qwen38-27b/pr4a/prefill-t5/layers.jsonl",
+        "sha256": "9dd2300390b4246c3b87d8735877697e185dab71090ae8e0bc13031fcd17b2c9"
       }
     }
   ],
+  "prefill_median_wall_ms": 29481.0,
+  "prefill_range_wall_ms": [
+    29404.0,
+    29544.0
+  ],
+  "prefill_stages_ms": {
+    "prenorm_ms": 19.762,
+    "gemm_tile_ms": 542.183,
+    "gemm_tr_ms": 345.219,
+    "mid_ms": 771.459,
+    "dn_conv_ms": 220.244,
+    "dn_rule_ms": 266.274,
+    "attn_ms": 284.8,
+    "tail_ms": 40.817,
+    "shared_ms": 147.457,
+    "state_ms": 4.842,
+    "sync_ms": 305.05,
+    "gemm_ms": 24765.781,
+    "host_ms": 2024.482,
+    "lmhead_ms": 25.8,
+    "request_total_ms": 29508.641,
+    "layer_total_ms": 29479.228,
+    "unattributed_ms": 2692.5780000000013,
+    "by_kind": [
+      {
+        "kind": "linear_attention",
+        "n": 48,
+        "mean_wall_ms": 462.8660208333333
+      },
+      {
+        "kind": "full_attention",
+        "n": 16,
+        "mean_wall_ms": 453.853625
+      }
+    ],
+    "checks": []
+  },
+  "host_fold": {
+    "samples_baseline_ms": [
+      2070.881,
+      2088.109,
+      2043.036,
+      2058.938,
+      2078.12
+    ],
+    "samples_candidate_ms": [
+      1614.61,
+      1644.538,
+      1747.897,
+      1736.121,
+      1641.572
+    ],
+    "median_baseline_ms": 2070.881,
+    "median_candidate_ms": 1644.538,
+    "median_paired_delta_ms": -436.548,
+    "median_paired_change_percent": -21.006871595480536,
+    "ci95_median_delta_ms": [
+      -456.3,
+      -295.1
+    ],
+    "wins": 5,
+    "pairs": 5,
+    "warmup_pairs_excluded": 1,
+    "numerically_equivalent": true,
+    "fixture": "random (deterministic), plus rounding and NaN gates",
+    "persistent_workspaces": true,
+    "log": {
+      "path": "Models/qwen38-27b/pr4a/host-fold-ceiling.log",
+      "sha256": "61f961070fa23b91974fc2baea3d4ea5bc21c0b563f6eb7b793f855a5abfa313"
+    }
+  },
+  "production_fold": {
+    "phase": "gemm-block",
+    "real_tokens": 256,
+    "block_tokens": 256,
+    "calls": 256,
+    "split_ms": 1263.599,
+    "copy_ms": 610.087,
+    "accumulate_ms": 648.856,
+    "total_ms": 2522.542,
+    "raw": {
+      "path": "Models/qwen38-27b/pr4a/prefill-fold2/fold.jsonl",
+      "sha256": "b1640fdaf4468737ac4692ea67560f69176bf8b146c20521b753d9fc5c3b2184"
+    },
+    "note": "exclusive instrumented windows around the fold; dispatch time excluded. Instrumentation inflated the measured prompt to 29390 ms, so the attributed fold is not a percentage of the uninstrumented median."
+  },
   "decode": {
-    "capture": "decode-32",
-    "steps": [
+    "phase": "generated-token decode",
+    "prompt_steps_excluded": true,
+    "prompt_tokens": 32,
+    "model_load_s": 6.5,
+    "prompt_wall_ms": 13642.0,
+    "generated_tokens": 7,
+    "generated_ms_per_token": 452.0,
+    "samples": [
       {
-        "total_ms": 423.828,
-        "gemm_ms": 2.801,
-        "host_ms": 420.294,
-        "per_token_ms": 0.0,
-        "lmhead_ms": 0.0,
-        "setup_ms": 0.0,
-        "embed_ms": 0.026,
-        "patch_ms": 0.01,
-        "dispatch_ms": 649.967,
-        "layer_wall_ms": 423.793,
-        "residue_ms": 0.035
+        "position": 32,
+        "route": "npu",
+        "total_ms": 447.2,
+        "part0_ms": 0.5,
+        "part1_ms": 420.2,
+        "lmhead_ms": 25.4,
+        "dispatch_ms": 672.7
       },
       {
-        "total_ms": 418.286,
-        "gemm_ms": 0.337,
-        "host_ms": 417.275,
-        "per_token_ms": 0.0,
-        "lmhead_ms": 0.0,
-        "setup_ms": 0.0,
-        "embed_ms": 0.034,
-        "patch_ms": 0.012,
-        "dispatch_ms": 642.49,
-        "layer_wall_ms": 418.242,
-        "residue_ms": 0.044
+        "position": 33,
+        "route": "npu",
+        "total_ms": 444.1,
+        "part0_ms": 0.4,
+        "part1_ms": 417.6,
+        "lmhead_ms": 25.3,
+        "dispatch_ms": 668.1
       },
       {
-        "total_ms": 422.259,
-        "gemm_ms": 0.516,
-        "host_ms": 420.547,
-        "per_token_ms": 0.0,
-        "lmhead_ms": 0.0,
-        "setup_ms": 0.0,
-        "embed_ms": 0.048,
-        "patch_ms": 0.014,
-        "dispatch_ms": 647.787,
-        "layer_wall_ms": 422.198,
-        "residue_ms": 0.062
-      }
-    ],
-    "verdict": "PASS",
-    "checks": [
-      {
-        "check": "layer wall + lm_head fit inside the request",
-        "a_ms": 1264.2,
-        "b_ms": 1264.4,
-        "ok": true
+        "position": 34,
+        "route": "npu",
+        "total_ms": 445.6,
+        "part0_ms": 0.5,
+        "part1_ms": 418.7,
+        "lmhead_ms": 25.4,
+        "dispatch_ms": 670.1
       },
       {
-        "check": "named host stages fit inside host_ms",
-        "a_ms": 0.0,
-        "b_ms": 1258.1,
-        "ok": true
+        "position": 35,
+        "route": "npu",
+        "total_ms": 447.7,
+        "part0_ms": 0.6,
+        "part1_ms": 419.2,
+        "lmhead_ms": 26.9,
+        "dispatch_ms": 672.4
       },
       {
-        "check": "dn conv + dn rule fit inside mid_ms",
-        "a_ms": 0.0,
-        "b_ms": 0.0,
-        "ok": true
+        "position": 36,
+        "route": "npu",
+        "total_ms": 455.0,
+        "part0_ms": 0.7,
+        "part1_ms": 426.4,
+        "lmhead_ms": 26.7,
+        "dispatch_ms": 683.6
+      },
+      {
+        "position": 37,
+        "route": "npu",
+        "total_ms": 452.5,
+        "part0_ms": 0.6,
+        "part1_ms": 425.1,
+        "lmhead_ms": 25.6,
+        "dispatch_ms": 680.4
+      },
+      {
+        "position": 38,
+        "route": "npu",
+        "total_ms": 464.2,
+        "part0_ms": 0.8,
+        "part1_ms": 436.1,
+        "lmhead_ms": 25.9,
+        "dispatch_ms": 698.3
       }
     ],
     "raw": {
-      "path": "Models/qwen38-27b/pr4-profile/decode-32/result.json",
-      "sha256": "2d79db315eb4f67b0b3eafff4f31705db096bcf04b05ddf51322d59e7d5365ee"
-    }
+      "path": "Models/qwen38-27b/pr4a/decode-g/capture.json",
+      "sha256": "f41ded893a7cf41fee0f1583827c84990c8e98e8d3e87be5fd8f906078494dd5"
+    },
+    "cpu_utime_s": 3.16,
+    "wall_s": 24.309,
+    "cpu_note": "aggregate process CPU over load+prompt+generation; NOT decode-only and NOT NPU utilisation"
   },
-  "process_cpu": [
+  "invalid_captures": [
     {
-      "tag": "prefill256",
-      "rc": 0,
-      "wall_s": 35.499,
-      "cpu_s": 21.319,
-      "cpu_fraction": 0.601
-    },
-    {
-      "tag": "decode32",
-      "rc": 0,
-      "wall_s": 23.521,
-      "cpu_s": 6.862,
-      "cpu_fraction": 0.292
-    }
-  ],
-  "host_fold_probe_ms": 3944.7,
-  "ceiling": {
-    "raw": {
-      "path": "Models/qwen38-27b/pr4-profile/host-fold-ceiling.log",
-      "sha256": "6d1fb91013445722dc99ff224b9b89c1894f32cd0efc6e16bc8b361f95042db0"
-    },
-    "bench_source": {
-      "path": "utilities/prefill-block/host_fold_ceiling.cpp",
-      "sha256": "3ca3522c5b001e497f3488c794897720b337b2211d76c3fbc14eace116dc5c44"
-    },
-    "baseline_ms": 3432.8,
-    "candidate_ms": 1477.4,
-    "saved_ms": 1955.4,
-    "saved_percent": 57.0
-  },
-  "unaccounted_definition": "request_total - lmhead - part0 - part1",
-  "part0_definition": "host-observed start() through wait() completion, including queue residence; not device-only time",
-  "ranked_candidates": [
-    {
-      "rank": 1,
-      "name": "host fold de-duplication",
-      "saved_ms": 1470,
-      "percent_prefill": 5.0,
-      "complexity": "low-moderate",
-      "numerical_risk": "low"
-    },
-    {
-      "rank": 2,
-      "name": "fuse GEMM transpose into consumer",
-      "saved_ms": 320,
-      "percent_prefill": 1.1,
-      "complexity": "high",
-      "numerical_risk": "medium"
-    },
-    {
-      "rank": 3,
-      "name": "overlap fold with next dispatch",
-      "saved_ms": 2570,
-      "percent_prefill": 8.8,
-      "complexity": "very high",
-      "numerical_risk": "low",
-      "sync_risk": "high"
-    },
-    {
-      "rank": 4,
-      "name": "tile/sync tuning",
-      "saved_ms": 750,
-      "percent_prefill": 2.6,
-      "complexity": "moderate-high",
-      "numerical_risk": "low"
-    },
-    {
-      "rank": 5,
-      "name": "DeltaNet conv/rule micro-tuning",
-      "saved_ms": 250,
-      "percent_prefill": 0.9,
-      "complexity": "moderate",
-      "numerical_risk": "medium"
-    },
-    {
-      "rank": 6,
-      "name": "DeltaNet recurrence on NPU",
-      "saved_ms": 0,
-      "percent_prefill": 1.7,
-      "complexity": "very high",
-      "numerical_risk": "high"
+      "path": "Models/qwen38-27b/pr4-profile/decode-32",
+      "reason": "INVALID FOR DECODE ANALYSIS: the three profiled steps are sequential prompt tokens (lmhead_ms = 0), not generated tokens",
+      "old_samples": [
+        {
+          "record": "request",
+          "what": "step",
+          "tokens": 1,
+          "blocks": 1,
+          "total_ms": 423.828,
+          "gemm_ms": 2.801,
+          "host_ms": 420.294,
+          "per_token_ms": 0.0,
+          "lmhead_ms": 0.0,
+          "setup_ms": 0.0,
+          "embed_ms": 0.026,
+          "patch_ms": 0.01,
+          "dispatch_ms": 649.967,
+          "layer_wall_ms": 423.793,
+          "residue_ms": 0.035,
+          "layers": 64
+        },
+        {
+          "record": "request",
+          "what": "step",
+          "tokens": 1,
+          "blocks": 1,
+          "total_ms": 418.286,
+          "gemm_ms": 0.337,
+          "host_ms": 417.275,
+          "per_token_ms": 0.0,
+          "lmhead_ms": 0.0,
+          "setup_ms": 0.0,
+          "embed_ms": 0.034,
+          "patch_ms": 0.012,
+          "dispatch_ms": 642.49,
+          "layer_wall_ms": 418.242,
+          "residue_ms": 0.044,
+          "layers": 64
+        },
+        {
+          "record": "request",
+          "what": "step",
+          "tokens": 1,
+          "blocks": 1,
+          "total_ms": 422.259,
+          "gemm_ms": 0.516,
+          "host_ms": 420.547,
+          "per_token_ms": 0.0,
+          "lmhead_ms": 0.0,
+          "setup_ms": 0.0,
+          "embed_ms": 0.048,
+          "patch_ms": 0.014,
+          "dispatch_ms": 647.787,
+          "layer_wall_ms": 422.198,
+          "residue_ms": 0.062,
+          "layers": 64
+        }
+      ]
     }
   ],
-  "deltanet_ms": {
-    "conv": 217.8,
-    "rule": 277.8,
-    "state": 4.9,
-    "total": 500.5,
-    "percent_prefill": 1.7,
-    "verdict": "not the bottleneck"
-  },
+  "withdrawn": [
+    "57% host-fold improvement",
+    "1.47 s saving",
+    "5% end-to-end estimate",
+    "quantitative GO justification"
+  ],
   "not_measured": [
     "end-to-end oflm run/serve TTFT",
     "~4K-context decode",
     "512/1024-token blocks",
-    "other families",
+    "other model families",
     "native Windows",
     "device-only execution time",
-    "NPU utilisation"
+    "NPU utilisation",
+    "decode-only CPU/wait split (process CPU is aggregate)"
   ],
   "validation": {
     "profile_checks": "PASS",
-    "decode_profile": "PASS",
-    "settings": "pending",
-    "pytest": "2586 passed, 172 skipped",
-    "report_tests": "5 passed"
-  }
+    "decode_phase": "generated steps, lmhead>0",
+    "settings": "PASS (detached snapshot)",
+    "pytest": "2592 passed, 172 skipped",
+    "output_equivalence": "pre-repair vs repaired CLI: identical greedy tokens on a 32-token/4-layer smoke"
+  },
+  "status": "NEEDS MORE EVIDENCE",
+  "review_resolution": [
+    {
+      "finding": 1,
+      "severity": "P1",
+      "status": "RESOLVED",
+      "evidence": "shared probe feeds both arms the same four products; tests assert byte equality, NaN rejection and corruption detection"
+    },
+    {
+      "finding": 2,
+      "severity": "P1",
+      "status": "RESOLVED",
+      "evidence": "persistent workspaces; warmed alternating paired samples retained; median/CI reported"
+    },
+    {
+      "finding": 3,
+      "severity": "P1",
+      "status": "RESOLVED",
+      "evidence": "decode:N selection yields 7 generated steps with lmhead>0; old capture marked INVALID FOR DECODE ANALYSIS"
+    },
+    {
+      "finding": 4,
+      "severity": "P1",
+      "status": "PARTIAL",
+      "evidence": "model load and prompt and generation separated per capture; decode-only CPU/wait split NOT MEASURED"
+    },
+    {
+      "finding": 5,
+      "severity": "P1",
+      "status": "RESOLVED",
+      "evidence": "direct production fold windows: 2522.5 ms (split 1263.6, copy 610.1, accumulate 648.9)"
+    },
+    {
+      "finding": 6,
+      "severity": "P2",
+      "status": "RESOLVED",
+      "evidence": "five uninstrumented prefill captures, median and range"
+    },
+    {
+      "finding": 7,
+      "severity": "P2",
+      "status": "RESOLVED",
+      "evidence": "behavioural compiled probe tests replace claim assertions"
+    },
+    {
+      "finding": 8,
+      "severity": "P2",
+      "status": "RESOLVED",
+      "evidence": "linear/full relation corrected; kernel version and settings from the actual run"
+    },
+    {
+      "finding": 9,
+      "severity": "P2",
+      "status": "RESOLVED",
+      "evidence": "each measured process maps XRT core/coreutil/xdna, hashed live"
+    }
+  ],
+  "prefill_linear_full_note": "capture A: linear 458.1 ms mean wall vs full 451.6 ms (earlier report reversed this)"
 }
