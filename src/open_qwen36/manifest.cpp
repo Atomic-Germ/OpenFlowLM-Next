@@ -582,6 +582,12 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.vw = get<uint64_t>(gj, "vw", gw);
                     g.key_heads = get<uint64_t>(gj, "key_heads", gw);
                     g.value_heads = get<uint64_t>(gj, "value_heads", gw);
+                    const std::string mapping = gj.value("key_head_mapping", "grouped");
+                    if (mapping != "grouped" && mapping != "tiled")
+                        fail(gw, "key_head_mapping must be grouped or tiled");
+                    g.key_head_tiled = mapping == "tiled";
+                    if (!g.key_heads || !g.value_heads || g.value_heads % g.key_heads)
+                        fail(gw, "linear value_heads must be a positive multiple of key_heads");
                     g.head_dim = get<uint64_t>(gj, "head_dim", gw);
                     g.conv_kernel = get<uint64_t>(gj, "conv_kernel", gw);
                     g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);

@@ -48,6 +48,7 @@
 #include <immintrin.h>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/omp_policy.hpp"
 #include "open_qwen36/spec_lookup.hpp"
 #include "open_qwen36/diagnostic_range.hpp"
 
@@ -930,6 +931,9 @@ int run_list(Core& core, const Args& a) {
 }
 
 int main(int argc, char** argv) {
+    // libgomp fixes its wait policy when it loads, so a process that did not start with
+    // OMP_WAIT_POLICY cannot apply it. Re-exec once with it set. Never returns when it fires.
+    if (open_qwen36::reexec_with_passive(argv)) return 0;
     Args a = parse(argc, argv);
     // The server reads this (engine.cpp); the CLI is the tool you reach for when a
     // dispatch times out, so it should honour the same knob - and a small value is how

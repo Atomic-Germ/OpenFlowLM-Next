@@ -161,7 +161,7 @@ def test_one_context_tail(monkeypatch):
     assert prog["kernels"]["dxh"] == {"context": "dx", "insts": "dxh/insts.bin", "build": "dxh"}
     assert prog["tail"] == [{"op": "run", "kernel": "dxh", "args": ["lmpool", "xres", "normw", "logits", "hn", "zero"]}]
     assert prog["globals"]["hn"] == 8192                       # the head's x fill reads two whole 4 KB elements
-    assert [s["kernel"] for s in prog["gguf"]["tail"]] == ["ln", "lm"]
+    assert [s["kernel"] for s in manifest(spec)["gguf"]["tail"]] == ["ln", "lm"]
     assert DR.builds(spec)["dxh"] == {"design": "dense/dx.py", "build_dir": "dense/build_granite_h2560_head",
                                       "env": {"DX_HEAD": "1"}}
     monkeypatch.setenv("DX_ONECTX", "0")

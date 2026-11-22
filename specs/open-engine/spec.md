@@ -2172,7 +2172,7 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
 - The 9B layout: `PER_CALL 1` (a 12288-wide activation table leaves no room for two 10 KB weight elements beside the streams), `DN_ROWS 10 / DN_SLICES 13 / DN_PAD 130`, `S_ROWS 130`, `ELN 8192` (so the split `ln_y` / `ln_xn` norm entries), `E_A 2048` with 2 f32 heads per attention element and 4 og heads, `KV_ROW 4096`, `PTAB_ROW 2048`; the pool holds q4-sized `up | gate | down` first, at the same offsets for both layer types.
 - No `moe` block, no `rout_idx_off`, no router or shared-expert tensor anywhere in the manifest; each layer type's program is one `run`, with `attnpos` on the full-attention kernel only.
 - The manifest fixture parses in `manifest_test.cpp` (a linear-attention layer type with a one-step program and no `moe`); `ssm_out_proj` is a plain `std_perm` with no source-format field, and the two `transpose` ops carry the sizes `pools::apply` needs.
-- **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. The value head's key head is `h / (lin_value_heads / lin_key_heads)` -- 2 value heads per key head at 32, one at 16.
+- **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. Current kernels use `h % lin_key_heads`; legacy grouped exports use `h / (lin_value_heads / lin_key_heads)`. The block route declares which mapping matches its kernels through `key_head_mapping`.
 - **The alpha / beta projection is padded to the accumulator's 32 lanes**, not narrowed: a W element stays 64 rows x 32 bf16 = 4 KB, `AB_ELEMS` is `hidden / 64` whatever the head count, and a 16-head model's `transpose` op carries `dst_rows` so columns 16..31 are zero. `dt_bias` sits at `lin_value_heads` floats inside `small`, not at a fixed 32.
 - **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048)` rows, one 4 KB weight tile per 64 of them, which is 32 and 8 tiles at HID 2560. Walked accumulator-outer, the side channel's fills are `2 + 4 * halves`; a width whose count would exceed `LIMITS["shim_fills"]` (three halves: 14) walks half-outer instead -- each half carried once, then both accumulators' tiles for it -- for `2 + 3 * halves` (11 at the 27B's 5120). The recipe refuses a width whose count still exceeds the budget (four halves: 14), naming the number. Every published size keeps its accumulator-outer walk.
 - **More than 32 value heads widen the alpha / beta accumulator** to the next multiple of 32 lanes rather than narrowing anything: at 48 heads the projection is packed `[hidden, 64]` (`transpose` with `dst_rows 64`, columns 48..63 zero), a 4 KB tile is 32 rows of it, and `glue_ab_w.cc` carries two 32-lane halves. 48 value heads over 16 key heads is 3 value heads per key head (`h / 3`), 6 value conv tiles against 4 key tiles, and one record per value head.
@@ -4083,6 +4083,14 @@ flat -- OPEN-ATTN-CONTEXT carries the numbers.
 **Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense,qwen35}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
 **Test category:** manual (needs the NPU; `Qwen3.6-35B-A3B-NPU2` for the MoE kinds, a dense family's own kernel set for `dense`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `tests/test_gemma3.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
 
+The linear route's optional `key_head_mapping` binds host prefill and rollback
+to the compiled DeltaNet head order. `grouped` (also the absent-field default)
+maps value head `h` to `h / (value_heads / key_heads)`; `tiled` maps it to
+`h % key_heads`. Current recipes emit `tiled` in both the Q4NX and GGUF views.
+Unknown mappings, zero/nondivisible head counts, and replaying a tape with a
+different mapping are refused. Existing grouped exports need no rebuild;
+unmarked modulo-head exports must be re-exported with their mapping declared.
+
 A kernel set may carry a block prefill route: per layer type a `gemm_block`
 naming, by kind, the GEMM dispatches that replace the layer's projections for
 T = 256 tokens at once -- `dense` (0167/#32): the five-step chain with T
@@ -4138,7 +4146,11 @@ set carries it and the prompt has at least the crossover length (64 tokens;
 `OFLM_OPEN_GEMM_BLOCK=0` (read through `getenv_oflm`, so the pre-rename `FLM_`
 export still works) turns it off; any other value leaves it on. A set without
 the route, or a prompt the route does not take, prefills one token at a time --
-with the route on, never skipped. Only the real tokens of a padded block touch the
+with the route on, never skipped. Near the context capacity, a block whose padding writes
+KV rows (the dxB dispatches, the host attention, the MoE kinds) would pass the capacity with
+a padded tail, so that tail prefills one token at a time. The attention products
+(OPEN-PREFILL-ATTN) write only the real rows, so their blocks run up to the capacity
+(`block_host_test.cpp`, `block_prefill_tokens`). Only the real tokens of a padded block touch the
 state, write KV rows, run the MoE or advance the position, and the conv state,
 S and the KV rows leave the buffers as the sequential path would (bf16 where
 the kernels keep bf16). A projection the container stores at q8 -- `attn`,

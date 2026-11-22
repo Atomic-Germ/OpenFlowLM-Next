@@ -28,7 +28,9 @@ def build(a):
  try:
   generated=out/'generated';generated.mkdir()
   files=[parent.DESIGN/'gemm_q4_prefill.py',parent.DESIGN/'gemm_q4_dequant.h',Path(__file__),Path(parent.__file__),ROOT/'open_kernels/build_design.py']
+  files.append(parent.DESIGN/'dma_schedule.py')
   record['sources']={str(p):digest(p) for p in files}
+  (generated/'dma_schedule.py').write_bytes((parent.DESIGN/'dma_schedule.py').read_bytes())
   (generated/'design.py').write_text(files[0].read_text())
   header=files[1].read_text()
   (generated/'gemm_q4_dequant.h').write_text(parent.low_header(header) if a.mode=='low' else header)

@@ -57,6 +57,7 @@ def build(a):
         # The normal CMake include hierarchy remains intact; all core/CLI headers
         # come from the copy, so a changed Core layout cannot mix with the control.
         (stage / 'src/include').symlink_to(ROOT / 'src/include', target_is_directory=True)
+        (stage / 'src/gguf').symlink_to(ROOT / 'src/gguf', target_is_directory=True)
         (stage / 'open_kernels').symlink_to(ROOT / 'open_kernels', target_is_directory=True)
         (stage / 'specs').symlink_to(ROOT / 'specs', target_is_directory=True)
         for p in dst.rglob('*'):
