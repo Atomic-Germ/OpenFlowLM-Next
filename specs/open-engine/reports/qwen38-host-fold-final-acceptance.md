@@ -121,5 +121,5 @@ Reproduction tools: [numerical driver](../../../utilities/prefill-block/fold_ded
 ## Portable checks and repository scope
 
 Focused tests: 7 passed. Full portable suite: 2,937 passed, 172 skipped. Skips are NOT MEASURED, with exact capability/server prerequisites retained in pytest-full-with-skips.log; they are not inference passes.
-Merged-target settings check: **NOT RUN: check refuses dirty tree; parent must run after final commits**. The earlier dirty-tree refusal is retained separately, not counted as a pass. No new production setting, flag or environment variable is introduced.
+Merged-target settings check: **PASS: clean committed-source merged-target check**. The earlier dirty-tree refusal is retained separately, not counted as a pass. No new production setting, flag or environment variable is introduced.
 Only acceptance tooling, portable tests and these separate reports change. Production optimization code, defaults, kernels and criteria are unchanged. Evidence/protocol commits do not authorize a default promotion, push, merge, rebase, reset, reload, reboot, firmware or power-policy change.

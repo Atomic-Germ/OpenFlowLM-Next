@@ -2197,7 +2197,7 @@
     "optional_4k": "NOT MEASURED: optional exploratory arm not selected",
     "npu_memory": "UNKNOWN: no per-process NPU memory counter exposed in basic accel sysfs; RSS is separate"
   },
-  "recorded_at_utc": "2026-11-23T16:17:32.357944+00:00",
+  "recorded_at_utc": "2026-11-23T16:19:56.560463+00:00",
   "evidence_root": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance",
   "machine_conditions": {
     "host_xrt_report": "System Configuration\n  OS Name              : Linux\n  Release              : 7.0.0-44-generic\n  Machine              : x86_64\n  CPU Cores            : 20\n  Memory               : 93354 MB\n  Distribution         : Ubuntu 26.04.1 LTS\n  GLIBC                : 2.43\n  Model                : EVO14-AI9-STP\n  BIOS Vendor          : American Megatrends International, LLC.\n  BIOS Version         : N.1.22GOS12\n  Processor            : AMD Ryzen AI 9 365 w/ Radeon 880M\n\nXRT\n  Version              : 2.26.0\n  Branch               : HEAD\n  Hash                 : e9db9ab15f10173f8d2fc93ff92ab4c7eb09d2e6\n  Hash Date            : Thu, 13 Aug 2026 13:49:05 -0700\n  amdxdna Version      : 2.26.0_20260817, 2b71d02b641561a40ab2db1c26a69620794f4e9f\n  virtio-pci Version   : 7.0.0-44-generic\n  NPU Firmware Version : 1.1.2.64\n\nDevice(s) Present\n|BDF             |Name       |Architecture  |Topology  |\n|----------------|-----------|--------------|----------|\n|[0000:67:00.1]  |NPU Strix  |aie2p         |6x8       |\n\n\n",
@@ -22438,6 +22438,15 @@
       "inode": 40536504,
       "mtime_ns": 1795443223005448238
     },
+    "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance/settings-ci-final.log": {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance/settings-ci-final.log",
+      "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance/settings-ci-final.log",
+      "sha256": "d9cf6a52c04eb379a4fb37ced2243a48e9606a83efda73b2b4ee965168f91693",
+      "bytes": 396,
+      "device": 64514,
+      "inode": 40537138,
+      "mtime_ns": 1795450743595308567
+    },
     "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance/settings-ci.log": {
       "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance/settings-ci.log",
       "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/final-acceptance/settings-ci.log",
@@ -22536,7 +22545,7 @@
     "focused": "7 passed",
     "full": "2937 passed, 172 skipped",
     "skips": "NOT MEASURED for skipped capabilities; exact reasons in pytest-full-with-skips.log",
-    "merged_settings": "NOT RUN: check refuses dirty tree; parent must run after final commits"
+    "merged_settings": "PASS: clean committed-source merged-target check"
   },
   "exclusions": [
     "No old timing observations pooled",
