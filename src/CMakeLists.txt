@@ -1852,7 +1852,7 @@ find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME oflm_model_registry_merge
         COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_SOURCE_DIR}/utilities/test-model-registry.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/test-model-registry.py"
                 $<TARGET_FILE:oflm> "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 endif()
 if(NOT Python3_EXECUTABLE)
