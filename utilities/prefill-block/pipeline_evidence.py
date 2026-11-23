@@ -335,8 +335,15 @@ def validate_log(text, phase, tokens, max_tokens, requests, info, route):
             0 <= int(s.split()[1]) < info['real_vocab'] for s in generated),
             'invalid/incomplete generated token trajectory')
     resident_at = text.index('resident after ')
+    resident_line = next(i for i, line in enumerate(lines) if 'resident after ' in line)
     prefill_at = next(i for i, line in enumerate(lines) if line.startswith('prefill '))
     require(resident_at < text.index(lines[prefill_at]), 'load/prefill phase order mismatch')
+    # Both summaries round the same outer duration independently to integer ms.
+    wall, per_token = map(int, prefill[0][1:])
+    slack = 1e-9
+    require(max(wall - .5, tokens * (per_token - .5)) <=
+            min(wall + .5, tokens * (per_token + .5)) + slack,
+            'prefill wall/ms-per-token contradiction')
     events = ['token' if line.startswith('token ') else
               'step' if line.lstrip().startswith('step @') else
               'decode' if line.startswith('decode ') else None for line in lines[prefill_at + 1:]]
@@ -384,9 +391,9 @@ def validate_log(text, phase, tokens, max_tokens, requests, info, route):
     observed = steps if phase == 'decode' else blocks
     if phase == 'decode':
         require(not blocks, 'decode capture contains unexpected block schedule')
-    require(all(i < prefill_at for i, line in enumerate(lines)
+    require(all(resident_line < i < prefill_at for i, line in enumerate(lines)
                 if line.lstrip().startswith(('gemm-block ', 'gemm-prompt '))),
-            'prefill block appears after the prefill boundary')
+            'prefill block outside resident/prefill boundaries')
     require(len(observed) == len(requests), 'log/profile request count mismatch')
     for log, request in zip(observed, requests):
         for key in ('total_ms', 'gemm_ms', 'host_ms', 'per_token_ms', 'lmhead_ms'):
@@ -404,8 +411,11 @@ def validate_log(text, phase, tokens, max_tokens, requests, info, route):
             require(block['what'] == request['what'] and block['tokens'] == request['tokens'] and
                     block['start'] == start and block['end'] == end, 'log block geometry mismatch')
             start += request['tokens']
-        require(abs(sum(r['total_ms'] for r in requests) - int(prefill[0][1])) <=
-                max(2, len(requests)), 'prefill wall contradicts profile')
+        # Core stops before serialization, fold flush and deallocation; CLI also
+        # includes printing/setup. Excluded wrapper work has no upper bound.
+        require(math.fsum(r['total_ms'] for r in requests) - wall <=
+                .5 + .0005 * len(requests) + slack,
+                'prefill wall is shorter than profile')
     return dict(model_load_s=float(resident[0]), prompt_wall_ms=float(prefill[0][1]),
                 generated_tokens=len(steps), generated_ids=[int(s.split()[1]) for s in generated],
                 generated_ms_per_token=float(decode[0][1]) if decode else None,

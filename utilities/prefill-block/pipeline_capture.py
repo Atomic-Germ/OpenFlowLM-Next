@@ -83,8 +83,14 @@ def process_cpu(pid):
         # comm can contain spaces and parentheses; fields after the final ')' are fixed.
         stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
         ticks = os.sysconf('SC_CLK_TCK')
-        return dict(utime_s=int(stat[11]) / ticks, stime_s=int(stat[12]) / ticks,
-                    threads=int(stat[17]))
+        result = dict(utime_s=int(stat[11]) / ticks, stime_s=int(stat[12]) / ticks,
+                      threads=int(stat[17]))
+        status = Path(f'/proc/{pid}/status').read_text()
+        for key, field in [('VmRSS', 'rss_bytes'), ('VmHWM', 'hwm_bytes')]:
+            match = re.search(r'^' + key + r':\s+(\d+) kB$', status, re.M)
+            if match:
+                result[field] = int(match[1]) * 1024
+        return result
     except (OSError, ValueError, IndexError, AttributeError):
         return {}
 
@@ -151,10 +157,12 @@ def capture_process(cmd, env, log, *, timeout, executable, interval=.02):
     live = dict(observed_pid=proc.pid, mapping_samples=mappings, before=runtime,
                 after=E.snapshot(runtime))
     E.validate_runtime(live)
-    return dict(wall_s=time.monotonic() - started, runtime=live, cpu_observations=samples)
+    return dict(wall_s=time.monotonic() - started, runtime=live, cpu_observations=samples,
+                sampled_rss_peak_bytes=max((s.get('rss_bytes', 0) for s in samples), default=0),
+                sampled_hwm_peak_bytes=max((s.get('hwm_bytes', 0) for s in samples), default=0))
 
 
-def environment(profile, fold, phase, steps, route, extra_env):
+def environment(profile, fold, phase, steps, route, extra_env, dedup_input_split=False):
     # All inherited OFLM overrides are discarded, including unknown future schedule knobs.
     inherited = {k: v for k, v in os.environ.items() if k.startswith('OFLM_')}
     env = {k: v for k, v in os.environ.items() if not k.startswith('OFLM_')}
@@ -163,6 +171,9 @@ def environment(profile, fold, phase, steps, route, extra_env):
     E.require(set(extra_env) <= allowed and all(isinstance(v, str) for v in extra_env.values()),
               'unapproved profiling/scheduling environment override')
     env.update(extra_env)
+    E.require(type(dedup_input_split) is bool, 'dedup opt-in must be boolean')
+    if dedup_input_split:
+        env['OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT'] = '1'
     env.update(OFLM_OPEN_PREFILL_PRECISION='paired', OFLM_OPEN_PROFILE=str(profile),
                OFLM_OPEN_PROFILE_STEPS=steps,
                OFLM_OPEN_LAYER_MAJOR='1' if route == 'layer-major' else '0')
@@ -179,7 +190,8 @@ def run(cli: Path, phase: str, tokens: int, max_tokens: int, out: Path, ctx: int
         pmode: str, profile_steps: str, extra_env: dict | None = None,
         fold_instrumentation: bool = False, *, build_identity: Path | None = None,
         model: Path = MODEL, kernels: Path = KERNELS, lock: Path = LOCK,
-        layers: int = 64, route: str = 'block', timeout: float = 5400) -> dict:
+        layers: int = 64, route: str = 'block', timeout: float = 5400,
+        dedup_input_split: bool = False, launch_check=None) -> dict:
     E.require(phase in ('prefill', 'decode'), 'explicit prefill/decode phase required')
     E.require(type(tokens) is int and 0 < tokens <= POOL, 'invalid prompt token count')
     E.require(type(max_tokens) is int and max_tokens >= (1 if phase == 'prefill' else 6),
@@ -206,6 +218,8 @@ def run(cli: Path, phase: str, tokens: int, max_tokens: int, out: Path, ctx: int
         return E.provenance_inputs(cli, identity_path, identity, model, kernels)
 
     with lock_exclusive(lock):
+        if launch_check is not None:
+            launch_check()
         before = E.snapshot(inputs())
         E.validate_attested_snapshot(before, cli, identity_path, identity)
         E.require(E.read_json(manifest_path) == manifest, 'kernel manifest changed before launch')
@@ -214,7 +228,7 @@ def run(cli: Path, phase: str, tokens: int, max_tokens: int, out: Path, ctx: int
         ids.write_text(','.join(map(str, fixture(tokens))) + '\n')
         profile, fold = out / 'layers.jsonl', out / 'fold.jsonl'
         env, removed = environment(profile, fold if fold_instrumentation else None,
-                                   phase, profile_steps, route, extra_env)
+                                   phase, profile_steps, route, extra_env, dedup_input_split)
         cmd = [str(cli), '--model', str(model), '--kernels', str(kernels), '--ids-file', str(ids),
                '--max-ctx', str(ctx), '--max-tokens', str(max_tokens), '--layers', str(layers),
                '--pmode', pmode, '--quiet']
@@ -277,11 +291,13 @@ if __name__ == '__main__':
     ap.add_argument('--timeout', type=float, default=5400)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--fold-instrumentation', action='store_true')
+    ap.add_argument('--dedup-input-split', action='store_true')
     a = ap.parse_args()
     rec = run(a.cli, a.phase, a.tokens, a.max_tokens, a.out, a.ctx, a.pmode,
               a.profile_steps, fold_instrumentation=a.fold_instrumentation,
               build_identity=a.build_identity, model=a.model, kernels=a.kernels,
-              lock=a.lock, route=a.route, timeout=a.timeout)
+              lock=a.lock, route=a.route, timeout=a.timeout,
+              dedup_input_split=a.dedup_input_split)
     print(json.dumps({k: rec[k] for k in ('phase', 'real_prompt_tokens', 'model_load_s',
                                          'prompt_wall_ms', 'generated_tokens',
                                          'generated_ms_per_token', 'cpu_wait')}, indent=2))

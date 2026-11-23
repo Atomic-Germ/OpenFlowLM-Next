@@ -18,6 +18,35 @@ C = importlib.import_module('pipeline_capture')
 E = importlib.import_module('pipeline_evidence')
 
 
+def test_dedup_explicit_opt_in_sanitizes_inheritance(monkeypatch, tmp_path):
+    monkeypatch.setenv('OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT', '1')
+    args = (tmp_path / 'profile', None, 'prefill', '0', 'block', None)
+    off, removed = C.environment(*args)
+    assert 'OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT' not in off
+    assert removed['OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT'] == '1'
+    on, _ = C.environment(*args, dedup_input_split=True)
+    assert on['OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT'] == '1'
+    with pytest.raises(E.EvidenceError):
+        C.environment(*args, dedup_input_split='1')
+
+
+def test_process_memory_observation():
+    procfs()
+    observation = C.process_cpu(os.getpid())
+    assert observation['rss_bytes'] > 0
+    assert observation['hwm_bytes'] >= observation['rss_bytes']
+
+
+def test_fold_report_uses_paired_gain_and_keeps_incomplete_set():
+    report = importlib.import_module('fold_dedup_report')
+    result = report.paired_observations([(100, 90), (200, 202)])
+    assert result['paired_percent_reductions'] == [10, -1]
+    assert result['paired_median_percent'] == 4.5
+    assert result['spread_percentage_points'] == 11
+    assert result['wins'] == 1
+    assert not result['complete_initial_set']
+
+
 def posix_lock():
     if os.name != 'posix':
         pytest.skip('POSIX advisory locks are unavailable')
@@ -75,7 +104,8 @@ def evidence(phase='prefill', tokens=5, max_tokens=1, route='block'):
                               copy_ms=2, accumulate_ms=3, total_ms=6))
             start += real
     text = 'resident after 1.0 s\n' + '\n'.join(blocks) + '\n'
-    text += f'prefill {tokens} tokens: {len(schedule) * 20} ms (8 ms/token)\n'
+    text += (f'prefill {tokens} tokens: {len(schedule) * 20} ms '
+             f'({len(schedule) * 20 / tokens:.0f} ms/token)\n')
     for index in range(max_tokens):
         text += f'token {index + 2}\n'
         if index < max_tokens - 1:
@@ -91,6 +121,64 @@ def validate(tmp_path, rows, text, phase='prefill', tokens=5, max_tokens=1, rout
     dump_rows(path, rows)
     _, requests = E.validate_profile(path, geometry(), phase, tokens, max_tokens, route)
     return E.validate_log(text, phase, tokens, max_tokens, requests, geometry(), route)
+
+
+def test_prefill_unbounded_legitimate_wrapper_overhead(tmp_path):
+    rows, _, text, _ = evidence()
+    text = text.replace('40 ms (8 ms/token)', '5040 ms (1008 ms/token)')
+    assert validate(tmp_path, rows, text)['prompt_wall_ms'] == 5040
+
+
+@pytest.mark.parametrize('wall,average', [(39, 8), (40, 9), (5040, 8)])
+def test_prefill_impossible_outer_summary(tmp_path, wall, average):
+    rows, _, text, _ = evidence()
+    text = text.replace('40 ms (8 ms/token)', f'{wall} ms ({average} ms/token)')
+    with pytest.raises(E.EvidenceError):
+        validate(tmp_path, rows, text)
+
+
+@pytest.mark.parametrize('location', ['before-residency', 'after-prefill'])
+def test_prefill_block_must_be_inside_phase(tmp_path, location):
+    rows, _, text, _ = evidence()
+    lines = text.splitlines()
+    block = lines.pop(1)
+    lines.insert(0 if location == 'before-residency' else len(lines), block)
+    with pytest.raises(E.EvidenceError, match='boundaries'):
+        validate(tmp_path, rows, '\n'.join(lines) + '\n')
+
+
+@pytest.mark.parametrize('field', ['total_ms', 'gemm_ms', 'host_ms', 'per_token_ms', 'lmhead_ms'])
+def test_wrapper_overhead_does_not_hide_changed_inner_values(tmp_path, field):
+    rows, _, text, _ = evidence()
+    text = text.replace('40 ms (8 ms/token)', '5040 ms (1008 ms/token)')
+    rows[1][field] += 1
+    if field == 'total_ms':
+        rows[1]['residue_ms'] += 1
+    with pytest.raises(E.EvidenceError):
+        validate(tmp_path, rows, text)
+
+
+def test_finished_raw_without_final_metadata_remains_invalid(tmp_path):
+    _, _, text, _ = evidence()
+    (tmp_path / 'run.log').write_text(text)
+    result = E.audit_capture(tmp_path)
+    assert not result['valid']
+    assert any('capture.json' in error for error in result['errors'])
+
+
+@pytest.mark.parametrize('delta,accepted', [(.2505, True), (.25051, False)])
+def test_prefill_containment_uses_only_print_rounding(tmp_path, delta, accepted):
+    rows, _, text, requests = evidence()
+    # Two three-decimal request times and one integer outer wall.
+    for row in requests:
+        row['total_ms'] += delta
+        row['residue_ms'] += delta
+    text = text.replace('20.0 ms', '20.3 ms')
+    if accepted:
+        validate(tmp_path, rows, text)
+    else:
+        with pytest.raises(E.EvidenceError, match='shorter'):
+            validate(tmp_path, rows, text)
 
 
 @pytest.mark.parametrize('phase,tokens,max_tokens,route', [
@@ -181,7 +269,7 @@ def test_bad_fold_records_are_rejected_never_relabelled(tmp_path, change):
 @pytest.mark.parametrize('change', [
     lambda t: t.replace('resident after 1.0 s', ''),
     lambda t: t + 'resident after invalid s\n',
-    lambda t: t.replace('prefill 5 tokens: 100 ms (8 ms/token)', ''),
+    lambda t: t.replace('prefill 5 tokens: 100 ms (20 ms/token)', ''),
     lambda t: t.replace('prefill 5 tokens:', 'prefill 6 tokens:'),
     lambda t: t.replace('prefill 5 tokens: 100', 'prefill 5 tokens: nan'),
     lambda t: t + 'prefill invalid\n',
