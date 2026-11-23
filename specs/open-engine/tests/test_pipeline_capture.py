@@ -368,6 +368,8 @@ def test_capture_owns_evidence_and_roundtrip_audit(assets, monkeypatch, phase, r
         kwargs.update(max_tokens=6, profile_steps='decode:5')
     rec = capture(assets, monkeypatch, **kwargs)
     assert rec['version'] == 2 and rec['cpu_wait'] == 'NOT MEASURED'
+    assert rec['manifest_block_tokens'] == 4
+    assert rec['physical_block_tokens'] == (4 if phase == 'prefill' else None)
     assert rec['cpu_observations'] == [{'utime_s': .1}]
     assert rec['before'] == rec['after']
     assert str(assets['cli']) in rec['before']

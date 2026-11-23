@@ -584,8 +584,12 @@ def audit_capture(directory):
                         'invocation/environment changed')
                 manifest = read_json(record['manifest_path'])
                 info = manifest_info(manifest, record['layers'])
-                require(record.get('physical_block_tokens') == info['block_tokens'] and
-                        type(record.get('physical_block_tokens')) is int and
+                physical = record.get('physical_block_tokens')
+                require(record.get('manifest_block_tokens') == info['block_tokens'] and
+                        type(record.get('manifest_block_tokens')) is int and
+                        'physical_block_tokens' in record and
+                        ((physical == info['block_tokens'] and type(physical) is int)
+                         if record['phase'] == 'prefill' else physical is None) and
                         (not record['fold_instrumentation'] or record['phase'] == 'prefill'),
                         'contradictory capture block/fold metadata')
                 info['real_vocab'] = manifest['spec']['real_vocab']
