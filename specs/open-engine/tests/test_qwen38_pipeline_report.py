@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-REPORT = ROOT / 'specs/open-engine/reports/qwen38-deltanet-pipeline-performance.json'
+REPORT = ROOT / 'specs/open-engine/reports/qwen38-deltanet-pipeline-historical.json'
 PROBE = ROOT / 'utilities/prefill-block/host_fold_probe.hpp'
 
 
