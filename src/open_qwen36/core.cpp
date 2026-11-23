@@ -619,6 +619,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else if (profile_) {
         profile_steps_left_ = 8;
     }
+    if (const char* env = std::getenv("OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT"))
+        fold_dedup_input_split_ = std::string(env) == "1";
     // OFLM_OPEN_FOLD_PROFILE: exclusive host-fold accounting. Opt-in, measurement only;
     // unset leaves the sink null. Arithmetic and dispatch scheduling are unchanged.
     if (const char* env = std::getenv("OFLM_OPEN_FOLD_PROFILE")) {
@@ -2942,7 +2944,7 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
         [&](bool low_weight, const float* input) {
             return gemm_dispatch(low_weight ? residual : s, input, T, K, N, layer);
         },
-        fold_profiler_.timing());
+        fold_profiler_.timing(), fold_dedup_input_split_);
 }
 
 const float* Core::gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {

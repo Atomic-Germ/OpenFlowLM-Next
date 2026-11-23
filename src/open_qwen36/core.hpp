@@ -645,6 +645,7 @@ private:
     /// time is NOT included. Written as one JSONL row per measured step/block.
     FILE* fold_profile_ = nullptr;
     FoldProfile fold_profiler_;
+    bool fold_dedup_input_split_ = false;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;

@@ -30,6 +30,9 @@ NON_SETTING_FLAGS = {
     "--size", "--steps", "--socket", "--preemption", "--img-pre-resize",
 }
 NON_SETTING_ENV_VARS = {
+    # Default-off CPU host-fold experiment, shared Core (native CLI and engine).
+    # Only exact "1" reuses the validated input split for the low-weight products.
+    "OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT",
     # install layout / paths
     "OFLM_CONFIG_PATH", "OFLM_SETTINGS_PATH", "OFLM_MODELINFO_PATH",
     "OFLM_MODEL_PATH", "OFLM_MODEL_DIR", "OFLM_EXECUTABLE", "OFLM_PYTHON",
