@@ -1,4 +1,8 @@
-"""PR #4 evidence must be measured, phase-correct and internally reproducible."""
+"""Historical PR4 summary consistency and the shared synthetic probe.
+
+These checks do not validate legacy raw captures against the current capture gate;
+test_pipeline_capture covers that fail-closed evidence contract separately.
+"""
 import json
 import shutil
 import subprocess
@@ -60,7 +64,7 @@ int main() {
                     cmp.baseline_accepted, cmp.candidate_accepted, cmp.agree);
         return 2;
     }
-    // Deliberately corrupt one baseline product: equivalence must fail.
+    // Deliberately corrupt the last candidate output: full-buffer comparison must fail.
     auto f = fold_probe::make_fixture(5, 8, 4, "random");
     fold_probe::BaselineState b; fold_probe::CandidateState c;
     std::vector<float> bo, co;
@@ -69,11 +73,14 @@ int main() {
     if (bo.size() != co.size() || std::memcmp(bo.data(), co.data(), bo.size() * sizeof(float))) {
         std::printf("FAIL: arms differ\n"); return 5;
     }
+    co.back() = std::nextafter(co.back(), std::numeric_limits<float>::infinity());
+    if (fold_probe::equal_outputs(bo, co)) return 6;
     return 0;
 }
 '''
     import tempfile
-    work = Path(tempfile.mkdtemp(prefix='pr4a-probe-'))
+    cleanup = tempfile.TemporaryDirectory(prefix='pr4a-probe-')
+    work = Path(cleanup.name)
     exe = work / 'probe.bin'
     proc = subprocess.run([cxx, '-O2', '-std=c++20', f'-I{ROOT}', f'-I{ROOT / "src"}',
                            f'-I{ROOT / "utilities/prefill-block"}', '-x', 'c++',

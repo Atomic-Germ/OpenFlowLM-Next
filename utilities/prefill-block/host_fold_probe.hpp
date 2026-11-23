@@ -3,12 +3,12 @@
 // Both arms perform the SAME four products in the SAME association:
 //   (W_hi X_hi + W_hi X_lo) + (W_lo X_hi + W_lo X_lo)
 // The baseline runs the real prefill_precision::Workspace; the candidate is the
-// arithmetic-preserving rewrite (split once, drop one intermediate copy).
+// arithmetic-preserving synthetic rewrite (split once, retain all output copies).
 // Outputs must be byte-identical and both arms must reject non-finite input.
 //
 // Workspaces are persistent across calls, as Core keeps them in
-// precision_workspaces_; allocation cost is therefore not part of the steady
-// state and is reported separately by the benchmark.
+// precision_workspaces_; the benchmark excludes one warm-up pair. It does not
+// model production mapped-buffer access, projection order or allocation costs.
 #pragma once
 
 #include <algorithm>
@@ -56,6 +56,7 @@ inline void split_low(const std::vector<float>& x, std::vector<float>& low) {
 
 // Deterministic fixture for T physical tokens: activations are K*T, products N*T.
 inline Fixture make_fixture(size_t n, size_t k, size_t tokens, const std::string& kind, unsigned seed = 26026) {
+    if (!n || !k || !tokens) throw std::invalid_argument("fixture dimensions must be positive");
     const size_t inputs = k * tokens, outputs = n * tokens;
     Fixture f;
     std::mt19937 gen(seed);
@@ -63,24 +64,36 @@ inline Fixture make_fixture(size_t n, size_t k, size_t tokens, const std::string
     std::uniform_int_distribution<int> small(-8, 7);
     f.x.resize(inputs);
     for (size_t i = 0; i < inputs; ++i) {
-        if (kind == "random") f.x[i] = u(gen);
+        if (kind == "random" || kind == "cancellation") f.x[i] = u(gen);
         else if (kind == "rounding") {
-            // values just off a BF16 tie, and both signs of zero
-            const float base = 1.0f + static_cast<float>(small(gen)) / 256.0f;
-            f.x[i] = (i % 3 == 0) ? -base : base;
-        } else if (kind == "nan") f.x[i] = (i == 7) ? std::numeric_limits<float>::quiet_NaN() : 0.5f;
+            const float tie = 1.0f + static_cast<float>(2 * small(gen) + 1) / 256.0f;
+            const float values[] = {tie, std::nextafter(tie, 0.0f),
+                std::nextafter(tie, 2.0f), -tie, 0.0f, -0.0f};
+            f.x[i] = values[i % 6];
+        } else if (kind == "nan" || kind == "inf" || kind == "negative_inf" || kind == "overflow") {
+            const float bad = kind == "nan" ? std::numeric_limits<float>::quiet_NaN() :
+                kind == "overflow" ? std::numeric_limits<float>::max() :
+                kind == "negative_inf" ? -std::numeric_limits<float>::infinity() :
+                std::numeric_limits<float>::infinity();
+            f.x[i] = i == inputs - 1 ? bad : 0.5f;
+        }
         else throw std::invalid_argument("unknown fixture kind");
     }
-    // Products vary independently, including values whose sums round in FP32.
-    auto fill = [&](std::vector<float>& v, float base, int step) {
-        v.resize(outputs);
-        for (size_t i = 0; i < outputs; ++i)
-            v[i] = base + static_cast<float>(static_cast<int>(i % 17) * step) / 1024.0f;
-    };
-    fill(f.a, 1.0f, 3);
-    fill(f.b, -0.5f, 5);
-    fill(f.c, 0.25f, 7);
-    fill(f.d, -0.125f, 11);
+    for (auto* v : {&f.a, &f.b, &f.c, &f.d}) v->resize(outputs);
+    for (size_t i = 0; i < outputs; ++i) {
+        if (kind == "rounding" || kind == "cancellation") {
+            // Both left- and right-associated alternatives differ on these products.
+            const float huge = std::ldexp(1.0f, 26 + static_cast<int>(i % 8));
+            if (i % 2) {
+                f.a[i] = huge; f.b[i] = -huge; f.c[i] = 1.0f; f.d[i] = 1.0f;
+            } else {
+                f.a[i] = huge; f.b[i] = 1.0f; f.c[i] = -huge; f.d[i] = 1.0f;
+            }
+        } else {
+            for (auto* v : {&f.a, &f.b, &f.c, &f.d})
+                (*v)[i] = std::ldexp(u(gen), static_cast<int>(i % 41) - 20);
+        }
+    }
     return f;
 }
 
@@ -93,9 +106,7 @@ struct BaselineState {
 };
 
 // Returns false when the fold rejects the input (non-finite), true on success.
-// Only the total is timed: the real header does not expose its internal split
-// and copy boundaries, and inventing them here would be the same mistake the
-// review found. The candidate reports its own exclusive phases separately.
+// Only whole calls are compared. Dispatch stubs do not model production BO reuse.
 inline bool run_baseline(BaselineState& st, const Fixture& f, std::vector<float>* out,
                          double* total_ms = nullptr) {
     auto dispatch = [&](bool low_weight, const float* input) -> const float* {
@@ -118,7 +129,7 @@ inline bool run_baseline(BaselineState& st, const Fixture& f, std::vector<float>
     return true;
 }
 
-// --- candidate: split once, then (a+b) + (c+d) with identical FP32 rounding ---
+// Split once, then (a+b) + (c+d). All three output copies remain.
 struct CandidateState {
     std::vector<float> low, high, low_sum, out;
 };
@@ -174,6 +185,11 @@ struct Comparison {
     std::string why;
 };
 
+inline bool equal_outputs(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() &&
+        (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
+}
+
 inline Comparison compare(const Fixture& f) {
     BaselineState base;
     CandidateState cand;
@@ -191,8 +207,7 @@ inline Comparison compare(const Fixture& f) {
         c.why = "both rejected";
         return c;
     }
-    c.outputs_equal = bo.size() == co.size() &&
-                      std::memcmp(bo.data(), co.data(), bo.size() * sizeof(float)) == 0;
+    c.outputs_equal = equal_outputs(bo, co);
     c.agree = c.outputs_equal;
     if (!c.outputs_equal) c.why = "outputs differ";
     return c;

@@ -6,7 +6,7 @@
 //   ./host_fold_ceiling 7
 //
 // Both arms perform the same four products in the same association; the
-// candidate only removes a duplicate input split and one intermediate copy.
+// candidate removes only a duplicate input split; all output copies remain.
 // Workspaces persist across calls in both arms, as Core's do. One warm-up pair is
 // discarded, then alternating paired measurements are retained and summarised.
 #include <algorithm>
@@ -24,7 +24,7 @@ namespace {
 struct Shape { const char* name; size_t n, k; };
 const Shape kLinear[] = {{"qkvz", 16384, 5120}, {"out", 5120, 6144},
                          {"ffn_up", 34816, 5120}, {"ffn_down", 5120, 17408}};
-const Shape kFull[] = {{"attn_in", 14336, 5120}, {"out", 5120, 5120},
+const Shape kFull[] = {{"attn_in", 14336, 5120}, {"out", 5120, 6144},
                        {"ffn_up", 34816, 5120}, {"ffn_down", 5120, 17408}};
 constexpr size_t T = 256;
 constexpr size_t LINEAR_LAYERS = 48, FULL_LAYERS = 16;
@@ -91,6 +91,12 @@ double block_ms(bool baseline, ShapeState& s) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--describe") {
+        std::printf("synthetic split-only candidate; three output copies retained; no production speedup prediction\n");
+        for (const auto& s : kLinear) std::printf("linear %s %zu %zu %zu\n", s.name, s.n, s.k, T);
+        for (const auto& s : kFull) std::printf("full %s %zu %zu %zu\n", s.name, s.n, s.k, T);
+        return 0;
+    }
     const int reps = argc > 1 ? std::atoi(argv[1]) : 7;
     if (reps < 5) { std::fprintf(stderr, "use at least five measured pairs (after warm-up)\n"); return 2; }
     const std::string kind = argc > 2 ? argv[2] : "random";

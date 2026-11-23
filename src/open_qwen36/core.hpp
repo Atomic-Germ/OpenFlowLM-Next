@@ -51,6 +51,7 @@
 #include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 #include "open_qwen36/prefill_precision.hpp"
+#include "open_qwen36/fold_profile.hpp"
 #include "open_qwen36/prefill_precision_switch.hpp"
 
 namespace open_qwen36 {
@@ -643,12 +644,7 @@ private:
     /// Split/copy/accumulate are disjoint windows around the precision fold; the dispatch
     /// time is NOT included. Written as one JSONL row per measured step/block.
     FILE* fold_profile_ = nullptr;
-    bool fold_profile_first_ = true;
-    std::string fold_profile_what_;
-    size_t fold_profile_real_tokens_ = 0, fold_profile_block_tokens_ = 0;
-    prefill_precision::FoldPhaseTiming fold_timing_;
-    void fold_profile_begin(const char* what, size_t real_tokens, size_t block_tokens);
-    void fold_profile_end();
+    FoldProfile fold_profiler_;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;
