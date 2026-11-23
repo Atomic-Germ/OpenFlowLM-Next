@@ -530,6 +530,46 @@ def kernel_set_name(dir_name):
     return n if n.lower().endswith("-npu2") else f"{n}-NPU2"
 
 
+def apply_base_patch_to_spec(spec, base_name, quiet=False):
+    """Fill rope_scaling / real_vocab from the base-model patch into a ModelSpec.
+
+    A GGUF names its geometry but not these two fields: llama.cpp bakes Llama-3's
+    factor-32 ramp into ``rope_freqs.weight`` and the GGUF's ``vocab`` is the
+    padded head row count. The patch is keyed by the GENERIC BASE name, so every
+    finetune/quant inherits it. Returns a (possibly replaced) ModelSpec; a spec
+    that already states a field keeps its own value.
+    """
+    if spec is None or not base_name:
+        return spec
+    try:
+        from recipes.model_patches import patch_fields
+    except Exception:
+        root = open_kernels_checkout()
+        if root is None:
+            return spec
+        added = str(root)
+        inserted = added not in sys.path
+        if inserted:
+            sys.path.insert(0, added)
+        try:
+            from recipes.model_patches import patch_fields
+        except Exception:
+            return spec
+        finally:
+            if inserted:
+                try:
+                    sys.path.remove(added)
+                except ValueError:
+                    pass
+    fields = {k: v for k, v in patch_fields(base_name).items()
+              if getattr(spec, k, None) is None}
+    if fields:
+        if not quiet:
+            log(f"[INFO] Applied base-model patch for {base_name}: {', '.join(sorted(fields))}")
+        spec = dataclasses.replace(spec, **fields)
+    return spec
+
+
 def build_geometry(spec, family, size, dir_name="", quiet=False):
     """Build the kernel set for a geometry nothing installed serves.
 
@@ -1765,6 +1805,21 @@ def repair_config_from_gguf(target):
         "rope_theta": spec.rope_theta,
         "rms_norm_eps": spec.norm_eps,
     }
+    # A GGUF cannot state rope_scaling (Llama-3 bakes it into rope_freqs.weight).
+    # The base-model patch supplies it so the engine's RoPE table matches the
+    # set's; M-RoPE below may still replace rope_parameters for VL models.
+    _md = (inv[0] if inv else {}) or {}
+    _base = str(_md.get("general.name") or
+                (getattr(spec, "extra", None) or {}).get("model") or "")
+    if _base:
+        try:
+            from recipes.model_patches import base_patch
+            _patch = base_patch(_base)
+            _rs = _patch.get("rope_scaling")
+            if _rs is not None and cfg.get("rope_scaling") is None:
+                built["rope_scaling"] = _rs
+        except Exception:
+            pass
     # Qwen3-VL's M-RoPE: a text token has one position, an image token three (t, h, w), so
     # the decoder needs the section split. The GGUF states it (`rope.dimension_sections`),
     # and the engine reads it from config.json's rope_parameters (or rope_scaling) -- a
@@ -2949,6 +3004,13 @@ def model_spec(model_dir):
                         spec = dataclasses.replace(spec, real_vocab=spec_from_model_dir(Path(model_dir)).real_vocab)
                     except Exception:
                         pass
+                    # Supply rope_scaling / real_vocab the GGUF cannot carry.
+                    # The GGUF's general.name is the base label (fallback to the
+                    # spec's export name); an installed config.json already
+                    # patched by repair_config_from_gguf keeps its own values.
+                    base = str((inv[0] or {}).get("general.name") or
+                               (spec.extra or {}).get("model") or "")
+                    spec = apply_base_patch_to_spec(spec, base, quiet=True)
                     return spec
             except Exception:
                 pass
@@ -3936,6 +3998,19 @@ def main():
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
 
+    # --force on an existing GGUF install is an IN-PLACE REFRESH: the weights
+    # are already on disk (kilobytes-to-gigabytes, the thing users do not want
+    # to re-download on a program update). Reuse them and re-derive every OTHER
+    # file -- spec, config, tokenizer, chat template, registry entry, kernel
+    # links -- from the current program + base-model patch data. No version
+    # stamp is needed: --force always means "rebuild the derived files".
+    models_root = models_root_dir(args.models_root)
+    target = models_root / dir_name
+    refresh_in_place = bool(args.force and (target / "model.gguf").is_file())
+    if refresh_in_place and not args.quiet:
+        log(f"[INFO] --force with installed weights: refreshing {target} in place "
+            "(no weight re-download)")
+
     # ---- a diffusion bundle: `q4nx-build --open-diffusion` writes one, and `oflm image`
     # replays it. It has no q4nx container and no GGUF, so it takes its own path before
     # either scan below.
@@ -4052,7 +4127,13 @@ def main():
             f"by the open kernels (accept {'/'.join(gguf_pref)}).\n"
             f"  .gguf files in repo: {files}")
     gguf_mode = gguf_name is not None and not have_q4nx
-    if gguf_mode:
+    if refresh_in_place:
+        # The installed GGUF is the authority: skip remote candidate selection
+        # AND tensor verification (it was verified when it was installed). Use
+        # it directly for spec/kernel derivation, even if the repo is offline.
+        gguf_mode = True
+        gguf_name, gguf_source = "model.gguf", str(target / "model.gguf")
+    if gguf_mode and not refresh_in_place:
         # The tensors must be what the name claims, in types the NPU packers
         # ingest. Try every compatible candidate: each repo's best-named file can
         # still hide one stray tensor of a rejected type (a Q4_1 with a Q5_0
@@ -4090,8 +4171,6 @@ def main():
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
     user_list = user_registry_path(args.config)
-    models_root = models_root_dir(args.models_root)
-    target = models_root / dir_name
 
     # Detection caches: the failure paths below may each need the base-model
     # chain and a peeked config.json; fetch each at most once per install.
@@ -4147,6 +4226,13 @@ def main():
     # rope_scaling, while the GGUF's metadata says factor 8.0, which is what runs.
     if gguf_mode and gguf_source is not None:
         spec = spec_from_gguf_source(gguf_source)
+        # The GGUF cannot state rope_scaling (Llama-3 bakes it into
+        # rope_freqs.weight) or the real tokenizer count. Supply them from the
+        # base-model patch BEFORE kernel-set matching: rope_scaling is in
+        # kernel_hash, so an unpatched spec would refuse the shipped set.
+        _chain = get_base_chain() or []
+        if _chain:
+            spec = apply_base_patch_to_spec(spec, _chain[-1])
     if spec is None:
         spec = spec_from_config_dict(get_peeked_config())
     # WHAT THE MODEL IS comes first: a vision tower is a property of the checkpoint, not
@@ -4459,7 +4545,13 @@ def main():
         if getattr(args, "verbose", False):
             for n, why in sorted(gguf_refused.items()):
                 log(f"[INFO]   skipping {n}: {why}")
-    if local_dir:
+    if refresh_in_place:
+        # In-place refresh: the weights are already here. Reuse the installed
+        # file list as the registry's `files` and let every step below rebuild
+        # the derived files from the CURRENT program + patch data. No copy, no
+        # download, and no base-repo re-fetch of the GGUF itself.
+        files = sorted(e.name for e in target.iterdir() if e.is_file())
+    elif local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
         target.mkdir(parents=True, exist_ok=True)

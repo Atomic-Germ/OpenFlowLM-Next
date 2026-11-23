@@ -1,0 +1,22 @@
+{
+  "Llama-3.2-1B-Instruct-NPU2": {
+    "rope_scaling": {
+      "factor": 32.0,
+      "low_freq_factor": 1.0,
+      "high_freq_factor": 4.0,
+      "original_max_position_embeddings": 8192
+    },
+    "real_vocab": 128256,
+    "_source": "meta-llama/Llama-3.2-1B-Instruct"
+  },
+  "Llama-3.2-3B-Instruct-NPU2": {
+    "rope_scaling": {
+      "factor": 32.0,
+      "low_freq_factor": 1.0,
+      "high_freq_factor": 4.0,
+      "original_max_position_embeddings": 8192
+    },
+    "real_vocab": 128256,
+    "_source": "meta-llama/Llama-3.2-3B-Instruct"
+  }
+}

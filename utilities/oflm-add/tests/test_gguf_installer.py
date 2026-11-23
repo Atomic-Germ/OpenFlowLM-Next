@@ -439,6 +439,8 @@ def _gguf_bytes(kv_items, tensors=()):
         return struct.pack("<Q", len(b)) + b
 
     def value(typ, val):
+        if typ == 3:
+            return struct.pack("<f", val)
         if typ == 4:
             return struct.pack("<I", val)
         if typ == 5:
@@ -1476,3 +1478,73 @@ def test_explicit_family_keeps_same_kernel_resolution_as_inferred(tmp_path, monk
     assert f"gguf kernels   : {fake_kdir}" in out_explicit
     assert "xclbin source  : Qwen3-4B-NPU2" in out_auto
     assert "xclbin source  : Qwen3-4B-NPU2" in out_explicit
+
+
+def test_force_refresh_reuses_installed_gguf_and_rebuilds_derived_files(
+        tmp_path, capsys, monkeypatch):
+    """`oflm add --force` on an existing GGUF install must not re-download the
+    weights; it re-derives config/tokenizer/registry from the installed file."""
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = "unsloth/Llama-3.2-1B-Instruct-GGUF"
+    slug = repo.split("/")[-1]
+    models = tmp_path / "models"
+    target = models / slug
+    target.mkdir(parents=True)
+    gguf = target / "model.gguf"
+    gguf.write_bytes(b"GGUF")  # a stub; read_gguf_inventory is mocked below
+    (target / "tokenizer.json").write_text("{}")
+    (target / "tokenizer_config.json").write_text("{}")
+    original_stat = gguf.stat()
+    # The GGUF header cannot state rope_scaling; the mock mirrors that (the
+    # patch must supply it). ModelSpec.from_gguf_metadata is real so the patch
+    # restoration of kernel_hash is exercised end to end.
+    md = {"general.architecture": "llama", "llama.block_count": 16,
+          "llama.embedding_length": 2048, "llama.attention.head_count": 32,
+          "llama.attention.head_count_kv": 8, "llama.attention.key_length": 64,
+          "llama.feed_forward_length": 8192, "llama.vocab_size": 128256,
+          "llama.rope.freq_base": 500000.0,
+          "general.name": "Llama-3.2-1B-Instruct"}
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[3] / "open_kernels"))
+    from recipes.spec import ModelSpec
+    real_spec = ModelSpec.from_gguf_metadata(md)
+    monkeypatch.setattr(oflm_add, "read_gguf_inventory",
+                        lambda p, limit_mb=96: (md, [("w", 12, [8, 8])]))
+    monkeypatch.setattr(oflm_add, "spec_from_gguf_source", lambda s: real_spec)
+    # Offline: the tree/base-chain scans are best-effort and must not block a
+    # refresh of the already-installed weights.
+    fake_kdir = tmp_path / "xclbins" / "Llama-3.2-1B-NPU2" / "open_kernels"
+    fake_kdir.mkdir(parents=True)
+    (fake_kdir / "manifest.json").write_text('{"gguf": {}}', encoding="utf-8")
+    monkeypatch.setattr(oflm_add, "hf_file_tree", lambda r: {})
+    monkeypatch.setattr(oflm_add, "readme_base_chain", lambda *a, **k: [])
+    monkeypatch.setattr(oflm_add, "find_system_xclbin_root", lambda: tmp_path / "no-sys")
+    monkeypatch.setattr(oflm_add, "tree_xclbins", lambda: None)
+    monkeypatch.setattr(oflm_add, "user_xclbin_dir", lambda arg: tmp_path / "xclbins")
+    monkeypatch.setattr(oflm_add, "scan_kernel_sets",
+                        lambda spec, roots, source=None, need_gguf=False:
+                        (fake_kdir, "Llama-3.2-1B-NPU2", []))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["oflm-add", repo, "--force", "--system-list", str(system_list),
+         "--config", str(tmp_path / "user_list.json"),
+         "--models-root", str(models), "--xclbin-dir", str(tmp_path / "xclbins"),
+         "--no-xclbin"])
+    oflm_add.main()
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "refreshing" in out
+    assert "no weight re-download" in out
+    # The installed weights are untouched (no copy, no download).
+    assert gguf.is_file() and gguf.stat().st_ino == original_stat.st_ino
+    # Derived files were (re)written from the current program.
+    cfg = json.loads((target / "config.json").read_text())
+    assert cfg["hidden_size"] == 2048
+    assert cfg["num_hidden_layers"] == 16
+    assert cfg["vocab_size"] == 128256
+    assert cfg["rope_scaling"]["factor"] == 32.0   # from the base-model patch
+    registry = json.loads((tmp_path / "user_list.json").read_text())
+    assert any(slug in info.get("name", "")
+               for sizes in registry["models"].values() for info in sizes.values())

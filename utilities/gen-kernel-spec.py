@@ -48,6 +48,7 @@ except Exception:
 # minicpm5-2b (same family+hidden, HEAD DIM 64 vs 128 -- different kernels).
 sys.path.insert(0, str(ROOT / "open_kernels"))
 from recipes.spec import ModelSpec, SpecError, GGUF_FAMILIES  # noqa: E402
+from recipes.model_patches import apply_to_dict  # noqa: E402
 
 
 def _repo_cache(repo: str) -> str:
@@ -62,9 +63,20 @@ def _repo_cache(repo: str) -> str:
     return f"/tmp/hf_cfg/{repo.replace('/', '__')}"
 
 
+def _hf_token():
+    """Forward HF credentials to huggingface_hub (gated bases: meta-llama/*).
+
+    huggingface_hub reads HF_TOKEN from the environment itself, but passing it
+    explicitly makes the contract visible and survives a library that stops
+    doing so. Never sent to ModelScope.
+    """
+    return (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None)
+
+
 def fetch_config(repo: str) -> dict:
     from huggingface_hub import hf_hub_download
-    p = hf_hub_download(repo_id=repo, filename="config.json", local_dir=_repo_cache(repo))
+    p = hf_hub_download(repo_id=repo, filename="config.json",
+                        local_dir=_repo_cache(repo), token=_hf_token())
     return json.loads(Path(p).read_text())
 
 
@@ -80,7 +92,8 @@ def fetch_real_vocab(repo: str) -> int | None:
     """
     from huggingface_hub import hf_hub_download
     try:
-        p = hf_hub_download(repo_id=repo, filename="tokenizer.json", local_dir=_repo_cache(repo))
+        p = hf_hub_download(repo_id=repo, filename="tokenizer.json",
+                            local_dir=_repo_cache(repo), token=_hf_token())
     except Exception as exc:                      # noqa: BLE001 - a gated repo may hide it
         print(f"warn: could not fetch tokenizer.json ({exc}); real_vocab = vocab")
         return None
@@ -210,7 +223,8 @@ def base_model_from_readme(repo: str) -> str | None:
         from huggingface_hub import hf_hub_download
         # Per-repo cache: one shared /tmp/hf_cfg made every repo's README land on
         # the same path, so a second repo could read the first one's base_model.
-        p = hf_hub_download(repo_id=repo, filename="README.md", local_dir=_repo_cache(repo))
+        p = hf_hub_download(repo_id=repo, filename="README.md",
+                            local_dir=_repo_cache(repo), token=_hf_token())
         text = Path(p).read_text(errors="ignore")
     except Exception:
         return None
@@ -374,6 +388,17 @@ def main():
         # the repo quantizes, never from the repo's upload slug. A second repo
         # of the same base therefore produces the same spec, and the geometry
         # hash below links it instead of duplicating it.
+        #
+        # Patch FIRST: the base-model patch supplies rope_scaling (baked into a
+        # Llama-3 GGUF's rope_freqs.weight, absent from its header) and the
+        # real tokenizer vocab. This changes kernel_hash -- which is the whole
+        # point: a scaled Llama-3.2 GGUF must hash-equal the shipped spec so
+        # it LINKS, rather than getting a second unbuildable spec.
+        patch_key_name = generic_model_name(args.repo, args.gguf)
+        before = dict(spec)
+        apply_to_dict(spec, patch_key_name)
+        if spec != before:
+            print(f"applied base-model patch for {patch_key_name}")
         existing = existing_gguf_spec(spec)
         if existing and not args.refresh:
             print(f"Existing spec covers this geometry: {existing} "
@@ -384,10 +409,10 @@ def main():
                 return 0
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps({"link_to": existing,
-                                       "base_model": generic_model_name(args.repo, args.gguf)}, indent=2))
+                                       "base_model": patch_key_name}, indent=2))
             print(f"Wrote link file to {out}")
             return 0
-        model_name = args.model_name or generic_model_name(args.repo, args.gguf)
+        model_name = args.model_name or patch_key_name
         spec["extra"] = {**(spec.get("extra") or {}), "model": model_name}
         out = Path(args.out) if args.out else SPECS_DIR / f"{spec_stem(spec)}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -396,25 +421,33 @@ def main():
         return 0
 
     def gguf_spec_is_complete(spec: dict) -> bool:
-        """Whether the GGUF header carries the fields this family's kernels need.
+        """Whether the GGUF header (plus its base-model patch) carries the fields
+        this family's kernels need.
 
         A GGUF names dimensions and vocab, but NOT every config field the
         kernels are built from -- Llama-3.2's rope_scaling (factor 32, the
-        low/high frequency ramp) is in config.json, not the header. A spec
-        missing it has a DIFFERENT kernel_hash from the shipped one and would
-        fail to link to an existing set, so fall through to the base config
-        when the header is incomplete. The GGUF is still the authority for the
-        size and architecture; this is only about the fields it cannot carry.
+        low/high frequency ramp) is in config.json, not the header. The base-
+        model patch supplies such fields by generic base name; only when the
+        patch has no value do we fall through to the base config. The GGUF is
+        still the authority for size and architecture; this is only about the
+        fields it cannot carry.
         """
+        patch = None
+        try:
+            from recipes.model_patches import base_patch
+            patch = base_patch(generic_model_name(args.repo, args.gguf))
+        except Exception:
+            pass
         missing = [f for f in ("layer_types",) if f not in spec]
         # rope_scaling is present-but-None when the GGUF header has no scaling
-        # metadata; Llama-3.2's kernels are built WITH the factor-32 ramp from
-        # config.json, so a None here is the same incompleteness as a missing key.
-        if spec.get("rope_scaling") is None:
+        # metadata; Llama-3.2's kernels are built WITH the factor-32 ramp. A
+        # patch entry with that field fills it, so the spec is complete.
+        if spec.get("rope_scaling") is None and not (patch and patch.get("rope_scaling") is not None):
             missing.append("rope_scaling")
         if missing:
-            print(f"GGUF header lacks {', '.join(missing)}; using the base model's config "
-                  "for those fields (the GGUF remains authoritative for size/architecture)")
+            print(f"GGUF header lacks {', '.join(missing)} and the base-model patch has no "
+                  "value; using the base model's config for those fields "
+                  "(the GGUF remains authoritative for size/architecture)")
             return False
         return True
 
@@ -574,6 +607,9 @@ def main():
                       "model": model_name})
         built["extra"] = extra
         spec = built
+    # Apply the base-model patch last, so both the family-builder result and
+    # the template derivation get the rope/real_vocab the source cannot carry.
+    apply_to_dict(spec, generic_model_name(args.repo, args.gguf))
     out = out_path
     if kept_model and spec.get("extra"):
         spec["extra"]["model"] = kept_model
