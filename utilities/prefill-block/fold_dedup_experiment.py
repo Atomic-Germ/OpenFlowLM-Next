@@ -30,12 +30,12 @@ def preflight():
               'another NPU client or failed device check: ' + result.stdout + result.stderr)
 
 
-def correctness_capture(n, arm, repeat=1):
+def correctness_capture(n, arm, repeat=1, *, output_root=None):
     build = BASE / ('control' if arm == 'original' else 'candidate')
     cli = build / 'build/open_qwen36_cli'
     identity_path = build / 'identity.json'
     identity = E.build_identity(identity_path, cli)
-    out = BASE / 'correctness' / f'{n}-{arm}-repeat{repeat}'
+    out = (BASE / 'correctness' if output_root is None else Path(output_root)) / f'{n}-{arm}-repeat{repeat}'
     manifest = E.read_json(KERNELS / 'manifest.json')
     def inputs():
         return E.provenance_inputs(cli, identity_path, identity, C.MODEL, KERNELS)

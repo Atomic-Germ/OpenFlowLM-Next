@@ -25,8 +25,9 @@ def tools():
 
 def list_capture(arm, prompts, name):
     """Real list requests reset in the CLI; preserve all outputs and live mappings."""
-    cli = BASE / 'candidate/build/open_qwen36_cli'
-    identity_path = BASE / 'candidate/identity.json'
+    build = BASE / ('control' if arm == 'original' else 'candidate')
+    cli = build / 'build/open_qwen36_cli'
+    identity_path = build / 'identity.json'
     identity = E.build_identity(identity_path, cli)
     out = OUT / name
     def inputs():

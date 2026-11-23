@@ -95,7 +95,8 @@ def process_cpu(pid):
         return {}
 
 
-def capture_process(cmd, env, log, *, timeout, executable, interval=.02):
+def capture_process(cmd, env, log, *, timeout, executable, interval=.02, stdin=None,
+                    allowed_returncodes=(0,)):
     """Stream directly to disk (no bounded pipe), kill the group and reap on errors."""
     E.require(os.name == 'posix' and Path('/proc/self/maps').exists(),
               'live runtime provenance requires POSIX /proc; NOT MEASURED here')
@@ -104,7 +105,7 @@ def capture_process(cmd, env, log, *, timeout, executable, interval=.02):
     runtime, samples, mappings = {}, [], []
     executable_seen = False
     with Path(log).open('wb') as output:
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdout=output,
+        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdin=stdin, stdout=output,
                                 stderr=subprocess.STDOUT, start_new_session=True)
         try:
             while True:
@@ -152,12 +153,12 @@ def capture_process(cmd, env, log, *, timeout, executable, interval=.02):
             except ProcessLookupError:
                 pass
             proc.wait()
-    E.require(rc == 0, f'capture failed rc={rc}; inspect retained {log}')
+    E.require(rc in allowed_returncodes, f'capture failed rc={rc}; inspect retained {log}')
     E.require(executable_seen, 'live executable identity was not observed')
     live = dict(observed_pid=proc.pid, mapping_samples=mappings, before=runtime,
                 after=E.snapshot(runtime))
     E.validate_runtime(live)
-    return dict(wall_s=time.monotonic() - started, runtime=live, cpu_observations=samples,
+    return dict(returncode=rc, wall_s=time.monotonic() - started, runtime=live, cpu_observations=samples,
                 sampled_rss_peak_bytes=max((s.get('rss_bytes', 0) for s in samples), default=0),
                 sampled_hwm_peak_bytes=max((s.get('hwm_bytes', 0) for s in samples), default=0))
 
