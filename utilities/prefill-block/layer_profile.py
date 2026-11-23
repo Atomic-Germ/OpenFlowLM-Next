@@ -1,4 +1,4 @@
-"""Performance plan PR #1: where a prefill's time goes, layer by layer.
+"""Per-layer attribution: where a prefill's time goes, layer by layer.
 
 The engine keeps a running `StepTiming` over a whole prompt or block, so it can say "the
 host stages cost 12 s" but not "layer 41 costs twice what layer 40 does". `OFLM_OPEN_PROFILE`
@@ -189,7 +189,11 @@ def run(ids: list[int], route: str, *, layers: int, max_ctx: int, max_tokens: in
     env.pop('OFLM_OPEN_PREFILL_ROLES', None)
     env.pop('OFLM_OPEN_PREFILL_ROLE_MODE', None)
     env['OFLM_OPEN_PROFILE'] = str(prof)
-    env['OFLM_OPEN_PROFILE_STEPS'] = str(steps)
+    # A sequential route is a prompt: prefill:N keeps it explicit. A block route's
+    # `steps` are the post-prompt decode steps, and decode:N prevents the prompt's
+    # own step() calls from consuming the generation budget.
+    env['OFLM_OPEN_PROFILE_STEPS'] = (
+        f'prefill:{steps}' if route == 'sequential' else f'decode:{steps}')
     # Dense Qwen defaults to block-loop even without --block-major.
     if route == 'block':
         env['OFLM_OPEN_LAYER_MAJOR'] = '0'
@@ -391,7 +395,7 @@ def main() -> int:
     out = a.out or (HERE / 'runs' / f'layer-profile-{a.tokens}-{stamp}')
     out.mkdir(parents=True)
     result = dict(tool='prefill-block-layer-profile', version=1,
-                  gate='performance plan PR #1: per-layer attribution, not a throughput claim',
+                  gate='per-layer attribution, not a throughput claim',
                   model_acceptance=False, cli=str(O.CLI), kernels=str(O.KERNELS),
                   started=stamp, prompt_tokens=a.tokens, layers=a.layers, pmode=a.pmode,
                   conditions_start=conditions(),

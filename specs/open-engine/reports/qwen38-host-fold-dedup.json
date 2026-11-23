@@ -1,0 +1,3749 @@
+{
+  "schema": "pr4b-host-fold-dedup-blocked-continuation-v2",
+  "decision": "KEEP DRAFT",
+  "model_acceptance": false,
+  "campaign_complete": false,
+  "reason": "A/B/A correctness prerequisite blocked before inference by HWCTX creation -22 twice",
+  "protocol": {
+    "path": "/home/prihlop/sources/github/OpenFlowLM-Next/specs/open-engine/reports/qwen38-host-fold-dedup-plan.md",
+    "sha256": "2a0b56ae12d8ab8024b0546f1744af62be4f058ceb43bccb368478961a75d1da",
+    "bytes": 4083
+  },
+  "policy": {
+    "power": "none unchanged; NPU governor unverifiable",
+    "threads": {
+      "OMP_NUM_THREADS": "8",
+      "OMP_WAIT_POLICY": "PASSIVE",
+      "OPENBLAS_NUM_THREADS": "1"
+    },
+    "profiling": "layer both arms; fold both prefill arms",
+    "primary_target_percent": 1.0,
+    "repetitions": 5,
+    "excluded_warmup_pairs": 1,
+    "initial_conditions": {
+      "npu": {
+        "returncode": 0,
+        "stdout": "System Configuration\n  OS Name              : Linux\n  Release              : 7.0.0-44-generic\n  Machine              : x86_64\n  CPU Cores            : 20\n  Memory               : 93354 MB\n  Distribution         : Ubuntu 26.04.1 LTS\n  GLIBC                : 2.43\n  Model                : EVO14-AI9-STP\n  BIOS Vendor          : American Megatrends International, LLC.\n  BIOS Version         : N.1.22GOS12\n  Processor            : AMD Ryzen AI 9 365 w/ Radeon 880M\n\nXRT\n  Version              : 2.26.0\n  Branch               : HEAD\n  Hash                 : e9db9ab15f10173f8d2fc93ff92ab4c7eb09d2e6\n  Hash Date            : Thu, 13 Aug 2026 13:49:05 -0700\n  amdxdna Version      : 2.26.0_20260817, 2b71d02b641561a40ab2db1c26a69620794f4e9f\n  virtio-pci Version   : 7.0.0-44-generic\n  NPU Firmware Version : 1.1.2.64\n\nDevice(s) Present\n|BDF             |Name       |Architecture  |Topology  |\n|----------------|-----------|--------------|----------|\n|[0000:67:00.1]  |NPU Strix  |aie2p         |6x8       |\n\n\n",
+        "stderr": ""
+      },
+      "memory": {
+        "returncode": 0,
+        "stdout": "               total        used        free      shared  buff/cache   available\nMem:     97889218560 34575183872 39729541120  8142229504 34278723584 63314034688\nSwap:    107374178304 12206944256 95167234048\n",
+        "stderr": ""
+      },
+      "load": {
+        "returncode": 0,
+        "stdout": " 11:17:08 up 1 day,  9:15,  2 users,  load average: 2.12, 2.14, 1.91\n",
+        "stderr": ""
+      },
+      "sysfs": {
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor": "powersave",
+        "/sys/class/thermal/thermal_zone0/temp": "66000",
+        "/sys/class/thermal/thermal_zone1/temp": "66000",
+        "/sys/bus/pci/devices/0000:67:00.1/power/runtime_status": "active"
+      }
+    }
+  },
+  "mapped_runtime": {
+    "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+      "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+      "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+      "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+      "bytes": 1961744,
+      "device": 64513,
+      "inode": 3932183,
+      "mtime_ns": 1786963145000000000
+    },
+    "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+      "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+      "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+      "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+      "bytes": 6507816,
+      "device": 64513,
+      "inode": 3932184,
+      "mtime_ns": 1786963142000000000
+    },
+    "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+      "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+      "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+      "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+      "bytes": 859104,
+      "device": 64513,
+      "inode": 3932212,
+      "mtime_ns": 1786963343000000000
+    }
+  },
+  "correctness": [
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/capture.json",
+        "sha256": "a9d6d22e5d98d14dcde7b9c0dff9bd237464c193243c5a6ee37bb203d797049e",
+        "bytes": 1534617
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/invocation.json",
+        "sha256": "e8ad7cfd4d474ddfa3d8015312fb2401ab15e34ab16420771b3cd180eb770587",
+        "bytes": 294649
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/capture.json",
+          "sha256": "a9d6d22e5d98d14dcde7b9c0dff9bd237464c193243c5a6ee37bb203d797049e",
+          "bytes": 1534617
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/ids.txt",
+          "sha256": "2231dcb3273e47793199fceccc1cf153bf7e89fe10af1b8f1717e5fc80c32e6a",
+          "bytes": 1675
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/invocation.json",
+          "sha256": "e8ad7cfd4d474ddfa3d8015312fb2401ab15e34ab16420771b3cd180eb770587",
+          "bytes": 294649
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_p254.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t0.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t1.bin",
+          "sha256": "965892f8d679ff5eecf1cd49499a17fc38f37877f7f2d00b6818dfac9563a010",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t10.bin",
+          "sha256": "583b445355eaea98951db86a707411eb4526de4807723fd441d92aa32e45cc63",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t11.bin",
+          "sha256": "a3f7df52b1f55f1037f9e871c87da4552a53d60991b8b63648adf5698435cde5",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t12.bin",
+          "sha256": "ed4c53725abf6507ecc1accd14c57913a2c68cb68e22123a2d26ee0e855982c3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t13.bin",
+          "sha256": "375543e54998b1ac1d3025a21bdfd20f6f2b50d66590e7bbc04716179bdb7f1a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t14.bin",
+          "sha256": "d43cf1f095aa49e94251900f9f8f503c68b5469b3b814008a8a089b40a4e43ef",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t15.bin",
+          "sha256": "a29f88197e4b0647ae71f9b3f4cd9f0d71269f7dd3fe2dd20cdf60f6859819b6",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t16.bin",
+          "sha256": "20bd7288a2e11935c344c49637c28950c468d458b8a980bb8cf033a91d811be1",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t2.bin",
+          "sha256": "436d5c43774205a05719618c64d6b4a5b325caa6bc6d58f8d58bbd00c042c212",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t3.bin",
+          "sha256": "9fc2e722dc303b6f2b0c2c2b21cdda8cda916373da01d183b0e2e579c8cb053c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t4.bin",
+          "sha256": "c640a1b3c0fc8414f054debc0b21308acbd8cf6a331ae5fb1fdcf6408f0a0eed",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t5.bin",
+          "sha256": "027185e86ba2bb69c32554409849dafa9e6f62da13f4877d8798b5282f8c8564",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t6.bin",
+          "sha256": "066faaba910488c35d34ec700910519afae695eacfa136a751066e64692f6769",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t7.bin",
+          "sha256": "83d24b92854c34ffe2b7a70b4d2337a3acc278185eab3f14dc409fb288e92c92",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t8.bin",
+          "sha256": "f535a15ccbc36af00027e9e47d49f4e12b592ee720c1c8d39267da3a1c23650b",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/logits_t9.bin",
+          "sha256": "faf85020d913488af8865ccdb0c706889e2b19a179390f0fcde7d0611f211b7d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/run.log",
+          "sha256": "60277ee525cb5b3cc8f63a4f620b78812be1d93b301d095fcff317a39728bb3f",
+          "bytes": 5309
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/state-0.bin",
+          "sha256": "ac27f0e0fb5a61598f3bbd0b8ffea02e1046b2faaf478b10d212b38b66598705",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/state-3.bin",
+          "sha256": "2be091e9912985af1b02588ae6f2f5ab94ae33b78f661cfb37b2f286dcff1eea",
+          "bytes": 2220032
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/state-62.bin",
+          "sha256": "f6f9fe827817320be26c4c7c24579b230530fe1f19d561b5aec5a7e5e69fd1df",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat1/state-63.bin",
+          "sha256": "985a13600727ea3628fac3b33e1db3df2665014be4c576f8d8334947752c35b8",
+          "bytes": 2220032
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/capture.json",
+        "sha256": "98c9fcbdb8fcc5cc6053913d7d607058bc963da2aea39f7e42470ef47c560b87",
+        "bytes": 2209925
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/invocation.json",
+        "sha256": "fa16400a9ac077e17491b5c19da3855b5e36fe7652f637e21b1f8b23ceaa68e4",
+        "bytes": 294649
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/capture.json",
+          "sha256": "98c9fcbdb8fcc5cc6053913d7d607058bc963da2aea39f7e42470ef47c560b87",
+          "bytes": 2209925
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/ids.txt",
+          "sha256": "2231dcb3273e47793199fceccc1cf153bf7e89fe10af1b8f1717e5fc80c32e6a",
+          "bytes": 1675
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/invocation.json",
+          "sha256": "fa16400a9ac077e17491b5c19da3855b5e36fe7652f637e21b1f8b23ceaa68e4",
+          "bytes": 294649
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_p254.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t0.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t1.bin",
+          "sha256": "965892f8d679ff5eecf1cd49499a17fc38f37877f7f2d00b6818dfac9563a010",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t10.bin",
+          "sha256": "583b445355eaea98951db86a707411eb4526de4807723fd441d92aa32e45cc63",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t11.bin",
+          "sha256": "a3f7df52b1f55f1037f9e871c87da4552a53d60991b8b63648adf5698435cde5",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t12.bin",
+          "sha256": "ed4c53725abf6507ecc1accd14c57913a2c68cb68e22123a2d26ee0e855982c3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t13.bin",
+          "sha256": "375543e54998b1ac1d3025a21bdfd20f6f2b50d66590e7bbc04716179bdb7f1a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t14.bin",
+          "sha256": "d43cf1f095aa49e94251900f9f8f503c68b5469b3b814008a8a089b40a4e43ef",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t15.bin",
+          "sha256": "a29f88197e4b0647ae71f9b3f4cd9f0d71269f7dd3fe2dd20cdf60f6859819b6",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t16.bin",
+          "sha256": "20bd7288a2e11935c344c49637c28950c468d458b8a980bb8cf033a91d811be1",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t2.bin",
+          "sha256": "436d5c43774205a05719618c64d6b4a5b325caa6bc6d58f8d58bbd00c042c212",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t3.bin",
+          "sha256": "9fc2e722dc303b6f2b0c2c2b21cdda8cda916373da01d183b0e2e579c8cb053c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t4.bin",
+          "sha256": "c640a1b3c0fc8414f054debc0b21308acbd8cf6a331ae5fb1fdcf6408f0a0eed",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t5.bin",
+          "sha256": "027185e86ba2bb69c32554409849dafa9e6f62da13f4877d8798b5282f8c8564",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t6.bin",
+          "sha256": "066faaba910488c35d34ec700910519afae695eacfa136a751066e64692f6769",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t7.bin",
+          "sha256": "83d24b92854c34ffe2b7a70b4d2337a3acc278185eab3f14dc409fb288e92c92",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t8.bin",
+          "sha256": "f535a15ccbc36af00027e9e47d49f4e12b592ee720c1c8d39267da3a1c23650b",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/logits_t9.bin",
+          "sha256": "faf85020d913488af8865ccdb0c706889e2b19a179390f0fcde7d0611f211b7d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/run.log",
+          "sha256": "096c228cd991d5c09d2e19ab0234642df19ecb9a4dbecb8483e7ee888fe52f9e",
+          "bytes": 10023
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/state-0.bin",
+          "sha256": "ac27f0e0fb5a61598f3bbd0b8ffea02e1046b2faaf478b10d212b38b66598705",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/state-3.bin",
+          "sha256": "2be091e9912985af1b02588ae6f2f5ab94ae33b78f661cfb37b2f286dcff1eea",
+          "bytes": 2220032
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/state-62.bin",
+          "sha256": "f6f9fe827817320be26c4c7c24579b230530fe1f19d561b5aec5a7e5e69fd1df",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-off-repeat2/state-63.bin",
+          "sha256": "985a13600727ea3628fac3b33e1db3df2665014be4c576f8d8334947752c35b8",
+          "bytes": 2220032
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/capture.json",
+        "sha256": "71c22b44f94e0774e336272d54c549adcf2a6b6cf83cdf04d80c291d43f9fa72",
+        "bytes": 1449867
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/invocation.json",
+        "sha256": "da2d8687abaa9044e87d178567ba092e5e0d369d577995db9f6538703ef1b356",
+        "bytes": 294688
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/capture.json",
+          "sha256": "71c22b44f94e0774e336272d54c549adcf2a6b6cf83cdf04d80c291d43f9fa72",
+          "bytes": 1449867
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/ids.txt",
+          "sha256": "2231dcb3273e47793199fceccc1cf153bf7e89fe10af1b8f1717e5fc80c32e6a",
+          "bytes": 1675
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/invocation.json",
+          "sha256": "da2d8687abaa9044e87d178567ba092e5e0d369d577995db9f6538703ef1b356",
+          "bytes": 294688
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_p254.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t0.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t1.bin",
+          "sha256": "965892f8d679ff5eecf1cd49499a17fc38f37877f7f2d00b6818dfac9563a010",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t10.bin",
+          "sha256": "583b445355eaea98951db86a707411eb4526de4807723fd441d92aa32e45cc63",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t11.bin",
+          "sha256": "a3f7df52b1f55f1037f9e871c87da4552a53d60991b8b63648adf5698435cde5",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t12.bin",
+          "sha256": "ed4c53725abf6507ecc1accd14c57913a2c68cb68e22123a2d26ee0e855982c3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t13.bin",
+          "sha256": "375543e54998b1ac1d3025a21bdfd20f6f2b50d66590e7bbc04716179bdb7f1a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t14.bin",
+          "sha256": "d43cf1f095aa49e94251900f9f8f503c68b5469b3b814008a8a089b40a4e43ef",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t15.bin",
+          "sha256": "a29f88197e4b0647ae71f9b3f4cd9f0d71269f7dd3fe2dd20cdf60f6859819b6",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t16.bin",
+          "sha256": "20bd7288a2e11935c344c49637c28950c468d458b8a980bb8cf033a91d811be1",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t2.bin",
+          "sha256": "436d5c43774205a05719618c64d6b4a5b325caa6bc6d58f8d58bbd00c042c212",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t3.bin",
+          "sha256": "9fc2e722dc303b6f2b0c2c2b21cdda8cda916373da01d183b0e2e579c8cb053c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t4.bin",
+          "sha256": "c640a1b3c0fc8414f054debc0b21308acbd8cf6a331ae5fb1fdcf6408f0a0eed",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t5.bin",
+          "sha256": "027185e86ba2bb69c32554409849dafa9e6f62da13f4877d8798b5282f8c8564",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t6.bin",
+          "sha256": "066faaba910488c35d34ec700910519afae695eacfa136a751066e64692f6769",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t7.bin",
+          "sha256": "83d24b92854c34ffe2b7a70b4d2337a3acc278185eab3f14dc409fb288e92c92",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t8.bin",
+          "sha256": "f535a15ccbc36af00027e9e47d49f4e12b592ee720c1c8d39267da3a1c23650b",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/logits_t9.bin",
+          "sha256": "faf85020d913488af8865ccdb0c706889e2b19a179390f0fcde7d0611f211b7d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/run.log",
+          "sha256": "57e769b401255386f45a8d160d5794f5bf22321c9a2e59e8923181a1511aadf0",
+          "bytes": 5287
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/state-0.bin",
+          "sha256": "ac27f0e0fb5a61598f3bbd0b8ffea02e1046b2faaf478b10d212b38b66598705",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/state-3.bin",
+          "sha256": "2be091e9912985af1b02588ae6f2f5ab94ae33b78f661cfb37b2f286dcff1eea",
+          "bytes": 2220032
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/state-62.bin",
+          "sha256": "f6f9fe827817320be26c4c7c24579b230530fe1f19d561b5aec5a7e5e69fd1df",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat1/state-63.bin",
+          "sha256": "985a13600727ea3628fac3b33e1db3df2665014be4c576f8d8334947752c35b8",
+          "bytes": 2220032
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/capture.json",
+        "sha256": "7ec9743588887055e74946364e1b2a0f893471d7d58524be4495be1270b6d28c",
+        "bytes": 2173629
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/invocation.json",
+        "sha256": "8fb7a04ec55992dc21f342b4dd3029f9be1fada3cbcf39dfe45d563c79afbccc",
+        "bytes": 294688
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/capture.json",
+          "sha256": "7ec9743588887055e74946364e1b2a0f893471d7d58524be4495be1270b6d28c",
+          "bytes": 2173629
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/ids.txt",
+          "sha256": "2231dcb3273e47793199fceccc1cf153bf7e89fe10af1b8f1717e5fc80c32e6a",
+          "bytes": 1675
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/invocation.json",
+          "sha256": "8fb7a04ec55992dc21f342b4dd3029f9be1fada3cbcf39dfe45d563c79afbccc",
+          "bytes": 294688
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_p254.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t0.bin",
+          "sha256": "4edb836b182892f6e68671d344b8527cdcdefc633897c29120abdf67beccfafb",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t1.bin",
+          "sha256": "965892f8d679ff5eecf1cd49499a17fc38f37877f7f2d00b6818dfac9563a010",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t10.bin",
+          "sha256": "583b445355eaea98951db86a707411eb4526de4807723fd441d92aa32e45cc63",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t11.bin",
+          "sha256": "a3f7df52b1f55f1037f9e871c87da4552a53d60991b8b63648adf5698435cde5",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t12.bin",
+          "sha256": "ed4c53725abf6507ecc1accd14c57913a2c68cb68e22123a2d26ee0e855982c3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t13.bin",
+          "sha256": "375543e54998b1ac1d3025a21bdfd20f6f2b50d66590e7bbc04716179bdb7f1a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t14.bin",
+          "sha256": "d43cf1f095aa49e94251900f9f8f503c68b5469b3b814008a8a089b40a4e43ef",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t15.bin",
+          "sha256": "a29f88197e4b0647ae71f9b3f4cd9f0d71269f7dd3fe2dd20cdf60f6859819b6",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t16.bin",
+          "sha256": "20bd7288a2e11935c344c49637c28950c468d458b8a980bb8cf033a91d811be1",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t2.bin",
+          "sha256": "436d5c43774205a05719618c64d6b4a5b325caa6bc6d58f8d58bbd00c042c212",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t3.bin",
+          "sha256": "9fc2e722dc303b6f2b0c2c2b21cdda8cda916373da01d183b0e2e579c8cb053c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t4.bin",
+          "sha256": "c640a1b3c0fc8414f054debc0b21308acbd8cf6a331ae5fb1fdcf6408f0a0eed",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t5.bin",
+          "sha256": "027185e86ba2bb69c32554409849dafa9e6f62da13f4877d8798b5282f8c8564",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t6.bin",
+          "sha256": "066faaba910488c35d34ec700910519afae695eacfa136a751066e64692f6769",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t7.bin",
+          "sha256": "83d24b92854c34ffe2b7a70b4d2337a3acc278185eab3f14dc409fb288e92c92",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t8.bin",
+          "sha256": "f535a15ccbc36af00027e9e47d49f4e12b592ee720c1c8d39267da3a1c23650b",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/logits_t9.bin",
+          "sha256": "faf85020d913488af8865ccdb0c706889e2b19a179390f0fcde7d0611f211b7d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/run.log",
+          "sha256": "47a8ddf647c019cbf5edb67eeeac62e50ad9bf53d621b6e52d3bbcb87ff2d138",
+          "bytes": 9983
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/state-0.bin",
+          "sha256": "ac27f0e0fb5a61598f3bbd0b8ffea02e1046b2faaf478b10d212b38b66598705",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/state-3.bin",
+          "sha256": "2be091e9912985af1b02588ae6f2f5ab94ae33b78f661cfb37b2f286dcff1eea",
+          "bytes": 2220032
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/state-62.bin",
+          "sha256": "f6f9fe827817320be26c4c7c24579b230530fe1f19d561b5aec5a7e5e69fd1df",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/255-on-repeat2/state-63.bin",
+          "sha256": "985a13600727ea3628fac3b33e1db3df2665014be4c576f8d8334947752c35b8",
+          "bytes": 2220032
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/capture.json",
+        "sha256": "da4ec688cdfd70f4712a1ae695a530f114cedf08a553b41702cd3b5d454d3e01",
+        "bytes": 1457713
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/invocation.json",
+        "sha256": "43a6b733f4a8d5f29005471b940958e88e1bec9d177f7e4a8222dd3be2d56cf1",
+        "bytes": 294649
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/capture.json",
+          "sha256": "da4ec688cdfd70f4712a1ae695a530f114cedf08a553b41702cd3b5d454d3e01",
+          "bytes": 1457713
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/invocation.json",
+          "sha256": "43a6b733f4a8d5f29005471b940958e88e1bec9d177f7e4a8222dd3be2d56cf1",
+          "bytes": 294649
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_p255.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t0.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t1.bin",
+          "sha256": "ff7a5689e247f98cb0a9bb76c7568ec5fc246ccb0b74e0e4af359356bfe54a4e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t10.bin",
+          "sha256": "8cef8672e5c2e732315cdf85138803e0f65c3227265bc85dd3fbea0c49f410de",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t11.bin",
+          "sha256": "6c64fd75de0dafe0983f3bc34b2d6a32ae7761f50dd74545d7ed6284214efa9a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t12.bin",
+          "sha256": "e3b361744937b3209829f95738b8264f0025418588cb69cfabbfe75e7599ed00",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t13.bin",
+          "sha256": "3308794f4b0d4114191e697fe70da5efc37304708aadc36021cca68df50517cf",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t14.bin",
+          "sha256": "e863c3b731f3d341421ac5bc9105949d736ba4c0a7ca14f22374097f9f51baec",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t15.bin",
+          "sha256": "90f5deae535fd445166dbc7906b5afe94767f29a1f6be06d16699c0f86a0ebee",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t16.bin",
+          "sha256": "9b9bc33ca938033cf2875d351e1a72928b6c5744c3f2d714afa96df1f58ad115",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t2.bin",
+          "sha256": "27bf559954bb01dfd93c6a2a1274cc52ded31dcf006298c65d4484092c64ce11",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t3.bin",
+          "sha256": "4be52818f32c46eef1ec4486b5b06bad1c90ad1f7936f0cc0040b1c52c3e3208",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t4.bin",
+          "sha256": "6fd9d52c9c9f31da000fbcc8f6f0d1316056096f00d8eba896fc06dbf4a6b0ab",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t5.bin",
+          "sha256": "a749722d153e0a8f5f9888d8db28df99e60c77e3d94502364f6ef8f96442b18d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t6.bin",
+          "sha256": "1b88e4a6414c455baa9bfdc24c4978fe59f08b14b10479bb9a2f2a41524dd478",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t7.bin",
+          "sha256": "51a2e16684be345b49b67c98c6939fadd33c0593d624aa6862d06ffda107d746",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t8.bin",
+          "sha256": "bb0099e2dc7cf889c469921a092da7d5721260335cc6c2f77a8a484d4f75d9ca",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/logits_t9.bin",
+          "sha256": "6d20702ac1c628e816581bcfae735c304aa8ff48ac596adb05cc97bc5b52c264",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/run.log",
+          "sha256": "d88f89ec9e7c82a97e6a05a340182895ceb540490399d8a33d429984a1fed77f",
+          "bytes": 5343
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/state-0.bin",
+          "sha256": "d098956a35219be5c773d771e2b95e7b19e84f63d7e08b01386717f845485a41",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/state-3.bin",
+          "sha256": "ff082ed63897a8cdab9742efd464c72c096db8aec3c72ba6e75caa8787ba0954",
+          "bytes": 2228224
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/state-62.bin",
+          "sha256": "a2596a7f479ce2cb922eb6869cc25757874cb1e4b7dbab4ed27127320052496d",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat1/state-63.bin",
+          "sha256": "945891b8f7657cd91d00d9a3e63589bd08a1ed05f322cbabbb6e788f971fae0b",
+          "bytes": 2228224
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/capture.json",
+        "sha256": "54a8b5f57c44abce4d2ba4b4cd75a8cf4768b9c2b106188a07d4a3b9f3246657",
+        "bytes": 2256762
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/invocation.json",
+        "sha256": "5f47071d0cbe9a5aa0316f53ee0725a93ad56429ed47074a669dbb97eacc6aa8",
+        "bytes": 294649
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/capture.json",
+          "sha256": "54a8b5f57c44abce4d2ba4b4cd75a8cf4768b9c2b106188a07d4a3b9f3246657",
+          "bytes": 2256762
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/invocation.json",
+          "sha256": "5f47071d0cbe9a5aa0316f53ee0725a93ad56429ed47074a669dbb97eacc6aa8",
+          "bytes": 294649
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_p255.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t0.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t1.bin",
+          "sha256": "ff7a5689e247f98cb0a9bb76c7568ec5fc246ccb0b74e0e4af359356bfe54a4e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t10.bin",
+          "sha256": "8cef8672e5c2e732315cdf85138803e0f65c3227265bc85dd3fbea0c49f410de",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t11.bin",
+          "sha256": "6c64fd75de0dafe0983f3bc34b2d6a32ae7761f50dd74545d7ed6284214efa9a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t12.bin",
+          "sha256": "e3b361744937b3209829f95738b8264f0025418588cb69cfabbfe75e7599ed00",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t13.bin",
+          "sha256": "3308794f4b0d4114191e697fe70da5efc37304708aadc36021cca68df50517cf",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t14.bin",
+          "sha256": "e863c3b731f3d341421ac5bc9105949d736ba4c0a7ca14f22374097f9f51baec",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t15.bin",
+          "sha256": "90f5deae535fd445166dbc7906b5afe94767f29a1f6be06d16699c0f86a0ebee",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t16.bin",
+          "sha256": "9b9bc33ca938033cf2875d351e1a72928b6c5744c3f2d714afa96df1f58ad115",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t2.bin",
+          "sha256": "27bf559954bb01dfd93c6a2a1274cc52ded31dcf006298c65d4484092c64ce11",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t3.bin",
+          "sha256": "4be52818f32c46eef1ec4486b5b06bad1c90ad1f7936f0cc0040b1c52c3e3208",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t4.bin",
+          "sha256": "6fd9d52c9c9f31da000fbcc8f6f0d1316056096f00d8eba896fc06dbf4a6b0ab",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t5.bin",
+          "sha256": "a749722d153e0a8f5f9888d8db28df99e60c77e3d94502364f6ef8f96442b18d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t6.bin",
+          "sha256": "1b88e4a6414c455baa9bfdc24c4978fe59f08b14b10479bb9a2f2a41524dd478",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t7.bin",
+          "sha256": "51a2e16684be345b49b67c98c6939fadd33c0593d624aa6862d06ffda107d746",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t8.bin",
+          "sha256": "bb0099e2dc7cf889c469921a092da7d5721260335cc6c2f77a8a484d4f75d9ca",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/logits_t9.bin",
+          "sha256": "6d20702ac1c628e816581bcfae735c304aa8ff48ac596adb05cc97bc5b52c264",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/run.log",
+          "sha256": "a2862f864ef77e146f2dec96a8a94444d57a2b3f68148a017d9869e7c20fb14e",
+          "bytes": 10091
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/state-0.bin",
+          "sha256": "d098956a35219be5c773d771e2b95e7b19e84f63d7e08b01386717f845485a41",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/state-3.bin",
+          "sha256": "ff082ed63897a8cdab9742efd464c72c096db8aec3c72ba6e75caa8787ba0954",
+          "bytes": 2228224
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/state-62.bin",
+          "sha256": "a2596a7f479ce2cb922eb6869cc25757874cb1e4b7dbab4ed27127320052496d",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-off-repeat2/state-63.bin",
+          "sha256": "945891b8f7657cd91d00d9a3e63589bd08a1ed05f322cbabbb6e788f971fae0b",
+          "bytes": 2228224
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/capture.json",
+        "sha256": "d6b11f9cc2e886aa034677e446d94e550f084690e60d729cb99533dd2c29fd35",
+        "bytes": 1455388
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/invocation.json",
+        "sha256": "e707ace65b302bbcebf7dc6690369a616a44403797d0be355b1db41db4492c1e",
+        "bytes": 294688
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/capture.json",
+          "sha256": "d6b11f9cc2e886aa034677e446d94e550f084690e60d729cb99533dd2c29fd35",
+          "bytes": 1455388
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/invocation.json",
+          "sha256": "e707ace65b302bbcebf7dc6690369a616a44403797d0be355b1db41db4492c1e",
+          "bytes": 294688
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_p255.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t0.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t1.bin",
+          "sha256": "ff7a5689e247f98cb0a9bb76c7568ec5fc246ccb0b74e0e4af359356bfe54a4e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t10.bin",
+          "sha256": "8cef8672e5c2e732315cdf85138803e0f65c3227265bc85dd3fbea0c49f410de",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t11.bin",
+          "sha256": "6c64fd75de0dafe0983f3bc34b2d6a32ae7761f50dd74545d7ed6284214efa9a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t12.bin",
+          "sha256": "e3b361744937b3209829f95738b8264f0025418588cb69cfabbfe75e7599ed00",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t13.bin",
+          "sha256": "3308794f4b0d4114191e697fe70da5efc37304708aadc36021cca68df50517cf",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t14.bin",
+          "sha256": "e863c3b731f3d341421ac5bc9105949d736ba4c0a7ca14f22374097f9f51baec",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t15.bin",
+          "sha256": "90f5deae535fd445166dbc7906b5afe94767f29a1f6be06d16699c0f86a0ebee",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t16.bin",
+          "sha256": "9b9bc33ca938033cf2875d351e1a72928b6c5744c3f2d714afa96df1f58ad115",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t2.bin",
+          "sha256": "27bf559954bb01dfd93c6a2a1274cc52ded31dcf006298c65d4484092c64ce11",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t3.bin",
+          "sha256": "4be52818f32c46eef1ec4486b5b06bad1c90ad1f7936f0cc0040b1c52c3e3208",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t4.bin",
+          "sha256": "6fd9d52c9c9f31da000fbcc8f6f0d1316056096f00d8eba896fc06dbf4a6b0ab",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t5.bin",
+          "sha256": "a749722d153e0a8f5f9888d8db28df99e60c77e3d94502364f6ef8f96442b18d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t6.bin",
+          "sha256": "1b88e4a6414c455baa9bfdc24c4978fe59f08b14b10479bb9a2f2a41524dd478",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t7.bin",
+          "sha256": "51a2e16684be345b49b67c98c6939fadd33c0593d624aa6862d06ffda107d746",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t8.bin",
+          "sha256": "bb0099e2dc7cf889c469921a092da7d5721260335cc6c2f77a8a484d4f75d9ca",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/logits_t9.bin",
+          "sha256": "6d20702ac1c628e816581bcfae735c304aa8ff48ac596adb05cc97bc5b52c264",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/run.log",
+          "sha256": "67ee55da8efb166f67a32f3e60be8549a60238898b07f9d77e8c817c6cb71265",
+          "bytes": 5321
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/state-0.bin",
+          "sha256": "d098956a35219be5c773d771e2b95e7b19e84f63d7e08b01386717f845485a41",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/state-3.bin",
+          "sha256": "ff082ed63897a8cdab9742efd464c72c096db8aec3c72ba6e75caa8787ba0954",
+          "bytes": 2228224
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/state-62.bin",
+          "sha256": "a2596a7f479ce2cb922eb6869cc25757874cb1e4b7dbab4ed27127320052496d",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat1/state-63.bin",
+          "sha256": "945891b8f7657cd91d00d9a3e63589bd08a1ed05f322cbabbb6e788f971fae0b",
+          "bytes": 2228224
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/capture.json",
+        "sha256": "12b42a4a5e4fcef7860a0d2957be01d2665ad44401dd3959f20b499c75f4c70d",
+        "bytes": 2228215
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/invocation.json",
+        "sha256": "217a0e72ea46a59e7dc9aeb5a49a8f2cc6a277ce6c40c51e13a504c2a6b041ca",
+        "bytes": 294688
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/capture.json",
+          "sha256": "12b42a4a5e4fcef7860a0d2957be01d2665ad44401dd3959f20b499c75f4c70d",
+          "bytes": 2228215
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/invocation.json",
+          "sha256": "217a0e72ea46a59e7dc9aeb5a49a8f2cc6a277ce6c40c51e13a504c2a6b041ca",
+          "bytes": 294688
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_p255.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t0.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t1.bin",
+          "sha256": "ff7a5689e247f98cb0a9bb76c7568ec5fc246ccb0b74e0e4af359356bfe54a4e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t10.bin",
+          "sha256": "8cef8672e5c2e732315cdf85138803e0f65c3227265bc85dd3fbea0c49f410de",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t11.bin",
+          "sha256": "6c64fd75de0dafe0983f3bc34b2d6a32ae7761f50dd74545d7ed6284214efa9a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t12.bin",
+          "sha256": "e3b361744937b3209829f95738b8264f0025418588cb69cfabbfe75e7599ed00",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t13.bin",
+          "sha256": "3308794f4b0d4114191e697fe70da5efc37304708aadc36021cca68df50517cf",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t14.bin",
+          "sha256": "e863c3b731f3d341421ac5bc9105949d736ba4c0a7ca14f22374097f9f51baec",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t15.bin",
+          "sha256": "90f5deae535fd445166dbc7906b5afe94767f29a1f6be06d16699c0f86a0ebee",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t16.bin",
+          "sha256": "9b9bc33ca938033cf2875d351e1a72928b6c5744c3f2d714afa96df1f58ad115",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t2.bin",
+          "sha256": "27bf559954bb01dfd93c6a2a1274cc52ded31dcf006298c65d4484092c64ce11",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t3.bin",
+          "sha256": "4be52818f32c46eef1ec4486b5b06bad1c90ad1f7936f0cc0040b1c52c3e3208",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t4.bin",
+          "sha256": "6fd9d52c9c9f31da000fbcc8f6f0d1316056096f00d8eba896fc06dbf4a6b0ab",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t5.bin",
+          "sha256": "a749722d153e0a8f5f9888d8db28df99e60c77e3d94502364f6ef8f96442b18d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t6.bin",
+          "sha256": "1b88e4a6414c455baa9bfdc24c4978fe59f08b14b10479bb9a2f2a41524dd478",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t7.bin",
+          "sha256": "51a2e16684be345b49b67c98c6939fadd33c0593d624aa6862d06ffda107d746",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t8.bin",
+          "sha256": "bb0099e2dc7cf889c469921a092da7d5721260335cc6c2f77a8a484d4f75d9ca",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/logits_t9.bin",
+          "sha256": "6d20702ac1c628e816581bcfae735c304aa8ff48ac596adb05cc97bc5b52c264",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/run.log",
+          "sha256": "523250d8d7ccf977e43d53e31e990f09bdcc55f478e7e53a367e0e63a6ed3c3c",
+          "bytes": 10051
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/state-0.bin",
+          "sha256": "d098956a35219be5c773d771e2b95e7b19e84f63d7e08b01386717f845485a41",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/state-3.bin",
+          "sha256": "ff082ed63897a8cdab9742efd464c72c096db8aec3c72ba6e75caa8787ba0954",
+          "bytes": 2228224
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/state-62.bin",
+          "sha256": "a2596a7f479ce2cb922eb6869cc25757874cb1e4b7dbab4ed27127320052496d",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-on-repeat2/state-63.bin",
+          "sha256": "945891b8f7657cd91d00d9a3e63589bd08a1ed05f322cbabbb6e788f971fae0b",
+          "bytes": 2228224
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/capture.json",
+        "sha256": "f9b45cccff6578ceccca62c4f68e9fce905bb8f3fa6fae202ab60ffb7ca1f32e",
+        "bytes": 1486273
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/invocation.json",
+        "sha256": "34114e2dd9574ca5dbf3a1f7cb2ce8b6ca6d2c4f1ab79af543d9acc315444310",
+        "bytes": 292989
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/capture.json",
+          "sha256": "f9b45cccff6578ceccca62c4f68e9fce905bb8f3fa6fae202ab60ffb7ca1f32e",
+          "bytes": 1486273
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/invocation.json",
+          "sha256": "34114e2dd9574ca5dbf3a1f7cb2ce8b6ca6d2c4f1ab79af543d9acc315444310",
+          "bytes": 292989
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_p255.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t0.bin",
+          "sha256": "bd2b697949ecc1524cddb761faba1c8b70f1d0fac2d880c60d8a9466ee84b216",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t1.bin",
+          "sha256": "ff7a5689e247f98cb0a9bb76c7568ec5fc246ccb0b74e0e4af359356bfe54a4e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t10.bin",
+          "sha256": "8cef8672e5c2e732315cdf85138803e0f65c3227265bc85dd3fbea0c49f410de",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t11.bin",
+          "sha256": "6c64fd75de0dafe0983f3bc34b2d6a32ae7761f50dd74545d7ed6284214efa9a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t12.bin",
+          "sha256": "e3b361744937b3209829f95738b8264f0025418588cb69cfabbfe75e7599ed00",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t13.bin",
+          "sha256": "3308794f4b0d4114191e697fe70da5efc37304708aadc36021cca68df50517cf",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t14.bin",
+          "sha256": "e863c3b731f3d341421ac5bc9105949d736ba4c0a7ca14f22374097f9f51baec",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t15.bin",
+          "sha256": "90f5deae535fd445166dbc7906b5afe94767f29a1f6be06d16699c0f86a0ebee",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t16.bin",
+          "sha256": "9b9bc33ca938033cf2875d351e1a72928b6c5744c3f2d714afa96df1f58ad115",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t2.bin",
+          "sha256": "27bf559954bb01dfd93c6a2a1274cc52ded31dcf006298c65d4484092c64ce11",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t3.bin",
+          "sha256": "4be52818f32c46eef1ec4486b5b06bad1c90ad1f7936f0cc0040b1c52c3e3208",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t4.bin",
+          "sha256": "6fd9d52c9c9f31da000fbcc8f6f0d1316056096f00d8eba896fc06dbf4a6b0ab",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t5.bin",
+          "sha256": "a749722d153e0a8f5f9888d8db28df99e60c77e3d94502364f6ef8f96442b18d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t6.bin",
+          "sha256": "1b88e4a6414c455baa9bfdc24c4978fe59f08b14b10479bb9a2f2a41524dd478",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t7.bin",
+          "sha256": "51a2e16684be345b49b67c98c6939fadd33c0593d624aa6862d06ffda107d746",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t8.bin",
+          "sha256": "bb0099e2dc7cf889c469921a092da7d5721260335cc6c2f77a8a484d4f75d9ca",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/logits_t9.bin",
+          "sha256": "6d20702ac1c628e816581bcfae735c304aa8ff48ac596adb05cc97bc5b52c264",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/run.log",
+          "sha256": "71338712b105202f11c1b5c5e5d1fd9c99213060d2671e04880274c38b8f631f",
+          "bytes": 5453
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/state-0.bin",
+          "sha256": "d098956a35219be5c773d771e2b95e7b19e84f63d7e08b01386717f845485a41",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/state-3.bin",
+          "sha256": "ff082ed63897a8cdab9742efd464c72c096db8aec3c72ba6e75caa8787ba0954",
+          "bytes": 2228224
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/state-62.bin",
+          "sha256": "a2596a7f479ce2cb922eb6869cc25757874cb1e4b7dbab4ed27127320052496d",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/256-original-repeat1/state-63.bin",
+          "sha256": "945891b8f7657cd91d00d9a3e63589bd08a1ed05f322cbabbb6e788f971fae0b",
+          "bytes": 2228224
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/capture.json",
+        "sha256": "491735dd7143e586f614c7105d272e2b0066675db6c94b6f71fb7d572bdea6dc",
+        "bytes": 2065609
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/invocation.json",
+        "sha256": "1238e8db812ffecd33f4c41cf9e400cb0cf41bdbbeb36a82066e37f07d7d7bcc",
+        "bytes": 294649
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/capture.json",
+          "sha256": "491735dd7143e586f614c7105d272e2b0066675db6c94b6f71fb7d572bdea6dc",
+          "bytes": 2065609
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/ids.txt",
+          "sha256": "e3c1e2c623ce8d10d8859365f85430861bb55bec1c228e7c6e6fcb9e49585b5e",
+          "bytes": 1689
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/invocation.json",
+          "sha256": "1238e8db812ffecd33f4c41cf9e400cb0cf41bdbbeb36a82066e37f07d7d7bcc",
+          "bytes": 294649
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_p256.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t0.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t1.bin",
+          "sha256": "8a13056f139bfd002b54d3d524f0bc4e5807141b7da31cc1d1796028765719a2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t10.bin",
+          "sha256": "581b1b63fa321bc63d120a64cbc2bd9837f02cefef071b62b9038693e19c213e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t11.bin",
+          "sha256": "b38e1bc2aa8559c2da7d882c550e6a11de2ffe84e8edcbf186ff93136acc6b06",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t12.bin",
+          "sha256": "c8738a81b3112762bbfea530eb9f6e2ca54cdddb2388d1e3b0f4e6677be008e3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t13.bin",
+          "sha256": "49604c8a7b2138763e3fa7237c43619bbf81c543938953f7903da63e81f00dda",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t14.bin",
+          "sha256": "1e1a1aee8eebf5ffc044b671af97615c2a88c68fbdaf1c05ff00f35b252ff56a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t15.bin",
+          "sha256": "439f591968a25841659f16998080e203b2721538b1dd00ebd9b20b410b94cd6d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t16.bin",
+          "sha256": "d9bcc392a4685c538ffedeb9d98e95402d1cdec5a8e1846cd0eee64c57ecce53",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t2.bin",
+          "sha256": "3b0ea25c29b6141f04d415d10382791eb0ffbe8ac439386f53970a7ff739bacd",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t3.bin",
+          "sha256": "5003de2ddc8a033738c3a681862b74f4c1f52c819887de41890e4507b5586b23",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t4.bin",
+          "sha256": "c9cc32258c9caa340838968ef45b28bedb5c21c7d2353c04a54b5b3ff6c7d6e2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t5.bin",
+          "sha256": "37db747816283c0e75598e620c91a8d5af26b754d13ae4dd590d7f26f1331e34",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t6.bin",
+          "sha256": "a19d50d29f3c8adce30c7be51c133b66ce35b6239b0e81eea1dde139a6724ac3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t7.bin",
+          "sha256": "abb26eb9d5db698db7cd34da4c7d84699af46344cfd162c227f4a9d0f70316bc",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t8.bin",
+          "sha256": "e0b86a83c76ca1e77390ac070f1555d3d9dac4dd541cfba0f7121385b4e25326",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/logits_t9.bin",
+          "sha256": "ed377225ff6402106795438de49d1250ddfb0f01cfc1d50d4dfc98ea46f73a90",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/run.log",
+          "sha256": "2a03e4d6cff9034400ae55c9c638fcb609a3966a22e2e1e058086be9552db02f",
+          "bytes": 5733
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/state-0.bin",
+          "sha256": "0dd9ac888a67bfae791384357a6fe9c47053342fdf4acfaf6e0d82666b11f49f",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/state-3.bin",
+          "sha256": "00969db4dccbb1b6a19181f692dd52860c7494252900fc57233e9ee8408909ac",
+          "bytes": 2236416
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/state-62.bin",
+          "sha256": "7768d42c2053c14a37cf24acbec8f0598f7abdc4cf69aa7bcff326d95c0d7e1b",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat1/state-63.bin",
+          "sha256": "13cc34740b70cb05b51fac60c9a18fab0b797e48f50cfcc10fa5f4162e55fafd",
+          "bytes": 2236416
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/capture.json",
+        "sha256": "5e3dd8bc5f24dcbc531b7816a8d400aaed8ed0a229810edbb0a59e4ad31fe1df",
+        "bytes": 3445645
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/invocation.json",
+        "sha256": "9c4efac60dcf9167b32228217f3dc0756660bf5928d78c648b468be0d8b4787a",
+        "bytes": 294649
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/capture.json",
+          "sha256": "5e3dd8bc5f24dcbc531b7816a8d400aaed8ed0a229810edbb0a59e4ad31fe1df",
+          "bytes": 3445645
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/ids.txt",
+          "sha256": "e3c1e2c623ce8d10d8859365f85430861bb55bec1c228e7c6e6fcb9e49585b5e",
+          "bytes": 1689
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/invocation.json",
+          "sha256": "9c4efac60dcf9167b32228217f3dc0756660bf5928d78c648b468be0d8b4787a",
+          "bytes": 294649
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_p256.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t0.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t1.bin",
+          "sha256": "8a13056f139bfd002b54d3d524f0bc4e5807141b7da31cc1d1796028765719a2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t10.bin",
+          "sha256": "581b1b63fa321bc63d120a64cbc2bd9837f02cefef071b62b9038693e19c213e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t11.bin",
+          "sha256": "b38e1bc2aa8559c2da7d882c550e6a11de2ffe84e8edcbf186ff93136acc6b06",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t12.bin",
+          "sha256": "c8738a81b3112762bbfea530eb9f6e2ca54cdddb2388d1e3b0f4e6677be008e3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t13.bin",
+          "sha256": "49604c8a7b2138763e3fa7237c43619bbf81c543938953f7903da63e81f00dda",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t14.bin",
+          "sha256": "1e1a1aee8eebf5ffc044b671af97615c2a88c68fbdaf1c05ff00f35b252ff56a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t15.bin",
+          "sha256": "439f591968a25841659f16998080e203b2721538b1dd00ebd9b20b410b94cd6d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t16.bin",
+          "sha256": "d9bcc392a4685c538ffedeb9d98e95402d1cdec5a8e1846cd0eee64c57ecce53",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t2.bin",
+          "sha256": "3b0ea25c29b6141f04d415d10382791eb0ffbe8ac439386f53970a7ff739bacd",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t3.bin",
+          "sha256": "5003de2ddc8a033738c3a681862b74f4c1f52c819887de41890e4507b5586b23",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t4.bin",
+          "sha256": "c9cc32258c9caa340838968ef45b28bedb5c21c7d2353c04a54b5b3ff6c7d6e2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t5.bin",
+          "sha256": "37db747816283c0e75598e620c91a8d5af26b754d13ae4dd590d7f26f1331e34",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t6.bin",
+          "sha256": "a19d50d29f3c8adce30c7be51c133b66ce35b6239b0e81eea1dde139a6724ac3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t7.bin",
+          "sha256": "abb26eb9d5db698db7cd34da4c7d84699af46344cfd162c227f4a9d0f70316bc",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t8.bin",
+          "sha256": "e0b86a83c76ca1e77390ac070f1555d3d9dac4dd541cfba0f7121385b4e25326",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/logits_t9.bin",
+          "sha256": "ed377225ff6402106795438de49d1250ddfb0f01cfc1d50d4dfc98ea46f73a90",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/run.log",
+          "sha256": "7274a29ff9e7e0dd099356668e0a890d4a35ddbed7649d85f61818eb492d01bc",
+          "bytes": 10871
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/state-0.bin",
+          "sha256": "0dd9ac888a67bfae791384357a6fe9c47053342fdf4acfaf6e0d82666b11f49f",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/state-3.bin",
+          "sha256": "00969db4dccbb1b6a19181f692dd52860c7494252900fc57233e9ee8408909ac",
+          "bytes": 2236416
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/state-62.bin",
+          "sha256": "7768d42c2053c14a37cf24acbec8f0598f7abdc4cf69aa7bcff326d95c0d7e1b",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-off-repeat2/state-63.bin",
+          "sha256": "13cc34740b70cb05b51fac60c9a18fab0b797e48f50cfcc10fa5f4162e55fafd",
+          "bytes": 2236416
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/capture.json",
+        "sha256": "ab96ae9a70e1776e081b7e35c28776359d510121825fa9364f40eb1a0c051690",
+        "bytes": 2043037
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/invocation.json",
+        "sha256": "efefbd483ca0a9dba36ecd7f9a6df6bcc9c6035a5a569b4472f067c265f52f7b",
+        "bytes": 294688
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/capture.json",
+          "sha256": "ab96ae9a70e1776e081b7e35c28776359d510121825fa9364f40eb1a0c051690",
+          "bytes": 2043037
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/ids.txt",
+          "sha256": "e3c1e2c623ce8d10d8859365f85430861bb55bec1c228e7c6e6fcb9e49585b5e",
+          "bytes": 1689
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/invocation.json",
+          "sha256": "efefbd483ca0a9dba36ecd7f9a6df6bcc9c6035a5a569b4472f067c265f52f7b",
+          "bytes": 294688
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_p256.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t0.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t1.bin",
+          "sha256": "8a13056f139bfd002b54d3d524f0bc4e5807141b7da31cc1d1796028765719a2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t10.bin",
+          "sha256": "581b1b63fa321bc63d120a64cbc2bd9837f02cefef071b62b9038693e19c213e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t11.bin",
+          "sha256": "b38e1bc2aa8559c2da7d882c550e6a11de2ffe84e8edcbf186ff93136acc6b06",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t12.bin",
+          "sha256": "c8738a81b3112762bbfea530eb9f6e2ca54cdddb2388d1e3b0f4e6677be008e3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t13.bin",
+          "sha256": "49604c8a7b2138763e3fa7237c43619bbf81c543938953f7903da63e81f00dda",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t14.bin",
+          "sha256": "1e1a1aee8eebf5ffc044b671af97615c2a88c68fbdaf1c05ff00f35b252ff56a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t15.bin",
+          "sha256": "439f591968a25841659f16998080e203b2721538b1dd00ebd9b20b410b94cd6d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t16.bin",
+          "sha256": "d9bcc392a4685c538ffedeb9d98e95402d1cdec5a8e1846cd0eee64c57ecce53",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t2.bin",
+          "sha256": "3b0ea25c29b6141f04d415d10382791eb0ffbe8ac439386f53970a7ff739bacd",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t3.bin",
+          "sha256": "5003de2ddc8a033738c3a681862b74f4c1f52c819887de41890e4507b5586b23",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t4.bin",
+          "sha256": "c9cc32258c9caa340838968ef45b28bedb5c21c7d2353c04a54b5b3ff6c7d6e2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t5.bin",
+          "sha256": "37db747816283c0e75598e620c91a8d5af26b754d13ae4dd590d7f26f1331e34",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t6.bin",
+          "sha256": "a19d50d29f3c8adce30c7be51c133b66ce35b6239b0e81eea1dde139a6724ac3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t7.bin",
+          "sha256": "abb26eb9d5db698db7cd34da4c7d84699af46344cfd162c227f4a9d0f70316bc",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t8.bin",
+          "sha256": "e0b86a83c76ca1e77390ac070f1555d3d9dac4dd541cfba0f7121385b4e25326",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/logits_t9.bin",
+          "sha256": "ed377225ff6402106795438de49d1250ddfb0f01cfc1d50d4dfc98ea46f73a90",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/run.log",
+          "sha256": "daa0ba09e33954c8f59c742c8db263bb64bcc8deceb8b3520b2bf2ba300d0e56",
+          "bytes": 5711
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/state-0.bin",
+          "sha256": "0dd9ac888a67bfae791384357a6fe9c47053342fdf4acfaf6e0d82666b11f49f",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/state-3.bin",
+          "sha256": "00969db4dccbb1b6a19181f692dd52860c7494252900fc57233e9ee8408909ac",
+          "bytes": 2236416
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/state-62.bin",
+          "sha256": "7768d42c2053c14a37cf24acbec8f0598f7abdc4cf69aa7bcff326d95c0d7e1b",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat1/state-63.bin",
+          "sha256": "13cc34740b70cb05b51fac60c9a18fab0b797e48f50cfcc10fa5f4162e55fafd",
+          "bytes": 2236416
+        }
+      ]
+    },
+    {
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/capture.json",
+        "sha256": "75fd7a1a4a34d511f9c4a31b261e9de4663d5a94db525c0d907694013cfc98ba",
+        "bytes": 3378546
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/invocation.json",
+        "sha256": "40e8c4c5bcdf0ea072bc29ec13dcc69806f1150923e9b26c2669b5fa4a33c1f7",
+        "bytes": 294688
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/capture.json",
+          "sha256": "75fd7a1a4a34d511f9c4a31b261e9de4663d5a94db525c0d907694013cfc98ba",
+          "bytes": 3378546
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/ids.txt",
+          "sha256": "e3c1e2c623ce8d10d8859365f85430861bb55bec1c228e7c6e6fcb9e49585b5e",
+          "bytes": 1689
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/invocation.json",
+          "sha256": "40e8c4c5bcdf0ea072bc29ec13dcc69806f1150923e9b26c2669b5fa4a33c1f7",
+          "bytes": 294688
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_p256.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t0.bin",
+          "sha256": "b7637e85cdfedc11f6270060f47451d627880fde5c22fb146bca18481595113c",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t1.bin",
+          "sha256": "8a13056f139bfd002b54d3d524f0bc4e5807141b7da31cc1d1796028765719a2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t10.bin",
+          "sha256": "581b1b63fa321bc63d120a64cbc2bd9837f02cefef071b62b9038693e19c213e",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t11.bin",
+          "sha256": "b38e1bc2aa8559c2da7d882c550e6a11de2ffe84e8edcbf186ff93136acc6b06",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t12.bin",
+          "sha256": "c8738a81b3112762bbfea530eb9f6e2ca54cdddb2388d1e3b0f4e6677be008e3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t13.bin",
+          "sha256": "49604c8a7b2138763e3fa7237c43619bbf81c543938953f7903da63e81f00dda",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t14.bin",
+          "sha256": "1e1a1aee8eebf5ffc044b671af97615c2a88c68fbdaf1c05ff00f35b252ff56a",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t15.bin",
+          "sha256": "439f591968a25841659f16998080e203b2721538b1dd00ebd9b20b410b94cd6d",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t16.bin",
+          "sha256": "d9bcc392a4685c538ffedeb9d98e95402d1cdec5a8e1846cd0eee64c57ecce53",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t2.bin",
+          "sha256": "3b0ea25c29b6141f04d415d10382791eb0ffbe8ac439386f53970a7ff739bacd",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t3.bin",
+          "sha256": "5003de2ddc8a033738c3a681862b74f4c1f52c819887de41890e4507b5586b23",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t4.bin",
+          "sha256": "c9cc32258c9caa340838968ef45b28bedb5c21c7d2353c04a54b5b3ff6c7d6e2",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t5.bin",
+          "sha256": "37db747816283c0e75598e620c91a8d5af26b754d13ae4dd590d7f26f1331e34",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t6.bin",
+          "sha256": "a19d50d29f3c8adce30c7be51c133b66ce35b6239b0e81eea1dde139a6724ac3",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t7.bin",
+          "sha256": "abb26eb9d5db698db7cd34da4c7d84699af46344cfd162c227f4a9d0f70316bc",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t8.bin",
+          "sha256": "e0b86a83c76ca1e77390ac070f1555d3d9dac4dd541cfba0f7121385b4e25326",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/logits_t9.bin",
+          "sha256": "ed377225ff6402106795438de49d1250ddfb0f01cfc1d50d4dfc98ea46f73a90",
+          "bytes": 993280
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/run.log",
+          "sha256": "a87c492f8ccf3472422e6ef2a146fd41ff6e98194d92270c6c0bf865410f779a",
+          "bytes": 10831
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/state-0.bin",
+          "sha256": "0dd9ac888a67bfae791384357a6fe9c47053342fdf4acfaf6e0d82666b11f49f",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/state-3.bin",
+          "sha256": "00969db4dccbb1b6a19181f692dd52860c7494252900fc57233e9ee8408909ac",
+          "bytes": 2236416
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/state-62.bin",
+          "sha256": "7768d42c2053c14a37cf24acbec8f0598f7abdc4cf69aa7bcff326d95c0d7e1b",
+          "bytes": 3317760
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness/257-on-repeat2/state-63.bin",
+          "sha256": "13cc34740b70cb05b51fac60c9a18fab0b797e48f50cfcc10fa5f4162e55fafd",
+          "bytes": 2236416
+        }
+      ]
+    }
+  ],
+  "correctness_result": {
+    "passed": true,
+    "cases": [
+      {
+        "tokens": 255,
+        "off_on_exact": true
+      },
+      {
+        "tokens": 256,
+        "off_on_exact": true
+      },
+      {
+        "tokens": 257,
+        "off_on_exact": true
+      }
+    ],
+    "state_repeat_scope": "first request only; final repeat logits equal fresh; IDs checked per request"
+  },
+  "builds": {
+    "control": {
+      "identity.json": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/control/identity.json",
+        "sha256": "4217c47d2784688fa9eb362bf7f4774ca9ee9348f9efce5e01bad0605f716a9e",
+        "bytes": 62073
+      },
+      "before.json": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/control/before.json",
+        "sha256": "0d32143faac9a8c40a830ae10ccca3e1b6e6ddc733a7e01d311581392b35c783",
+        "bytes": 154360
+      },
+      "after.json": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/control/after.json",
+        "sha256": "0d32143faac9a8c40a830ae10ccca3e1b6e6ddc733a7e01d311581392b35c783",
+        "bytes": 154360
+      },
+      "build.log": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/control/build.log",
+        "sha256": "cd418046abe6269aea3a37c18cfcd7adbff7f1d57b8891a8b79c2cbe62b52f18",
+        "bytes": 519
+      },
+      "sources.tar": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/control/sources.tar",
+        "sha256": "d419df72bb89f997e97fdfc06792b80390283893d29458da17aba036a5275079",
+        "bytes": 3256320
+      }
+    },
+    "candidate": {
+      "identity.json": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/identity.json",
+        "sha256": "627f1d52270eafa883febf7b31091f4a883af5c6d25761336255b2e276fcdd25",
+        "bytes": 62495
+      },
+      "before.json": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/before.json",
+        "sha256": "e307ed0953501515c0c90cecbe851a81a81d15e4eaff8ac266cb23722d4cdb13",
+        "bytes": 155614
+      },
+      "after.json": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/after.json",
+        "sha256": "e307ed0953501515c0c90cecbe851a81a81d15e4eaff8ac266cb23722d4cdb13",
+        "bytes": 155614
+      },
+      "build.log": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build.log",
+        "sha256": "5d8fdbdbd03c83c712c7ebc6cc0c355a2009f753f33ed02d1b72e4949a322d95",
+        "bytes": 523
+      },
+      "sources.tar": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/sources.tar",
+        "sha256": "a2d95e65c37b916ec27e4c6c22b5e8f0f79098954584d658176846bf69063b2d",
+        "bytes": 3256320
+      }
+    }
+  },
+  "tests": {
+    "focused": {
+      "log": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-focused-final.log",
+        "sha256": "89170279f821d0bf65352718691fb9cf82c354e2184847b001d677bbbd741ed3",
+        "bytes": 420
+      },
+      "summary": "329 passed in 2.22s"
+    },
+    "portable": {
+      "log": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-portable-final.log",
+        "sha256": "532f043b8f62315b8138dc79cc7c8bdd7eb624cd2e1282f1560aee465c2453e6",
+        "bytes": 3565
+      },
+      "summary": "2930 passed, 172 skipped in 66.97s (0:01:06)"
+    },
+    "settings_ci": {
+      "status": "PASS: clean committed-tree target merge",
+      "log": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/settings-ci-final.log",
+        "sha256": "b801776ea4ca0f9517120209b8932d26afdf65e5396d6f2207981e4f4e46257d",
+        "bytes": 376
+      }
+    }
+  },
+  "timing_captures": [
+    {
+      "name": "prefill-256--1-off",
+      "rep": -1,
+      "warmup": true,
+      "arm": "off",
+      "prefill_ms": 30255.0,
+      "rss_bytes": 35071180800,
+      "hwm_bytes": 35091496960,
+      "fold_ms": {
+        "split_ms": 1398.211,
+        "copy_ms": 665.501,
+        "accumulate_ms": 709.698,
+        "total_ms": 2773.41
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/capture.json",
+        "sha256": "71bede933b8b03d81defe32ce01448592680a5a6d71c085a417416421ce2b722",
+        "bytes": 1317143
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/invocation.json",
+        "sha256": "a676608bc164f85bcebc4bf9a2a3adc5b6cc90f675a6fdac6c2ce306d5202ff0",
+        "bytes": 294150
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "71bede933b8b03d81defe32ce01448592680a5a6d71c085a417416421ce2b722",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "5807410196427e6fd4c043572dc8eb4652ab2b4573fdee28a8bdbc35062d075c",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "a676608bc164f85bcebc4bf9a2a3adc5b6cc90f675a6fdac6c2ce306d5202ff0",
+          "layers.jsonl": "59a89e76fb304837cf5df19ce5bd78e495d9a95d352ea77b69705b0f7ce116cf",
+          "run.log": "72d3beb3bc3b99677e96e648dc0bbf14095902c9684ee4fd0b6d56eeae364f4d"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/capture.json",
+          "sha256": "71bede933b8b03d81defe32ce01448592680a5a6d71c085a417416421ce2b722",
+          "bytes": 1317143
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/fold.jsonl",
+          "sha256": "5807410196427e6fd4c043572dc8eb4652ab2b4573fdee28a8bdbc35062d075c",
+          "bytes": 201
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/invocation.json",
+          "sha256": "a676608bc164f85bcebc4bf9a2a3adc5b6cc90f675a6fdac6c2ce306d5202ff0",
+          "bytes": 294150
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/layers.jsonl",
+          "sha256": "59a89e76fb304837cf5df19ce5bd78e495d9a95d352ea77b69705b0f7ce116cf",
+          "bytes": 33771
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-off/run.log",
+          "sha256": "72d3beb3bc3b99677e96e648dc0bbf14095902c9684ee4fd0b6d56eeae364f4d",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256--1-on",
+      "rep": -1,
+      "warmup": true,
+      "arm": "on",
+      "prefill_ms": 29394.0,
+      "rss_bytes": 35093319680,
+      "hwm_bytes": 35093319680,
+      "fold_ms": {
+        "split_ms": 693.7,
+        "copy_ms": 668.305,
+        "accumulate_ms": 724.178,
+        "total_ms": 2086.183
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/capture.json",
+        "sha256": "999eb79afa509d8104990062b354395f0a0d9acbcfead27d8b5490bdc6540d40",
+        "bytes": 1294552
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/invocation.json",
+        "sha256": "6731f42f3ffd0b983a03e3cafcbbeece1733ec53366984ab280c46962e5ea904",
+        "bytes": 294191
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "999eb79afa509d8104990062b354395f0a0d9acbcfead27d8b5490bdc6540d40",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "a9ab6fb272e75e4886853ba4453878047d91336dfa264a59aa8dbf792d6a8503",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "6731f42f3ffd0b983a03e3cafcbbeece1733ec53366984ab280c46962e5ea904",
+          "layers.jsonl": "08ffe7d0403e8ab25a72d0c462124bf9b6960b9542dc8c09ec4267ef8956275a",
+          "run.log": "5613f7b4b4b34bbf3565509751e4e29389fa75b080e1160fbc036a4c394e1b3f"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/capture.json",
+          "sha256": "999eb79afa509d8104990062b354395f0a0d9acbcfead27d8b5490bdc6540d40",
+          "bytes": 1294552
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/fold.jsonl",
+          "sha256": "a9ab6fb272e75e4886853ba4453878047d91336dfa264a59aa8dbf792d6a8503",
+          "bytes": 200
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/invocation.json",
+          "sha256": "6731f42f3ffd0b983a03e3cafcbbeece1733ec53366984ab280c46962e5ea904",
+          "bytes": 294191
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/layers.jsonl",
+          "sha256": "08ffe7d0403e8ab25a72d0c462124bf9b6960b9542dc8c09ec4267ef8956275a",
+          "bytes": 33765
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256--1-on/run.log",
+          "sha256": "5613f7b4b4b34bbf3565509751e4e29389fa75b080e1160fbc036a4c394e1b3f",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256-0-off",
+      "rep": 0,
+      "warmup": false,
+      "arm": "off",
+      "prefill_ms": 30264.0,
+      "rss_bytes": 35071111168,
+      "hwm_bytes": 35091238912,
+      "fold_ms": {
+        "split_ms": 1368.179,
+        "copy_ms": 657.894,
+        "accumulate_ms": 695.527,
+        "total_ms": 2721.6
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/capture.json",
+        "sha256": "f27881abc681bd2e21939ae08f88671b5db85083d1070b0eff6455a8958304e8",
+        "bytes": 1312773
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/invocation.json",
+        "sha256": "b7e88fc850e0b17368aabe9f1ff1d92e6e8d7cc16b1de9aeeeb1c5999f97bc5b",
+        "bytes": 294146
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "f27881abc681bd2e21939ae08f88671b5db85083d1070b0eff6455a8958304e8",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "657c123b30dd2b5e42ba3757be80ffc64679f00a2ebd34a0218f28de73e34713",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "b7e88fc850e0b17368aabe9f1ff1d92e6e8d7cc16b1de9aeeeb1c5999f97bc5b",
+          "layers.jsonl": "348c0c660f5ec331aa525e38cd73fcaa340f581864806b3cac3e56cb756f4c59",
+          "run.log": "d4d5a51495eb4dd2eb0fd70fb8d416b8566de4e9db8a2c50dcf947a225cda9b3"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/capture.json",
+          "sha256": "f27881abc681bd2e21939ae08f88671b5db85083d1070b0eff6455a8958304e8",
+          "bytes": 1312773
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/fold.jsonl",
+          "sha256": "657c123b30dd2b5e42ba3757be80ffc64679f00a2ebd34a0218f28de73e34713",
+          "bytes": 201
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/invocation.json",
+          "sha256": "b7e88fc850e0b17368aabe9f1ff1d92e6e8d7cc16b1de9aeeeb1c5999f97bc5b",
+          "bytes": 294146
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/layers.jsonl",
+          "sha256": "348c0c660f5ec331aa525e38cd73fcaa340f581864806b3cac3e56cb756f4c59",
+          "bytes": 33772
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/run.log",
+          "sha256": "d4d5a51495eb4dd2eb0fd70fb8d416b8566de4e9db8a2c50dcf947a225cda9b3",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256-0-on",
+      "rep": 0,
+      "warmup": false,
+      "arm": "on",
+      "prefill_ms": 30491.0,
+      "rss_bytes": 35084947456,
+      "hwm_bytes": 35092103168,
+      "fold_ms": {
+        "split_ms": 738.366,
+        "copy_ms": 672.816,
+        "accumulate_ms": 732.553,
+        "total_ms": 2143.735
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/capture.json",
+        "sha256": "3266d855b15191bc2261854bf33fec27b22d47f6f7129a6ec513801e3e0b5bf2",
+        "bytes": 1317729
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/invocation.json",
+        "sha256": "2b96dd8ff6cd8c96df0c48ae1cde9451e4944e0d9f164e9918d4054d8461f4e5",
+        "bytes": 294187
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "3266d855b15191bc2261854bf33fec27b22d47f6f7129a6ec513801e3e0b5bf2",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "4f93df5f9cff2af241c1b6d20e07e9b797214e48e61b3b26709fad6181560e0b",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "2b96dd8ff6cd8c96df0c48ae1cde9451e4944e0d9f164e9918d4054d8461f4e5",
+          "layers.jsonl": "b3143c80613c0d71c0419c671247cb06c968144321f90e3a3d90a23869a5fbd5",
+          "run.log": "c780990ded9cb1bcee85cfb69388334394de42df9c4117bba5160b658c9ebd19"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/capture.json",
+          "sha256": "3266d855b15191bc2261854bf33fec27b22d47f6f7129a6ec513801e3e0b5bf2",
+          "bytes": 1317729
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/fold.jsonl",
+          "sha256": "4f93df5f9cff2af241c1b6d20e07e9b797214e48e61b3b26709fad6181560e0b",
+          "bytes": 200
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/invocation.json",
+          "sha256": "2b96dd8ff6cd8c96df0c48ae1cde9451e4944e0d9f164e9918d4054d8461f4e5",
+          "bytes": 294187
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/layers.jsonl",
+          "sha256": "b3143c80613c0d71c0419c671247cb06c968144321f90e3a3d90a23869a5fbd5",
+          "bytes": 33776
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/run.log",
+          "sha256": "c780990ded9cb1bcee85cfb69388334394de42df9c4117bba5160b658c9ebd19",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256-1-off",
+      "rep": 1,
+      "warmup": false,
+      "arm": "off",
+      "prefill_ms": 30010.0,
+      "rss_bytes": 35061235712,
+      "hwm_bytes": 35091996672,
+      "fold_ms": {
+        "split_ms": 1302.455,
+        "copy_ms": 654.259,
+        "accumulate_ms": 696.807,
+        "total_ms": 2653.522
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/capture.json",
+        "sha256": "c973c6d69e164f567092807143054c042656ec1c9a04c0da6116d6658e201571",
+        "bytes": 1309406
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/invocation.json",
+        "sha256": "94e4181036fed866aa2a8342b356290ee6d175d2aa5f42195bafa2cccc40d681",
+        "bytes": 294146
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "c973c6d69e164f567092807143054c042656ec1c9a04c0da6116d6658e201571",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "5cbf3fca0b87ebf87c3df5955eb03e1433cbe42c8af9d1b6e5f0a8992e55d80e",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "94e4181036fed866aa2a8342b356290ee6d175d2aa5f42195bafa2cccc40d681",
+          "layers.jsonl": "0a0452720a17ae9f875d398426c5cb966ff4ad38ead51998080c7e7923f1d3ba",
+          "run.log": "b4157f7ee11925ccc5e24dbe7a492b164a5d7208fa96a5b9d0b7340d6b5f39ae"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/capture.json",
+          "sha256": "c973c6d69e164f567092807143054c042656ec1c9a04c0da6116d6658e201571",
+          "bytes": 1309406
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/fold.jsonl",
+          "sha256": "5cbf3fca0b87ebf87c3df5955eb03e1433cbe42c8af9d1b6e5f0a8992e55d80e",
+          "bytes": 201
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/invocation.json",
+          "sha256": "94e4181036fed866aa2a8342b356290ee6d175d2aa5f42195bafa2cccc40d681",
+          "bytes": 294146
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/layers.jsonl",
+          "sha256": "0a0452720a17ae9f875d398426c5cb966ff4ad38ead51998080c7e7923f1d3ba",
+          "bytes": 33766
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/run.log",
+          "sha256": "b4157f7ee11925ccc5e24dbe7a492b164a5d7208fa96a5b9d0b7340d6b5f39ae",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256-1-on",
+      "rep": 1,
+      "warmup": false,
+      "arm": "on",
+      "prefill_ms": 29660.0,
+      "rss_bytes": 35071139840,
+      "hwm_bytes": 35091808256,
+      "fold_ms": {
+        "split_ms": 739.293,
+        "copy_ms": 675.262,
+        "accumulate_ms": 715.822,
+        "total_ms": 2130.376
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/capture.json",
+        "sha256": "427c5b7c1f2b1a345f57ef7c206e727058918f5be9eba178f880870c44163fd8",
+        "bytes": 1302631
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/invocation.json",
+        "sha256": "363f045a4beed923812a7d2acdf71c042e6ad02b47b18f412adb8bd621b4af79",
+        "bytes": 294187
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "427c5b7c1f2b1a345f57ef7c206e727058918f5be9eba178f880870c44163fd8",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "f8039be576776a0dc158d104e920ed861e2ef0c01c70a0f003c84bf7fd144627",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "363f045a4beed923812a7d2acdf71c042e6ad02b47b18f412adb8bd621b4af79",
+          "layers.jsonl": "bed415fbb18033e978ecb1da2a0667449a6624bbb5a0d028a59bf7d35a4a8d81",
+          "run.log": "f562b1b7277d8fb3755a39feb56599286fa280ec3ecd4a378730642cd00fc6ad"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/capture.json",
+          "sha256": "427c5b7c1f2b1a345f57ef7c206e727058918f5be9eba178f880870c44163fd8",
+          "bytes": 1302631
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/fold.jsonl",
+          "sha256": "f8039be576776a0dc158d104e920ed861e2ef0c01c70a0f003c84bf7fd144627",
+          "bytes": 200
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/invocation.json",
+          "sha256": "363f045a4beed923812a7d2acdf71c042e6ad02b47b18f412adb8bd621b4af79",
+          "bytes": 294187
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/layers.jsonl",
+          "sha256": "bed415fbb18033e978ecb1da2a0667449a6624bbb5a0d028a59bf7d35a4a8d81",
+          "bytes": 33771
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/run.log",
+          "sha256": "f562b1b7277d8fb3755a39feb56599286fa280ec3ecd4a378730642cd00fc6ad",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256-2-off",
+      "rep": 2,
+      "warmup": false,
+      "arm": "off",
+      "prefill_ms": 30219.0,
+      "rss_bytes": 35060371456,
+      "hwm_bytes": 35091898368,
+      "fold_ms": {
+        "split_ms": 1296.644,
+        "copy_ms": 665.463,
+        "accumulate_ms": 710.716,
+        "total_ms": 2672.822
+      },
+      "capture": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/capture.json",
+        "sha256": "82821594490963a38c7c889c9c324c653894ef8070d8098286ecc09ef14ea130",
+        "bytes": 1317758
+      },
+      "invocation": {
+        "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/invocation.json",
+        "sha256": "3272f609203da4dee2e4e270d9e0afbce773285e322714c5ac7f0e22ba4f4afb",
+        "bytes": 294146
+      },
+      "valid": true,
+      "audit": {
+        "valid": true,
+        "errors": [],
+        "capture_metadata_sha256": "82821594490963a38c7c889c9c324c653894ef8070d8098286ecc09ef14ea130",
+        "version": 2,
+        "phase": "prefill",
+        "real_prompt_tokens": 256,
+        "generated_tokens": 0,
+        "command": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli --model /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2 --kernels /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model --ids-file /home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/ids.txt --max-ctx 4096 --max-tokens 1 --layers 64 --pmode none --quiet --gemm-block --block-major",
+        "argv": [
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "--model",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/Qwen3.8-27B-NPU2",
+          "--kernels",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4a-hardware/kernels-model",
+          "--ids-file",
+          "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/ids.txt",
+          "--max-ctx",
+          "4096",
+          "--max-tokens",
+          "1",
+          "--layers",
+          "64",
+          "--pmode",
+          "none",
+          "--quiet",
+          "--gemm-block",
+          "--block-major"
+        ],
+        "binary": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "resolved": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/candidate/build/open_qwen36_cli",
+          "sha256": "3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01",
+          "bytes": 1685896,
+          "device": 64514,
+          "inode": 40517366,
+          "mtime_ns": 1795427535039446881
+        },
+        "raw_hashes": {
+          "fold.jsonl": "e36913f6ff4bab3e6274f7b5129c4f187797bb9dd3ac18f08e13e65a7aa13386",
+          "ids.txt": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "invocation.json": "3272f609203da4dee2e4e270d9e0afbce773285e322714c5ac7f0e22ba4f4afb",
+          "layers.jsonl": "68f1de1187c48c0890ac69e7978d147ac54431f5e3ef392207087dc0f71705ee",
+          "run.log": "4b808a1887764fa550c305195be8465883f040f05e55cfa4b2313746ebea851a"
+        },
+        "runtime": {
+          "before": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          },
+          "after": {
+            "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_core.so.2.26.0",
+              "sha256": "335c6df3ecd829b3d51040d61a73c1734388447fa5d4145f4a3f315a92081cd1",
+              "bytes": 1961744,
+              "device": 64513,
+              "inode": 3932183,
+              "mtime_ns": 1786963145000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_coreutil.so.2.26.0",
+              "sha256": "b533cdac5af5fa1c3d74a90f7c80d74d792f6a0ce2ccea171e8774444d6de478",
+              "bytes": 6507816,
+              "device": 64513,
+              "inode": 3932184,
+              "mtime_ns": 1786963142000000000
+            },
+            "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0": {
+              "path": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "resolved": "/opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2.26.0",
+              "sha256": "21991fefbaba9dc7f596af6f0c06b2091a88fd9e5dd60d6a934c1f9f8b179068",
+              "bytes": 859104,
+              "device": 64513,
+              "inode": 3932212,
+              "mtime_ns": 1786963343000000000
+            }
+          }
+        }
+      },
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/capture.json",
+          "sha256": "82821594490963a38c7c889c9c324c653894ef8070d8098286ecc09ef14ea130",
+          "bytes": 1317758
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/fold.jsonl",
+          "sha256": "e36913f6ff4bab3e6274f7b5129c4f187797bb9dd3ac18f08e13e65a7aa13386",
+          "bytes": 201
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/invocation.json",
+          "sha256": "3272f609203da4dee2e4e270d9e0afbce773285e322714c5ac7f0e22ba4f4afb",
+          "bytes": 294146
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/layers.jsonl",
+          "sha256": "68f1de1187c48c0890ac69e7978d147ac54431f5e3ef392207087dc0f71705ee",
+          "bytes": 33774
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off/run.log",
+          "sha256": "4b808a1887764fa550c305195be8465883f040f05e55cfa4b2313746ebea851a",
+          "bytes": 480
+        }
+      ],
+      "audit_scope": "retained original accepted audit; raw bytes verified unchanged; not replayed with the modified validator"
+    },
+    {
+      "name": "prefill-256-2-on",
+      "valid": false,
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-on/fold.jsonl",
+          "sha256": "b63cfdcc158e3706ee5d27ec72c2deacd06391c90f1e0e3f39604c9d10c140f1",
+          "bytes": 200
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-on/ids.txt",
+          "sha256": "bade0525db40922a964bce1a2c8f690ce77734f5a468b124f234f8fbe18102da",
+          "bytes": 1682
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-on/invocation.json",
+          "sha256": "4f590035cb2031b9a62c2e1988866c7bb78370649cdb41a879727f5ff2cdae61",
+          "bytes": 294187
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-on/layers.jsonl",
+          "sha256": "872c3ccbcfbb7b595f3543a4edcb7723d01b12fd53516de94d437209a6b49a78",
+          "bytes": 33770
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-on/run.log",
+          "sha256": "d814507c2ae990f777fe0dae1b0084013234dc8c6177fa13c26065d9cd3c88d2",
+          "bytes": 480
+        }
+      ],
+      "reason": "invalid: missing final process metadata; structural timer fix does not restore it"
+    }
+  ],
+  "descriptive_only": {
+    "paired_percent_reductions": [
+      -0.7500660851176315,
+      1.166277907364212
+    ],
+    "paired_median_percent": 0.20810591112329024,
+    "spread_percentage_points": 1.9163439924818435,
+    "wins": 1,
+    "pairs": 2,
+    "complete_initial_set": false,
+    "arm_medians": {
+      "off": {
+        "prefill_ms": 30137.0,
+        "rss_bytes": 35066173440.0,
+        "hwm_bytes": 35091617792.0,
+        "fold_ms": {
+          "split_ms": 1335.317,
+          "copy_ms": 656.0765,
+          "accumulate_ms": 696.167,
+          "total_ms": 2687.5609999999997
+        }
+      },
+      "on": {
+        "prefill_ms": 30075.5,
+        "rss_bytes": 35078043648.0,
+        "hwm_bytes": 35091955712.0,
+        "fold_ms": {
+          "split_ms": 738.8295,
+          "copy_ms": 674.039,
+          "accumulate_ms": 724.1875,
+          "total_ms": 2137.0555000000004
+        }
+      }
+    }
+  },
+  "unmeasured": [
+    "distinct-prompt reset/isolation",
+    "complete five-pair primary gate",
+    "512 prefill",
+    "1024 prefill",
+    "32-prompt plus 32-step decode",
+    "around-4K populated-context decode",
+    "application/server inference",
+    "per-repeat state dumps"
+  ],
+  "supporting_files": [
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/all-tests-final.log",
+      "sha256": "7c868f5ac37a54dc1d69fbd5860777087acb27ade44037ad04b44b8063ddd9df",
+      "bytes": 3485
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/all-tests-report.log",
+      "sha256": "f4c9dcd5bdfc707a4a672f6e565f1f551715ca6cf23ff258a7b3f91fb411adcb",
+      "bytes": 3485
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/all-tests.log",
+      "sha256": "4d3ccec44e56351f35870d3cd3b33bca053da9e22256b2dc3d3699f0d28d079c",
+      "bytes": 3485
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign-driver.log",
+      "sha256": "eed4f5287ff6385ae240a5cadc46ee3b15de5afdfcd7b17ad3e2900e833ed09f",
+      "bytes": 1823
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/correctness-driver.log",
+      "sha256": "8630da66889c36d4a6553994805204d5d3be9caeea34e38b6107fceaf010d98c",
+      "bytes": 324
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/focused-tests-final.log",
+      "sha256": "fc311bf0d85a27e4e0e8577c9d3a56fc577f9fb00b8878e1c0621e85a2da092c",
+      "bytes": 340
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/focused-tests-report.log",
+      "sha256": "6d024982e940f04c75069f7ac3c80d18b134083b64992c220107e324625b0d8f",
+      "bytes": 340
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/focused-tests.log",
+      "sha256": "a62245755811931db9ad99f440c41d6232b70c1386928b940a284684d5151808",
+      "bytes": 340
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/settings-ci.log",
+      "sha256": "5047d7df560900e445a49f976b75a54a1fc62d145723f569f8f6212bd56f5574",
+      "bytes": 176
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256--1-off.json",
+      "sha256": "f439491fff8eb14b834544a5aa934adc4f520af3fd75adbcc2eb2e7fe489a9c0",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256--1-on.json",
+      "sha256": "89df6bfae1ec39258e0370eed2b9ef8cec2a3e958c9ecb2ac61941424558fb2e",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256-0-off.json",
+      "sha256": "c33b7a884a0b5bde00dc70f7d859748e4d44468c0cd159068676d5b7396431bb",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256-0-on.json",
+      "sha256": "26515b4fc88550a4b6cb87aef9063c7c6d2205b255044d21181f7b0b306d2639",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256-1-off.json",
+      "sha256": "222c93681b0dc50a0e024341e9f0b853b7c957f0edd7be12750573ac9bd1adc7",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256-1-on.json",
+      "sha256": "213b6c6e3ca43332c84470701cee264395f71cd692dcef8a25adfc404c7525f8",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions/prefill-256-2-off.json",
+      "sha256": "9b76a66f44745a4dbf67f870edc565b728bae2eaee676e11b7c71ec24b0bad46",
+      "bytes": 3725
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/conditions-relocation.json",
+      "sha256": "1af234a24f63f9f55b34a01728b6b2d01444b93d8b0101f729829993e75d807b",
+      "bytes": 2628
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/application/command-v2.json",
+      "sha256": "7b88c4d3805150bee2211c0d0f3760b0b16d7c6380ff08be3305901ac37746b4",
+      "bytes": 655
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/application/command.json",
+      "sha256": "84705fc96ce3009b918c4fbfebd7a7db8e604cd12523cfe80b0d4a08fa09d8a5",
+      "bytes": 604
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/application/result-v2.json",
+      "sha256": "8869ca5e7f3ae989b151917c32f706ea8b83fd8d2ab5fd425117c4860c4e595f",
+      "bytes": 18
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/application/result.json",
+      "sha256": "8869ca5e7f3ae989b151917c32f706ea8b83fd8d2ab5fd425117c4860c4e595f",
+      "bytes": 18
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/application/build-v2.log",
+      "sha256": "4b721435f2bd8b8e24b96f4028b19cc2d438b006b531bc5cc262b5b743904c99",
+      "bytes": 3776
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/application/build.log",
+      "sha256": "47a32234645e3414b748e00331d5e4a127e42819ed43111757ce736ebc704003",
+      "bytes": 692
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/correctness-pipeline_capture.py",
+      "sha256": "f0bceedeae6cc26b859920d5d070043bf6c4ab83aead693c15fff9aa3e4f084e",
+      "bytes": 16255
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/fold_dedup_build.py",
+      "sha256": "61e7fd42847b749986cc2c023078ca928dbc2ce80e8f8b45094c3c462363f6a9",
+      "bytes": 2907
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/fold_dedup_experiment.py",
+      "sha256": "1cb683fb0f5a277abb7ba7cd9ceffb72cf02e3f88eb3d0c91a272b4d539c7985",
+      "bytes": 8719
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/inventory.json",
+      "sha256": "b02032977b29e28cd7090e164e8f5526d12dd7aeec56564435512b33db623486",
+      "bytes": 808
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/pipeline_campaign.py",
+      "sha256": "af0f2f233bcb4cc5ae06f3c67b825bca3ce58dc847dc630510edbb53c0ca3495",
+      "bytes": 7054
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/pipeline_capture.py",
+      "sha256": "d783603fc6410505d165b837fd80f75d6a0e8c13c1fb041364348dc7b5fa43c9",
+      "bytes": 16338
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/tool-snapshots/pipeline_evidence.py",
+      "sha256": "5eebba23901bf484c8beb837b9df5bbf8ec456cdbaa95b3f4b2661ef7e3536ee",
+      "bytes": 34353
+    }
+  ],
+  "original_evidence_unchanged": true,
+  "predeclared_selection": {
+    "protocol": "original initial five; not confirmation or replacement dataset",
+    "retained": [
+      {
+        "rep": 0,
+        "arm": "off",
+        "capture": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-off/capture.json",
+          "sha256": "f27881abc681bd2e21939ae08f88671b5db85083d1070b0eff6455a8958304e8",
+          "bytes": 1312773
+        }
+      },
+      {
+        "rep": 0,
+        "arm": "on",
+        "capture": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-0-on/capture.json",
+          "sha256": "3266d855b15191bc2261854bf33fec27b22d47f6f7129a6ec513801e3e0b5bf2",
+          "bytes": 1317729
+        }
+      },
+      {
+        "rep": 1,
+        "arm": "off",
+        "capture": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-off/capture.json",
+          "sha256": "c973c6d69e164f567092807143054c042656ec1c9a04c0da6116d6658e201571",
+          "bytes": 1309406
+        }
+      },
+      {
+        "rep": 1,
+        "arm": "on",
+        "capture": {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-1-on/capture.json",
+          "sha256": "427c5b7c1f2b1a345f57ef7c206e727058918f5be9eba178f880870c44163fd8",
+          "bytes": 1302631
+        }
+      }
+    ],
+    "pending": [
+      {
+        "rep": 2,
+        "off": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/resume-prefill256-rep2-off",
+        "on": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/resume-prefill256-rep2-on",
+        "measured": false
+      },
+      {
+        "rep": 3,
+        "off": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/resume-prefill256-rep3-off",
+        "on": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/resume-prefill256-rep3-on",
+        "measured": false
+      },
+      {
+        "rep": 4,
+        "off": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/resume-prefill256-rep4-off",
+        "on": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/resume-prefill256-rep4-on",
+        "measured": false
+      }
+    ],
+    "excluded": [
+      {
+        "capture": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-off",
+        "counted": false,
+        "reason": "unpaired interrupted attempt"
+      },
+      {
+        "capture": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/campaign/prefill-256-2-on",
+        "counted": false,
+        "reason": "invalid: final process metadata missing; never reconstructed"
+      }
+    ],
+    "warmups": {
+      "original": "excluded",
+      "restart": "one excluded pair pending",
+      "other_scenarios": "one excluded warmup then exactly five pairs each pending"
+    }
+  },
+  "previous_reports": [
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-history-v1/qwen38-host-fold-dedup.md",
+      "sha256": "26f17c61f5ba3a381898f5ee91e6625e6b780df2de4e3be69c96098d882b7d8e",
+      "bytes": 9158
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-history-v1/qwen38-host-fold-dedup.json",
+      "sha256": "13dc68b2475c8e2d771fd36ac7150afc3beacdee7bf5dea3fe3e37b6fd426281",
+      "bytes": 4502113
+    }
+  ],
+  "original_inventory": {
+    "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-history-v1/original-evidence-inventory.json",
+    "sha256": "fa9c12bfaa2fb8cdc8cc04deecdcac6315fc7380b2647021a3a0e3201d58440d",
+    "bytes": 54167
+  },
+  "continuation_failures": [
+    {
+      "capture": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a",
+      "valid": false,
+      "reason": "hardware context creation rc=1, err=-22 before inference; no final metadata",
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a/ids-list.txt",
+          "sha256": "0028bad1003e561353c3a2d95fb3c52bf1e296adf00a1d551768f81879721cf8",
+          "bytes": 133
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a/invocation.json",
+          "sha256": "2e9156474bf88b63cc082e8237373ef686d02aa041f5972efcc331c5b6cd63ec",
+          "bytes": 294699
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a/run.log",
+          "sha256": "a531ee8b36bb1a288bb53e4b7ff8ed19179a0ee4d531739e991a2314131b2a2e",
+          "bytes": 79
+        }
+      ]
+    },
+    {
+      "capture": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a-retry1",
+      "valid": false,
+      "reason": "hardware context creation rc=1, err=-22 before inference; no final metadata",
+      "raw_files": [
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a-retry1/ids-list.txt",
+          "sha256": "0028bad1003e561353c3a2d95fb3c52bf1e296adf00a1d551768f81879721cf8",
+          "bytes": 133
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a-retry1/invocation.json",
+          "sha256": "713bd24b9819e459b58fa87ff96b0520dfd8c79dc8b895118f5ce4e4e10300a8",
+          "bytes": 294727
+        },
+        {
+          "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/isolation-off-fresh-a-retry1/run.log",
+          "sha256": "a531ee8b36bb1a288bb53e4b7ff8ed19179a0ee4d531739e991a2314131b2a2e",
+          "bytes": 79
+        }
+      ]
+    }
+  ],
+  "timer_validation": {
+    "scope": "one-sided inner containment; no upper bound on wrapper overhead",
+    "allowance_ms": "0.5 + 0.0005 * request_count + 1e-9 arithmetic slack",
+    "outer_summary": "integer-ms and integer-ms/token rounding intervals must intersect",
+    "numerical_thresholds_changed": false,
+    "performance_thresholds_changed": false
+  },
+  "confirmation": {
+    "collected": false,
+    "eligibility": "not established: initial five incomplete"
+  },
+  "continuation_support": [
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-cpu-tests-v1.log",
+      "sha256": "baebfdd7edc74f84a0d006a7eb0f981f6dd6cdd4078577c063886caa7d026f34",
+      "bytes": 3092
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-cpu-tests-v2.log",
+      "sha256": "4775a899359548209a898ce9f0b617fa77f80d7fb4d3637fdf53a1433b1ec43d",
+      "bytes": 420
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-cpu-tests-v3.log",
+      "sha256": "e71a7c8fbf24805896ec3e83bc0bf0c744b92252934e4c70c0d9e59613966037",
+      "bytes": 420
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-device-diagnosis-v1.log",
+      "sha256": "b0002ff126549d0374ba1edd482952377213fdb57c334e277b748816fa3fdeba",
+      "bytes": 9992
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-docker-inventory-v1.log",
+      "sha256": "d1e2f41d1c65e36016ef472890d8be76c24cadd357b9499f32f680ad88f45f5f",
+      "bytes": 206
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-focused-complete.log",
+      "sha256": "c15c67b83cff5e2e01868978404ec760ad8effa61c2e8fcf1d3cbfbf0f42d504",
+      "bytes": 420
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-focused-final.log",
+      "sha256": "89170279f821d0bf65352718691fb9cf82c354e2184847b001d677bbbd741ed3",
+      "bytes": 420
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-focused-post-report.log",
+      "sha256": "f0b969172342bcfafe17832d4c71f9f105a0f38d0f8d0c73f40828b27283b82d",
+      "bytes": 420
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-isolation-driver-v1.log",
+      "sha256": "e94df129bfbf703af15fc473eea6940873ad6cd09ef54b16b5b1800b71d4dfce",
+      "bytes": 1338
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-isolation-retry1.log",
+      "sha256": "2e9efed51bcb355fd910e452987d99ef4dc721f23d56e48af9021a700ec3440a",
+      "bytes": 1512
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-portable-complete.log",
+      "sha256": "a6c75244002c9af167df907d705beb72a92cea022bdd9aeb867d52bb810bdac4",
+      "bytes": 3565
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-portable-final.log",
+      "sha256": "532f043b8f62315b8138dc79cc7c8bdd7eb624cd2e1282f1560aee465c2453e6",
+      "bytes": 3565
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-portable-post-report.log",
+      "sha256": "41f8a49e5464edee4997b88ea95b3ded511471d1760c04e35d9ab4e0b8c23b74",
+      "bytes": 3565
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-settings-ci.log",
+      "sha256": "f6a7a196e8908b117124027ea76b7aa9b858bf3b2b02f7fcc527c1b82a7e7656",
+      "bytes": 224
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-xdna-journal-v1.log",
+      "sha256": "520617a00407990947f24fb8d5ccd9588fa01464b2cb84804c8caec133f1fe2d",
+      "bytes": 1326
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools/fold_dedup_continue.py",
+      "sha256": "ec7df630d3216bb0adc392f38883210b5d2ac1fd27f21169d34a83a1994f36a0",
+      "bytes": 10007
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools/fold_dedup_experiment.py",
+      "sha256": "9221c611c3bb7ab72395738ceb649c26dfc1f0b889eac30dd1d3668ce8fa4b27",
+      "bytes": 8817
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools/inventory.json",
+      "sha256": "8ed48f6e9c22becc1c6b97635d95ba5325d556debac444064b157a9b9b54ba4c",
+      "bytes": 2821
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools/pipeline_campaign.py",
+      "sha256": "af0f2f233bcb4cc5ae06f3c67b825bca3ce58dc847dc630510edbb53c0ca3495",
+      "bytes": 7054
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools/pipeline_capture.py",
+      "sha256": "d783603fc6410505d165b837fd80f75d6a0e8c13c1fb041364348dc7b5fa43c9",
+      "bytes": 16338
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools/pipeline_evidence.py",
+      "sha256": "cb11a1b5f117547e0ac00dc185520c78a4d5590258a88c236e3802aff9d83305",
+      "bytes": 34956
+    }
+  ],
+  "current_tooling": [
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/fold_dedup_continue.py",
+      "sha256": "36492dad159dac503c10d96c73597fb68c45148ab56c89942ebb0c8dd4671eb2",
+      "bytes": 10058
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/fold_dedup_experiment.py",
+      "sha256": "9221c611c3bb7ab72395738ceb649c26dfc1f0b889eac30dd1d3668ce8fa4b27",
+      "bytes": 8817
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/fold_dedup_report.py",
+      "sha256": "9083da3e6c1e17f8ed5b86ef235866c5710e64f56c428803d734a030c63bfb29",
+      "bytes": 29907
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/inventory.json",
+      "sha256": "96d9c4430a6f4e2250cf344d266ae0235bffaaf1a3cbee12c6f5cf7b48599a98",
+      "bytes": 4752
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/pipeline_campaign.py",
+      "sha256": "af0f2f233bcb4cc5ae06f3c67b825bca3ce58dc847dc630510edbb53c0ca3495",
+      "bytes": 7054
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/pipeline_capture.py",
+      "sha256": "d783603fc6410505d165b837fd80f75d6a0e8c13c1fb041364348dc7b5fa43c9",
+      "bytes": 16338
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/pipeline_evidence.py",
+      "sha256": "cb11a1b5f117547e0ac00dc185520c78a4d5590258a88c236e3802aff9d83305",
+      "bytes": 34956
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/test_fold_dedup_continue.py",
+      "sha256": "da34ccc6e3043ce026cd9c0f98672e49793aada7b12ae0205901645fb1ea6209",
+      "bytes": 1537
+    },
+    {
+      "path": "/home/prihlop/sources/github/OpenFlowLM-Next/Models/qwen38-27b/pr4b/continuation-v1/tools-final-v2/test_pipeline_capture.py",
+      "sha256": "e3628dc185c9e554e135c87d08f8c9bc4f1f39f821be8fc47ba8f9706f13f5d3",
+      "bytes": 44220
+    }
+  ],
+  "build_identities_reverified": true,
+  "report_generator": {
+    "path": "/home/prihlop/sources/github/OpenFlowLM-Next/utilities/prefill-block/fold_dedup_report.py",
+    "sha256": "626c417c521b71ecfde7892e3fe8b11ba9387e0eeee36457d115e6827a55bcd9",
+    "bytes": 31696
+  }
+}

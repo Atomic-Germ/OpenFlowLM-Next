@@ -30,6 +30,9 @@ NON_SETTING_FLAGS = {
     "--size", "--steps", "--socket", "--preemption", "--img-pre-resize",
 }
 NON_SETTING_ENV_VARS = {
+    # Default-off CPU host-fold experiment, shared Core (native CLI and engine).
+    # Only exact "1" reuses the validated input split for the low-weight products.
+    "OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT",
     # install layout / paths
     "OFLM_CONFIG_PATH", "OFLM_SETTINGS_PATH", "OFLM_MODELINFO_PATH",
     "OFLM_MODEL_PATH", "OFLM_MODEL_DIR", "OFLM_EXECUTABLE", "OFLM_PYTHON",
@@ -74,6 +77,8 @@ NON_SETTING_ENV_VARS = {
     "OFLM_OPEN_DISPATCH_LOG", "OFLM_OPEN_DXB_LOG",
     # Per-layer accounting and its sequential-step budget are measurement-only diagnostics.
     "OFLM_OPEN_PROFILE", "OFLM_OPEN_PROFILE_STEPS",
+    # exclusive host-fold phase accounting, opt-in measurement only (PR #4A)
+    "OFLM_OPEN_FOLD_PROFILE",
     # Granite prefill/dispatch A/B switches; these force experimental paths
     # for kernel parity and timing checks, rather than model preferences.
     "OFLM_OPEN_FUSED_NORM", "OFLM_OPEN_PREFILL_PREP", "OFLM_OPEN_RUN_REUSE",

@@ -51,6 +51,7 @@
 #include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 #include "open_qwen36/prefill_precision.hpp"
+#include "open_qwen36/fold_profile.hpp"
 #include "open_qwen36/prefill_precision_switch.hpp"
 
 namespace open_qwen36 {
@@ -392,6 +393,12 @@ public:
     /// Write the request line and every buffered layer row, then flush.
     void profile_end();
     bool profiling() const { return profile_ != nullptr; }
+    /// OFLM_OPEN_PROFILE_STEPS=decode:N: only the generation loop is profiled, so a
+    /// sequential prompt cannot consume the budget. No-op for other budgets.
+    void arm_profile_decode() {
+        if (profile_ && profile_decode_only_ && profile_steps_left_ == 0)
+            profile_steps_left_ = profile_steps_requested_;
+    }
     const Manifest& manifest() const { return man_; }
     /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
     const Manifest& weights() const { return w_ ? *w_ : man_; }
@@ -628,6 +635,17 @@ private:
     /// step() is profiled only when OFLM_OPEN_PROFILE_STEPS asks, and only for that many
     /// steps: a decode loop would otherwise write one 64-row record per generated token.
     int profile_steps_left_ = 0;
+    /// OFLM_OPEN_PROFILE_STEPS=prefill:N or decode:N selects the phase explicitly:
+    /// prompt steps are skipped until the generation loop arms the budget. Plain
+    /// N keeps the historical behaviour for existing drivers.
+    int profile_steps_requested_ = 0;   ///< decode budget, released by arm_profile_decode()
+    bool profile_decode_only_ = false;
+    /// OFLM_OPEN_FOLD_PROFILE: exclusive host-fold accounting, opt-in and off by default.
+    /// Split/copy/accumulate are disjoint windows around the precision fold; the dispatch
+    /// time is NOT included. Written as one JSONL row per measured step/block.
+    FILE* fold_profile_ = nullptr;
+    FoldProfile fold_profiler_;
+    bool fold_dedup_input_split_ = false;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;

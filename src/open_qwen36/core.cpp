@@ -597,10 +597,38 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // How many sequential steps to profile. A prefill of N tokens is N steps and a decode loop
     // is one per generated id, so the default covers a short prompt and stops; 0 is legal and
     // profiles only the block routes.
-    if (const char* env = std::getenv("OFLM_OPEN_PROFILE_STEPS"))
-        profile_steps_left_ = std::atoi(env);
-    else if (profile_)
+    if (const char* env = std::getenv("OFLM_OPEN_PROFILE_STEPS")) {
+        const std::string spec(env);
+        const size_t colon = spec.find(':');
+        if (colon != std::string::npos) {
+            // "prefill:N" or "decode:N": only the named phase is profiled, so a
+            // sequential prompt cannot consume a decode budget.
+            const std::string phase = spec.substr(0, colon);
+            profile_steps_left_ = std::atoi(spec.c_str() + colon + 1);
+            if (phase == "decode") {
+                // Prompt steps must not consume the budget: hold it until the generation loop.
+                profile_decode_only_ = true;
+                profile_steps_requested_ = profile_steps_left_;
+                profile_steps_left_ = 0;
+            }
+            else if (phase == "prefill") profile_decode_only_ = false;
+            else throw std::runtime_error("open_qwen36: OFLM_OPEN_PROFILE_STEPS phase must be prefill or decode");
+        } else {
+            profile_steps_left_ = std::atoi(env);
+        }
+    } else if (profile_) {
         profile_steps_left_ = 8;
+    }
+    if (const char* env = std::getenv("OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT"))
+        fold_dedup_input_split_ = std::string(env) == "1";
+    // OFLM_OPEN_FOLD_PROFILE: exclusive host-fold accounting. Opt-in, measurement only;
+    // unset leaves the sink null. Arithmetic and dispatch scheduling are unchanged.
+    if (const char* env = std::getenv("OFLM_OPEN_FOLD_PROFILE")) {
+        fold_profile_ = std::fopen(env, "w");
+        fold_profiler_.attach(fold_profile_);
+        if (fold_profile_) log("host fold profile: " + std::string(env));
+        else std::fprintf(stderr, "open_qwen36: cannot open OFLM_OPEN_FOLD_PROFILE=%s; fold profiling off\n", env);
+    }
     // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
     // Measurement only; off (and free) unless the env names a file.
     if (const char* env = std::getenv("OFLM_OPEN_DXB_LOG")) {
@@ -808,6 +836,11 @@ Core::~Core() {
         std::fflush(profile_);
         std::fclose(profile_);
         profile_ = nullptr;
+    }
+    if (fold_profile_) {
+        std::fflush(fold_profile_);
+        std::fclose(fold_profile_);
+        fold_profile_ = nullptr;
     }
 }
 
@@ -2890,7 +2923,8 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
         // four dispatches where this mode promises two. Measured on hardware: the first
         // version did exactly that and cost 68576.5 ms where two products cost 36132.9.
         return precision_workspaces_[s.args.at(2)].high.run(x, T * K, T * N,
-            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); });
+            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); },
+            fold_profiler_.timing());
     Step residual = s;
     residual.kernel = companion->second;
     prefill_precision::Workspace& ws = precision_workspaces_[s.args.at(2)];
@@ -2899,7 +2933,8 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
         // removed from the W_lo pass only. The order of the first three additions is
         // unchanged, so the accepted route's sum is a strict superset of this one.
         const float* h = ws.high.run(x, T * K, T * N,
-            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); });
+            [&](const float* input) { return gemm_dispatch(s, input, T, K, N, layer); },
+            fold_profiler_.timing());
         ws.output.assign(h, h + T * N);
         const float* l = gemm_dispatch(residual, x, T, K, N, layer);
         for (size_t i = 0; i < T * N; ++i) ws.output[i] += l[i];
@@ -2908,7 +2943,8 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     return ws.run(x, T * K, T * N,
         [&](bool low_weight, const float* input) {
             return gemm_dispatch(low_weight ? residual : s, input, T, K, N, layer);
-        });
+        },
+        fold_profiler_.timing(), fold_dedup_input_split_);
 }
 
 const float* Core::gemm_dispatch(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
@@ -3618,8 +3654,10 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
                                  std::to_string(cfg_.max_ctx));
     for (int tok : ids)
         if (tok < 0 || static_cast<size_t>(tok) >= w_->vocab) throw std::runtime_error("open_qwen36: token id out of range");
+    FoldProfile::Scope fold(fold_profiler_, "gemm-block", t_real, T, &profile_active_);
     if (types_[0]->gemm_block.kind != "dense") {
         step_block_moe(ids, t_real, want_logits);
+        fold.complete();
         return;
     }
 
@@ -3667,6 +3705,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
     }
     timing_.total_ms = ms_since(t0);
     profile_end();
+    fold.complete();
 }
 
 // ---- the MoE families' block: kinds linear and full. Timing: part0 = the GEMM
@@ -3751,15 +3790,17 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
 void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     apply_thread_budget();
     if (!layer_major_ok()) throw std::runtime_error("open_qwen36: step_gemm_prompt on a kernel set without a layer-major block route");
-    if (types_[0]->gemm_block.kind == "dense") {
-        step_gemm_prompt_dense(ids, want_logits);
-        return;
-    }
     if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
-    auto t0 = std::chrono::steady_clock::now();
-    timing_ = StepTiming{};
     const size_t T = gemm_block_t_, hid = w_->hidden;
     const size_t N = ids.size(), B = (N + T - 1) / T, TOT = B * T;
+    FoldProfile::Scope fold(fold_profiler_, "gemm-prompt", N, TOT, &profile_active_);
+    if (types_[0]->gemm_block.kind == "dense") {
+        step_gemm_prompt_dense(ids, want_logits);
+        fold.complete();
+        return;
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
     if (static_cast<size_t>(pos_) + N > cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: prompt of " + std::to_string(N) + " at position " + std::to_string(pos_) +
                                  " is past the context capacity of " + std::to_string(cfg_.max_ctx));
@@ -3801,6 +3842,7 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     if (want_logits) tail_logits(xres.data() + (N - 1) * hid);
     timing_.total_ms = ms_since(t0);
     profile_end();
+    fold.complete();
 }
 
 // OPEN-PREFILL-HOST-ATTN: the dense kind layer-major, each GEMM step over every block so the NPU runs b + 1 while the host works b
