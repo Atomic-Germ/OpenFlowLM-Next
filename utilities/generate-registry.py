@@ -34,6 +34,9 @@ NON_SETTING_ENV_VARS = {
     "OFLM_CONFIG_PATH", "OFLM_SETTINGS_PATH", "OFLM_MODELINFO_PATH",
     "OFLM_MODEL_PATH", "OFLM_MODEL_DIR", "OFLM_EXECUTABLE", "OFLM_PYTHON",
     "OFLM_PACK_SCRIPT", "OFLM_ADD_SCRIPT",
+    # oflm dev source-tree plumbing (dev_command.cpp, not a user setting):
+    # where the repo lives and an override for the built run_kernel harness.
+    "OFLM_REPO_ROOT", "OFLM_RUN_KERNEL",
     # runtime plumbing
     "OFLM_BACKEND", "OFLM_PLATFORM", "OFLM_SERVE_PORT",
     "OFLM_DISABLE_UPDATE_CHECK", "OFLM_HF_OWNER",

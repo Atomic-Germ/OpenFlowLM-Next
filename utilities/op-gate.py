@@ -57,6 +57,15 @@ GATES = {
         "design": "designs/gemv_q4/gemv_q4.py",
         "compare": [],
     },
+    # LFM2's 3-tap depthwise conv. sc_test.py calls sc_elem.cc over the whole
+    # hidden width (W/512 elements, the same loop cx.py runs in a layer); the
+    # fixture is width-parametric, so a new LFM2 size is a script run, not a
+    # design task. Taps stay 3 -- sc.h's state rows are a tap-count design choice.
+    "short_conv": {
+        "dir": "short_conv",
+        "design": "designs/short_conv/sc_test.py",
+        "compare": [],
+    },
     # The RMSNorm. Its point is a COMBINATION (width, groups) plus a values()
     # width, because a grouped width can only be validated as that group count.
     "ln": {
@@ -84,7 +93,8 @@ NOT_AUTOMATED = {
                "container's own q8 values)",
     "gemv_q4_prep_f32": "validated through the whole-layer MoE block only (K is fixed at 512)",
     "deltanet": "designs/deltanet/make_test.py reads a captured state, not a geometry: no per-shape run",
-    "short_conv": "no fixture; (3, 2048) came from an oflm serve run (OPEN-SHORT-CONV-KERNEL)",
+    # short_conv is gated: designs/short_conv/sc_test.py + make_test.py run sc.h
+    # at any width (the old (3, 2048) point came from an oflm serve run).
     "router": "no per-geometry fixture",
     "moe": "no per-geometry fixture (whole-layer MoE block only)",
 }
@@ -220,13 +230,24 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
     k = int(kw["K"])
     rs = int(kw.get("rs", 2))
     per_band = rs * k // 256
-    tries = [int(kw.get("per_call", 2)), 1]
+    # The standalone fixture's L1 layout is tighter than the production design's.
+    # Prefer the recipe's per_call, then try other valid divisors (smaller first,
+    # to reduce buffered chunks) so off-grid geometries can still be gated.
+    preferred = int(kw.get("per_call", 2))
+    divisors = [d for d in range(1, per_band + 1) if per_band % d == 0]
+    # try preferred, then 1, then remaining divisors ascending
+    tries = []
+    for v in (preferred, 1):
+        if v in divisors and v not in tries:
+            tries.append(v)
+    for v in divisors:
+        if v not in tries:
+            tries.append(v)
     d = DESIGNS / "gemv_q4"
     cc_before = set(d.glob("*.cc"))
     last: GateError | None = None
-    for pc in dict.fromkeys(tries):
-        if per_band % pc:
-            continue
+    attempted = 0
+    for idx, pc in enumerate(tries):
         n = 8 * 32 * rs                  # one band per core, 8 cores
         tag, build_dir = _gemv_names(k, n, pc)
         e = dict(env, GEMV_N=str(n), GEMV_K=str(k), GEMV_RS=str(rs), GEMV_CORES="8", GEMV_PER_CALL=str(pc))
@@ -237,12 +258,17 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
             print(f"   would build: {' '.join(map(str, cmd_build))}")
             print(f"   would add:  gemv_q4 K={k}")
             return
-        _run(cmd_fixture, env=e, cwd=d, quiet=pc != tries[0])
+        attempted += 1
+        _run(cmd_fixture, env=e, cwd=d, quiet=attempted > 1)
         try:
             _run(cmd_build, env=e)
         except GateError as exc:
             last = exc
-            print(f"   per_call={pc} does not fit the fixture's L1 at K={k}; trying the next")
+            more = any(per_band % t == 0 for t in tries[idx + 1:])
+            if more:
+                print(f"   per_call={pc} failed for K={k}; trying another per_call")
+            else:
+                print(f"   per_call={pc} failed for K={k}; no more per_call candidates")
             _cleanup(d, tag, cc_before, keep=dry)     # a failed build leaves TUs behind too
             continue
         _run([harness, d / f"run_{tag}.cfg"], env=e, cwd=d, quiet=True)
@@ -252,7 +278,23 @@ def gate_gemv_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None
         _cleanup(d, tag, cc_before, keep=dry)
         print(f"   PASS gemv_q4 K={k} (rs={rs}, per_call={pc})")
         return
-    raise last or GateError(f"gemv_q4: no per_call in {tries} divides {per_band} chunks per band at K={k}")
+    # Heuristic: large-K standalone gemv_q4 fixtures can exceed AIE tile L1 even
+    # at per_call=1 because tab(~2.25*K)+x(~2*K)+2*w buffers must be resident.
+    tab_b = 2 * k + 4 * (k // 32) + 2 * (k // 32) + 2 * (k // 32)
+    x_b = 2 * k
+    w_b = 2 * min(tries) * 5120 if tries else 0
+    est_b = 4096 + tab_b + x_b + w_b + 512
+    detail = (f"gemv_q4 gate failed for K={k}, rs={rs}, per_band={per_band} "
+              f"(attempted per_call={tries[:8]}{'...' if len(tries)>8 else ''}, n={attempted}). "
+              f"Estimated standalone fixture footprint per tile ~{est_b} B "
+              f"(stack+tab+x+2*w+y), L1 budget ~65536 B. "
+              f"If aiecc reported 'allocated buffers exceeded available memory', "
+              f"this is a fixture/layout validation gap (not host RAM): the gate needs "
+              f"a large-K-capable fixture/design path (e.g. K-tiled/streamed x+tab) "
+              f"to certify this point.")
+    if last is not None:
+        raise GateError(str(last) + "\n" + detail) from last
+    raise GateError(detail)
 
 
 def gate_ln(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
@@ -311,7 +353,46 @@ def gate_lm_head_q4(spec, kw: dict, py, env, harness, note: str, dry: bool) -> N
     print(f"   PASS lm_head_q4 K={k}")
 
 
-GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln, "lm_head_q4": gate_lm_head_q4}
+def gate_short_conv(spec, kw: dict, py, env, harness, note: str, dry: bool) -> None:
+    """Run designs/short_conv/sc_test.py at this width and add the point.
+
+    sc.h is width-agnostic: SCW=512 channel slices, W/512 calls -- the same loop
+    the layer design cx.py runs. The fixture exercises the real core at the new
+    width rather than trusting that arithmetic which passed at 2048 also holds
+    at 1536 (or any other multiple of 512).
+    """
+    width, taps = int(kw["width"]), int(kw["taps"])
+    if taps != 3:
+        raise GateError(f"op-gate: short_conv taps={taps}: sc.h implements a 3-tap window; "
+                        "another tap count is a design change, not a geometry")
+    if width % 512:
+        raise GateError(f"op-gate: short_conv width={width}: must be a multiple of 512 "
+                        "(one element is 512 channels)")
+    tag = f"w{width}_t{taps}"
+    d = DESIGNS / "short_conv"
+    cc_before = set(d.glob("*.cc"))
+    e = dict(env, SC_TEST_WIDTH=str(width), SC_TEST_TAG=tag, SC_TEST_BUILD=f"build_{tag}")
+    cmd_fixture = [py, d / "make_test.py"]
+    cmd_build = [py, ROOT / "open_kernels" / "build_design.py", d / "sc_test.py", d / f"build_{tag}"]
+    if dry:
+        print(f"   would run: {' '.join(map(str, cmd_fixture))}")
+        print(f"   would build: {' '.join(map(str, cmd_build))}")
+        print(f"   would add:  short_conv width={width}, taps={taps}")
+        return
+    _run(cmd_fixture, env=e, cwd=d)
+    _run(cmd_build, env=e)
+    _run([harness, d / f"run_{tag}.cfg"], env=e, cwd=d, quiet=True)
+    _run([py, d / "compare.py"], env=e, cwd=d)
+    for param in _values_params("short_conv", kw):
+        _add_param("short_conv", param, kw[param], note)
+    for keys in _combo_keys("short_conv"):
+        _add_combo("short_conv", tuple(kw.get(k, 1) for k in keys), note)
+    _cleanup(d, tag, cc_before, keep=dry)
+    print(f"   PASS short_conv width={width} taps={taps}")
+
+
+GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln, "lm_head_q4": gate_lm_head_q4,
+           "short_conv": gate_short_conv}
 
 
 def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
