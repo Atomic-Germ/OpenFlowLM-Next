@@ -48,6 +48,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPECS = ROOT / "open_kernels" / "recipes" / "specs"
+CANDIDATES = ROOT / "open_kernels" / "recipes" / "candidates"
 PROBE = ROOT / "open_kernels" / "designs" / "attn" / "probe_dense.py"
 BUILD_DESIGN = ROOT / "open_kernels" / "build_design.py"
 MAKE_TEST = ROOT / "open_kernels" / "designs" / "attn" / "make_test.py"
@@ -67,6 +68,31 @@ def run(cmd, env=None, cwd=None, check=True, quiet=False):
     if check and p.returncode != 0:
         raise SystemExit(f"build-new-spec: FAILED: {' '.join(cmd)}")
     return p.returncode
+
+
+def to_candidates(spec_path: Path, reason: str, detail: str = "") -> None:
+    """Move a spec that cannot be validated out of specs/ before it ships.
+
+    CMake exports EVERY spec in specs/ on the next `cmake --build` — there is no
+    per-spec opt-out. A spec left there after a failed gate would be compiled
+    with an unvalidated geometry and break the build for everyone. The
+    candidates/ dir is the parking lot: a recipe that learns the shape, or a
+    fixture that gets written, picks it up later.
+
+    A .reason file records WHY alongside it, so the next dev (or a script) does
+    not have to rediscover the failure.
+    """
+    CANDIDATES.mkdir(parents=True, exist_ok=True)
+    if spec_path.is_file():
+        spec_path.rename(CANDIDATES / spec_path.name)
+    reason_path = CANDIDATES / f"{spec_path.stem}.reason"
+    reason_path.write_text(
+        f"{reason}\n" + (f"\n{detail.rstrip()}\n" if detail else ""),
+        encoding="utf-8",
+    )
+    print(f"build-new-spec: {spec_path.name} moved to "
+          f"{CANDIDATES.relative_to(ROOT)} ({reason}); see {reason_path.name}",
+          file=sys.stderr)
 
 
 def _load_module(name: str, path: Path):
@@ -350,15 +376,9 @@ def main() -> int:
         for op, kw in missing:
             print(f"      {op}: {kw}")
     if walls:
-        # a spec the recipe cannot build would break every later export, so it
-        # does not stay in the specs dir -- but it is not thrown away either:
-        # a recipe that learns the shape (the FF split, say) picks it up.
-        cand = ROOT / "open_kernels" / "recipes" / "candidates"
-        cand.mkdir(parents=True, exist_ok=True)
-        spec_path.rename(cand / spec_path.name)
-        print(f"build-new-spec: the recipe cannot build this shape, so the spec moved to "
-              f"{cand.relative_to(ROOT)} (the export would fail on it in the specs dir)",
-              file=sys.stderr)
+        # A spec the recipe cannot build would break every later export.
+        to_candidates(spec_path, "recipe wall: the recipe cannot build this shape",
+                      "\n".join(walls))
         return 1
     if a.dry_run:
         return 0
@@ -376,10 +396,14 @@ def main() -> int:
     attn_supported, attn_why = ((True, "") if attn_validated or a.skip_gate
                                 else attn_gate_support(spec_path))
     if not attn_validated and not attn_supported and not a.skip_gate:
-        print(f"-- attention gate: NOTIFICATION: the probe cannot gate this spec: {attn_why}",
-              flush=True)
-        print("   building the kernel set anyway; the attention point stays unvalidated "
-              "(a plain export needs the manual validation before it passes)", flush=True)
+        # No scripted gate for this attention shape. Do NOT ship a spec with an
+        # unvalidated point: the next cmake build would export it and the
+        # catalogue wall would break the build for everyone. Park it.
+        to_candidates(spec_path,
+                      "no attention gate: the probe cannot validate this shape",
+                      f"{attn_why}\n\nA scripted gate for this attention layout is needed "
+                      "before this spec can ship (design task).")
+        return 1
 
     # 3a. every op EXCEPT attention: run its own fixture and write the point.
     # Attention is 3b, because its gate builds the model's worker, not a fixture.
@@ -395,12 +419,14 @@ def main() -> int:
             print(exc, file=sys.stderr)
             msg = str(exc)
             if "has no automated gate" in msg or "NOT_AUTOMATED" in msg:
-                print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
-                      "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
+                to_candidates(spec_path,
+                              "no op fixture: this size needs a DESIGN step",
+                              msg)
             else:
-                print("   (fixture/gate failed for this geometry; see the error above. "
-                      "This may be a fixture/layout limit rather than a missing op fixture.)",
-                      file=sys.stderr)
+                to_candidates(spec_path,
+                              "op gate failed at this geometry",
+                              msg + "\n\nA fixture that fits this geometry (e.g. a "
+                              "large-K-capable layout) is needed before this spec can ship.")
             return 1
 
     # 2. the kernel set compiles at this geometry
@@ -410,7 +436,9 @@ def main() -> int:
         e = dict(env, OPEN_KERNELS_UNVALIDATED="1")
         rc = run([py, EXPORT, "--specs", name, "--skip-bert", "--skip-diffusion"], env=e, check=False)
         if rc != 0:
-            print("build-new-spec: the kernel set did not build at this geometry", file=sys.stderr)
+            to_candidates(spec_path, "kernel build failed at this geometry",
+                          f"export-kernels.py --specs {name} (OPEN_KERNELS_UNVALIDATED=1) "
+                          f"exited {rc}")
             return rc
 
     # 3. the attention gate
@@ -424,8 +452,9 @@ def main() -> int:
         print("-- attention gate: the production worker at this geometry, against an fp64 oracle",
               flush=True)
         if not attn_gate(py, env, spec_path, work, a.rows):
-            print("build-new-spec: the attention gate FAILED -- the catalogue was not touched",
-                  file=sys.stderr)
+            to_candidates(spec_path, "attention gate failed",
+                          "the production worker at this geometry did not match the fp64 "
+                          "oracle; the catalogue was not touched")
             return 1
         print("   PASS", flush=True)
 
@@ -436,6 +465,8 @@ def main() -> int:
                   "--note", f"{geo['name']} (the attention gate, designs/attn/probe_dense.py)"],
                  env=env, check=False)
         if rc != 0:
+            to_candidates(spec_path, "catalogue point could not be added",
+                          f"catalogue-add-point.py --op attn exited {rc}")
             return rc
 
         # 5. the build through the validated path
@@ -443,23 +474,25 @@ def main() -> int:
             print("-- rebuild through the validated path", flush=True)
             rc = run([py, EXPORT, "--specs", name, "--skip-bert", "--skip-diffusion"], env=env, check=False)
             if rc != 0:
-                print("build-new-spec: the validated rebuild failed", file=sys.stderr)
+                to_candidates(spec_path, "validated rebuild failed",
+                              f"export-kernels.py --specs {name} exited {rc}")
                 return rc
 
     # 6. validate the spec's geometry signature and export label
     print("-- validate the spec (utilities/register-spec.py)", flush=True)
     rc = run([sys.executable, REGISTER, name], env=env, check=False)
     if rc != 0:
+        to_candidates(spec_path, "spec validation failed",
+                      f"register-spec.py {name} exited {rc} (duplicate geometry or export "
+                      "name -- link to the existing spec instead)")
         return rc
 
-    if not a.skip_gate and not attn_validated and not attn_supported:
-        print(f"\n{name}: spec and built kernels are ready; the ATTENTION point is still "
-              "unvalidated.", flush=True)
-        print(f"  {attn_why}", flush=True)
-        print("  A plain `oflm dev export-kernels --spec ...` will hit the catalogue wall until "
-              "that point is validated by its family procedure.", flush=True)
-    else:
-        print(f"\n{name} is ready: the spec, the built kernels and the catalogue entry.")
+    print(f"\n{name} is ready.", flush=True)
+    print("  commit: " + ", ".join(str(p.relative_to(ROOT)) for p in
+                                   [spec_path, ROOT / "open_kernels" / "recipes" / "catalogue.py"]),
+          flush=True)
+    print("  the next `cmake --build` exports its kernel set automatically; no test files "
+          "or registry entries need editing.", flush=True)
     return 0
 
 

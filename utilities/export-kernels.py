@@ -148,14 +148,28 @@ def ensure_venv() -> Path:
     if os.environ.get("OFLM_SKIP_VENV_SETUP") == "1" and py.is_file():
         return py
     if py.is_file():
-        # If the existing venv can import the IRON "aie" package, trust it
-        # (e.g. the Nix dev shell materialized it). Otherwise fall through and
-        # recreate it.
+        # Trust an existing venv only when it can import BOTH the IRON "aie"
+        # package and the Python deps the dev workflow uses (huggingface_hub for
+        # repo crawling, tokenizers for vocab). A venv that has "aie" but is
+        # missing these used to fail halfway through `oflm dev build-new-spec`,
+        # after the spec was already written. Add what's missing in place rather
+        # than rebuilding the whole IRON toolchain.
         try:
-            subprocess.run([str(py), "-c", "import aie"], check=True, capture_output=True)
+            subprocess.run([str(py), "-c", "import aie, huggingface_hub, tokenizers"],
+                           check=True, capture_output=True)
             return py
         except subprocess.CalledProcessError:
             pass
+        if REQS.is_file():
+            print("-- installing missing dev dependencies into ironvenv", flush=True)
+            subprocess.run([str(py), "-m", "pip", "install", "-r", str(REQS)], check=True)
+            try:
+                subprocess.run([str(py), "-c", "import aie, huggingface_hub, tokenizers"],
+                               check=True, capture_output=True)
+                return py
+            except subprocess.CalledProcessError:
+                pass
+        # Still incomplete -- fall through and recreate it from scratch.
     print("-- creating ironvenv (mlir-aie + Peano toolchain)", flush=True)
     if shutil.which("uv"):
         subprocess.run(["uv", "venv", "--python", PYTHON, str(VENV)], check=True)

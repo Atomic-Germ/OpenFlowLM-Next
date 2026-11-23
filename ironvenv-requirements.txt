@@ -25,3 +25,4 @@ gurobipy
 networkx[default]
 ortools
 huggingface_hub
+tokenizers
