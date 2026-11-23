@@ -8,6 +8,7 @@
 #include <fstream>
 #include <filesystem>
 #include <vector>
+#include "test_env.hpp"
 
 #define TEST(name) static void name(); \
     static struct name##_registrar { name##_registrar() { tests.push_back({#name, name}); } } name##_instance; \
@@ -137,8 +138,8 @@ TEST(save_user_settings_writes_valid_json) {
     nlohmann::json settings = {{"version", 1}, {"defaults", {{"pmode", "balanced"}}}};
     oflm::config::save_user_settings(settings, path);
 
-    std::ifstream f(path);
-    auto loaded = nlohmann::json::parse(f);
+    // A temporary stream: closed before remove_all, which cannot delete an open file on Windows.
+    auto loaded = nlohmann::json::parse(std::ifstream(path));
     ASSERT_EQ(loaded["version"], 1);
     ASSERT_EQ(loaded["defaults"]["pmode"], "balanced");
 
@@ -178,8 +179,7 @@ TEST(migration_user_added_model) {
     auto log = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
 
     ASSERT_TRUE(std::filesystem::exists(settings_path));
-    std::ifstream f(settings_path);
-    auto settings = nlohmann::json::parse(f);
+    auto settings = nlohmann::json::parse(std::ifstream(settings_path));
 
     ASSERT_TRUE(settings["models"]["my-model"]["1b"].contains("url"));
     ASSERT_FALSE(std::filesystem::exists(legacy_path));
@@ -205,8 +205,7 @@ TEST(migration_modified_entry_preserved_as_override) {
 
     auto log = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
 
-    std::ifstream f(settings_path);
-    auto settings = nlohmann::json::parse(f);
+    auto settings = nlohmann::json::parse(std::ifstream(settings_path));
 
     ASSERT_TRUE(settings["settings"]["qwen3.8"]["27b"].contains("ctx_len"));
     ASSERT_EQ(settings["settings"]["qwen3.8"]["27b"]["ctx_len"], 16384);
@@ -226,8 +225,7 @@ TEST(migration_identical_entries_dropped) {
 
     auto log = oflm::config::migrate_legacy_user_registry(legacy_path, shipped, settings_path);
 
-    std::ifstream f(settings_path);
-    auto settings = nlohmann::json::parse(f);
+    auto settings = nlohmann::json::parse(std::ifstream(settings_path));
 
     ASSERT_FALSE(settings["models"].contains("test"));
     ASSERT_FALSE(settings["settings"].contains("test"));

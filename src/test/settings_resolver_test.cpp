@@ -6,6 +6,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdlib>
+#include "test_env.hpp"
 
 #define TEST(name) static void name(); \
     static struct name##_registrar { name##_registrar() { tests.push_back({#name, name}); } } name##_instance; \
