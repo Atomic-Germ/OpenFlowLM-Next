@@ -25,10 +25,20 @@ SPECS_DIR = ROOT / "open_kernels" / "recipes" / "specs"
 # Reuse oflm-add alias tables if available.
 sys.path.insert(0, str(ROOT / "utilities" / "oflm-add"))
 try:
-    from oflm_add import CONFIG_MODEL_FAMILIES, FAMILY_ALIASES  # type: ignore
+    from oflm_add import CONFIG_MODEL_FAMILIES, FAMILY_ALIASES, kernel_set_name  # type: ignore
 except Exception:
     CONFIG_MODEL_FAMILIES = {}
     FAMILY_ALIASES = []
+
+    def kernel_set_name(name: str) -> str:
+        """Fallback when oflm-add is not beside us: strip the upload suffix."""
+        n = name or ""
+        while True:
+            stripped = re.sub(r"[-_.](gguf|q4nx|i1)$", "", n, flags=re.IGNORECASE)
+            if stripped == n:
+                break
+            n = stripped
+        return (n if n.lower().endswith("-npu2") else f"{n}-NPU2") if n else ""
 
 # The real spec machinery: `ModelSpec.from_hf_config` knows the family builders
 # (layer types off full_attn_idxs / layer_types, LFM2's FF adjustment, llama3's
@@ -230,6 +240,84 @@ def base_model_from_readme(repo: str) -> str | None:
     return None
 
 
+def generic_model_name(repo: str, gguf_source: str = "") -> str:
+    """The export/spec label for a repo, from the BASE model it quantizes.
+
+    A GGUF upload's name is an author's slug -- `Llama-3.2-1B-Instruct-GGUF`,
+    `Qwen3-8B-GGUF` -- carrying quant/upload suffixes that are not properties of
+    the model. The kernels, and `oflm add`'s geometry match, are named after the
+    generic base (`Llama-3.2-1B-Instruct`, `Qwen3-8B`). Climb the repo's README
+    ``base_model:`` chain first (finetune -> base -> base), then fall back to the
+    repo slug with those suffixes stripped by ``kernel_set_name``.
+
+    The returned value is the EXPORT name (with ``-NPU2``). The spec filename
+    stem is ``spec_stem()`` below: a second, lower-cased spelling of the same
+    model for the repository's on-disk convention.
+    """
+    base = ""
+    if repo:
+        base = base_model_from_readme(repo)
+        if not base:
+            try:
+                from oflm_add import readme_base_chain
+                chain = readme_base_chain(repo) or []
+                if chain:
+                    base = chain[-1]
+            except Exception:
+                pass
+    if not base and gguf_source:
+        # A local GGUF names itself in general.name; use it before any slug.
+        try:
+            from oflm_add import read_gguf_inventory
+            inv = read_gguf_inventory(gguf_source, limit_mb=96)
+            if inv and inv[0].get("general.name"):
+                base = str(inv[0]["general.name"]).strip()
+        except Exception:
+            pass
+    if base and "/" in base:
+        base = base.split("/")[-1]          # meta-llama/Llama-3.2-1B-Instruct
+    fallback = (repo.split("/")[-1] if repo else
+                Path(gguf_source).stem if gguf_source else "model")
+    return kernel_set_name(base or fallback)
+
+
+def spec_stem(spec: dict) -> str:
+    """The spec file stem for a derived spec: its export name, lower-cased.
+
+    Kept as a separate function so the filename and ``extra.model`` can never
+    drift apart (the #54 regression: a 12B spec shipped as "Gemma3-4B-NPU2").
+    The export name is the generic base model, so the stem is too:
+    ``Llama-3.2-1B-Instruct-NPU2`` -> ``llama-3.2-1b-instruct-npu2``.
+    """
+    name = (spec.get("extra") or {}).get("model") or spec.get("family") or "model"
+    return str(name).lower()
+
+
+def existing_gguf_spec(spec: dict) -> str | None:
+    """An existing spec whose KERNELS cover this GGUF-derived geometry.
+
+    The repo's slug is irrelevant here: a quant of a model whose geometry is
+    already shipped must LINK to that spec, not grow a second repo-named one.
+    ``kernel_hash`` is the same key the engine uses to match installed sets, so
+    a false link (same hidden, different head dim -- Llama-3.2-1B vs minicpm5-2b)
+    is refused by the hash, not by a name heuristic.
+    """
+    try:
+        cand = ModelSpec.from_dict(spec)
+    except Exception:
+        return None
+    for sp in sorted(SPECS_DIR.glob("*.json")):
+        try:
+            d = json.loads(sp.read_text(encoding="utf-8"))
+            if d.get("family") != cand.family:
+                continue
+            if ModelSpec.from_dict(d).kernel_hash() == cand.kernel_hash():
+                return sp.stem
+        except Exception:
+            continue
+    return None
+
+
 def existing_spec_for_family_size(family: str, cfg: dict) -> str | None:
     """The spec whose KERNELS cover this config, by the same key the engine
     matches installed sets with (ModelSpec.kernel_hash: family, hidden, FF,
@@ -282,13 +370,53 @@ def main():
     gguf_error = None
 
     def write_gguf_spec(spec, source="the GGUF metadata"):
-        stem = args.model_name or (args.repo.split("/")[-1] if args.repo else "model") + "-NPU2"
-        spec["extra"] = {**(spec.get("extra") or {}), "model": stem}
-        out = Path(args.out) if args.out else SPECS_DIR / f"{stem.lower()}.json"
+        # The geometry comes from the GGUF; the NAME comes from the base model
+        # the repo quantizes, never from the repo's upload slug. A second repo
+        # of the same base therefore produces the same spec, and the geometry
+        # hash below links it instead of duplicating it.
+        existing = existing_gguf_spec(spec)
+        if existing and not args.refresh:
+            print(f"Existing spec covers this geometry: {existing} "
+                  f"({source}) -- linking instead of generating.")
+            out = Path(args.out) if args.out else SPECS_DIR / f"{spec_stem(spec)}.json"
+            if out.is_file():
+                print(f"{out} already exists -- keeping it")
+                return 0
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"link_to": existing,
+                                       "base_model": generic_model_name(args.repo, args.gguf)}, indent=2))
+            print(f"Wrote link file to {out}")
+            return 0
+        model_name = args.model_name or generic_model_name(args.repo, args.gguf)
+        spec["extra"] = {**(spec.get("extra") or {}), "model": model_name}
+        out = Path(args.out) if args.out else SPECS_DIR / f"{spec_stem(spec)}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(spec, indent=2), encoding="utf-8")
         print(f"Wrote candidate spec to {out} (from {source})")
         return 0
+
+    def gguf_spec_is_complete(spec: dict) -> bool:
+        """Whether the GGUF header carries the fields this family's kernels need.
+
+        A GGUF names dimensions and vocab, but NOT every config field the
+        kernels are built from -- Llama-3.2's rope_scaling (factor 32, the
+        low/high frequency ramp) is in config.json, not the header. A spec
+        missing it has a DIFFERENT kernel_hash from the shipped one and would
+        fail to link to an existing set, so fall through to the base config
+        when the header is incomplete. The GGUF is still the authority for the
+        size and architecture; this is only about the fields it cannot carry.
+        """
+        missing = [f for f in ("layer_types",) if f not in spec]
+        # rope_scaling is present-but-None when the GGUF header has no scaling
+        # metadata; Llama-3.2's kernels are built WITH the factor-32 ramp from
+        # config.json, so a None here is the same incompleteness as a missing key.
+        if spec.get("rope_scaling") is None:
+            missing.append("rope_scaling")
+        if missing:
+            print(f"GGUF header lacks {', '.join(missing)}; using the base model's config "
+                  "for those fields (the GGUF remains authoritative for size/architecture)")
+            return False
+        return True
 
     if args.gguf:
         # A GGUF names its own geometry: architecture, dimensions, vocab, rope. A gated
@@ -324,7 +452,7 @@ def main():
                     gguf_spec = ModelSpec.from_gguf_metadata(inv[0]).to_dict()
             except SpecError as exc:
                 gguf_error = exc
-        if gguf_spec is not None:
+        if gguf_spec is not None and gguf_spec_is_complete(gguf_spec):
             return write_gguf_spec(gguf_spec)
         try:
             cfg, real_vocab = spec_config(args.repo)
@@ -434,7 +562,8 @@ def main():
     head_dim = cfg.get("head_dim") or cfg.get("hidden_size", 0) // max(cfg.get("num_attention_heads", 1), 1)
     spec["head_dim"] = head_dim or spec.get("head_dim")
     spec["rotary_dim"] = head_dim or spec.get("rotary_dim")
-    spec["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config", "model": args.repo.split("/")[-1] + "-NPU2"}
+    model_name = args.model_name or generic_model_name(args.repo, args.gguf)
+    spec["extra"] = {"model_type": cfg.get("model_type"), "source": "hf_config", "model": model_name}
     if cand is not None:
         built = cand.to_dict()
         # keep what the FAMILY BUILDER recorded in extra (Granite's pre-fold
@@ -442,7 +571,7 @@ def main():
         # the one fact the pack plan needs to fold a raw GGUF's weights
         extra = dict(built.get("extra") or {})
         extra.update({"model_type": cfg.get("model_type"), "source": "hf_config",
-                      "model": args.repo.split("/")[-1] + "-NPU2"})
+                      "model": model_name})
         built["extra"] = extra
         spec = built
     out = out_path

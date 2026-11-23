@@ -26,11 +26,11 @@ What it does, in order, and why each step exists:
                catalogue.py, so the next build of this size needs no override.
   5. REBUILD   the kernel set is compiled again through the validated path,
                so what ships is a build the catalogue allows.
-  6. REGISTER  the spec joins the frozen lists the tests enforce
-               (utilities/register-spec.py): its spec_hash in test_lfm2.py and,
-               when the name derived from the file stem is not the model it
-               exports as, its name in test_spec_model_names.py. Mechanical
-               edits, scripted -- never hand-written.
+  6. VALIDATE  utilities/register-spec.py checks the spec's geometry signature
+               and export label against the shipped set (no duplicate shape,
+               no duplicate export directory). It edits NO files: the contract
+               is the geometry, so there is no hash/name list to commit. What
+               you commit is the spec JSON and the catalogue points above.
 
 Only step 3 needs an NPU; everything else is a compile. Nothing here needs the
 model's weights, a container or the engine.
@@ -238,10 +238,12 @@ def attn_point_validated(spec) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default="", help="the HuggingFace repo (Qwen/Qwen3-0.6B)")
+    ap.add_argument("--gguf-file", default="",
+                    help="a local GGUF whose header names the geometry (gated/offline repos); "
+                         "paired with --repo for its base-model name")
     ap.add_argument("--spec", default="",
                     help="an EXISTING spec (stem or path) to build and gate: skips step 1. "
-                         "For a gated HF repo, make the spec with "
-                         "gen-kernel-spec.py --gguf <file> first")
+                         "For a local GGUF, pass --repo with --gguf-file instead")
     ap.add_argument("--spec-name", default="", help="the spec's stem (default: from the family and the size)")
     ap.add_argument("--rows", type=int, default=17, help="the attention gate's window length")
     ap.add_argument("--work", default="", help="where the build artifacts go (default: build/attn-gate/<spec>)")
@@ -277,31 +279,63 @@ def main() -> int:
         goto_build = True
     else:
         goto_build = False
-    if not name:
-        sys.path.insert(0, str(ROOT / "utilities" / "oflm-add"))
-        try:
-            from oflm_add import family_from_config_dict  # noqa: F401
-        except Exception:
-            pass
-        name = a.repo.split("/")[-1].lower()
-    spec_path = SPECS / f"{name}.json"
+    # The spec NAME is a label, not geometry: it comes from the base model the
+    # repo quantizes (gen-kernel-spec.py), never from the upload slug. Let the
+    # generator write to a scratch path so it can choose the canonical name,
+    # then move the result into the specs dir under that name. This keeps a
+    # second repo of the same base -- e.g. unsloth/Llama-3.2-1B-Instruct-GGUF
+    # after mradermacher/Llama-3.2-1B-Instruct-i1-GGUF -- on ONE spec, and
+    # `oflm add` links any geometrically matching model by spec_hash anyway.
+    generate = not goto_build and not name
+    if generate:
+        scratch = ROOT / "build" / "spec-scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        gen_out = scratch / f"{a.repo.split('/')[-1].lower()}.json"
+    else:
+        spec_path = SPECS / (f"{name}.json" if name else f"{a.repo.split('/')[-1].lower()}.json")
+        gen_out = spec_path
 
-    # 1. the spec
-    print(f"-- spec {name}", flush=True)
-    existed = spec_path.is_file()
-    rc = 0 if goto_build else run([sys.executable, GEN_SPEC, "--repo", a.repo, "--out", spec_path], env=env, check=False)
+    # 1. the spec -- the name is derived from the base model by gen-kernel-spec,
+    # not from the repo slug, so report it only once it is known.
+    print(f"-- spec from {a.repo or a.spec or a.gguf_file}", flush=True)
+    existed = spec_path.is_file() if not generate else (SPECS / f"{gen_out.stem}.json").is_file()
+    gen_cmd = [sys.executable, GEN_SPEC]
+    if a.gguf_file:
+        gen_cmd += ["--gguf", a.gguf_file]
+    if a.repo:
+        gen_cmd += ["--repo", a.repo]
+    gen_cmd += ["--out", gen_out]
+    rc = 0 if goto_build else run(gen_cmd, env=env, check=False)
     if rc != 0:
         print("build-new-spec: the spec could not be generated", file=sys.stderr)
         return rc
-    if not spec_path.is_file():
+    if not gen_out.is_file():
         print("build-new-spec: no spec was written", file=sys.stderr)
         return 1
-    written = json.loads(spec_path.read_text())
+    written = json.loads(gen_out.read_text())
     if "link_to" in written:
+        # The geometry is already served by an existing spec. The link file is
+        # only a scratch artifact -- it must NOT become a shipped spec (it would
+        # duplicate the geometry under a second name and break the export).
         print(f"the base model already has kernels: {written['link_to']} -- nothing to build")
-        if not existed:
-            spec_path.unlink()
+        if gen_out.is_file():
+            gen_out.unlink()
         return 0
+    if a.dry_run and generate:
+        # A dry run reports the derived spec; it never writes into specs/.
+        name = gen_out.stem
+        spec_path = gen_out
+        print(f"   (dry run: {gen_out.relative_to(ROOT)})", flush=True)
+    elif generate:
+        # The generator picked the canonical filename (extra.model, lower-cased)
+        # under scratch; move it into the specs dir under that stem.
+        name = gen_out.stem
+        spec_path = SPECS / f"{name}.json"
+        if spec_path.is_file() and not existed:
+            print(f"build-new-spec: {spec_path.name} already exists; keeping it", flush=True)
+            gen_out.unlink()
+        elif not spec_path.is_file():
+            gen_out.rename(spec_path)
     print(f"   {spec_path.relative_to(ROOT)}", flush=True)
 
     geo = spec_geometry(spec_path)
@@ -412,8 +446,8 @@ def main() -> int:
                 print("build-new-spec: the validated rebuild failed", file=sys.stderr)
                 return rc
 
-    # 6. register the spec in the frozen test lists
-    print("-- register the spec (utilities/register-spec.py)", flush=True)
+    # 6. validate the spec's geometry signature and export label
+    print("-- validate the spec (utilities/register-spec.py)", flush=True)
     rc = run([sys.executable, REGISTER, name], env=env, check=False)
     if rc != 0:
         return rc
@@ -424,12 +458,8 @@ def main() -> int:
         print(f"  {attn_why}", flush=True)
         print("  A plain `oflm dev export-kernels --spec ...` will hit the catalogue wall until "
               "that point is validated by its family procedure.", flush=True)
-        print(f"  commit: {spec_path.relative_to(ROOT)} and the two test files "
-              "register-spec.py touched")
     else:
         print(f"\n{name} is ready: the spec, the built kernels and the catalogue entry.")
-        print(f"  commit: {spec_path.relative_to(ROOT)}, open_kernels/recipes/catalogue.py and "
-              "the two test files register-spec.py touched")
     return 0
 
 

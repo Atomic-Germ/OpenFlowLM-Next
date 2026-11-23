@@ -368,7 +368,7 @@ class ModelSpec:
         d["norm_eps"] = float(f"{self.norm_eps:g}")
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
-    def serves(self, model: "ModelSpec") -> str | None:
+    def serves(self, model: "ModelSpec", ignore: tuple[str, ...] = ()) -> str | None:
         """None when a kernel set built for THIS spec can run `model`, else why not.
 
         `kernel_hash` says two models need the same xclbins. This says whether the set
@@ -385,8 +385,14 @@ class ModelSpec:
         4B: set 262208 rows, GGUF 262144, every other field equal). The check belongs
         here, where a set is chosen, not in the hash, where it refused a model the set
         serves.
+
+        ``ignore`` carries the fields a GGUF cannot express but bakes into its
+        weights (Llama-3's rope_scaling lives in ``rope_freqs.weight``). A set
+        built with the scale and a GGUF without the metadata still share the
+        same position law; comparing that group would refuse a model the set
+        serves. The caller computes it with ``rope_ignore(gguf_source)``.
         """
-        if self.kernel_hash() != model.kernel_hash():
+        if self.kernel_hash(ignore) != model.kernel_hash(ignore):
             return "a different geometry"
         if self.vocab < model.vocab:
             return (f"a {self.vocab}-row head and this model's is {model.vocab} "

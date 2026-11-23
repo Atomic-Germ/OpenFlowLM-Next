@@ -415,7 +415,7 @@ def scan_kernel_sets(spec, roots, source=None, need_gguf=False):
                 laid = d.get("spec")
                 if not laid:
                     continue
-                gap = ModelSpec.from_dict(laid).serves(spec)
+                gap = ModelSpec.from_dict(laid).serves(spec, ignore)
             except (OSError, ValueError):
                 continue
             name = m.parents[1].name
@@ -484,25 +484,24 @@ def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
         # at build-new-spec.py, which only adds a SIZE to a family that already has kernels.
         return (f"{head}{body}\n"
                 f"This build has no recipe for that architecture, so its geometry cannot be "
-                f"read from the file. Not supported yet -- nothing to match, nothing to build.")
+                f"read.")
     if any("no GGUF-direct build" in n for n in notes):
         return (f"{head}{body}\n"
-                f"The kernels are installed; this build of the set predates GGUF-direct.\n"
-                f"Re-export the set with:\n"
-                f"  python utilities/export-kernels.py")
+                f"The kernels installed are stale. Re-export the set with:\n"
+                f"  oflm dev export-kernels --spec <spec-name>")
     if any("row head" in n for n in notes):
         return (f"{head}{body}\n"
                 f"The set's head cannot be widened at install time; this size needs its\n"
-                f"own kernels." + (f"\n  {build}" if build else ""))
+                f"own spec." + (f"\n  {build}" if build else ""))
     if build:
         return (f"{head}{body}\n"
                 f"Building this size's kernels did not succeed. To retry:\n  {build}")
-    # No checkout: the user cannot build anything, and telling them to run a script
-    # that is not installed is the same false gate in a different place.
+    # No checkout: the user cannot build anything, and needs to install the dev package
     return (f"{head}{body}\n"
             f"This size's kernels are not part of this release. They are built from the\n"
-            f"geometry above and shipped with the app -- please report it with the family\n"
-            f"and the shape, and the next release will carry the set.")
+            f"geometry above -- please report the gap at\n" 
+            f"github.com/Atomic-Germ/OpenFlowLM-Next with the family\n"
+            f"and the size, or install the dev package and make one.")
 
 
 # Families whose GGUF-direct numerics are not right yet. A model that installs, loads and
@@ -2990,7 +2989,7 @@ def sibling_spec(base_spec, model_spec):
                                extra={**base_spec.extra, **model_spec.extra})
 
 
-def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
+def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None, source=None):
     """A kernel set for this model built from the kernels of an installed set
     that serves the same GEOMETRY, with a manifest for THIS model.
 
@@ -3015,6 +3014,9 @@ def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
     spec = model_spec(model_dir)
     if spec is None:
         return None
+    # The installed model's own GGUF is the source: fields it bakes into its
+    # weights (Llama-3 rope_scaling) are not geometry, same rule as scan().
+    ignore = rope_ignore(source or (Path(model_dir) / "model.gguf"))
     want = spec.kernel_hash()
     # The preferred base first: the set the GGUF gate picked (the freshest one
     # with the f32-scale twins), so the sibling carries them too.
@@ -3035,7 +3037,7 @@ def sibling_open_kernels(model_dir, roots, quiet=False, prefer=None):
             if ModelSpec is None:
                 continue
             base_spec = ModelSpec.from_dict(s)
-            if base_spec.serves(spec) is not None:
+            if base_spec.serves(spec, ignore) is not None:
                 continue
         except Exception:
             continue
@@ -3098,6 +3100,28 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+    # The strict spec_hash can differ for a GGUF whose rope scale is baked into
+    # its weights (no rope_scaling in the header). Fall back to the geometry
+    # signature with that field ignored -- same rule as scan_kernel_sets.
+    spec = model_spec(model_dir)
+    ignore = rope_ignore(Path(model_dir) / "model.gguf")
+    if spec is not None:
+        for root in roots:
+            if not root:
+                continue
+            for mf in sorted(Path(root).glob("*/open_kernels/manifest.json")):
+                try:
+                    laid = json.loads(mf.read_text(encoding="utf-8")).get("spec")
+                    if not laid:
+                        continue
+                    if _model_spec_class().from_dict(laid).serves(spec, ignore) is not None:
+                        continue
+                except Exception:
+                    continue
+                kdir = mf.parent
+                log(f"[INFO] open kernels from '{kdir.parent.name}': same geometry signature "
+                    f"({spec.kernel_hash(ignore)[:19]}, baked-rope fields ignored)")
+                return link_open_kernels(model_dir, kdir, force=force, quiet=quiet)
     # No set was built for this shape exactly. The kernels are width-keyed, so
     # a set that serves the same geometry does: only the manifest (the layer
     # loop) differs, and it is written here -- no build, no kernel set to
@@ -4315,13 +4339,16 @@ def main():
                         # The closed set for this size does not exist (we just built the
                         # open one), so do not link the nearest official size's xclbins
                         # under this model: a GGUF model runs on the open kernels, and a
-                        # symlink to a different geometry would be a lie in the registry.
+                        # symlink to a different geometry would not run correctly.
                         xclbin_source = geom_set
                 if kdir is None and not args.dry_run:
                     raise SystemExit(kernel_set_refusal(
                         repo_arg, family, geom_notes, get_base_chain(),
-                        build=f"python utilities/build-new-spec.py --spec "
-                              f"{family.replace('.', '')}-{size_token}".lower()))
+                        # The repo-driven path is the one that knows about base
+                        # configs and geometry link shortcuts; a raw --spec name
+                        # would write a fresh GGUF-derived spec with no baked-rope
+                        # metadata and duplicate an existing set's geometry.
+                        build=f"oflm dev build-new-spec --repo {repo_arg}"))
             gguf_kernel_dir = kdir
             if kdir and str(kdir) != str(Path(args.open_kernels) if args.open_kernels else ""):
                 log(f"[INFO] GGUF-direct kernels: {kdir}")

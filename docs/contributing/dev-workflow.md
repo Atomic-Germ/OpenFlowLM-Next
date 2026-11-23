@@ -69,7 +69,7 @@ oflm dev env-check
 
 Aliases like `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec`, `run-kernel`/`harness`/`run_kernel` are accepted.
 
-**Not yet wrapped (use directly as needed):** `utilities/gen-kernel-spec.py`, `utilities/register-spec.py`, `utilities/catalogue-add-point.py`, `utilities/audit-kernel-export.py`, `utilities/clean-kernels.py` options beyond basics, and specialized exports in `open_kernels/` (e.g. `export_whisper_kernels.py`, `export_dit_kernels.py`, `compose_elf.py`) and `open_embedding/` tooling. Wiring more of these into `oflm dev` is incremental as the workflow stabilizes.
+The commands above wrap the whole spec → gate → catalogue → rebuild → validate flow, including spec generation from a GGUF-only repo (`oflm dev build-new-spec --repo <user>/<repo>`, or `--gguf-file <local.gguf>`). You do not need to run the underlying Python scripts by hand; their options are passed through unchanged by each `oflm dev` subcommand. Specialized exports in `open_kernels/` (e.g. `export_whisper_kernels.py`, `export_dit_kernels.py`, `compose_elf.py`) and `open_embedding/` tooling are still separate.
 
 ---
 
@@ -100,14 +100,24 @@ Always trust derived geometry/spec/hash and `--dry-run` over model names.
 
 ```bash
 oflm dev build-new-spec --dry-run --repo mradermacher/Qwen2.5-7B-Instruct-i1-GGUF
-# or, for local/GGUF-only cases:
-# python utilities/gen-kernel-spec.py --gguf model.gguf --out open_kernels/recipes/specs/<name>.json
+# a gated/offline repo with a local GGUF:
+# oflm dev build-new-spec --dry-run --gguf-file model.gguf --repo <base-repo>
+# an already-generated spec:
 # oflm dev build-new-spec --dry-run --spec <name>
 ```
 
+The spec name and export label come from the **base model** the repo quantizes,
+not from the upload slug (`unsloth/Llama-3.2-1B-Instruct-GGUF` and
+`mradermacher/Llama-3.2-1B-Instruct-i1-GGUF` resolve to the same base). Geometry
+matching at install time uses `kernel_hash()` / `serves()`, so a user can install
+**any tune of a supported base** with `oflm add <user>/<repo>` and get the right
+kernel set without a name matching, a chat-template match, or any other manual
+step. Depth and parameter count are not part of that match: a 27B set runs a
+40B merged model at a different depth.
+
 This reports recipe walls and missing catalogue points (attention tuple, op fixtures like `gemv_q4`, `ln`, `lm_head_q4`, etc.).
 
-### 3. Build, gate, and register (NPU required for GATE)
+### 3. Build, gate, and validate (NPU required for GATE)
 
 ```bash
 oflm dev build-new-spec --repo mradermacher/Qwen2.5-7B-Instruct-i1-GGUF
@@ -120,7 +130,11 @@ oflm dev build-new-spec --repo mradermacher/Qwen2.5-7B-Instruct-i1-GGUF
 3. **GATE** — run fixtures/oracles on NPU for missing points (only points that pass are added)
 4. **CATALOGUE** — record validated points
 5. **REBUILD** — rebuild through validated path
-6. **REGISTER** — update frozen spec/hash/name lists (mechanical)
+6. **VALIDATE** — check the geometry signature and export label; no files are edited
+
+Commit only the generated **spec JSON** and the validated **catalogue points** —
+there is no hash-locked test file or name list to update. Users on the new
+version then install any tune of that base with `oflm add` and it Just Works.
 
 Notes:
 - Nothing here needs the model’s weights, a converted container, or the engine.
@@ -200,7 +214,7 @@ When this occurs, capture the point `(K, rs, rows_per_core, per_call)`, the memo
 - **Do not guess mappings:** original `qwen3_moe` vs `qwen3_next`/qwen3.5-moe, Granite 3.x vs 4.2, Gemma4 unified vs unsupported sub-variants, etc. are different contracts.
 - **Shape reuse is the feature:** many derivatives/distills/size-label variants resolve to existing sets (e.g. phi4-mini/phi3 geometry cases, LFM2.5 on LFM2 geometry, qwen3.5/3.6-moe class reuse, depth-immaterial cases where kernelized geometry matches).
 - **Never `git add -A` / `git add .`** in this repo; stage specific paths and review `git diff --cached --stat`.
-- **`build-new-spec.py` register/spec updates are mechanical** (hash/name lists) — review and commit them with the corresponding spec/catalogue/set changes as appropriate.
+- **`build-new-spec.py` commits only the spec JSON and catalogue points** — the geometry is the contract; no frozen hash or name list is edited.
 
 ---
 

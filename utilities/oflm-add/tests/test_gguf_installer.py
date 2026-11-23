@@ -645,7 +645,7 @@ def test_gguf_repo_without_kernels_fails_directly_instead_of_q4nx_fallback(tmp_p
         # geometry cannot be read at all -- and then there is nothing to match OR build, which
         # is what it says (build-new-spec.py only adds a size to a family that HAS kernels).
         assert "no open kernel set can run this model" in msg
-        assert "nothing to build" in msg
+        assert "no recipe for that architecture" in msg
         assert "build-new-spec.py" not in msg
         assert "model.q4nx" not in msg
     else:
@@ -885,7 +885,7 @@ def test_a_set_the_registry_does_not_list_still_names_its_family(tmp_path):
         def kernel_hash(self, ignore=()):
             return "sha256:same"
 
-        def serves(self, model):
+        def serves(self, model, ignore=()):
             return None                # same geometry, and the head fits
 
     model_spec = _Spec()
@@ -950,6 +950,47 @@ def test_a_baked_rope_table_makes_rope_scaling_irrelevant(tmp_path):
                                                           [("token_embd.weight", 0, [128])])
     try:
         assert oflm_add.rope_ignore(str(src)) == ()
+    finally:
+        oflm_add.read_gguf_inventory = orig
+
+
+def test_scan_kernel_sets_honours_the_baked_rope_ignore(tmp_path):
+    """The field `rope_ignore` finds must reach the geometry comparison.
+
+    A scaled Llama-3.2 set and a GGUF whose header has no rope_scaling (llama.cpp
+    baked it into rope_freqs.weight) share the same position law. Before the
+    regression, scan_kernel_sets computed `ignore = rope_ignore(source)` but
+    called `serves(spec)` without it, so a 1B GGUF refused the shipped 1B set
+    and oflm add tried to build a kernel for itself.
+    """
+    import dataclasses
+
+    tree = OFLM_ADD.parents[1]                      # .../OpenFlowLM-Next
+    sys.path.insert(0, str(tree / "open_kernels"))
+    from recipes.load import load_spec
+
+    repo = tmp_path / "repo"
+    (repo / "Llama-3.2-1B-NPU2" / "open_kernels").mkdir(parents=True)
+    kdir = repo / "Llama-3.2-1B-NPU2" / "open_kernels"
+    scaled = load_spec(tree / "open_kernels" / "recipes" / "specs" / "llama32-1b.json")
+    # The installed set's manifest is the scaled spec; the GGUF's derived spec
+    # has no rope_scaling. Same family, same hidden/heads -- only that field.
+    (kdir / "manifest.json").write_text(json.dumps({
+        "spec": scaled.to_dict(), "gguf": True,
+    }))
+
+    gguf = dataclasses.replace(scaled, rope_scaling=None,
+                               extra={"source": "gguf", "architecture": "llama"})
+    src = tmp_path / "m.gguf"
+    src.write_bytes(b"GGUF")
+    orig = oflm_add.read_gguf_inventory
+    oflm_add.read_gguf_inventory = lambda p, limit_mb=96: ({"general.architecture": "llama"},
+                                                          [("rope_freqs.weight", 0, [64])])
+    try:
+        found, name, notes = oflm_add.scan_kernel_sets(gguf, [repo], source=str(src),
+                                                       need_gguf=True)
+        assert found == kdir, notes
+        assert name == "Llama-3.2-1B-NPU2", notes
     finally:
         oflm_add.read_gguf_inventory = orig
 

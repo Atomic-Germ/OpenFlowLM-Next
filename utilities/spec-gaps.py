@@ -290,8 +290,8 @@ def main() -> int:
         for stem in sorted(ours):
             print(f"  ok       {stem}")
 
-    print("\nadd one:  python utilities/build-new-spec.py --repo <hf-repo>   "
-          "(then utilities/op-gate.py names any point with no fixture)")
+    print("\nadd one: oflm dev build-new-spec --repo <hf-repo>   "
+          "(run from an OpenFlowLM source checkout; see docs/contributing/dev-workflow.md)")
     return 1 if problems else 0
 
 
