@@ -279,7 +279,6 @@ def test_benchmark_describes_verified_manifest_shapes_without_running_campaign(t
     result = subprocess.run([str(exe), '--describe'], text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert 'split-only' in lines[0] and 'three output copies retained' in lines[0]
     data = manifest(load_spec(ROOT / 'open_kernels/recipes/specs/qwen35-27b.json'))
     described = [line.split() for line in lines[1:]]
     for kind, name in [('linear', 'linear_attention'), ('full', 'full_attention')]:

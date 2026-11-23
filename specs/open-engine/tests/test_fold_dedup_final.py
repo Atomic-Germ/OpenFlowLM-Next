@@ -50,10 +50,70 @@ def test_timing_requires_application_gate(driver, tmp_path):
     assert not (tmp_path / 'timing-v1').exists()
 
 
-def test_fixed_campaign_counts(driver):
+@pytest.fixture
+def campaign(driver, tmp_path, monkeypatch):
     timing = importlib.import_module('fold_dedup_final_timing')
-    assert timing.SCENARIOS == [('prefill', 256, 1, 14), ('prefill', 512, 1, 6),
-                                ('prefill', 1024, 1, 6), ('decode', 32, 33, 6)]
+    root = tmp_path / 'campaign'
+    (root / 'numerical-v1').mkdir(parents=True)
+    timing.C.write_json(root / 'numerical-v1/numerical-passed.json', {'passed': True})
+    timing.C.write_json(root / 'application-passed.json', {'passed': True})
+    monkeypatch.setattr(timing, 'SCENARIOS', [('prefill', 256, 1, 2), ('decode', 32, 33, 2)])
+    monkeypatch.setattr(timing.P, 'conditions', lambda: {})
+    monkeypatch.setattr(timing.E, 'audit_capture', lambda _: {'valid': True, 'errors': []})
+    calls = []
+
+    def run(cli, phase, tokens, outputs, out, ctx, power, budget, **kwargs):
+        assert ctx >= tokens + outputs - 1
+        assert budget == ('0' if phase == 'prefill' else f'decode:{outputs - 1}')
+        calls.append((phase, kwargs['dedup_input_split']))
+        out.mkdir()
+        record = dict(runtime={'before': {'runtime-library': 'digest'}},
+                      generated_ids=[7] * outputs, prompt_wall_ms=10,
+                      generated_ms_per_token=1 if phase == 'decode' else None)
+        timing.C.write_json(out / 'capture.json', record)
+        return record
+
+    monkeypatch.setattr(timing.C, 'run', run)
+    return timing, root, calls, run
+
+
+def test_campaign_executes_balanced_pairs_and_marks_warmups(campaign):
+    timing, root, calls, _ = campaign
+    timing.campaign(root)
+    # Each scenario starts with an excluded candidate-first pair, then alternates.
+    expected_order = [True, False, False, True, True, False]
+    assert calls == [(phase, enabled) for phase in ('prefill', 'decode') for enabled in expected_order]
+    selected = timing.E.read_json(root / 'timing-v1/selection.json')['samples']
+    assert len(selected) == 12
+    assert len([s for s in selected if s['warmup']]) == 4
+    assert all(s['warmup'] == (s['rep'] < 0) for s in selected)
+    completed = timing.E.read_json(root / 'timing-v1/completed.json')
+    assert completed['completed'] is True
+    assert completed['measured_pairs'] == 4
+
+
+@pytest.mark.parametrize('failure', ['trajectory', 'runtime', 'audit'])
+def test_campaign_stops_without_completion_on_invalid_pair(campaign, monkeypatch, failure):
+    timing, root, calls, run = campaign
+
+    def invalid_run(*args, **kwargs):
+        record = run(*args, **kwargs)
+        if len(calls) == 2:
+            if failure == 'trajectory':
+                record['generated_ids'] = [8]
+            elif failure == 'runtime':
+                record['runtime']['before'] = {'runtime-library': 'replaced'}
+            else:
+                monkeypatch.setattr(timing.E, 'audit_capture',
+                                    lambda _: {'valid': False, 'errors': ['incomplete capture']})
+        return record
+
+    monkeypatch.setattr(timing.C, 'run', invalid_run)
+    with pytest.raises(timing.E.EvidenceError):
+        timing.campaign(root)
+    assert len(calls) == 2
+    assert not (root / 'timing-v1/completed.json').exists()
+    assert timing.E.read_json(root / 'timing-v1/stopped.json')['completed'] is False
 
 
 def test_fixed_bootstrap_and_pair_direction(driver):

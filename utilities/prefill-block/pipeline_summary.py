@@ -1,4 +1,4 @@
-"""Audit an explicitly selected PR4A campaign and summarize only its new samples."""
+"""Audit an explicitly selected host-fold profiling campaign and summarize only its new samples."""
 import argparse
 import hashlib
 import json

@@ -1,4 +1,4 @@
-# PR4B final acceptance protocol
+# Host-fold final acceptance protocol
 
 This is the operator-requested final acceptance campaign, fixed before its timing
 samples. It does not change the optimization in `c5d20c85` or the original report.

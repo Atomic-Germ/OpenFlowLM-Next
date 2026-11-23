@@ -1,4 +1,4 @@
-# PR4B final acceptance
+# Host-fold final acceptance
 
 **Decision: MERGE CANDIDATE. Defaults remain OFF. No push or merge.**
 
@@ -30,7 +30,7 @@ Each inference launch holds the model flock, requires at least 35 GiB available 
 | control | ad8671440c9c3ab3671a00aa1cf9bfe962a210dc | 76ecff0ffd796895dfe28e6a580de85a1877f60183cfa7c1457273bec9268c47 |
 | candidate | c5d20c85defced034d8f2912953f10a2acf97969 | 3c7741cf08340818b2b9958e970c4d357fb352363b5f641a07b3f2eff6692e01 |
 
-Executables are under Models/qwen38-27b/pr4b/{control,candidate}/build/open_qwen36_cli. Only candidate sets OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT=1; unchanged control has no candidate switch. Identical model/kernel content hashes are audited independently.
+Executable paths are recorded in the JSON report. Only candidate sets OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT=1; unchanged control has no candidate switch. Identical model/kernel content hashes are audited independently.
 
 ## Fixed timing result
 
@@ -110,16 +110,16 @@ NPU memory bytes: **UNKNOWN**. Available XRT reports expose host/platform/partit
 Initial real app run used a directory symlink and shipped metadata triggered automatic download. Config changed, original weight bytes stayed intact. Process stopped; downloaded config, 321347584-byte partial weight and install record retained under download-incident. Configuration reconstructed from pre-normalization backup only after exact original SHA256 match; original inode changed. Later application attempts use isolated small-file copies, local file metadata and a weight-file symlink. Timing begins after restoration; no algorithm/default/kernel change.
 
 Configuration restoration SHA-256 is 30cf5c47d75b13934df23683f6f8f660d948d3c8e4e3ca91ad90b2278c536d6b. The new inode is explicitly recorded; initial numerical captures retain the original inode metadata. Content hashes match across initialization, numerical and timing evidence. No old record is rewritten to conceal the change.
-Accepted application logs/requests and ancillary files also have a separate parent-finalization content inventory. That inventory is explicitly an audit-time seal, not reconstructed runtime capture metadata.
-The first writable Docker configure required the omitted candidate license and harness headers; both were copied from the same candidate commit. A loopback client inherited an invalid proxy, and an early server capture treated harness SIGINT as an error. Those attempts remain retained separately, never as timing or accepted captures. The final server capture explicitly records its harness-issued SIGINT exit.
+Accepted application logs/requests and ancillary files have a separate content inventory sealed at audit time, not reconstructed runtime capture metadata.
+The writable Docker build uses the candidate license and harness headers from the same candidate commit. Failed build/client/server attempts, including an invalid inherited proxy and a harness-SIGINT classification error, remain separate from timing and accepted captures. Accepted server captures explicitly record the harness-issued SIGINT exit.
 Optional genuine 4000-token plus 32-step decode is **NOT MEASURED**: the existing validated decode-capture contract excludes block-prefill logs, while its sequential 4000-token prefill is not practical for this bounded campaign. No seek/fake context or extrapolation is used.
 Full-context, independent API logits/state, complete all-layer/per-request state isolation and continuous NPU-memory/thermal measurements are outside these passing scoped gates. Existing linked closed libraries remain application dependencies; this work neither removes nor replaces them.
 
-Raw evidence root: Models/qwen38-27b/pr4b/final-acceptance/. The [JSON report](qwen38-host-fold-final-acceptance.json) contains all individual pairs, all 72 capture paths/hashes/commands/environments, observed runtime identities, evidence/build hashes, initialization references and machine conditions. The original [PR4B Markdown](qwen38-host-fold-dedup.md), [JSON](qwen38-host-fold-dedup.json), old raw hashes and recovery directory remain unchanged.
+The [JSON report](qwen38-host-fold-final-acceptance.json) records the raw evidence root, all individual pairs, all 72 capture paths/hashes/commands/environments, observed runtime identities, evidence/build hashes, initialization references and machine conditions. The [duplicate-split experiment report](qwen38-host-fold-dedup.md) describes the separate bounded attempt. Its [JSON](qwen38-host-fold-dedup.json), raw hashes and recovery directory remain unchanged.
 Reproduction tools: [numerical driver](../../../utilities/prefill-block/fold_dedup_final.py), [application capture](../../../utilities/prefill-block/fold_dedup_app.py), [application audit](../../../utilities/prefill-block/fold_dedup_app_audit.py), [fixed timing](../../../utilities/prefill-block/fold_dedup_final_timing.py), [statistics/report](../../../utilities/prefill-block/fold_dedup_final_report.py), [final audit](../../../utilities/prefill-block/fold_dedup_final_audit.py). Fresh output paths are mandatory; do not rerun into existing evidence.
 
 ## Portable checks and repository scope
 
 Focused tests: 7 passed. Full portable suite: 2,937 passed, 172 skipped. Skips are NOT MEASURED, with exact capability/server prerequisites retained in pytest-full-with-skips.log; they are not inference passes.
-Merged-target settings check: **PASS: clean committed-source merged-target check**. The earlier dirty-tree refusal is retained separately, not counted as a pass. No new production setting, flag or environment variable is introduced.
+Merged-target settings check: **PASS: clean committed-source merged-target check**. Only the clean committed-source check counts as a pass; the retained dirty-tree refusal is not acceptance evidence. No new production setting, flag or environment variable is introduced.
 Only acceptance tooling, portable tests and these separate reports change. Production optimization code, defaults, kernels and criteria are unchanged. Evidence/protocol commits do not authorize a default promotion, push, merge, rebase, reset, reload, reboot, firmware or power-policy change.

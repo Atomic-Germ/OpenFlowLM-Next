@@ -1,4 +1,4 @@
-"""Predeclared PR4B continuation; no replacement, confirmation or candidate edits."""
+"""Predeclared duplicate-split continuation; no replacement, confirmation or candidate edits."""
 import argparse
 import os
 from pathlib import Path

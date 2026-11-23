@@ -172,7 +172,7 @@ def publish(root):
         repository_actions='Evidence/protocol commits only; no push, merge, rebase, reset, reload, reboot, firmware or power-policy writes')
     destination = C.ROOT/'specs/open-engine/reports/qwen38-host-fold-final-acceptance'
     C.write_json(destination.with_suffix('.json'), result)
-    lines = ['# PR4B final acceptance', '', f'**Decision: {result["decision"]}. Defaults remain OFF. No push or merge.**', '',
+    lines = ['# Host-fold final acceptance', '', f'**Decision: {result["decision"]}. Defaults remain OFF. No push or merge.**', '',
         'This decision applies to the scoped host-fold optimization on the machine below, not to general model support or a full-context claim.', '',
         '## Machine and fixed protocol', '',
         'Measured on prihlop-laptop2 / EVO14-AI9-STP, AMD Ryzen AI 9 365 (20 logical CPUs), Ubuntu 26.04.1 LTS, Linux 7.0.0-44-generic, glibc 2.43, NPU Strix aie2p 6x8.',
@@ -193,7 +193,7 @@ def publish(root):
     for name in ('control', 'candidate'):
         identity = E.read_json(root.parent/name/'identity.json')
         lines.append(f'| {name} | {identity["source_revision"]} | {identity["executable_sha256"]} |')
-    lines += ['', 'Executables are under Models/qwen38-27b/pr4b/{control,candidate}/build/open_qwen36_cli. Only candidate sets OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT=1; unchanged control has no candidate switch. Identical model/kernel content hashes are audited independently.', '',
+    lines += ['', 'Executable paths are recorded in the JSON report. Only candidate sets OFLM_OPEN_FOLD_DEDUP_INPUT_SPLIT=1; unchanged control has no candidate switch. Identical model/kernel content hashes are audited independently.', '',
         '## Fixed timing result', '',
         'Exactly 14 new measured 256-token pairs (seven per order), six each for 512/1024 prefill and short decode, plus one excluded warmup pair per scenario: 72 captures total. No retry, selective omission or extra confirmation pair. Both prefill arms include layer and fold profiling; decode includes the same layer profiling in both arms.',
         'Primary prefill metric is the outer CLI prompt wall, without subtracting serialization or substituting inner timers. Decode is 32 real prompt tokens and 32 generated steps (max-tokens 33).', '',
@@ -232,15 +232,15 @@ def publish(root):
         '## Evidence, environment repair and limits', '',
         result['incident'], '',
         'Configuration restoration SHA-256 is 30cf5c47d75b13934df23683f6f8f660d948d3c8e4e3ca91ad90b2278c536d6b. The new inode is explicitly recorded; initial numerical captures retain the original inode metadata. Content hashes match across initialization, numerical and timing evidence. No old record is rewritten to conceal the change.',
-        'Accepted application logs/requests and ancillary files also have a separate parent-finalization content inventory. That inventory is explicitly an audit-time seal, not reconstructed runtime capture metadata.',
-        'The first writable Docker configure required the omitted candidate license and harness headers; both were copied from the same candidate commit. A loopback client inherited an invalid proxy, and an early server capture treated harness SIGINT as an error. Those attempts remain retained separately, never as timing or accepted captures. The final server capture explicitly records its harness-issued SIGINT exit.',
+        'Accepted application logs/requests and ancillary files have a separate content inventory sealed at audit time, not reconstructed runtime capture metadata.',
+        'The writable Docker build uses the candidate license and harness headers from the same candidate commit. Failed build/client/server attempts, including an invalid inherited proxy and a harness-SIGINT classification error, remain separate from timing and accepted captures. Accepted server captures explicitly record the harness-issued SIGINT exit.',
         'Optional genuine 4000-token plus 32-step decode is **NOT MEASURED**: the existing validated decode-capture contract excludes block-prefill logs, while its sequential 4000-token prefill is not practical for this bounded campaign. No seek/fake context or extrapolation is used.',
         'Full-context, independent API logits/state, complete all-layer/per-request state isolation and continuous NPU-memory/thermal measurements are outside these passing scoped gates. Existing linked closed libraries remain application dependencies; this work neither removes nor replaces them.', '',
-        'Raw evidence root: Models/qwen38-27b/pr4b/final-acceptance/. The [JSON report](qwen38-host-fold-final-acceptance.json) contains all individual pairs, all 72 capture paths/hashes/commands/environments, observed runtime identities, evidence/build hashes, initialization references and machine conditions. The original [PR4B Markdown](qwen38-host-fold-dedup.md), [JSON](qwen38-host-fold-dedup.json), old raw hashes and recovery directory remain unchanged.',
+        'The [JSON report](qwen38-host-fold-final-acceptance.json) records the raw evidence root, all individual pairs, all 72 capture paths/hashes/commands/environments, observed runtime identities, evidence/build hashes, initialization references and machine conditions. The [duplicate-split experiment report](qwen38-host-fold-dedup.md) describes the separate bounded attempt. Its [JSON](qwen38-host-fold-dedup.json), raw hashes and recovery directory remain unchanged.',
         'Reproduction tools: [numerical driver](../../../utilities/prefill-block/fold_dedup_final.py), [application capture](../../../utilities/prefill-block/fold_dedup_app.py), [application audit](../../../utilities/prefill-block/fold_dedup_app_audit.py), [fixed timing](../../../utilities/prefill-block/fold_dedup_final_timing.py), [statistics/report](../../../utilities/prefill-block/fold_dedup_final_report.py), [final audit](../../../utilities/prefill-block/fold_dedup_final_audit.py). Fresh output paths are mandatory; do not rerun into existing evidence.', '',
         '## Portable checks and repository scope', '',
         'Focused tests: 7 passed. Full portable suite: 2,937 passed, 172 skipped. Skips are NOT MEASURED, with exact capability/server prerequisites retained in pytest-full-with-skips.log; they are not inference passes.',
-        f'Merged-target settings check: **{settings_status}**. The earlier dirty-tree refusal is retained separately, not counted as a pass. No new production setting, flag or environment variable is introduced.',
+        f'Merged-target settings check: **{settings_status}**. Only the clean committed-source check counts as a pass; the retained dirty-tree refusal is not acceptance evidence. No new production setting, flag or environment variable is introduced.',
         'Only acceptance tooling, portable tests and these separate reports change. Production optimization code, defaults, kernels and criteria are unchanged. Evidence/protocol commits do not authorize a default promotion, push, merge, rebase, reset, reload, reboot, firmware or power-policy change.', '']
     destination.with_suffix('.md').write_text('\n'.join(lines))
 

@@ -1,4 +1,4 @@
-"""Build immutable PR4B git archives with before/after native input attestation."""
+"""Build immutable duplicate-split git archives with before/after native input attestation."""
 import argparse
 import io
 import shutil

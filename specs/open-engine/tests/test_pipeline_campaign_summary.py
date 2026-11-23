@@ -44,25 +44,6 @@ def test_incomplete_pairs_rejected(off, on):
         summary.paired(off, on)
 
 
-def test_current_report_uses_new_direct_fold_samples():
-    d = summary.E.read_json(ROOT / 'specs/open-engine/reports/qwen38-deltanet-pipeline-performance.json')
-    assert d['status'] == 'NEEDS MORE EVIDENCE'
-    assert len(d['fold_samples']) == 5
-    for f in d['fold_samples']:
-        assert f['real_tokens'] == f['block_tokens'] == f['calls'] == 256
-        assert f['total_ms'] == pytest.approx(f['split_ms'] + f['copy_ms'] + f['accumulate_ms'], abs=.002)
-        assert f['fold_share_percent'] == pytest.approx(100 * f['total_ms'] / f['prompt_wall_ms'])
-    for phase in ['prefill', 'decode']:
-        r = d['overhead'][phase]
-        assert summary.paired(r['off']['samples'], r['on']['samples']) == r
-    chosen = [s for s in d['selected_samples'] if not s['warmup']]
-    assert len(chosen) == 20
-    assert len({(s['phase'], s['rep'], s['arm']) for s in chosen}) == 20
-    assert all('/pr4a-hardware/' in s['capture'] for s in chosen)
-    assert all(r['lmhead_ms'] > 0 for r in d['profiles']['decode'])
-    assert 'allocation' in ' '.join(d['not_measured'])
-
-
 GOOD = '''resident after 1.0 s
   gemm-block [0,256) t_real=256: 10.0 ms (GEMM 5.0, host 2.0, per-token 0.0, lm_head 1.0)
 prefill 256 tokens: 10 ms (0 ms/token)

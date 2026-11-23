@@ -1,4 +1,4 @@
-"""Fresh PR4B numerical gates; archived control, no timing or recovery actions."""
+"""Fresh final-acceptance numerical gates; archived control, no timing or recovery actions."""
 import argparse
 import os
 from pathlib import Path

@@ -1,4 +1,4 @@
-"""Fixed PR4B hardware correctness gate, followed only explicitly by timing.
+"""Fixed duplicate-split hardware correctness gate, followed only explicitly by timing.
 
 No production code changes. A failed gate aborts; captures are never overwritten.
 """

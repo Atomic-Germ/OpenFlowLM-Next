@@ -1,4 +1,4 @@
-"""Capture PR4A raw evidence with an exclusive lock and build-time attestation.
+"""Capture host-fold profiling raw evidence with an exclusive lock and build-time attestation.
 
 --build-identity is mandatory; see pipeline_evidence's module documentation for
 its schema and trust boundary. No current git revision is inferred as the build.

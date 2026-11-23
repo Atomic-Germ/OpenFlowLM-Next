@@ -1,12 +1,12 @@
-# Qwen3.8 PR4A hardware profiling
+# Qwen3.8 host-fold hardware profiling
 
 ## Decision: NEEDS MORE EVIDENCE
 
 The production paired-prefill fold is directly measurable, but the split-only
 candidate has only a conditional roughly 2.22% prefill-wall opportunity. There is
 no measured production-candidate gain. Allocation/reuse and phase-specific CPU
-versus waiting remain unresolved. Do not implement PR4B from this report without
-independent review. No inference arithmetic, kernel, precision, scheduling default
+versus waiting remain unresolved. This report alone does not establish acceptance
+for a duplicate-split optimization. No inference arithmetic, kernel, precision, scheduling default
 or oracle threshold changes are part of this work.
 
 ## Machine, identity and conditions
@@ -182,16 +182,18 @@ The summary revalidates the raw OFF phase ordering, geometry, generated position
 LM-head and output labels as well as hashes. Supplemental condition sidecars live
 outside sealed enabled-capture directories, with their hashes in the report.
 
-Run from the repository root, choosing a fresh output directory for a new campaign:
+Run from the repository root. Set CONTROL_CLI, BUILD_IDENTITY, KERNELS and
+CAPTURE_ROOT from the selected capture metadata, and choose a fresh output
+directory for a new campaign:
 
 ```sh
 ironvenv/bin/python utilities/prefill-block/pipeline_campaign.py \
-  --cli Models/qwen38-27b/pr4a-correctness/native-cli/open_qwen36_cli \
-  --build-identity Models/qwen38-27b/pr4a-correctness/native-cli/build-identity.json \
-  --kernels Models/qwen38-27b/pr4a-hardware/kernels-model \
-  --out Models/qwen38-27b/pr4a-hardware/campaign-new
+  --cli "$CONTROL_CLI" \
+  --build-identity "$BUILD_IDENTITY" \
+  --kernels "$KERNELS" \
+  --out "$CAPTURE_ROOT/campaign-new"
 ironvenv/bin/python utilities/prefill-block/pipeline_summary.py \
-  --root Models/qwen38-27b/pr4a-hardware \
+  --root "$CAPTURE_ROOT" \
   --out specs/open-engine/reports/qwen38-deltanet-pipeline-performance.json
 ```
 
@@ -224,8 +226,8 @@ was merged. Skipped capabilities are not acceptance passes. No kernel build,
 new model support claim, speculative implementation, push or merge is part of
 this work.
 
-Before a PR4B decision can become GO: resolve split-half versus allocation/reuse
-attribution, quantify serialization separately if a sub-percent effect matters,
+The profiling prerequisites for duplicate-split acceptance are: resolve split-half
+versus allocation/reuse attribution, quantify serialization separately if a sub-percent effect matters,
 and tighten environmental/power controls enough to discriminate the roughly 2%
 conditional opportunity. A CPU-versus-wait claim additionally requires directly
 verified phase accounting. No optimization is implemented by this report.

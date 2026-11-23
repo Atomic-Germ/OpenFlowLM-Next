@@ -1,13 +1,14 @@
-# PR4A instrumentation correctness gate
+# Instrumentation correctness gate
 
 ## Scope
 
 This gate covers instrumentation, the synthetic fold harness and capture
 validation. It changes no inference arithmetic, kernel, precision, routing
 default or oracle threshold. No NPU inference, new performance campaign, or long
-synthetic timing campaign runs in this iteration. PR4B is not implemented.
+synthetic timing campaign is included in this gate. Production duplicate-split
+optimization is outside its scope.
 
-## Review-resolution matrix
+## Instrumentation correctness requirements
 
 | Requirement | Implementation | Executable gate |
 |---|---|---|
@@ -88,33 +89,33 @@ different measured snapshots, even when the path is identical.
 
 ## CPU-only reproduction
 
-From the repository root:
+From the repository root, set BUILD_DIR to a fresh native CLI build directory:
 
 ```sh
 ironvenv/bin/python -m pytest -q \
   specs/open-engine/tests/test_fold_instrumentation.py \
   specs/open-engine/tests/test_pipeline_capture.py \
-  specs/open-engine/tests/test_qwen38_pipeline_report.py \
   specs/open-engine/tests/test_layer_profile.py
 ironvenv/bin/python -m pytest -q specs/
-bash -c '. utilities/env.sh >/dev/null; utilities/prefill-block/build-cli.sh Models/qwen38-27b/pr4a-correctness/native-cli'
+bash -c '. utilities/env.sh >/dev/null; utilities/prefill-block/build-cli.sh "$1"' bash "$BUILD_DIR"
 ```
 
 The portable tests compile and run only a description of benchmark shapes, not
 the long timing campaign. They derive the reference shapes from the checked-in
 recipe/spec and do not require model weights.
 
-A read-only historical audit, expected to return nonzero for legacy evidence:
+A read-only historical audit, expected to return nonzero for legacy evidence.
+Set the three capture-directory variables from the retained evidence inventory:
 
 ```sh
 ironvenv/bin/python utilities/prefill-block/pipeline_evidence.py \
-  Models/qwen38-27b/pr4a/prefill-t{1,2,3,4,5} \
-  Models/qwen38-27b/pr4a/prefill-fold2 \
-  Models/qwen38-27b/pr4a/decode-g
+  "$LEGACY_PREFILL_CAPTURE" \
+  "$LEGACY_FOLD_CAPTURE" \
+  "$LEGACY_DECODE_CAPTURE"
 ```
 
-The audit example uses Bash brace expansion. It does not run the model or change
-raw captures. Settings are checked with the repository's scratch merged-tree
+The audit does not run the model or change raw captures. Settings are checked
+with the repository's scratch merged-tree
 workflow, against the recorded target revision, after committing the source gate.
 
 ## Results and limits
@@ -122,8 +123,8 @@ workflow, against the recorded target revision, after committing the source gate
 Host verification: Linux 7.0.0-44-generic, GCC 15.2, Python 3.14. The standalone
 CLI uses the existing build helper and its strict host-arithmetic flags, the
 from-source XRT development headers and the installed XRT coreutil library.
-No NPU inference is part of these checks. Logs live under
-`Models/qwen38-27b/pr4a-correctness/`.
+No NPU inference is part of these checks. Log locations are retained in the
+build and capture metadata.
 
 | Check | Result |
 |---|---|
@@ -170,5 +171,5 @@ predicted from it, and its changed fixtures/shape have no new timing measurement
 Zero fold timestamp reads is an instrumentation contract, not a measured claim of
 zero end-to-end overhead. Matched NPU overhead measurements, model-state/reset and
 prefill/decode acceptance, native Windows verification, and any new performance
-report remain **NOT MEASURED**. Stop at this gate; a subsequent review is required
-before a new NPU campaign or PR4B.
+report remain **NOT MEASURED** by this gate. Separate hardware profiling and
+duplicate-split acceptance are required before a production speedup claim.

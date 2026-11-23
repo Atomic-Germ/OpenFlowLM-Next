@@ -1,4 +1,4 @@
-"""Performance plan PR #1: where a prefill's time goes, layer by layer.
+"""Per-layer attribution: where a prefill's time goes, layer by layer.
 
 The engine keeps a running `StepTiming` over a whole prompt or block, so it can say "the
 host stages cost 12 s" but not "layer 41 costs twice what layer 40 does". `OFLM_OPEN_PROFILE`
@@ -395,7 +395,7 @@ def main() -> int:
     out = a.out or (HERE / 'runs' / f'layer-profile-{a.tokens}-{stamp}')
     out.mkdir(parents=True)
     result = dict(tool='prefill-block-layer-profile', version=1,
-                  gate='performance plan PR #1: per-layer attribution, not a throughput claim',
+                  gate='per-layer attribution, not a throughput claim',
                   model_acceptance=False, cli=str(O.CLI), kernels=str(O.KERNELS),
                   started=stamp, prompt_tokens=a.tokens, layers=a.layers, pmode=a.pmode,
                   conditions_start=conditions(),

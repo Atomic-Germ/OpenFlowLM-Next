@@ -1,7 +1,7 @@
-# PR4B bounded host-fold experiment protocol
+# Duplicate-split experiment protocol
 
 This protocol is fixed before hardware correctness or performance collection.
-Control base: `ad867144` (committed PR4A profiling). Branch:
+Control base: `ad867144` (committed host-fold profiling). Branch:
 `perf/npu-host-fold-dedup`. Historical evidence remains separate.
 
 ## Only candidate

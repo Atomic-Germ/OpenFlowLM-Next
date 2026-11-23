@@ -62,7 +62,8 @@ def campaign(root):
                     print(dest.name, rec['prompt_wall_ms'], rec['generated_ms_per_token'], flush=True)
                 E.require(pair['original']['generated_ids'] == pair['on']['generated_ids'],
                           'timing greedy IDs differ')
-        C.write_json(out / 'completed.json', dict(completed=True, measured_pairs=32))
+        C.write_json(out / 'completed.json', dict(completed=True,
+                     measured_pairs=sum(reps for _, _, _, reps in SCENARIOS)))
     except Exception as exc:
         C.write_json(out / 'stopped.json', dict(error=repr(exc), completed=False,
             instruction='No retry or recovery; inspect retained raw logs; control hardware failure requires operator'))

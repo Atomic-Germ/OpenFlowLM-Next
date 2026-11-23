@@ -1,4 +1,4 @@
-"""Inventory the bounded PR4B attempt without repairing or replacing raw evidence."""
+"""Inventory the bounded duplicate-split attempt without repairing or replacing raw evidence."""
 import argparse
 import json
 from pathlib import Path
@@ -109,9 +109,12 @@ def blocked_continuation(base, report):
     old_text = (history / 'qwen38-host-fold-dedup.md').read_text()
     machine_build = old_text.split('## Machine and measurement conditions\n', 1)[1].split(
         '## Hardware correctness before timing', 1)[0]
+    machine_build = re.sub(r'\bPR\s*#?\s*\d+[A-Z]?\b', 'host-fold profiling', machine_build)
+    machine_build = re.sub(r'`Models/[^`]+` and `candidate/`',
+        'the control and candidate archive paths listed in the JSON report', machine_build)
     correctness = old_text.split('## Hardware correctness before timing\n', 1)[1].split(
         '## Timing observations:', 1)[0]
-    report.write_text(f'''# PR4B bounded host-fold deduplication hardware experiment
+    report.write_text(f'''# Bounded duplicate-split hardware experiment
 
 ## Decision: KEEP DRAFT — hardware prerequisite blocked
 
@@ -143,7 +146,7 @@ output copies and FP32 `(a+b)+(c+d)` grouping remain unchanged. The opt-in stays
 OFF by default. Product/sum arithmetic and workspace ownership are unchanged;
 there is no separate allocation-strategy refactor.
 
-The default-OFF candidate is committed as c5d20c85; PR4A evidence is committed
+The default-OFF candidate is committed as c5d20c85; host-fold profiling evidence is committed
 as ad867144. The narrow production changes are
 [the prepared-input fold helper](../../../src/open_qwen36/prefill_precision.hpp:51),
 [the Core opt-in and call site](../../../src/open_qwen36/core.cpp:622), and
@@ -196,10 +199,10 @@ The explicit selection in JSON retains original pairs 0/1 and reserves exactly
 three fresh pairs 2/3/4 under resume-prefill256 names, after one excluded restart
 warmup. Original pair 2 OFF remains an excluded unpaired observation. Original
 pair 2 ON remains invalid: final process metadata is absent and is never
-reconstructed, even though its timer inequality is now structurally valid.
+reconstructed. Its valid timer inequality does not replace missing metadata.
 The original warmup, failed raw files, selection and conditions remain unchanged;
-the pre-continuation inventory verifies their bytes. Prior report snapshots are
-archived separately under Models before current reports are rewritten.
+the pre-continuation inventory verifies their bytes. Archived report snapshots
+under Models preserve the evidence available before continuation.
 
 Five pairs each of 512/1024 prefill and 32-prompt plus 32 generated decode steps,
 each after one excluded scenario warmup, remain pending behind correctness.
@@ -219,14 +222,13 @@ and before the prefill boundary. Exact log/profile timing agreement, layer sums,
 finite checks, labels, request/fold counts and generation checks are preserved.
 These are scope checks, not relaxed numerical or performance thresholds.
 
-### Rejected experiments / hypotheses
+### Timer scope and unusable observation
 
-Symmetric timer equality is rejected as a structural hypothesis: the retained
-invalid ON attempt has inner total 29490.778 ms and outer 29493 ms, but excluded
-serialization/flush/deallocation/printing work has no 2 ms upper bound. The old
-rejection does not establish a bad timing measurement. Its absent final process
-metadata independently makes it unusable; correcting the inequality cannot
-recover that metadata. No sample is relabelled or accepted retroactively.
+The retained invalid ON attempt has inner total 29490.778 ms and outer 29493 ms.
+Excluded serialization/flush/deallocation/printing work has no 2 ms upper bound,
+so symmetric timer equality is not a valid scope requirement. The attempt is
+unusable because final process metadata is absent. A valid timer inequality does
+not replace missing capture metadata; this observation remains excluded.
 
 ## Application/server and verification
 
@@ -241,13 +243,13 @@ Full 64-layer CLI correctness is scoped evidence, not full-application acceptanc
 Pre-hardware focused CPU tests: 322 passed. Final focused result:
 {record['tests']['focused']['summary']}. Final portable result:
 {record['tests']['portable']['summary']}. Skips are not passes. Settings CI:
-{record['tests']['settings_ci']['status']}. The earlier dirty-tree refusal is
-retained separately and is not counted as a pass.
+{record['tests']['settings_ci']['status']}. Only the clean committed-tree check
+counts as a pass; the retained dirty-tree refusal is not acceptance evidence.
 Exact test logs, full commands/environments, build IDs, runtime hashes, original
 capture references and continuation tool hashes are in JSON and retained local
-evidence. No further production optimization, default promotion, push, merge or
-rebase is performed. The final evidence/tooling commit is separate from the
-already committed candidate and PR4A snapshot.
+evidence. The candidate commit c5d20c85 and host-fold profiling commit ad867144 identify
+the production and profiling snapshots independently of acceptance tooling. No
+further production optimization or default promotion is included in this gate.
 ''')
     print(report)
 
@@ -350,7 +352,7 @@ def generate(base, report):
     table = '\n'.join(f"| {r['rep'] if not r['warmup'] else 'warmup'} | {r['arm']} | "
         f"{r['prefill_ms']:.0f} | {r['fold_ms']['split_ms']:.3f} | {r['fold_ms']['total_ms']:.3f} | "
         f"{r['rss_bytes']/1024**2:.3f} | {r['hwm_bytes']/1024**2:.3f} |" for r in rows)
-    report.write_text(f'''# PR4B bounded host-fold deduplication hardware experiment
+    report.write_text(f'''# Bounded duplicate-split hardware experiment
 
 ## Decision: KEEP DRAFT
 
@@ -388,15 +390,15 @@ available before load and requires no existing accelerator client.
 
 Control revision ad8671440c9c3ab3671a00aa1cf9bfe962a210dc and candidate revision
 c5d20c85defced034d8f2912953f10a2acf97969 are fresh git archives under
-`Models/qwen38-27b/pr4b/control/` and `candidate/`. Each archive's own native
+the control and candidate archive paths listed in the JSON report. Each archive's own native
 build helper compiles the CLI. The known per-unit AVX2/FMA and block-host
 `-ffp-contract=off` flags are unchanged. Source files are read-only after build.
 Identity version 1 records full revision, executable digest, argv, nonempty
 absolute source/build-input inventories, compiler version, XRT headers/libraries,
 and equal before/after input snapshots. Native execution uses installed XRT.
-Existing PR4A binaries/evidence and production kernels are untouched.
+Existing profiling binaries/evidence and production kernels are untouched.
 
-The model is the existing Qwen3.8-27B-NPU2 and the kernel tree is the PR4A
+The model is the existing Qwen3.8-27B-NPU2 and the kernel tree is the profiling
 95-file production-equivalent tree excluding self-loop. Per-run snapshots bind
 model/kernel contents, identities and executable; mappings attest live libraries.
 The capture helper used for correctness is preserved by its exact recorded hash
@@ -491,8 +493,8 @@ No commit or stash is made to bypass it.
 Build commands (fresh output directories required):
 
 ```sh
-python3 utilities/prefill-block/fold_dedup_build.py --revision ad867144 --out Models/qwen38-27b/pr4b/control
-python3 utilities/prefill-block/fold_dedup_build.py --revision c5d20c85 --out Models/qwen38-27b/pr4b/candidate
+python3 utilities/prefill-block/fold_dedup_build.py --revision ad867144 --out "$BUILD_ROOT/control"
+python3 utilities/prefill-block/fold_dedup_build.py --revision c5d20c85 --out "$BUILD_ROOT/candidate"
 ironvenv/bin/python utilities/prefill-block/fold_dedup_experiment.py correctness
 ironvenv/bin/python utilities/prefill-block/fold_dedup_experiment.py timing
 ```

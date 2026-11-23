@@ -1,4 +1,4 @@
-"""Fail-closed PR4A evidence validation; never rewrites raw captures or reports.
+"""Fail-closed host-fold profiling evidence validation; never rewrites raw captures or reports.
 
 Build identity is a caller-trusted build-time attestation, not a git HEAD guess:
 version=1, executable_sha256, source_revision, build_command (argv), source_files

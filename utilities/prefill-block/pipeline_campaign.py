@@ -1,4 +1,4 @@
-"""Matched PR4A profiling campaign; production inference is unchanged.
+"""Matched host-fold profiling campaign; production inference is unchanged.
 
 Enabled samples use pipeline_capture v2. Disabled samples retain a separate
 schema: no missing profile rows or labels are synthesized. Stops on any failure.
