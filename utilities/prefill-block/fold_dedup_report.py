@@ -73,6 +73,14 @@ def blocked_continuation(base, report):
         if entry.get('valid'):
             entry['audit_scope'] = ('retained original accepted audit; raw bytes verified unchanged; '
                                     'not replayed with the modified validator')
+            audit = entry['audit']
+            # Full mapping samples and source inventories stay in hashed captures.
+            # Keep identities here without duplicating every live-process sample.
+            entry['audit'] = {k: audit[k] for k in (
+                'valid', 'errors', 'capture_metadata_sha256', 'version', 'phase',
+                'real_prompt_tokens', 'generated_tokens', 'command', 'argv', 'binary',
+                'raw_hashes') if k in audit}
+            entry['audit']['runtime'] = {k: audit['runtime'][k] for k in ('before', 'after')}
         if entry['name'] == 'prefill-256-2-on':
             entry['reason'] = 'invalid: missing final process metadata; structural timer fix does not restore it'
     for arm in ('control', 'candidate'):

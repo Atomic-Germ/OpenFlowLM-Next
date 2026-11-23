@@ -198,7 +198,7 @@ Full 64-layer CLI correctness is scoped evidence, not full-application acceptanc
 Pre-hardware focused CPU tests: 322 passed. Final focused result:
 329 passed in 2.22s. Final portable result:
 2930 passed, 172 skipped in 66.97s (0:01:06). Skips are not passes. Settings CI:
-NOT RUN: dirty-tree refusal; parent commit required. The earlier dirty-tree refusal is
+PASS: clean committed-tree target merge. The earlier dirty-tree refusal is
 retained separately and is not counted as a pass.
 Exact test logs, full commands/environments, build IDs, runtime hashes, original
 capture references and continuation tool hashes are in JSON and retained local
