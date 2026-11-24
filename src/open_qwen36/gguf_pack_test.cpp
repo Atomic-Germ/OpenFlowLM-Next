@@ -149,6 +149,51 @@ BlocksQ6K make_blocks_q6k(unsigned rows, unsigned cols, std::mt19937_64& rng) {
     return b;
 }
 
+/// Q5_0 / Q5_1: 22 / 24 bytes per 32 values, with the fifth bits in a trailing
+/// u32 (bit j for the low-nibble of nibble byte j, bit j+12 for its high one).
+/// llama.cpp emits the values INTERLEAVED (2*j, 2*j+1); this fixture encodes
+/// that law independently of the reader it tests.
+struct BlocksQ5 {
+    unsigned rows, cols, blk, type;
+    std::vector<uint8_t> bytes;
+    std::vector<float> values;
+};
+
+BlocksQ5 make_blocks_q5(unsigned rows, unsigned cols, unsigned type, std::mt19937_64& rng) {
+    BlocksQ5 b;
+    b.rows = rows;
+    b.cols = cols;
+    b.type = type;
+    b.blk = type == 6 ? 22 : 24;                      // q5_0 / q5_1
+    b.bytes.assign(static_cast<size_t>(rows) * (cols / 32) * b.blk, 0);
+    b.values.resize(static_cast<size_t>(rows) * cols);
+    for (unsigned r = 0; r < rows; ++r) {
+        for (unsigned bl = 0; bl < cols / 32; ++bl) {
+            uint8_t* p = b.bytes.data() + (static_cast<size_t>(r) * (cols / 32) + bl) * b.blk;
+            const uint16_t dh = f32_to_f16(0.01f + 0.02f * static_cast<float>(rng() % 1000) / 1000.f);
+            const uint16_t mh = type == 7 ? f32_to_f16(-0.05f + 0.04f * static_cast<float>(rng() % 1000) / 1000.f) : 0;
+            std::memcpy(p, &dh, 2);
+            if (type == 7) std::memcpy(p + 2, &mh, 2);
+            const float d = fp16_to_f32(dh), m = type == 7 ? fp16_to_f32(mh) : 0.f;
+            uint32_t qh = 0;
+            for (unsigned j = 0; j < 16; ++j) {
+                const uint8_t lo = static_cast<uint8_t>(rng() % 16);
+                const uint8_t hi = static_cast<uint8_t>(rng() % 16);
+                const bool blo = (rng() & 1) != 0, bhi = (rng() & 1) != 0;
+                p[(type == 7 ? 4 : 2) + j] = static_cast<uint8_t>(lo | (hi << 4));
+                if (blo) qh |= 1u << j;
+                if (bhi) qh |= 1u << (j + 16);       // read back with (qh >> (j+12)) & 0x10
+                const int v0 = lo | (blo ? 0x10 : 0), v1 = hi | (bhi ? 0x10 : 0);
+                float* y = b.values.data() + static_cast<size_t>(r) * cols + bl * 32 + 2 * j;
+                y[0] = type == 7 ? d * static_cast<float>(v0) + m : d * static_cast<float>(v0 - 16);
+                y[1] = type == 7 ? d * static_cast<float>(v1) + m : d * static_cast<float>(v1 - 16);
+            }
+            std::memcpy(p + b.blk - 4, &qh, 4);
+        }
+    }
+    return b;
+}
+
 /// A one-tensor GGUF carrying a single Q6_K tensor (rows x 256).
 std::string write_gguf_q6k(const fs::path& dir, const BlocksQ6K& b) {
     std::vector<uint8_t> f;
@@ -274,13 +319,19 @@ struct SynthTensor {
 };
 
 std::string write_gguf_tensors(const fs::path& dir, const std::string& file,
-                               const std::vector<SynthTensor>& ts) {
+                               const std::vector<SynthTensor>& ts,
+                               uint32_t split_no = 0, uint32_t split_count = 0) {
+    const bool split = split_count > 1;
     std::vector<uint8_t> f;
     f.insert(f.end(), {'G', 'G', 'U', 'F'});
     put_u32(f, 3);
     put_u64(f, ts.size());
-    put_u64(f, 1);
+    put_u64(f, split ? 3 : 1);
     put_kv_str(f, "general.architecture", "qwen35moe");
+    if (split) {
+        put_kv_u32(f, "split.no", split_no);
+        put_kv_u32(f, "split.count", split_count);
+    }
     for (const auto& t : ts) {
         put_str(f, t.name);
         put_u32(f, static_cast<uint32_t>(t.dims.size()));
@@ -298,7 +349,7 @@ std::string write_gguf_tensors(const fs::path& dir, const std::string& file,
     }
     // walk the header to the offset field of each tensor info
     size_t p = 4 + 4 + 8 + 8;
-    {
+    for (uint32_t kv = 0; kv < (split ? 3u : 1u); ++kv) {
         uint64_t ln;
         uint32_t ty;
         std::memcpy(&ln, f.data() + p, 8);
@@ -737,6 +788,206 @@ int main() {
         }
         std::printf("%s embed_row Q6_K (both super-block halves bit-exact)\n", bad6 ? "FAIL" : "ok");
         if (bad6) return 1;
+    }
+
+    // ---- fl_q4: the generic GGUF expert pack, with a padded destination slot
+    // (LFM2.5-8B-A1B's 1792 real rows into a 2048-row band-aligned slot). The
+    // op reads only `rows` real rows from each expert; the rest of the slot stays
+    // zero, so a padded band contributes nothing to the GEMV.
+    {
+        const unsigned cols = 256, real = 128, padded = 192, E = 2;  // real 2 bands, padded 3
+        Blocks ex = make_blocks(real * E, cols, "Q4_0", rng);
+        GgufFile gf(write_gguf_tensors(dir, "test-flq4.gguf",
+            {{"blk.0.ffn_gate_exps.weight", {cols, real, E}, 2, ex.bytes}}));
+        // one 2-D reference file per expert (its own rows, so std_perm_gguf can
+        // read them without a chunk0 offset into a 3-D tensor)
+        std::vector<std::unique_ptr<GgufFile>> refs;
+        for (unsigned e = 0; e < E; ++e) {
+            const size_t row_bytes = static_cast<size_t>(cols / 32) * 18;   // Q4_0: 18 B per 32-value block
+            std::vector<uint8_t> bytes(ex.bytes.begin() + static_cast<size_t>(e) * real * row_bytes,
+                                       ex.bytes.begin() + static_cast<size_t>(e + 1) * real * row_bytes);
+            refs.emplace_back(new GgufFile(write_gguf_tensors(dir, "test-flq4-ref" + std::to_string(e) + ".gguf",
+                {{"blk.0.ffn_gate_exps.weight", {cols, real}, 2, bytes}})));
+        }
+        PackOp op;
+        op.op = "fl_q4";
+        op.tensor = "blk.0.ffn_gate_exps.weight";
+        op.rows = real;
+        op.in_dim = cols;
+        op.experts = E;
+        op.n_total = real;                 // source stride: expert e starts at row e*real
+        const size_t band = 2 * (cols / 256) * 5120;   // one 64-row band
+        op.expert_bytes = (padded / 64) * band;
+        // the real packer zeroes the whole pool before apply (pools.cpp), so
+        // the padded lanes start at zero and stay zero
+        std::vector<uint8_t> out(E * op.expert_bytes, 0);
+        pools::apply(op, gf, 0, out.data(), out.size(), 5120);
+
+        // fl_q4's byte law for the real rows IS std_perm_gguf's (both use
+        // gguf_chunk's std_perm raster). Pack each expert's rows through the
+        // reference op with the matching chunk0 and compare byte-for-byte.
+        const size_t nch = static_cast<size_t>(real) * cols / (32 * 256);
+        size_t bad = 0;
+        for (unsigned e = 0; e < E; ++e) {
+            PackOp ref;
+            ref.op = "std_perm_gguf";
+            ref.tensor = op.tensor;
+            ref.in_dim = cols;
+            ref.nch = nch;
+            std::vector<uint8_t> plain(nch * 5120, 0);
+            pools::apply(ref, *refs[e], 0, plain.data(), plain.size(), 5120);
+
+            const uint8_t* dst = out.data() + e * op.expert_bytes;
+            for (size_t c = 0; c < nch; ++c) {
+                const uint8_t* want = plain.data() + c * 5120;
+                const size_t b = c / 2, half = c % 2;
+                const uint8_t* got = dst + b * band + half * 5120;
+                if (std::memcmp(got, want, 5120) != 0) ++bad;
+            }
+            // the pad bands (rows real..padded-1) stay zero bytes.
+            for (size_t i = (real / 64) * band; i < op.expert_bytes; ++i)
+                if (dst[i] != 0) { ++bad; break; }
+        }
+        std::printf("%s fl_q4 GGUF expert pack (padded slot, exact codes + zero pad)\n", bad ? "FAIL" : "ok");
+        if (bad) return 1;
+    }
+
+    // ---- Q5_0 / Q5_1: the 5-bit families Unsloth mixes into UD-Q4_K_XL
+    // (Q4_K on the gates/ups, Q5_1 on the MoE downs). A synthetic block checks
+    // the reader's interleaved fifth-bit order; a second GGUF carrying the same
+    // logical values as Q4_1 checks that the requant pack path sees those values.
+    for (unsigned ty : {6u, 7u}) {
+        const std::string label = ty == 6 ? "Q5_0" : "Q5_1";
+        BlocksQ5 q5 = make_blocks_q5(4, 256, ty, rng);
+        GgufFile g5e(write_gguf_tensors(dir, "test-" + label + "-emb.gguf",
+            {{"token_embd.weight", {256, 4}, ty, q5.bytes}}));
+        std::vector<float> row(256);
+        bool bad = false;
+        for (unsigned r = 0; r < 4 && !bad; ++r) {
+            g5e.embed_row("token_embd.weight", r, 256, row.data());
+            for (unsigned i = 0; i < 256; ++i)
+                if (f32_bits(row[i]) != f32_bits(q5.values[static_cast<size_t>(r) * 256 + i])) {
+                    std::printf("FAIL embed_row(%s)[r%u i%u]: got %.9g want %.9g\n",
+                                label.c_str(), r, i, row[i], q5.values[static_cast<size_t>(r) * 256 + i]);
+                    bad = true;
+                    break;
+                }
+        }
+        std::printf("%s embed_row %s (fifth bits, interleaved order)\n", bad ? "FAIL" : "ok", label.c_str());
+        if (bad) return 1;
+
+        const unsigned rows = 64, cols = 512, nb = cols / 32;
+        const uint16_t dh = f32_to_f16(1.f), mh = f32_to_f16(ty == 6 ? -16.f : 0.f);
+        const size_t b5 = ty == 6 ? 22 : 24;
+        std::vector<uint8_t> bytes5(static_cast<size_t>(rows) * nb * b5, 0);
+        std::vector<uint8_t> bytes41(static_cast<size_t>(rows) * nb * 20, 0);
+        for (unsigned r = 0; r < rows; ++r) {
+            for (unsigned b = 0; b < nb; ++b) {
+                uint8_t* p5 = bytes5.data() + (static_cast<size_t>(r) * nb + b) * b5;
+                uint8_t* p4 = bytes41.data() + (static_cast<size_t>(r) * nb + b) * 20;
+                std::memcpy(p5, &dh, 2);
+                if (ty == 7) std::memcpy(p5 + 2, &mh, 2);
+                std::memcpy(p4, &dh, 2);
+                std::memcpy(p4 + 2, &mh, 2);
+                for (unsigned j = 0; j < 16; ++j) {
+                    const uint8_t lo = static_cast<uint8_t>((2 * j) % 16);
+                    const uint8_t hi = static_cast<uint8_t>((2 * j + 1) % 16);
+                    p5[(ty == 7 ? 4 : 2) + j] = static_cast<uint8_t>(lo | (hi << 4));
+                    p4[4 + j] = static_cast<uint8_t>(j | (j << 4));
+                }
+                // qh = 0: the fifth bits add nothing, so both files hold 0..15.
+            }
+        }
+        GgufFile g5p(write_gguf_tensors(dir, "test-" + label + "-pack.gguf",
+            {{"blk.0.attn_q.weight", {cols, rows}, ty, bytes5}}));
+        GgufFile g41(write_gguf_tensors(dir, "test-" + label + "-ref.gguf",
+            {{"blk.0.attn_q.weight", {cols, rows}, 3, bytes41}}));
+        PackOp op5;
+        op5.op = "std_perm_gguf";
+        op5.tensor = "blk.0.attn_q.weight";
+        op5.in_dim = cols;
+        op5.nch = 64ull * cols / (32 * 256);
+        std::vector<uint8_t> p5(static_cast<size_t>(op5.nch) * 6144, 0), p41(p5.size(), 0);
+        pools::apply(op5, g5p, 0, p5.data(), p5.size(), 6144);
+        pools::apply(op5, g41, 0, p41.data(), p41.size(), 6144);
+        if (p5 != p41) {
+            size_t at = 0;
+            while (at < p5.size() && p5[at] == p41[at]) ++at;
+            std::printf("FAIL std_perm_gguf %s requant: byte %zu %02x != %02x\n",
+                        label.c_str(), at, p5[at], p41[at]);
+            return 1;
+        }
+        std::printf("ok    std_perm_gguf %s requant (same pool bytes as Q4_1)\n", label.c_str());
+    }
+
+    // ---- split GGUF: two shards, installed as model.gguf + numbered sibling,
+    // and the original Name-00001-of-000NN.gguf spelling. Both open as ONE file.
+    {
+        Blocks s1 = make_blocks(2, 64, "Q8_0", rng), s2 = make_blocks(2, 64, "Q8_0", rng);
+        SynthTensor a{"blk.0.attn_q.weight", {64, 2}, 8, s1.bytes};
+        SynthTensor b{"blk.1.attn_q.weight", {64, 2}, 8, s2.bytes};
+        write_gguf_tensors(dir, "model.gguf", {a}, 1, 2);
+        write_gguf_tensors(dir, "model.gguf-00002-of-00002", {b}, 2, 2);
+        GgufFile gsplit((dir / "model.gguf").string());
+        if (gsplit.kv_str("split.count") != "2" || gsplit.tensor_names().size() != 2 ||
+            gsplit.tensor("blk.0.attn_q.weight").shard != 0 ||
+            gsplit.tensor("blk.1.attn_q.weight").shard != 1) {
+            std::printf("FAIL split GGUF index (metadata / tensor shards)\n");
+            return 1;
+        }
+        std::vector<float> row(64);
+        bool bad = false;
+        for (size_t t = 0; t < 2 && !bad; ++t) {
+            const Blocks& want = t ? s2 : s1;
+            const char* name = t ? "blk.1.attn_q.weight" : "blk.0.attn_q.weight";
+            for (unsigned r = 0; r < 2 && !bad; ++r) {
+                gsplit.embed_row(name, r, 64, row.data());
+                for (unsigned i = 0; i < 64; ++i)
+                    if (f32_bits(row[i]) != f32_bits(want.values[static_cast<size_t>(r) * 64 + i])) {
+                        std::printf("FAIL split embed_row(%s)[r%u i%u]\n", name, r, i);
+                        bad = true;
+                        break;
+                    }
+            }
+        }
+        std::printf("%s split GGUF (installed model.gguf + sibling; rows from both shards)\n",
+                    bad ? "FAIL" : "ok");
+        if (bad) return 1;
+
+        write_gguf_tensors(dir, "Source-00001-of-00002.gguf", {a}, 1, 2);
+        write_gguf_tensors(dir, "Source-00002-of-00002.gguf", {b}, 2, 2);
+        GgufFile graw((dir / "Source-00001-of-00002.gguf").string());
+        bool badraw = false;
+        for (size_t t = 0; t < 2 && !badraw; ++t) {
+            const Blocks& want = t ? s2 : s1;
+            const char* name = t ? "blk.1.attn_q.weight" : "blk.0.attn_q.weight";
+            for (size_t r = 0; r < 2 && !badraw; ++r) {
+                graw.embed_row(name, r, 64, row.data());
+                for (size_t i = 0; i < 64; ++i)
+                    if (f32_bits(row[i]) != f32_bits(want.values[r * 64 + i])) {
+                        badraw = true;
+                        break;
+                    }
+            }
+        }
+        std::printf("%s split GGUF (source Name-NNNNN-of-NNNNN spelling)\n", badraw ? "FAIL" : "ok");
+        if (badraw) return 1;
+
+        // Unsloth numbers split.no from ZERO. Same file names, same order; only
+        // the metadata convention differs, and the reader must accept it.
+        write_gguf_tensors(dir, "Unsloth-00001-of-00002.gguf", {a}, 0, 2);
+        write_gguf_tensors(dir, "Unsloth-00002-of-00002.gguf", {b}, 1, 2);
+        GgufFile guns((dir / "Unsloth-00001-of-00002.gguf").string());
+        bool badzero = guns.tensor_names().size() != 2;
+        for (size_t t = 0; t < 2 && !badzero; ++t) {
+            const Blocks& want = t ? s2 : s1;
+            const char* name = t ? "blk.1.attn_q.weight" : "blk.0.attn_q.weight";
+            guns.embed_row(name, 0, 64, row.data());
+            for (unsigned i = 0; i < 64; ++i)
+                if (f32_bits(row[i]) != f32_bits(want.values[i])) { badzero = true; break; }
+        }
+        std::printf("%s split GGUF (Unsloth 0-based split.no)\n", badzero ? "FAIL" : "ok");
+        if (badzero) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");

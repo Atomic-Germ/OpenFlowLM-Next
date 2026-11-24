@@ -10,12 +10,16 @@
 /// open_kernels/gguf_pool.py), so the pool never requantizes or narrows.
 ///
 /// Matmul tensors the pack ops accept: Q4_0 / Q4_1 exact, plus a host
-/// requant for Q8_0 / Q4_K / Q6_K (std_perm_gguf; Q8_0 also serves the q8
-/// lm_head, MoE families). Anything else (other K-quants, IQ quants) is
-/// refused at pack time with a pointer to q4nx-build. The embedding row is
-/// dequantized per token on the host; Q4_K and Q6_K are supported there
-/// (they are what most quants use for token_embd), mirroring llama.cpp's
-/// dequant loops.
+/// requant for Q5_0 / Q5_1 / Q8_0 / Q4_K / Q5_K / Q6_K / IQ4_NL / IQ4_XS
+/// (std_perm_gguf; Q8_0 also serves the q8 lm_head, MoE families). Anything
+/// else is refused at pack time with a pointer to q4nx-build. The embedding
+/// row is dequantized per token on the host, mirroring llama.cpp's loops.
+///
+/// A split GGUF set is one logical file: the installed first shard is
+/// `model.gguf`, with siblings `model.gguf-00002-of-00004` etc. All shards are
+/// mapped and their tensor tables merged; each tensor remembers which shard
+/// holds its bytes. The original `Name-00002-of-00004.gguf` spelling is also
+/// accepted when a shard path is opened directly.
 #pragma once
 
 #include <cstddef>
@@ -41,7 +45,8 @@ public:
     struct TensorInfo {
         Type type = Type::F32;
         std::vector<uint64_t> dims;      // fastest first, as GGUF stores them
-        uint64_t offset = 0;             // relative to the (aligned) data section
+        uint64_t offset = 0;             // relative to the shard's aligned data section
+        uint32_t shard = 0;              // which mapped shard holds the bytes
         uint64_t nvalues() const { uint64_t n = 1; for (uint64_t d : dims) n *= d; return n; }
     };
 
@@ -97,10 +102,22 @@ public:
     static const char* type_name(Type t);
 
 private:
+    /// One mapped shard of a (possibly split) GGUF. Shard 0 carries the metadata
+    /// view; a single-file model has exactly one shard.
+    struct Shard {
+        std::string path;
+        const uint8_t* map = nullptr;
+        size_t size = 0;
+        size_t data_base = 0;
+#ifdef _WIN32
+        void* file = nullptr;
+        void* mapping = nullptr;
+#else
+        int fd = -1;
+#endif
+    };
     std::string path_;
-    const uint8_t* map_ = nullptr;
-    size_t map_size_ = 0;
-    size_t data_base_ = 0;
+    std::vector<Shard> shards_;
     std::map<std::string, TensorInfo> tensors_;
     bool sandwich_ = false;
     bool post_norm_ = false;
@@ -109,12 +126,9 @@ private:
     /// One row of `dim` values starting at `row`, in the tensor's own block layout.
     /// No bounds check: callers (embed_row, f32_all) decide what a row is.
     void dequant_row(const TensorInfo& t, size_t row, size_t dim, float* out) const;
-#ifdef _WIN32
-    void* file_ = nullptr;
-    void* mapping_ = nullptr;
-#else
-    int fd_ = -1;
-#endif
+    static void map_shard(const std::string& path, Shard& s);
+    static void unmap_shard(Shard& s);
+    static void drop_shard_pages(Shard& s);
 };
 
 }  // namespace open_qwen36

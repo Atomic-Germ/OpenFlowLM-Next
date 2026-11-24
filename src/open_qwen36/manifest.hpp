@@ -76,10 +76,20 @@ struct PackOp {
 
 /// One verb of a layer type's (or the tail's) program.
 struct Step {
-    std::string op;                          ///< run | moeroute2
+    std::string op;                          ///< run | moeroute2 | hy_route
     std::string kernel;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
+    /// hy_route (host router, between the mixer and the expert dispatch): sigmoid scores of
+    /// `router` (F32 [experts][hidden_real]) over xm (bf16 at a_xm); the top `r_topk` of
+    /// score + `router_bias` (F32 [experts]); their UNBIASED scores renormalised times
+    /// `r_scale` into slots 0..r_topk-1, then each `shared` pool expert at weight 1. The
+    /// weights (f32[r_slots]) go at a_w beside xm; the slots into kernel's fills.
+    uint64_t a_xm = 0, a_w = 0, hidden_real = 0, r_experts = 0, r_topk = 0, r_slots = 0;
+    std::string router, router_bias;
+    double r_scale = 1.0;
+    bool r_dense = false;
+    std::vector<uint32_t> shared;
     std::string fmt;                         ///< run, block route: "" = the q4_1 / bf16 GEMMs, "bfp16" = gemm_bfp16
                                              ///< (x packed bfp16, y c-tiled with `n_pad` rows)
     uint64_t n_pad = 0;                      ///< fmt bfp16: the weight's rows padded to a whole number of tile groups

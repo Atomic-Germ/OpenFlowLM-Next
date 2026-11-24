@@ -193,6 +193,15 @@ static void test_is_chat_model(const std::string& list_path) {
     ok(ml.is_model_supported("llama3.2:1b"), "precondition: llama3.2:1b is in the list");
     ok(is_chat_model("llama3.2:1b", ml), "llama3.2:1b IS a chat model");
 
+    // The GGUF-direct LFM hybrids (oflm add writes their GGUF architecture into
+    // details.family) resolve to the generic LFM2 adapter. A missing entry here
+    // is exactly the "family has no engine" refusal at `oflm run` startup.
+    {
+        const auto& fm = model_family_map();
+        ok(fm.count("lfm2moe") && fm.count("lfm3"),
+           "the LFM2.5 / LFM3 GGUF families resolve to an engine selector");
+    }
+
     // The two that passed is_model_supported() and were served by a renamed Llama3.
     for (const char* tag : {"embed-gemma:300m", "whisper-v3:turbo", "flux2-klein:4b"}) {
         if (!ml.is_model_supported(tag)) {

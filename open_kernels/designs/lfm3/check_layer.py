@@ -26,8 +26,9 @@ HERE = Path(__file__).resolve().parent
 OK = HERE.parents[1]
 sys.path.insert(0, str(OK))
 sys.path.insert(0, str(OK / "model"))
-from flint_gguf_reference import rms, rope, silu, attention  # noqa: E402
-from lfm3_gguf_reference import Gguf3, forward, inv_freq  # noqa: E402
+from lfm_gguf_ref import LfmGguf as Gguf3, attention, rope, silu  # noqa: E402
+from lfm3_gguf_reference import forward, inv_freq  # noqa: E402
+from replica_dense import rms  # noqa: E402
 from recipes import lfm3 as FR  # noqa: E402
 from recipes import flint_pack as P  # noqa: E402
 from recipes.load import spec_from_model_dir  # noqa: E402

@@ -47,7 +47,7 @@ endforeach()
 target_include_directories(manifest_test PRIVATE ${_inc})
 
 # vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
-add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
+add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp ../gguf/gguf_file.cpp)
 target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
 find_package(OpenMP REQUIRED)
 if(OpenMP_CXX_FOUND)

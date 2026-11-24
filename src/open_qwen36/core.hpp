@@ -711,6 +711,11 @@ void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
     /// honest one to add up once a dispatch has been running while the host did something else.
     std::pair<double, double> wait_run(Inflight& f);
     void route(Kern& k, int layer, uint64_t act_off);
+    /// HY V3 / LFM2.5's router on the host (manifest.hpp Step::hy_route).
+    void hy_route(const Step& s, int layer);
+    std::map<int, std::pair<std::vector<float>, std::vector<float>>> hy_router_;  ///< per layer: F32 router, bias
+    /// One non-run step of a layer program: hy_route on the host, else the device route.
+    void host_step(const Step& s, int layer);
     void log(const std::string& s) const;
 
     // ---- the block route's helpers (core.cpp)

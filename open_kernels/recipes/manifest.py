@@ -132,6 +132,11 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         m["manifest_version"] = GLU_MANIFEST_VERSION
     if has_attn_fa_prep(m["layer_types"]):
         m["manifest_version"] = PREP_MANIFEST_VERSION
+    # A family whose GGUF view is the manifest itself (LFM2.5 / LFM3: there is no q4nx
+    # container) and whose per-layer type names are not the spec's raw names.
+    finalize = getattr(F, "finalize_gguf_manifest", None)
+    if finalize:
+        finalize(spec, m)
     return m
 
 

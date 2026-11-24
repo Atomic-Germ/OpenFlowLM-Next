@@ -95,7 +95,7 @@ PackOp parse_op(const json& j, const std::string& where) {
     };
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_gemm" ||
         p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" || p.op == "expert_down_gguf" ||
-        p.op == "conv_transpose" ||
+        p.op == "conv_transpose" || p.op == "fl_q4" ||
         p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes" || p.op == "expert_stripes_gguf") {
@@ -113,6 +113,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
     else if (p.op == "expert_down" || p.op == "expert_down_gguf")
         need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
+    else if (p.op == "fl_q4") need_all({{"rows", p.rows}, {"in_dim", p.in_dim}});
     else if (p.op == "put") need_all({{"cap", p.cap}});
     else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}, {"in_dim", p.in_dim}});
     else if (p.op == "conv_transpose") need_all({{"taps", p.taps}, {"groups", p.groups}, {"width", p.width}});
@@ -142,6 +143,25 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
                 fail(where, "run " + st.kernel + ": epi glu / a h are bfp16 step options");
         } else if (st.op == "moeroute2") {
             st.act_off = get<uint64_t>(s, "act_off", where);
+        } else if (st.op == "hy_route") {
+            st.a_w = get<uint64_t>(s, "a_w", where);
+            st.r_slots = get<uint64_t>(s, "slots", where);
+            st.r_dense = s.value("dense", false);
+            if (!st.r_slots || st.r_slots > 16)
+                fail(where, "hy_route: slots must be 1..16 (the f32[16] weight record)");
+            if (!st.r_dense) {
+                st.a_xm = get<uint64_t>(s, "a_xm", where);
+                st.hidden_real = get<uint64_t>(s, "hidden_real", where);
+                st.router = get<std::string>(s, "router", where);
+                st.router_bias = get<std::string>(s, "bias", where);
+                st.r_experts = get<uint64_t>(s, "experts", where);
+                st.r_topk = get<uint64_t>(s, "topk", where);
+                st.r_scale = get<double>(s, "scale", where);
+                st.shared = s.value("shared", std::vector<uint32_t>{});
+                if (!st.hidden_real || !st.r_experts || !st.r_topk || st.r_topk > st.r_experts ||
+                    st.r_topk + st.shared.size() != st.r_slots)
+                    fail(where, "hy_route: hidden_real / experts / topk, and topk + shared must be the slots");
+            }
         } else {
             fail(where, "unknown program op '" + st.op + "'");
         }
@@ -157,8 +177,8 @@ void check_step(const Manifest& m, const Step& s, const std::string& where, cons
     if (it == m.kernels.end()) fail(where, std::string(what) + " names unknown kernel " + s.kernel);
     if (!it->second.weight_component.empty())
         fail(where, std::string(what) + ": low-weight kernel cannot be a standalone program step");
-    if (s.op == "moeroute2" && it->second.patch != "moeroute2")
-        fail(where, std::string(what) + ": moeroute2 on kernel " + s.kernel + ", whose patch is '" +
+    if ((s.op == "moeroute2" || s.op == "hy_route") && it->second.patch != "moeroute2")
+        fail(where, std::string(what) + ": " + s.op + " on kernel " + s.kernel + ", whose patch is '" +
                         (it->second.patch.empty() ? std::string("none") : it->second.patch) + "'");
 }
 

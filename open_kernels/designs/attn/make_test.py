@@ -63,6 +63,13 @@ def main() -> int:
     # types); the gate must too, or it tests a worker that is not the one that ships.
     G = for_spec(spec).geometry(spec)
     nh, kvh, hd, rot = G.NH, G.KVH, G.HD, G.ROT
+    # A family geometry may carry these (the dense recipe's does); a hybrid's
+    # may not, and then the family law gives them.
+    QKVB = bool(getattr(G, "QKVB", D.qkv_bias(spec)))
+    QKNORM_POST = bool(getattr(G, "QKNORM_POST", spec.qk_norm and spec.family in D.QKNORM_POST_ROPE))
+    # A gated family's final step multiplies the heads by sigmoid(gate), and the
+    # gate vector is one f32 per channel, streamed after the window.
+    GATED = bool(spec.attn_gate)
     # Gemma 4 rides build-new-spec's G4_KIND contract with dx.py: the probe builds
     # the family's geometry, so the geometry carries the layer type's own RoPE law
     # (sliding: full theta, denom ROT; global: proportional, theta full and a quarter
@@ -101,23 +108,29 @@ def main() -> int:
     # A q/k/v-bias family adds one bf16 bias per channel to q, k and v before
     # the norm and the rotation. The kernel streams them in head-major order
     # q | k | v, the same layout dx.py packs from consts.
-    bias_bytes = (nh * hd + 2 * kvh * hd) * 2 if G.QKVB else 0
+    bias_bytes = (nh * hd + 2 * kvh * hd) * 2 if QKVB else 0
     cfg = ["device", "xclbin a final.xclbin", "kernelx a a insts.bin",
            f"buf meta {len(meta)}", f"buf qg {nh * hd * 4}", f"buf kvn {2 * G.KVW * 4}",
            f"buf cache {a.rows * 2 * G.KVW * 2}"]
-    if G.QKVB:
+    if GATED:
+        cfg.append(f"buf gate {nh * hd * 4}")          # one f32 per channel, after the window
+    if QKVB:
         cfg.append(f"buf bias {bias_bytes}")
     cfg += [f"buf new {new_bytes + len(GUARD)}", f"buf og {og_bytes + len(GUARD)}"]
     files = ["final.xclbin", "insts.bin", "poison-new.bin", "poison-og.bin"]
     cases = []
 
-    def case(name: str, q, k, v, cache_k, cache_v):
+    def case(name: str, q, k, v, cache_k, cache_v, gate_scale=1.0):
         i = len(cases)
         qg = np.ascontiguousarray(q, np.float32)
         kvn = np.ascontiguousarray(np.concatenate([k, v], 0), np.float32)
         ck = np.ascontiguousarray(cache_k, bfloat16)
         cv = np.ascontiguousarray(cache_v, bfloat16)
-        if G.QKVB:
+        # the gate is a per-channel f32 vector the final step multiplies by
+        # sigmoid(g); gate_scale drives the saturated case past exp's range
+        gate = (np.ascontiguousarray(rng.normal(0, 1.0, (nh, hd)).astype(np.float32) * gate_scale)
+                if GATED else None)
+        if QKVB:
             bq = rng.uniform(-0.8, 0.8, (nh, hd)).astype(bfloat16)
             bk = rng.uniform(-0.8, 0.8, (kvh, hd)).astype(bfloat16)
             bv = rng.uniform(-0.8, 0.8, (kvh, hd)).astype(bfloat16)
@@ -127,15 +140,18 @@ def main() -> int:
                        v + bv.astype(np.float64))
         new, og = REF.decode(q, k, v, qn, kn, cs, ck, cv, nh=nh, kvh=kvh, hd=hd,
                              eps=spec.norm_eps, qk_norm=spec.qk_norm,
-                             post=bool(G.QKNORM_POST),
+                             post=QKNORM_POST,
                              interleaved=bool(spec.rope_interleaved),
                              pair=(G.ROPE_PAIR if gemma4 else None),
                              v_norm=bool(getattr(G, "VNORM", 0)),
-                             attn_scale=(G.SCALE if gemma4 else None))
+                             attn_scale=(G.SCALE if gemma4 else None),
+                             gate=(gate if GATED else None))
         cache = np.concatenate([ck, cv], 1)               # [rows, 2, KVH, HD]
         data_out = [("meta", meta), ("qg", qg), ("kvn", kvn),
                     ("ref-new", new), ("ref-og", og.astype(np.float32))]
-        if G.QKVB:
+        if GATED:
+            data_out.append(("gate", gate.view(np.uint8)))
+        if QKVB:
             data_out.append(("bias", np.concatenate([bq.ravel(), bk.ravel(), bv.ravel()]).view(np.uint8)))
         for prefix, data in data_out:
             f = out / f"{prefix}{i}.bin"
@@ -146,10 +162,13 @@ def main() -> int:
         files.append(f.name)
         cfg.extend([f"load cache cache{i}.bin", f"load meta meta{i}.bin", f"load qg qg{i}.bin",
                     f"load kvn kvn{i}.bin"])
-        if G.QKVB:
+        if GATED:
+            cfg.append(f"load gate gate{i}.bin")
+        if QKVB:
             cfg.append(f"load bias bias{i}.bin")
         cfg.extend(["load new poison-new.bin", "load og poison-og.bin",
-                    "run a meta qg kvn cache" + (" bias" if G.QKVB else "") + " new og",
+                    "run a meta qg kvn cache" + (" gate" if GATED else "") + (" bias" if QKVB else "")
+                    + " new og",
                     f"dump new new{i}.bin {new_bytes + len(GUARD)}",
                     f"dump og og{i}.bin {og_bytes + len(GUARD)}"])
         cases.append({"name": name})
@@ -170,7 +189,8 @@ def main() -> int:
          np.repeat(np.arange(1, kvh + 1, dtype=np.float32)[None, :, None], a.rows, 0).repeat(hd, 2))
     # 3. a saturated softmax: one row wins, so the running max must be right
     q, k, v = randn(nh, hd) * 40, randn(kvh, hd) * 40, randn(kvh, hd)
-    case("saturated", q, k, v, randn(a.rows, kvh, hd) * 40, randn(a.rows, kvh, hd))
+    case("saturated", q, k, v, randn(a.rows, kvh, hd) * 40, randn(a.rows, kvh, hd),
+         gate_scale=8.0)
     # 4. zero values: the output must be zero, not noise
     q, k, v = randn(nh, hd), randn(kvh, hd), np.zeros((kvh, hd), np.float32)
     case("zeros", q, k, v, randn(a.rows, kvh, hd), np.zeros((a.rows, kvh, hd), np.float32))

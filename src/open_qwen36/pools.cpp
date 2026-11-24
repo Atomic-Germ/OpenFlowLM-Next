@@ -233,12 +233,14 @@ const uint8_t* q4_source(const WeightFile& m, const std::string& name, size_t ch
 void gguf_chunk(const GgufFile& g, const std::string& name, const GgufFile::TensorInfo& t,
                 size_t row0, size_t blk0, size_t rows, size_t in_dim, size_t ch, double fold,
                 std::vector<float>& rd, uint8_t* d) {
-    const bool kq = fold != 1.0 || t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
+    const bool kq = fold != 1.0 || t.type == GgufFile::Type::Q5_0 || t.type == GgufFile::Type::Q5_1 ||
+                    t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
                     t.type == GgufFile::Type::Q5_K || t.type == GgufFile::Type::Q6_K ||
                     t.type == GgufFile::Type::IQ4_NL || t.type == GgufFile::Type::IQ4_XS;
     if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
         fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-             "requantizes Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS (convert the others with q4nx-build)");
+             "requantizes Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS "
+             "(convert the others with q4nx-build)");
     if (ch != Q4_CHUNK && ch != GGUF_CHUNK)
         fail(name + ": pool chunk " + std::to_string(ch) +
              " is neither the q4_1 law nor the GGUF-direct twin's f32 one");
@@ -773,12 +775,14 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // a raw GGUF is not). Scaling needs the decoded values, so it forces the
         // requant path even for a Q4_0/Q4_1 source.
         const bool fold = op.fold != 1.0;
-        const bool kq = fold || t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
+        const bool kq = fold || t.type == GgufFile::Type::Q5_0 || t.type == GgufFile::Type::Q5_1 ||
+                        t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
                         t.type == GgufFile::Type::Q5_K || t.type == GgufFile::Type::Q6_K ||
                         t.type == GgufFile::Type::IQ4_NL || t.type == GgufFile::Type::IQ4_XS;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
             fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-                 "requantizes Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS (convert the others with q4nx-build)");
+                 "requantizes Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS "
+                 "(convert the others with q4nx-build)");
         // Which chunk law the POOL wants (m.chunk_bytes): the GGUF-direct twin
         // widens the block scales exactly to f32 (planes of 1024 B, codes at
         // 2048), and the q4_1 twin this file also serves for the f32-numerics
@@ -1049,6 +1053,54 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                 const size_t row0 = e * rows_per + 32 * (fc / ncol);
                 const size_t blk0 = (fc % ncol) * 8;
                 gguf_chunk(g, name, t, row0, blk0, rows_per * E, in_dim, ch, 1.0, rd, dd + c * ch);
+            }
+        }
+    } else if (op.op == "fl_q4") {
+        // A GGUF [out, in] tensor (or a 3-D expert stack, its trailing dims flattened
+        // into rows) as q4_1 pool bands: for e < experts, the rows x in_dim block at
+        // (row0 + e*n_total, chunk0 + e*cols), band b landing at
+        // dst + e*expert_bytes + b*stripe_bytes (0: the bands contiguous). Within a band
+        // the bytes are std_perm_gguf's byte law (its 32-row half x 256-column k-tile
+        // chunks), so a recipe can split one dense tensor into slots, interleave gate and
+        // up by band stride, and read the result with the same GEMV. This is the generic
+        // form: every offset, expert count and stride comes from the plan, so a family
+        // whose geometry differs only in width needs no new pack op.
+        const std::string name = with_layer(op.tensor, layer);
+        const GgufFile& g = dynamic_cast<const GgufFile&>(m);
+        const GgufFile::TensorInfo& t = g.tensor(name);
+        if (t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
+            fail(name + " is " + GgufFile::type_name(t.type) +
+                 "; fl_q4 packs Q4_0 / Q4_1 with their codes kept");
+        if (op.rows % 64 || op.in_dim % 256 || op.chunk0 % 32)
+            fail("fl_q4 " + name + ": " + std::to_string(op.rows) + " rows / " +
+                 std::to_string(op.in_dim) + " columns at column " + std::to_string(op.chunk0) +
+                 " are not whole 64-row bands and 256-wide k-tiles");
+        const uint64_t cols = t.dims.empty() ? 0 : t.dims[0];
+        uint64_t total_rows = 1;
+        for (size_t i = 1; i < t.dims.size(); ++i) total_rows *= t.dims[i];
+        const uint64_t E = op.experts ? op.experts : 1, nbands = op.rows / 64;
+        const size_t ktiles = op.in_dim / 256;
+        const size_t band = 2 * ktiles * ch, bstride = op.stripe_bytes ? op.stripe_bytes : band;
+        if (op.stripe_bytes && op.stripe_bytes < band)
+            fail("fl_q4 " + name + ": a band stride under one band");
+        const uint64_t last_row = op.row0 + (E - 1) * op.n_total + op.rows;
+        const uint64_t last_col = op.chunk0 + (E - 1) * op.cols + op.in_dim;
+        if (last_row > total_rows || last_col > cols)
+            fail("fl_q4 " + name + ": the blocks reach row " + std::to_string(last_row) + " / column " +
+                 std::to_string(last_col) + " of a " + std::to_string(total_rows) + " x " +
+                 std::to_string(cols) + " tensor");
+        const uint64_t one = (nbands - 1) * bstride + band;
+        bounds(op, (E - 1) * op.expert_bytes + one, dst_bytes);
+        std::vector<float> rd;
+        for (uint64_t e = 0; e < E; ++e) {
+            for (uint64_t b = 0; b < nbands; ++b) {
+                uint8_t* bd = dst + op.dst + e * op.expert_bytes + b * bstride;
+                std::memset(bd, 0, band);
+                for (size_t j = 0; j < 2 * ktiles; ++j) {      // std_perm within a band
+                    const size_t row0 = op.row0 + e * op.n_total + 64 * b + 32 * (j % 2);
+                    const size_t blk0 = (op.chunk0 + e * op.cols) / 32 + (j / 2) * 8;
+                    gguf_chunk(g, name, t, row0, blk0, total_rows, cols, ch, 1.0, rd, bd + j * ch);
+                }
             }
         }
     } else if (op.op == "put") {

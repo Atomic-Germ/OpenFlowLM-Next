@@ -75,6 +75,15 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"gemma4", SupportedModelFamily::gemma4_12b},
         {"gpt-oss", SupportedModelFamily::gpt_oss},
         {"lfm2", SupportedModelFamily::lfm2},
+        // LFM2.5 (lfm2moe, the routed-expert hybrid) and LFM3 (the hybrid with
+        // full/sliding attention) are GGUF-direct families built on the SAME open
+        // engine as LFM2 -- they differ only in the kernel set installed by
+        // `oflm add`, which the adapter selects from the model's own manifest.
+        // `oflm add` writes these architecture names into details.family, so the
+        // runner must resolve them to the generic LFM2 adapter or `oflm run`
+        // refuses an installed model with "no engine for this family".
+        {"lfm2moe", SupportedModelFamily::lfm2},
+        {"lfm3", SupportedModelFamily::lfm2},
         {"lfm2.5-tk", SupportedModelFamily::lfm2_5_tk},
         {"qwen2vl", SupportedModelFamily::qwen2vl},
         {"phi4", SupportedModelFamily::phi4},

@@ -952,6 +952,177 @@ def _lfm3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
                "partial_rotary_factor": float(full.get("partial_rotary_factor", 1.0))},
     )
 
+def _lfm_kv_layers(md: Mapping[str, Any], a: str, n: int) -> tuple[tuple[int, ...], int]:
+    """Llama.cpp writes `attention.head_count_kv` for every LFM hybrid as one entry PER
+    LAYER: 0 is a short-conv layer, a positive count an attention layer. That list is the
+    layer law -- the published config.json is not consulted, and a repo whose card says
+    nothing useful still derives correctly from its own file. Every attention layer of
+    this family shares one kv-head count; a file that disagrees is refused."""
+    kv = _need(md, f"{a}.attention.head_count_kv", "GGUF metadata")
+    if not isinstance(kv, (list, tuple)) or len(kv) != n:
+        raise SpecError(f"{a}.attention.head_count_kv must hold one entry per layer ({n}); "
+                        f"got {kv!r}")
+    per_layer = tuple(int(x) for x in kv)
+    heads = sorted({x for x in per_layer if x})
+    if len(heads) > 1:
+        raise SpecError(f"{a}.attention.head_count_kv has {heads} kv-head counts; every "
+                        f"attention layer of this family must agree")
+    return per_layer, (heads[0] if heads else 0)
+
+
+def _lfm_gguf_head_dim(md: Mapping[str, Any], a: str, hidden: int, heads: int) -> int:
+    hd = md.get(f"{a}.attention.key_length")
+    if hd:
+        return int(hd)
+    if hidden % heads:
+        raise SpecError(f"{a}: no attention.key_length and embedding_length {hidden} is not "
+                        f"a multiple of attention.head_count {heads}")
+    return hidden // heads
+
+
+def _lfm_gguf_vocab(md: Mapping[str, Any], a: str) -> int:
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is not None:
+        return int(vocab)
+    toks = md.get("tokenizer.ggml.tokens")
+    if toks is None:
+        raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+    return len(toks)
+
+
+def _lfm2_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """LFM2 (llama.cpp arch `lfm2`): the hybrid the HF builder describes, read from the
+    file's own geometry. `feed_forward_length` is already the width the kernels run (the
+    GGUF carries the post-two-thirds MLP), so it is used as-is rather than adjusted."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    kv, kvh = _lfm_kv_layers(md, a, n)
+    hidden, heads = k("embedding_length"), k("attention.head_count")
+    hd = _lfm_gguf_head_dim(md, a, hidden, heads)
+    vocab = _lfm_gguf_vocab(md, a)
+    return ModelSpec(
+        family="lfm2",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=tuple(SHORT_CONV if x == 0 else FULL for x in kv),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=kvh,
+        head_dim=hd,
+        rotary_dim=int(md.get(f"{a}.rope.dimension_count", hd)),
+        rope_theta=float(k("rope.freq_base")),
+        qk_norm=True,
+        attn_gate=False,
+        conv_kernel=int(k("shortconv.l_cache")),
+        intermediate=k("feed_forward_length"),
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-5)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
+def _lfm2moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """LFM2.5 (`lfm2moe`): LFM2's hybrid with routed SiLU experts past the leading
+    `leading_dense_block_count` layers. The router law (sigmoid scores + a selection bias,
+    unbiased scores renormalised, scale 1.0) is the family's, not the file's -- llama.cpp
+    spells it `expert_gating_func = 2` (sigmoid) and has no routed scaling key."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    kv, kvh = _lfm_kv_layers(md, a, n)
+    hidden, heads = k("embedding_length"), k("attention.head_count")
+    hd = _lfm_gguf_head_dim(md, a, hidden, heads)
+    vocab = _lfm_gguf_vocab(md, a)
+    lead = int(md.get(f"{a}.leading_dense_block_count", 0))
+    if not 0 <= lead < n:
+        raise SpecError(f"{a}.leading_dense_block_count {lead} of {n} layers")
+    gating = int(md.get(f"{a}.expert_gating_func", 2))
+    if gating != 2:
+        raise SpecError(f"{a}.expert_gating_func {gating} is not sigmoid (2)")
+    return ModelSpec(
+        family="lfm2moe",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=tuple(SHORT_CONV if x == 0 else FULL for x in kv),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=kvh,
+        head_dim=hd,
+        rotary_dim=int(md.get(f"{a}.rope.dimension_count", hd)),
+        rope_theta=float(k("rope.freq_base")),
+        qk_norm=True,
+        attn_gate=False,
+        conv_kernel=int(k("shortconv.l_cache")),
+        intermediate=k("feed_forward_length") if lead else 0,
+        activation="silu",
+        num_experts=k("expert_count"),
+        experts_per_tok=k("expert_used_count"),
+        moe_intermediate=k("expert_feed_forward_length"),
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-5)),
+        dense_lead=lead,
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf",
+               "router_scale": 1.0, "router": "sigmoid+bias, renormalised"},
+    )
+
+
+def _lfm3_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """LFM3 (`lfm3`): LFM2's hybrid plus a third layer kind. `attention.head_count_kv`
+    says conv (0) or attention, and `attention.sliding_window_pattern` says which
+    attention layers keep the window (dense_local) and which see the whole context
+    (full). The full layers rotate the first half of each head (partial_rotary_factor
+    0.5) at `rope.freq_base`; the sliding layers rotate every pair at `rope.freq_base_swa`."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    kv, kvh = _lfm_kv_layers(md, a, n)
+    pat = _need(md, f"{a}.attention.sliding_window_pattern", "GGUF metadata")
+    if not isinstance(pat, (list, tuple)) or len(pat) != n:
+        raise SpecError(f"{a}.attention.sliding_window_pattern must hold one entry per "
+                        f"layer ({n}); got {pat!r}")
+    hidden, heads = k("embedding_length"), k("attention.head_count")
+    hd = _lfm_gguf_head_dim(md, a, hidden, heads)
+    vocab = _lfm_gguf_vocab(md, a)
+    layer_types = tuple(SHORT_CONV if x == 0 else (DENSE_LOCAL if bool(s) else FULL)
+                        for x, s in zip(kv, pat))
+    return ModelSpec(
+        family="lfm3",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=layer_types,
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=kvh,
+        head_dim=hd,
+        rotary_dim=int(md.get(f"{a}.rope.dimension_count", hd)),
+        rope_theta=float(k("rope.freq_base")),
+        rope_local_theta=float(md.get(f"{a}.rope.freq_base_swa", 10000.0)),
+        sliding_window=int(k("attention.sliding_window")),
+        qk_norm=True,
+        attn_gate=True,
+        conv_kernel=int(k("shortconv.l_cache")),
+        intermediate=k("feed_forward_length"),
+        activation="silu",
+        sandwich_norms=True,
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-5)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf", "partial_rotary_factor": 0.5},
+    )
+
+
 # GPT-OSS's own layer-type names. `full_attention` here means a plain dense layer, NOT the
 # spec's FULL -- that one is the full-attention half of Qwen3.6's linear/full alternation.
 _GPTOSS_LAYER_TYPES = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
@@ -2016,7 +2187,10 @@ GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qw
                  "qwen2": _qwen2_gguf, "qwen2vl": _qwen2_gguf, "llama": _llama3_gguf,
                  "k2-horizon": _k2_hf,          # IFM K2-Horizon's own GGUF arch name
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf,
-                 "gemma4": _gemma4_gguf}
+                 "gemma4": _gemma4_gguf,
+                 # The LFM hybrids: one head_count_kv entry per layer (0 = short conv) is
+                 # the layer law, and lfm3's sliding_window_pattern adds the third kind.
+                 "lfm2": _lfm2_gguf, "lfm2moe": _lfm2moe_gguf, "lfm3": _lfm3_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
@@ -2026,6 +2200,7 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
               _lfm2_hf: "lfm2", _lfm2moe_hf: "lfm2moe", _lfm3_hf: "lfm3",
+              _lfm2_gguf: "lfm2", _lfm2moe_gguf: "lfm2moe", _lfm3_gguf: "lfm3",
               _gptoss_hf: "gptoss", _k2_hf: "k2",
               _gemma4_hf: "gemma4", _gemma4_unsupported: "gemma4", _gemma4_gguf: "gemma4"}
 
@@ -2064,6 +2239,13 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
 ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
                         "shortconv.in_proj.weight": "linear",
                         "shortconv.out_proj.weight": "linear_out"}
+# LFM3 keeps LFM2's mixers and FFN; LFM2.5 keeps them too and swaps the FFN of every
+# layer past the dense lead for routed experts (the `experts` role).
+ROLE_TENSORS["lfm3"] = dict(ROLE_TENSORS["lfm2"])
+ROLE_TENSORS["lfm2moe"] = {**ROLE_TENSORS["lfm2"],
+                           "ffn_gate_exps.weight": "experts",
+                           "ffn_up_exps.weight": "experts",
+                           "ffn_down_exps.weight": "experts"}
 for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2", "gemma4"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 # GPT-OSS's routed experts, under the names q4nx-build writes them
@@ -2085,7 +2267,8 @@ _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight":
               "ffn_down_exps.weight": "experts",
               "ffn_up_shexp.weight": "shared", "ffn_gate_shexp.weight": "shared",
               "ffn_down_shexp.weight": "shared",
-              "ssm_in.weight": "linear", "attn_gate.weight": "linear", "ssm_out.weight": "linear_out"}
+              "ssm_in.weight": "linear", "attn_gate.weight": "linear", "ssm_out.weight": "linear_out",
+              "shortconv.in_proj.weight": "linear", "shortconv.out_proj.weight": "linear_out"}
 GGUF_TYPE_FORMAT = {"Q8_0": "q8", "Q4_1": "q4_1", "Q4_0": "q4_1"}
 
 

@@ -34,9 +34,9 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
-from flint_gguf_reference import Gguf, bf, rms, rope, silu, attention  # noqa: E402
-
-Q6_K = 14
+from gguf_ref import Q6_K  # noqa: E402
+from lfm_gguf_ref import LfmGguf, attention, bf, rope  # noqa: E402
+from replica_dense import rms  # noqa: E402
 
 
 def decode_q6k(raw: np.ndarray) -> np.ndarray:
@@ -58,14 +58,6 @@ def decode_q6k(raw: np.ndarray) -> np.ndarray:
             sj = np.repeat(s[:, [j * 2, j * 2 + 1]], 16, axis=1)       # 16 values per scale
             out[:, 128 * half + 32 * j:128 * half + 32 * j + 32] = d[:, None] * sj * q[j]
     return out.reshape(-1)
-
-
-class Gguf3(Gguf):
-    def _bytes(self, kind, n):
-        return n // 256 * 210 if kind == Q6_K else super()._bytes(kind, n)
-
-    def _decode(self, raw, kind, n, narrow):
-        return decode_q6k(raw) if kind == Q6_K else super()._decode(raw, kind, n, narrow)
 
 
 def inv_freq(theta: float, hd: int, partial: float) -> np.ndarray:
@@ -92,7 +84,7 @@ def short_conv(h, w_in, w_conv, w_out, rb, dump=None):
     return y @ w_out.T
 
 
-def forward(g: Gguf3, cfg: dict, ids: list[int], dump_layers=(), out: Path | None = None,
+def forward(g: LfmGguf, cfg: dict, ids: list[int], dump_layers=(), out: Path | None = None,
             positions=None, npu_like=False, layers=None, expand_gate=False):
     """npu_like: a control rounding where the NPU route will (norm outputs, the conv's y, K / V, the
     attention output and the gate product to bf16; the q4 block scales to bf16)."""
@@ -170,7 +162,7 @@ def main():
     pos = (None if a.positions == "all" else [len(ids) - 1] if a.positions == "last"
            else [int(p) for p in a.positions.split(",")])
     dump = {int(l) for l in a.dump_layers.split(",") if l.strip()}
-    g = Gguf3(a.gguf)
+    g = LfmGguf(a.gguf)
     t0 = time.time()
     logits, sel, _ = forward(g, cfg, ids, dump, a.out, pos, a.npu_like, a.layers)
     logits.tofile(a.out / "logits.f32")

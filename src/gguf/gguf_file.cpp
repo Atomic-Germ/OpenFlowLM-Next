@@ -2,7 +2,10 @@
 /// \brief GGUF parsing and the per-token embedding dequant (see gguf_file.hpp).
 #include "gguf/gguf_file.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <regex>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -19,6 +22,8 @@
 namespace open_qwen36 {
 
 namespace {
+
+namespace fs = std::filesystem;
 
 [[noreturn]] void fail(const std::string& what) { throw std::runtime_error("gguf: " + what); }
 
@@ -88,13 +93,17 @@ void rd_value(uint32_t t, const uint8_t*& p, const uint8_t* end, std::string& ou
 /// Exact tensor byte count for a value count (0 when the type's size is
 /// unknown to this reader; the pack ops refuse those with a proper message).
 uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
-    // block quants: 18 B / 32 q4_0 | 20 B / 32 q4_1 | 34 B / 32 q8_0 |
-    // 144 B / 256 q4_k | 210 B / 256 q6_k
+    // block quants: 18 B / 32 q4_0 | 20 B / 32 q4_1 | 22 B / 32 q5_0 |
+    // 24 B / 32 q5_1 | 34 B / 32 q8_0 | 144 B / 256 q4_k | 176 B / 256 q5_k |
+    // 210 B / 256 q6_k. Unsloth's UD-Q4_K_XL mixes Q4_K with Q5_1 on the MoE
+    // down projections, so both 5-bit families must be sized here as well.
     switch (t) {
         case 0: return values * 4;                        // f32
         case 1: case 30: return values * 2;               // f16 / bf16
         case 2: return values / 32 * 18;                  // q4_0
         case 3: return values / 32 * 20;                  // q4_1
+        case 6: return values / 32 * 22;                  // q5_0
+        case 7: return values / 32 * 24;                  // q5_1
         case 8: return values / 32 * 34;                  // q8_0
         case 12: return values / 256 * 144;               // q4_k
         case 14: return values / 256 * 210;               // q6_k
@@ -134,6 +143,142 @@ inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t* d, uint8_t* m) {
     }
 }
 
+struct ParsedHeader {
+    std::map<std::string, std::string> meta;
+    std::map<std::string, GgufFile::TensorInfo> tensors;
+    size_t data_base = 0;
+    uint64_t split_no = 0;
+    uint64_t split_count = 0;
+};
+
+uint64_t meta_u64(const std::map<std::string, std::string>& meta, const std::string& key) {
+    auto it = meta.find(key);
+    if (it == meta.end()) return 0;
+    try {
+        return std::stoull(it->second);
+    } catch (const std::logic_error&) {
+        fail("metadata " + key + " is not a number (" + it->second + ")");
+    }
+}
+
+/// Parse one shard's header. Every shard carries its own alignment and tensor
+/// offset table; `split.no` / `split.count` say which part it is when the model
+/// was exported in pieces.
+ParsedHeader read_header(const uint8_t* map, size_t size, const std::string& path) {
+    ParsedHeader h;
+    if (size < 24 || map[0] != 'G' || map[1] != 'G' || map[2] != 'U' || map[3] != 'F')
+        fail(path + " is not a GGUF file");
+    const uint8_t* end = map + size;
+    const uint8_t* q = map + 4;
+    const uint32_t version = rd_u32(q);
+    if (version < 2) fail(path + ": GGUF v" + std::to_string(version) + " unsupported (need v2+)");
+    const uint64_t ntensors = rd_u64(q);
+    const uint64_t nkv = rd_u64(q);
+    for (uint64_t i = 0; i < nkv; ++i) {
+        const std::string key = rd_str(q, end);
+        const uint32_t t = rd_u32(q);
+        std::string v;
+        rd_value(t, q, end, v);
+        h.meta[key] = v;
+    }
+    h.split_no = meta_u64(h.meta, "split.no");
+    h.split_count = meta_u64(h.meta, "split.count");
+    uint64_t align = 32;
+    auto it = h.meta.find("general.alignment");
+    if (it != h.meta.end()) {
+        try {
+            align = std::stoull(it->second);
+        } catch (const std::logic_error&) {
+            fail(path + ": general.alignment is not a number (" + it->second + ")");
+        }
+    }
+    if (align == 0 || (align & (align - 1)) != 0)
+        fail(path + ": general.alignment must be a non-zero power of two (got " + std::to_string(align) + ")");
+    const uint8_t* tq = q;
+    for (uint64_t i = 0; i < ntensors; ++i) {
+        const std::string name = rd_str(tq, end);
+        const uint32_t nd = rd_u32(tq);
+        GgufFile::TensorInfo t;
+        t.dims.resize(nd);
+        for (uint32_t d = 0; d < nd; ++d) t.dims[d] = rd_u64(tq);
+        t.type = static_cast<GgufFile::Type>(rd_u32(tq));
+        t.offset = rd_u64(tq);
+        h.tensors.emplace(name, std::move(t));
+    }
+    // The data section starts AFTER the tensor-info table, aligned. Offsets in
+    // each tensor are relative to THIS shard's aligned data section, not to the
+    // start of the file -- checking against `size` alone hid truncated shards.
+    h.data_base = static_cast<size_t>(tq - map);
+    h.data_base += static_cast<size_t>((align - h.data_base % align) % align);
+    if (h.data_base > size) fail(path + ": GGUF header runs past EOF");
+    const size_t data_bytes = size - h.data_base;
+    for (const auto& [name, t] : h.tensors) {
+        const uint64_t nb = gguf_type_bytes(static_cast<uint32_t>(t.type), t.nvalues());
+        if (nb && (t.offset > data_bytes || nb > data_bytes - t.offset))
+            fail("tensor " + name + " runs past EOF in " + path);
+    }
+    return h;
+}
+
+std::string split_name(const std::string& stem, uint64_t i, uint64_t count) {
+    const auto five = [](uint64_t v) {
+        std::string s = std::to_string(v);
+        return std::string(5 - std::min<size_t>(5, s.size()), '0') + s;
+    };
+    return stem + "-" + five(i) + "-of-" + five(count) + ".gguf";
+}
+
+uint64_t shard_count_from_name(const std::string& path) {
+    static const std::regex part(R"(-(\d{5})-of-(\d{5})\.gguf$)", std::regex::icase);
+    std::smatch m;
+    const std::string leaf = fs::path(path).filename().string();
+    return std::regex_search(leaf, m, part) ? std::stoull(m[2].str()) : 0;
+}
+
+/// All shard paths for a model, in split order. The installed form is
+/// `model.gguf` plus `model.gguf-00002-of-00004` siblings; a source repo's
+/// `Name-00001-of-00004.gguf` spelling is understood too.
+std::vector<std::string> split_paths(const std::string& path, uint64_t count) {
+    if (count < 1 || count > 100000) fail(path + ": split.count " + std::to_string(count) + " is implausible");
+    const fs::path fp(path);
+    const std::string leaf = fp.filename().string();
+    static const std::regex part(R"(^(.*)-(\d{5})-of-(\d{5})\.gguf$)", std::regex::icase);
+    std::smatch m;
+    if (std::regex_match(leaf, m, part)) {
+        const std::string stem = m[1].str();
+        const uint64_t idx = std::stoull(m[2].str()), named = std::stoull(m[3].str());
+        if (named != count) fail(path + ": split.count is " + std::to_string(count) +
+                                " but the name says " + std::to_string(named));
+        std::vector<std::string> out(count);
+        for (uint64_t i = 1; i <= count; ++i)
+            out[i - 1] = (fp.parent_path() / split_name(stem, i, count)).string();
+        if (idx < 1 || idx > count) fail(path + ": shard number " + std::to_string(idx) + " is out of range");
+        out[idx - 1] = path;                         // the path the caller actually opened
+        return out;
+    }
+    static const std::regex sibling(R"(^model\.gguf-(\d{5})-of-(\d{5})$)", std::regex::icase);
+    if (leaf == "model.gguf" || std::regex_match(leaf, m, sibling)) {
+        std::vector<std::string> out(count);
+        out[0] = (fp.parent_path() / "model.gguf").string();
+        for (uint64_t i = 2; i <= count; ++i) {
+            // Installed siblings keep the .gguf on the PRIMARY file only:
+            // model.gguf-00002-of-00004 (no trailing .gguf).
+            std::string sib = split_name("model.gguf", i, count);
+            sib.resize(sib.size() - 5);                 // drop the appended ".gguf"
+            out[i - 1] = (fp.parent_path() / sib).string();
+        }
+        if (std::regex_match(leaf, m, sibling)) {
+            const uint64_t idx = std::stoull(m[1].str()), named = std::stoull(m[2].str());
+            if (named != count || idx < 2 || idx > count)
+                fail(path + ": shard name disagrees with split.count " + std::to_string(count));
+            out[idx - 1] = path;
+        }
+        return out;
+    }
+    fail(path + ": a split GGUF must be model.gguf with numbered siblings, or "
+         "Name-00001-of-000NN.gguf");
+}
+
 }  // namespace
 
 const char* GgufFile::type_name(Type t) {
@@ -153,6 +298,87 @@ const char* GgufFile::type_name(Type t) {
 }
 
 GgufFile::GgufFile(const std::string& path) : path_(path) {
+    // Peek at the named file: its split.count (or its -NNNNN-of-NNNNN name)
+    // decides whether we open one mapping or a whole set. Unsloth's big UD
+    // exports are split into several GGUFs, each with its own tensor table;
+    // llama.cpp offsets are relative to that shard's own aligned data section.
+    std::vector<std::string> paths{path};
+    {
+        Shard probe;
+        map_shard(path, probe);
+        try {
+            ParsedHeader h = read_header(probe.map, probe.size, path);
+            const uint64_t count = h.split_count ? h.split_count : shard_count_from_name(path);
+            if (count > 1) paths = split_paths(path, count);
+            else if (h.split_no > 1 || shard_count_from_name(path) > 1)
+                fail(path + ": a shard without split.count cannot be opened alone");
+        } catch (...) {
+            unmap_shard(probe);
+            throw;
+        }
+        unmap_shard(probe);
+    }
+    // Unsloth writes split.no 0-based (0..count-1), llama.cpp's writer uses
+    // 1-based. The -NNNNN-of-NNNNN file name fixes the order, so take the
+    // convention from the first shard that declares it and require the rest to
+    // agree. -1 means no shard has declared it yet.
+    int no_base = -1;
+    try {
+        for (size_t i = 0; i < paths.size(); ++i) {
+            Shard s;
+            map_shard(paths[i], s);
+            try {
+                ParsedHeader h = read_header(s.map, s.size, paths[i]);
+                s.data_base = h.data_base;
+                if (h.meta.count("split.no")) {
+                    if (no_base < 0) {
+                        if (h.split_no == 0) no_base = 0;
+                        else if (h.split_no == 1) no_base = 1;
+                        else fail(paths[i] + ": split.no " + std::to_string(h.split_no) +
+                                  " is neither 0- nor 1-based");
+                    }
+                    const uint64_t want = i + static_cast<uint64_t>(no_base);
+                    if (h.split_no != want)
+                        fail(paths[i] + ": split.no is " + std::to_string(h.split_no) +
+                             ", expected " + std::to_string(want));
+                }
+                if (h.split_count && h.split_count != paths.size())
+                    fail(paths[i] + ": split.count is " + std::to_string(h.split_count) +
+                         ", expected " + std::to_string(paths.size()));
+                if (i == 0) meta_ = std::move(h.meta);
+                else for (const auto& [k, v] : h.meta) meta_.emplace(k, v);
+                for (auto& [name, t] : h.tensors) {
+                    t.shard = static_cast<uint32_t>(i);
+                    if (!tensors_.emplace(name, std::move(t)).second)
+                        fail("tensor " + name + " appears in more than one shard of " + path);
+                }
+                shards_.push_back(std::move(s));
+            } catch (...) {
+                unmap_shard(s);
+                throw;
+            }
+        }
+        sandwich_ = tensors_.count("blk.0.post_ffw_norm.weight") != 0;
+        // The pre-FFN norm: llama.cpp calls it ffn_norm (llama, qwen3) or
+        // post_attention_norm (gemma, qwen35) -- the file says which.
+        post_norm_ = tensors_.count("blk.0.post_attention_norm.weight") != 0;
+    } catch (...) {
+        for (auto& s : shards_) unmap_shard(s);
+        shards_.clear();
+        throw;
+    }
+}
+
+GgufFile::~GgufFile() {
+    for (auto& s : shards_) unmap_shard(s);
+}
+
+void GgufFile::drop_pages() {
+    for (auto& s : shards_) drop_shard_pages(s);
+}
+
+void GgufFile::map_shard(const std::string& path, Shard& s) {
+    s.path = path;
 #ifdef _WIN32
     HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -163,106 +389,50 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
     if (!m) { CloseHandle(f); throw std::runtime_error("gguf: cannot map " + path); }
     const void* p = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
     if (!p) { CloseHandle(m); CloseHandle(f); throw std::runtime_error("gguf: cannot map view of " + path); }
-    file_ = f;
-    mapping_ = m;
-    map_ = static_cast<const uint8_t*>(p);
-    map_size_ = static_cast<size_t>(sz.QuadPart);
+    s.file = f;
+    s.mapping = m;
+    s.map = static_cast<const uint8_t*>(p);
+    s.size = static_cast<size_t>(sz.QuadPart);
 #else
-    fd_ = ::open(path.c_str(), O_RDONLY);
-    if (fd_ < 0) throw std::runtime_error("gguf: cannot open " + path);
+    s.fd = ::open(path.c_str(), O_RDONLY);
+    if (s.fd < 0) throw std::runtime_error("gguf: cannot open " + path);
     struct stat st;
-    if (fstat(fd_, &st) != 0) { ::close(fd_); throw std::runtime_error("gguf: size of " + path); }
-    void* p = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_PRIVATE, fd_, 0);
-    if (p == MAP_FAILED) { ::close(fd_); throw std::runtime_error("gguf: cannot map " + path); }
-    map_ = static_cast<const uint8_t*>(p);
-    map_size_ = static_cast<size_t>(st.st_size);
-#endif
-    try {
-        const uint8_t* end = map_ + map_size_;
-        if (map_size_ < 24 || map_[0] != 'G' || map_[1] != 'G' || map_[2] != 'U' || map_[3] != 'F') fail(path + " is not a GGUF file");
-        const uint8_t* q = map_ + 4;
-        const uint32_t version = rd_u32(q);
-        if (version < 2) fail(path + ": GGUF v" + std::to_string(version) + " unsupported (need v2+)");
-        const uint64_t ntensors = rd_u64(q);
-        const uint64_t nkv = rd_u64(q);
-        for (uint64_t i = 0; i < nkv; ++i) {
-            const std::string key = rd_str(q, end);
-            const uint32_t t = rd_u32(q);
-            std::string v;
-            rd_value(t, q, end, v);
-            meta_[key] = v;
-        }
-        for (uint64_t i = 0; i < ntensors; ++i) {
-            const std::string name = rd_str(q, end);
-            const uint32_t nd = rd_u32(q);
-            TensorInfo t;
-            t.dims.resize(nd);
-            for (uint32_t d = 0; d < nd; ++d) t.dims[d] = rd_u64(q);
-            const uint32_t ty = rd_u32(q);
-            t.type = static_cast<Type>(ty);
-            t.offset = rd_u64(q);
-            const uint64_t nb = gguf_type_bytes(ty, t.nvalues());
-            if (nb && t.offset + nb > map_size_) fail("tensor " + name + " runs past EOF in " + path);
-            tensors_.emplace(name, std::move(t));
-        }
-        sandwich_ = tensors_.count("blk.0.post_ffw_norm.weight") != 0;
-        // The pre-FFN norm: llama.cpp calls it ffn_norm (llama, qwen3) or
-        // post_attention_norm (gemma, qwen35) -- the file says which.
-        post_norm_ = tensors_.count("blk.0.post_attention_norm.weight") != 0;
-        // Alignment is not stored in the header for either version: GGUF v2 and
-        // v3 both take it from the optional `general.alignment` metadata key and
-        // default to 32. (Only v1 carried a trailing alignment word.) Validate
-        // it before dividing, and fail loudly on a nonsensical value.
-        uint64_t align = 32;
-        {
-            auto it = meta_.find("general.alignment");
-            if (it != meta_.end()) {
-                uint64_t v = 0;
-                try {
-                    v = std::stoull(it->second);
-                } catch (const std::logic_error&) {
-                    fail(path + ": general.alignment is not a number (" + it->second + ")");
-                }
-                align = v;
-            }
-        }
-        if (align == 0 || (align & (align - 1)) != 0)
-            fail(path + ": general.alignment must be a non-zero power of two (got " +
-                 std::to_string(align) + ")");
-        data_base_ = static_cast<size_t>(q - map_);
-        data_base_ += static_cast<size_t>((align - data_base_ % align) % align);
-    } catch (...) {
-#ifdef _WIN32
-        if (map_) UnmapViewOfFile(map_);
-        if (mapping_) CloseHandle(static_cast<HANDLE>(mapping_));
-        if (file_) CloseHandle(static_cast<HANDLE>(file_));
-#else
-        if (map_) munmap(const_cast<uint8_t*>(map_), map_size_);
-        if (fd_ >= 0) ::close(fd_);
-#endif
-        throw;
-    }
-}
-
-GgufFile::~GgufFile() {
-#ifdef _WIN32
-    if (map_) UnmapViewOfFile(map_);
-    if (mapping_) CloseHandle(static_cast<HANDLE>(mapping_));
-    if (file_) CloseHandle(static_cast<HANDLE>(file_));
-#else
-    if (map_) munmap(const_cast<uint8_t*>(map_), map_size_);
-    if (fd_ >= 0) ::close(fd_);
+    if (fstat(s.fd, &st) != 0) { ::close(s.fd); s.fd = -1; throw std::runtime_error("gguf: size of " + path); }
+    void* p = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_PRIVATE, s.fd, 0);
+    if (p == MAP_FAILED) { ::close(s.fd); s.fd = -1; throw std::runtime_error("gguf: cannot map " + path); }
+    s.map = static_cast<const uint8_t*>(p);
+    s.size = static_cast<size_t>(st.st_size);
 #endif
 }
 
-void GgufFile::drop_pages() {
+void GgufFile::unmap_shard(Shard& s) {
 #ifdef _WIN32
-    UnmapViewOfFile(map_);
-    const void* p = MapViewOfFile(static_cast<HANDLE>(mapping_), FILE_MAP_READ, 0, 0, 0);
-    if (!p) throw std::runtime_error("gguf: cannot remap " + path_);
-    map_ = static_cast<const uint8_t*>(p);
+    if (s.map) UnmapViewOfFile(const_cast<uint8_t*>(s.map));
+    if (s.mapping) CloseHandle(static_cast<HANDLE>(s.mapping));
+    if (s.file) CloseHandle(static_cast<HANDLE>(s.file));
 #else
-    madvise(const_cast<uint8_t*>(map_), map_size_, MADV_DONTNEED);
+    if (s.map) munmap(const_cast<uint8_t*>(s.map), s.size);
+    if (s.fd >= 0) ::close(s.fd);
+#endif
+    s.map = nullptr;
+    s.size = 0;
+    s.data_base = 0;
+#ifdef _WIN32
+    s.file = nullptr;
+    s.mapping = nullptr;
+#else
+    s.fd = -1;
+#endif
+}
+
+void GgufFile::drop_shard_pages(Shard& s) {
+#ifdef _WIN32
+    UnmapViewOfFile(const_cast<uint8_t*>(s.map));
+    const void* p = MapViewOfFile(static_cast<HANDLE>(s.mapping), FILE_MAP_READ, 0, 0, 0);
+    if (!p) throw std::runtime_error("gguf: cannot remap " + s.path);
+    s.map = static_cast<const uint8_t*>(p);
+#else
+    madvise(const_cast<uint8_t*>(s.map), s.size, MADV_DONTNEED);
 #endif
 }
 
@@ -420,7 +590,9 @@ const uint8_t* GgufFile::raw(const std::string& name, size_t* nbytes) const {
     const TensorInfo& t = tensor(name);
     const uint64_t nb = gguf_type_bytes(static_cast<uint32_t>(t.type), t.nvalues());
     if (nbytes) *nbytes = static_cast<size_t>(nb);
-    return map_ + data_base_ + t.offset;
+    if (t.shard >= shards_.size()) fail("tensor " + name + " has no mapped shard");
+    const Shard& s = shards_[t.shard];
+    return s.map + s.data_base + t.offset;
 }
 
 std::vector<std::string> GgufFile::tensor_names() const {
@@ -510,11 +682,12 @@ double GgufFile::kv_f64(const std::string& key) const {
 
 std::vector<std::string> GgufFile::kv_str_array(const std::string& key) const {
     // `meta_` deliberately drops big arrays (the tokenizer's vocab is megabytes of
-    // text nothing else reads), so walk the header again to the key. Called once
-    // per GGUF->checkpoint conversion, never on a hot path.
-    const uint8_t* end = map_ + map_size_;
-    if (map_size_ < 24) return {};
-    const uint8_t* q = map_ + 4;
+    // text nothing else reads), so walk the primary shard's header again to the key.
+    // Called once per GGUF->checkpoint conversion, never on a hot path.
+    if (shards_.empty() || shards_[0].size < 24) return {};
+    const Shard& s = shards_[0];
+    const uint8_t* end = s.map + s.size;
+    const uint8_t* q = s.map + 4;
     (void)rd_u32(q);                 // version
     (void)rd_u64(q);                 // tensor count
     const uint64_t nkv = rd_u64(q);
@@ -544,7 +717,9 @@ std::vector<std::string> GgufFile::kv_str_array(const std::string& key) const {
 /// [P, P, C, hidden], and llama.cpp stores the conv kernel with the patch width
 /// fastest -- a row of it is a patch column, not a hidden row).
 void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* out) const {
-    const uint8_t* base = map_ + data_base_ + t.offset;
+    if (t.shard >= shards_.size()) fail("tensor row has no mapped shard");
+    const Shard& s = shards_[t.shard];
+    const uint8_t* base = s.map + s.data_base + t.offset;
     switch (t.type) {
         case Type::F32: {
             std::memcpy(out, base + row * dim * 4, dim * 4);
@@ -604,6 +779,55 @@ void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* o
                 for (size_t j = 0; j < 16; ++j) {
                     out[b * 32 + j] = d * (p[4 + j] & 0xF) + m;
                     out[b * 32 + 16 + j] = d * (p[4 + j] >> 4) + m;
+                }
+            }
+            break;
+        }
+        case Type::Q5_0: {
+            // llama.cpp's q5_0: fp16 d, 16 nibble bytes, 4 bytes of high bits
+            // (32 bits, one per value). 22 B per 32 values. The high-bit layout
+            // is bitwise, not a second nibble array: values 0..15 take bit j of
+            // qh, values 16+j take bit 16+j (llama.cpp extracts both with the
+            // shifts below).
+            const uint8_t* p = base + row * (dim / 32) * 22;
+            for (size_t b = 0; b < dim / 32; ++b, p += 22) {
+                uint16_t u;
+                std::memcpy(&u, p, 2);
+                const float d = fp16_to_f32(u);
+                uint32_t qh;
+                std::memcpy(&qh, p + 18, 4);
+                // llama.cpp emits these INTERLEAVED (y[2*j], y[2*j+1]), unlike
+                // q4_0/q4_1's low nibble block then high nibble block.
+                for (size_t j = 0; j < 16; ++j) {
+                    const uint8_t xh0 = static_cast<uint8_t>(((qh >> (j + 0)) << 4) & 0x10);
+                    const uint8_t xh1 = static_cast<uint8_t>((qh >> (j + 12)) & 0x10);
+                    out[b * 32 + 2 * j] = static_cast<float>(
+                        static_cast<int>((p[2 + j] & 0xF) | xh0) - 16) * d;
+                    out[b * 32 + 2 * j + 1] = static_cast<float>(
+                        static_cast<int>((p[2 + j] >> 4) | xh1) - 16) * d;
+                }
+            }
+            break;
+        }
+        case Type::Q5_1: {
+            // Unsloth's UD-Q4_K_XL keeps the MoE down projections at q5_1:
+            // fp16 d, fp16 m, 16 nibble bytes, 4 bytes of high bits (24 B/32).
+            // Values are d * (nibble | high) + m; layout as q5_0 above.
+            const uint8_t* p = base + row * (dim / 32) * 24;
+            for (size_t b = 0; b < dim / 32; ++b, p += 24) {
+                uint16_t ud, um;
+                std::memcpy(&ud, p, 2);
+                std::memcpy(&um, p + 2, 2);
+                const float d = fp16_to_f32(ud), m = fp16_to_f32(um);
+                uint32_t qh;
+                std::memcpy(&qh, p + 20, 4);
+                for (size_t j = 0; j < 16; ++j) {
+                    const uint8_t xh0 = static_cast<uint8_t>(((qh >> (j + 0)) << 4) & 0x10);
+                    const uint8_t xh1 = static_cast<uint8_t>((qh >> (j + 12)) & 0x10);
+                    const int v0 = (p[4 + j] & 0xF) | xh0;
+                    const int v1 = (p[4 + j] >> 4) | xh1;
+                    out[b * 32 + 2 * j] = static_cast<float>(v0) * d + m;
+                    out[b * 32 + 2 * j + 1] = static_cast<float>(v1) * d + m;
                 }
             }
             break;
@@ -750,8 +974,8 @@ void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* o
         }
         default:
             fail(std::string("the embedding is ") + type_name(t.type) +
-                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K/"
-                 "IQ4_NL/IQ4_XS rows "
+                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/"
+                 "Q6_K/IQ4_NL/IQ4_XS rows "
                  "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
     }
 }

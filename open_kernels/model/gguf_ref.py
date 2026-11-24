@@ -34,13 +34,13 @@ import numpy as np
 
 # ggml type ids (ggml.h). The ones this tree's kernels ingest; anything else is
 # refused by name rather than guessed.
-F32, F16 = 0, 1
+F32, F16, BF16 = 0, 1, 30
 Q4_0, Q4_1, Q8_0 = 2, 3, 8
 Q4_K, Q5_K, Q6_K = 12, 13, 14
-TYPE_NAMES = {F32: "F32", F16: "F16", Q4_0: "Q4_0", Q4_1: "Q4_1", Q8_0: "Q8_0",
+TYPE_NAMES = {F32: "F32", F16: "F16", BF16: "BF16", Q4_0: "Q4_0", Q4_1: "Q4_1", Q8_0: "Q8_0",
               Q4_K: "Q4_K", Q5_K: "Q5_K", Q6_K: "Q6_K"}
 # bytes per 256 values (QK_K) or per 32 values, and the block's value count
-BLOCK = {F32: (1, 4), F16: (1, 2), Q8_0: (32, 34), Q4_0: (32, 18), Q4_1: (32, 20),
+BLOCK = {F32: (1, 4), F16: (1, 2), BF16: (1, 2), Q8_0: (32, 34), Q4_0: (32, 18), Q4_1: (32, 20),
          Q4_K: (256, 144), Q5_K: (256, 176), Q6_K: (256, 210)}
 
 
@@ -146,6 +146,9 @@ class Gguf:
             return np.frombuffer(buf, np.float32).reshape(rows, ne0).copy()
         if ty == F16:
             return np.frombuffer(buf, np.float16).reshape(rows, ne0).astype(np.float32)
+        if ty == BF16:
+            u = np.frombuffer(buf, np.uint16).reshape(rows, ne0).astype(np.uint32)
+            return (u << 16).view(np.float32)
         if ty == Q8_0:
             b = np.frombuffer(buf, np.uint8).reshape(rows, ne0 // 32, 34)
             d = b[:, :, 0:2].copy().view(np.float16).astype(np.float32)

@@ -173,8 +173,15 @@ def _build_open_whisper(target, repo, bases, modelscope, local_dir):
 # Plain float formats (F16/BF16/F32, and the FP16/FP32 spellings repos use)
 # are whole-file formats rather than named Q families, but they are explicitly
 # supported sources (NPUE_GGUF_PREFERENCE) and must be selectable by name.
+GGUF_SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+# Unsloth names its dynamic quants `UD-Q4_K_XL` (and splits big ones into
+# `-00001-of-00004.gguf` parts). The quant token is no longer the last thing in
+# the name, so match it before the optional shard suffix and keep the UD prefix
+# for display / an explicit `:UD-Q4_K_XL` request. gguf_quant_family() strips it
+# to the tensor family the packers actually ingest (Q4_K, IQ4_XS, ...).
 GGUF_QUANT_RE = re.compile(
-    r"[.\-_ ]((?:I?Q[0-9](?:_[A-Za-z0-9]+)*|F16|BF16|F32|FP16|FP32))\.gguf$",
+    r"(?:^|[.\-_ ])((?:UD[.\-_])?(?:I?Q[0-9](?:_[A-Za-z0-9]+)*|F16|BF16|F32|FP16|FP32))"
+    r"(?=(?:-\d{5}-of-\d{5})?\.gguf$)",
     re.IGNORECASE,
 )
 _FLOAT_QUANT_CANON = {"FP16": "F16", "FP32": "F32"}
@@ -185,7 +192,10 @@ def _canon_quant_token(token):
     if not token:
         return None
     up = token.upper()
-    return _FLOAT_QUANT_CANON.get(up, up)
+    up = _FLOAT_QUANT_CANON.get(up, up)
+    if up.startswith("UD_"):
+        up = "UD-" + up[3:]
+    return up
 
 
 def gguf_quant_suffix(name):
@@ -207,6 +217,11 @@ def gguf_quant_family(suffix, preference=None):
     if not suffix:
         return None
     q = _canon_quant_token(suffix)
+    # `UD-Q4_K_XL` is Unsloth's dynamic-mix name: the tensors are ordinary
+    # ggml quants (Q4_K, Q5_1 on MoE downs, Q8_0, ...), so the family is the
+    # part after UD. The installer verifies the real tensor types separately.
+    if q and q.startswith("UD-"):
+        q = q[3:]
     for fam in (preference or GGUF_QUANT_PREFERENCE):
         if q == fam:
             return fam
@@ -227,6 +242,96 @@ def gguf_quant_of(name, preference=None):
         return suffix
     return gguf_quant_family(suffix, preference)
 
+
+def gguf_shard_info(name):
+    """(1-based part, total parts, stem) for a `-NNNNN-of-NNNNN.gguf` name."""
+    m = GGUF_SHARD_RE.search(name)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), name[:m.start()]
+
+
+def _canonical_shard_info(name):
+    """(1-based part, total) for an INSTALLED `model.gguf-NNNNN-of-NNNNN` sibling."""
+    leaf = Path(name).name
+    if leaf.lower() == "model.gguf":
+        return 1, None
+    m = re.fullmatch(r"model\.gguf-(\d{5})-of-(\d{5})", leaf, re.IGNORECASE)
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+
+
+def gguf_split_count(kv, name=None):
+    """`split.count` from a GGUF's metadata, falling back to its file name."""
+    raw = kv.get("split.count") if isinstance(kv, dict) else None
+    try:
+        count = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count > 1:
+        return count
+    info = gguf_shard_info(name) if name else None
+    return info[1] if info else 0
+
+
+def gguf_shard_names(name, available=None, count=None):
+    """All remote/local names of the split set `name` belongs to, in part order.
+
+    A single-file GGUF yields `[name]`. Missing siblings are still returned by
+    their canonical spelling so the downloader reports them as absent instead of
+    silently installing half a model. An installed `model.gguf` is understood too:
+    its siblings are discovered from `available` (a repo tree or a directory
+    listing), or from an explicit `count` read from `split.count` metadata."""
+    info = gguf_shard_info(name)
+    if info:
+        idx, total, stem = info
+        if count and count != total:
+            raise ValueError(f"{name}: split.count {count} disagrees with the file name")
+        out = [f"{stem}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+        if 1 <= idx <= total:
+            out[idx - 1] = name
+        return out
+
+    idx, named = _canonical_shard_info(name)
+    if idx is None:
+        return [name]
+    if count is None and available:
+        # A repo tree (dict/list) or a local directory listing: find the highest
+        # canonical sibling so a plain `model.gguf` still knows it has parts.
+        leaves = available.keys() if isinstance(available, dict) else available
+        found = [m for n in leaves if (m := re.fullmatch(
+            r"(?:.*/)?model\.gguf-(\d{5})-of-(\d{5})", str(n), re.IGNORECASE))]
+        if found:
+            counts = {int(m.group(2)) for m in found}
+            if len(counts) == 1:
+                count = counts.pop()
+    if count is None or count <= 1:
+        return [name]
+    if named and named != count:
+        raise ValueError(f"{name}: shard name says {named} parts, metadata says {count}")
+
+    parent = Path(name).parent
+    out = ["model.gguf"] + [f"model.gguf-{i:05d}-of-{count:05d}"
+                            for i in range(2, count + 1)]
+    out = [(parent / n).as_posix() if str(parent) != "." else n for n in out]
+    if idx > 1:
+        out[idx - 1] = name
+    return out
+
+
+def gguf_install_pairs(name, available=None, count=None):
+    """[(remote-or-local name, installed name)] for the selected GGUF set.
+
+    Part 1 becomes `model.gguf`, which is what the engine opens; the rest keep
+    numbered sibling names beside it (`model.gguf-00002-of-00004`) so
+    GgufFile can map them as one logical tensor table."""
+    shards = gguf_shard_names(name, available, count)
+    if len(shards) == 1:
+        return [(name, "model.gguf")]
+    total = len(shards)
+    return [(remote, "model.gguf" if i == 0 else f"model.gguf-{i + 1:05d}-of-{total:05d}")
+            for i, remote in enumerate(shards)]
+
+
 def split_quant_request(repo_arg: str):
     """`repo:QUANT` -- name the quant to take from a GGUF repo.
 
@@ -238,41 +343,45 @@ def split_quant_request(repo_arg: str):
     if ":" not in repo_arg:
         return repo_arg, None
     head, _, tail = repo_arg.rpartition(":")
-    if not head or not re.fullmatch(r"[A-Za-z0-9_]+", tail):
+    # A UD request is hyphenated (`UD-Q4_K_XL`); a bare port number is not a
+    # quant, so require at least one letter in the token.
+    if not head or not re.fullmatch(r"[A-Za-z0-9_]+(?:[-_][A-Za-z0-9_]+)*", tail) or not re.search(r"[A-Za-z]", tail):
         return repo_arg, None
-    return head, tail.upper()
+    return head, _canon_quant_token(tail)
 
 
-def choose_gguf_file(names, want=None, preference=None):
-    """Pick the best compatible *.gguf from a repo's root file names.
-    Returns (chosen, refused) -- refused maps every other gguf to why.
+def _gguf_candidates(names, pref):
+    """(candidates, refused) from a repo's GGUF paths.
 
-    `want` names the quant the user asked for ("IQ4_NL"): the files whose quant
-    SUFFIX matches it exactly win, and the ones whose FAMILY matches are the
-    fallback. Without it the preference order decides (Q4_1 first -- it is the
-    one the pool takes byte-exactly). `preference` replaces that order for an
-    NpuEmbeddings GGUF, whose packer dequantizes everything (NPUE_GGUF_PREFERENCE).
-    """
-    pref = preference or GGUF_QUANT_PREFERENCE
+    A split set is one candidate: its first shard. The other shards are noted
+    in `refused` only so `--verbose` can say they were not separate downloads;
+    they are installed beside part 1, not thrown away."""
     refused = {}
     cands = []
     for n in names:
         if not n.endswith(".gguf"):
             continue
-        if re.search(r"-\d+-of-\d+\.gguf$", n):
-            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
+        info = gguf_shard_info(n)
+        if info and info[0] != 1:
+            refused[n] = f"part {info[0]} of a {info[1]}-part GGUF; installed beside part 1"
             continue
         suffix = gguf_quant_suffix(n)
         q = gguf_quant_family(suffix, pref)
         if q not in pref:
-            refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(pref)}); convert with q4nx-build"
+            refused[n] = ("quant " + (suffix or "unmarked") + " not supported by the open kernels (have "
+                          + "/".join(pref) + "); convert with q4nx-build")
             continue
         cands.append((pref.index(q), q, suffix, n))
-    cands.sort()
+    # A single-file export wins a tie with the same quant split across shards.
+    cands.sort(key=lambda c: (c[0], 1 if gguf_shard_info(c[3]) else 0, c[2], c[3]))
+    return cands, refused
+
+
+def _choose_from_candidates(cands, want, pref, refused):
     if not cands:
         return None, refused
     if want:
-        exact = [c for c in cands if c[2].upper() == want]
+        exact = [c for c in cands if c[2].upper() == str(want).upper()]
         if exact:
             return exact[0][3], refused
         fam = gguf_quant_family(want, pref)
@@ -286,6 +395,26 @@ def choose_gguf_file(names, want=None, preference=None):
     return cands[0][3], refused
 
 
+def choose_gguf_file(names, want=None, preference=None):
+    """Pick the best compatible *.gguf from a repo's file names.
+
+    `want` names the quant the user asked for ("IQ4_NL", "UD-Q4_K_XL"): the
+    files whose quant SUFFIX matches it exactly win, and the ones whose FAMILY
+    matches are the fallback. Without it the preference order decides (Q4_1
+    first -- the one the pool takes byte-exactly). `preference` replaces that
+    order for an NpuEmbeddings GGUF, whose packer dequantizes everything.
+    Multi-part sets are candidates; part 1 stands for the whole set."""
+    pref = preference or GGUF_QUANT_PREFERENCE
+    cands, refused = _gguf_candidates(names, pref)
+    chosen, refused = _choose_from_candidates(cands, want, pref, refused)
+    if chosen:
+        for c in cands:
+            if c[3] != chosen and gguf_shard_info(c[3]):
+                refused[c[3]] = ("multi-part GGUF set; a single-file export of the same "
+                                 "quant was preferred")
+    return chosen, refused
+
+
 def choose_gguf_candidates(names, want=None, preference=None):
     """All compatible *.gguf candidates, best first, like choose_gguf_file.
 
@@ -295,25 +424,10 @@ def choose_gguf_candidates(names, want=None, preference=None):
     through to the next quant when one repo's Q4_1 happens to hide a stray tensor
     type the NPU packers reject (a single Q5_0/Q6_K embedding row)."""
     pref = preference or GGUF_QUANT_PREFERENCE
-    refused = {}
-    cands = []
-    for n in names:
-        if not n.endswith(".gguf"):
-            continue
-        if re.search(r"-\d+-of-\d+\.gguf$", n):
-            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
-            continue
-        suffix = gguf_quant_suffix(n)
-        q = gguf_quant_family(suffix, pref)
-        if q not in pref:
-            refused[n] = ("quant " + (suffix or "unmarked") + " not supported by the open kernels (have "
-                          + "/".join(pref) + "); convert with q4nx-build")
-            continue
-        cands.append((pref.index(q), q, suffix, n))
-    cands.sort()
+    cands, refused = _gguf_candidates(names, pref)
     if not want:
         return cands, refused
-    exact = [c for c in cands if c[2].upper() == want]
+    exact = [c for c in cands if c[2].upper() == str(want).upper()]
     if exact:
         return exact, refused
     fam = gguf_quant_family(want, pref)
@@ -330,6 +444,16 @@ def root_file_names(tree):
     """Root file names from an HF tree list or ModelScope's name-keyed dict."""
     names = tree.keys() if isinstance(tree, dict) else (e.get("path") for e in tree)
     return [n for n in names if n and "/" not in n]
+
+
+def gguf_file_names(tree):
+    """Every GGUF path in a repo tree, including quant subdirectories.
+
+    Unsloth puts each dynamic quant in its own folder (`UD-Q4_K_XL/Model-
+    00001-of-00004.gguf`); restricting the GGUF scan to root files made those
+    repos look like an NPU2/q4nx install with no weights."""
+    names = tree.keys() if isinstance(tree, dict) else (e.get("path") for e in tree)
+    return [n for n in names if n and n.endswith(".gguf")]
 
 
 def repo_has_q4nx(tree, cache=None):
@@ -666,7 +790,9 @@ GGUF_ARCH_FAMILIES = {
     "qwen35": "qwen3.5",
     "qwen3next": "qwen3.5",
     "qwen35moe": "qwen3.6-moe",
-    "lfm2moe": "lfm2moe",
+    "lfm2": "lfm2",                  # the hybrid: conv + GQA, no experts
+    "lfm2moe": "lfm2moe",            # LFM2.5: the same hybrid with routed experts
+    "lfm3": "lfm3",                  # LFM3: conv + full/sliding attention, sandwich norms
     "qwen3vl": "qwen3vl",            # Qwen3-VL: the VL adapter, on qwen3-shaped kernels
     "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
     "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
@@ -2250,25 +2376,47 @@ def download_file(url, dest, expected_size=None, expected_sha=None, verify=True,
     os.replace(tmp, dest)
 
 
+def _gguf_remote_map(gguf_name, available):
+    """{installed name: source repo name} for a GGUF set, siblings included."""
+    try:
+        return {dest: remote for remote, dest in gguf_install_pairs(gguf_name, available)}
+    except ValueError:
+        return {"model.gguf": gguf_name}
+
+
 def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False, gguf_name=None, want=None):
     """Populate target/ with the model files; returns the list of files present.
 
     With gguf_name set (the GGUF-direct path) the wanted set is the tokenizer
-    files plus that one GGUF, stored canonically as model.gguf. Otherwise the
-    default is ALL_FILES; an explicit `want` list overrides it (used by the
-    NPU-embedding path, which fetches a safetensors checkpoint, not model.q4nx)."""
+    files plus that GGUF SET. A split export's part 1 lands as model.gguf and
+    every later part lands beside it as model.gguf-NNNNN-of-NNNNN, which is the
+    form GgufFile maps as one logical model. Otherwise the default is ALL_FILES;
+    an explicit `want` list overrides it (used by the NPU-embedding path, which
+    fetches a safetensors checkpoint, not model.q4nx)."""
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
-    if gguf_name:
-        # `want` adds files a GGUF repo needs beyond the chat set -- the
-        # NPU-embedding checkpoint's vocab.txt and 1_Pooling/config.json.
-        want_list = list(dict.fromkeys(GGUF_FILES + GGUF_OPTIONAL + (want or [])))
-    else:
-        want_list = want if want is not None else ALL_FILES
+    domain = None
+    entries = {}
     if modelscope:
         domain, entries = ms_file_tree(repo_id)
+    if gguf_name:
+        if not modelscope:
+            for e in hf_file_tree(repo_id):
+                p = e.get("path")
+                if p:
+                    entries[p] = e
+        gguf_map = _gguf_remote_map(gguf_name, entries)
+        # `want` adds files a GGUF repo needs beyond the chat set -- the
+        # NPU-embedding checkpoint's vocab.txt and 1_Pooling/config.json.
+        want_list = list(dict.fromkeys(
+            [f for f in GGUF_FILES if f != "model.gguf"] + list(gguf_map)
+            + GGUF_OPTIONAL + (want or [])))
+    else:
+        gguf_map = {}
+        want_list = want if want is not None else ALL_FILES
+    if modelscope:
         for fname in want_list:
-            remote = gguf_name if fname == "model.gguf" else fname
+            remote = gguf_map.get(fname, fname)
             if remote not in entries:
                 continue
             dest = target / fname
@@ -2297,13 +2445,13 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
 
     # Hugging Face: local cache first, then the tree API. Keep nested paths too
     # (e.g. 1_Pooling/config.json for NPU-embedding models).
-    entries = {}
-    for e in hf_file_tree(repo_id):
-        p = e.get("path")
-        if p:
-            entries[p] = e
+    if not entries:
+        for e in hf_file_tree(repo_id):
+            p = e.get("path")
+            if p:
+                entries[p] = e
     for fname in want_list:
-        remote = gguf_name if fname == "model.gguf" else fname
+        remote = gguf_map.get(fname, fname)
         if remote not in entries:
             continue
         dest = target / fname
@@ -2329,11 +2477,19 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
 
 
 def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
+    src_dir = Path(src_dir)
+    if gguf_name:
+        available = [str(p.relative_to(src_dir)) for p in src_dir.rglob("*.gguf")]
+        gguf_map = _gguf_remote_map(gguf_name, available)
+        want_list = list(dict.fromkeys(
+            [f for f in GGUF_FILES if f != "model.gguf"] + list(gguf_map)
+            + GGUF_OPTIONAL + (want or [])))
+    else:
+        gguf_map = {}
+        want_list = want if want is not None else ALL_FILES
     obtained = []
-    want_list = (list(dict.fromkeys(GGUF_FILES + GGUF_OPTIONAL + (want or [])))
-                 if gguf_name else (want if want is not None else ALL_FILES))
     for fname in want_list:
-        src = src_dir / (gguf_name if fname == "model.gguf" else fname)
+        src = src_dir / gguf_map.get(fname, fname)
         if src.is_file():
             dest = target / fname
             if dest.is_file() and (not force or src.resolve() == dest.resolve()):
@@ -2501,6 +2657,8 @@ def size_token_from_bytes(num_bytes):
 GGUF_BYTES_PER_PARAM = {
     "Q4_0": 0.5625,
     "Q4_1": 0.625,
+    "Q5_0": 0.6875,
+    "Q5_1": 0.75,
     "Q8_0": 1.0625,
     "Q4_K": 0.5625,
     "Q6_K": 0.8125,
@@ -2516,30 +2674,59 @@ def gguf_size_token(gguf_bytes, quant):
 
 
 def gguf_byte_size(repo, modelscope, local_dir, cache_dir, gguf_name, tree):
-    """On-disk or listed byte size of the chosen GGUF, or None.
+    """On-disk or listed byte size of the chosen GGUF SET, or None.
 
-    Local files (install dir, HF/MS cache snapshot) stat first: no network.
-    Otherwise the size comes from the repo tree listing already fetched for
-    the GGUF scan."""
+    A split quant's bytes are the sum of every part; a part-1 header alone says
+    nothing about the model's size. Local files (install dir, HF/MS cache
+    snapshot) stat first: no network. Otherwise sizes come from the repo tree
+    already fetched for the GGUF scan."""
+    if isinstance(tree, dict):
+        available = list(tree.keys())
+    elif isinstance(tree, list):
+        available = [e.get("path") for e in tree if e.get("path")]
+    else:
+        available = []
     for d in (local_dir, cache_dir):
-        if d is None:
-            continue
-        cand = Path(d) / gguf_name
-        try:
-            if cand.is_file():
-                return cand.stat().st_size
-        except OSError:
-            pass
+        if d is not None and Path(d).is_dir():
+            # Installed siblings end in `-NNNNN-of-NNNNN` WITHOUT a .gguf
+            # suffix, so a `*.gguf` glob would not see them.
+            available += [str(p.relative_to(d)) for p in Path(d).rglob("*") if p.is_file()]
     try:
-        if modelscope and isinstance(tree, dict):
-            return (tree.get(gguf_name) or {}).get("Size") or None
-        if isinstance(tree, list):
-            for entry in tree:
-                if entry.get("path") == gguf_name:
-                    return (entry.get("lfs") or {}).get("size") or entry.get("size")
-    except Exception:
-        pass
-    return None
+        pairs = gguf_install_pairs(gguf_name, available)
+    except ValueError:
+        pairs = [(gguf_name, "model.gguf")]
+    total = 0
+    found = 0
+    for name, installed in pairs:
+        size = None
+        for d in (local_dir, cache_dir):
+            if d is None:
+                continue
+            for candidate in (name, installed):
+                cand = Path(d) / candidate
+                try:
+                    if cand.is_file():
+                        size = cand.stat().st_size
+                        break
+                except OSError:
+                    pass
+            if size is not None:
+                break
+        if size is None:
+            try:
+                if modelscope and isinstance(tree, dict):
+                    size = (tree.get(name) or {}).get("Size")
+                elif isinstance(tree, list):
+                    for entry in tree:
+                        if entry.get("path") == name:
+                            size = (entry.get("lfs") or {}).get("size") or entry.get("size")
+                            break
+            except Exception:
+                pass
+        if size:
+            total += int(size)
+            found += 1
+    return total if found else None
 
 
 def link_npue_design(system_prefixes, user_root, design_family, force=False, quiet=False):
@@ -3209,8 +3396,8 @@ GGML_TYPE_NAMES = {
 }
 # Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
 # quants, put/pack_norm for the small float weights).
-GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K",
-                     "IQ4_NL", "IQ4_XS"}
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
+                     "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS"}
 
 
 class _GgufTruncated(Exception):
@@ -3333,18 +3520,86 @@ def gguf_prefix_bytes(source, limit):
         return b""
 
 
-def read_gguf_inventory(source, limit_mb=32):
-    """(kv, tensors) for a GGUF, or None when the prefix is unreachable or
-    too short to cover the metadata. `source` is a local path or URL."""
-    buf = gguf_prefix_bytes(source, int(limit_mb * 1024 * 1024))
+def _read_single_gguf_inventory(source, limit):
+    buf = gguf_prefix_bytes(source, limit)
     if len(buf) < 24:
         return None
     try:
         return parse_gguf_inventory(buf)
-    except _GgufTruncated:
+    except (_GgufTruncated, ValueError):
         return None
-    except ValueError:
+
+
+def _split_sources(source, count):
+    """Sibling paths/URLs for a split GGUF whose first part is `source`."""
+    text = str(source)
+    if text.startswith("http://") or text.startswith("https://"):
+        leaf = text.rsplit("/", 1)[-1]
+        names = gguf_shard_names(leaf, count=count)
+        return [text[:-len(leaf)] + n for n in names]
+    p = Path(source)
+    try:
+        available = [q.name for q in p.parent.iterdir()]
+    except OSError:
+        available = []
+    names = gguf_shard_names(p.name, available=available, count=count)
+    return [str(p.parent / Path(n).name) for n in names]
+
+
+def read_gguf_inventory(source, limit_mb=32):
+    """(kv, tensors) for a GGUF or a whole SPLIT set, or None when a header is
+    unreachable. `source` is a local path or URL.
+
+    Unsloth's big UD exports put the metadata in part 1 and the tensors in the
+    later parts -- reading only the named file sees ZERO tensors and would tag a
+    4-part model as empty. Every shard is parsed (a small prefix read) and the
+    tensor tables are merged, while the first shard stays the metadata authority.
+    """
+    limit = int(limit_mb * 1024 * 1024)
+    inv = _read_single_gguf_inventory(source, limit)
+    if inv is None:
         return None
+    kv, tensors = inv
+    count = gguf_split_count(kv, str(source))
+    if count <= 1:
+        return inv
+    merged = list(tensors)
+    seen = {name for name, _, _ in tensors}
+    # Unsloth's split.no is 0-based (0..count-1); llama.cpp's writer is 1-based.
+    # The `-NNNNN-of-NNNNN` file name is authoritative for the order, so infer
+    # the convention from whichever shard declares it first and require the
+    # rest to agree.
+    base = None
+    first_no = kv.get("split.no")
+    if first_no is not None:
+        try:
+            first_no = int(first_no)
+        except (TypeError, ValueError):
+            return None
+        if first_no in (0, 1):
+            base = first_no
+    for shard, path in enumerate(_split_sources(source, count)[1:], 2):
+        other = _read_single_gguf_inventory(path, limit)
+        if other is None:
+            return None                 # a half-read set is worse than no claim
+        okv, otensors = other
+        if str(okv.get("split.count", count)) != str(count):
+            return None
+        no = okv.get("split.no")
+        if no is not None:
+            try:
+                no = int(no)
+            except (TypeError, ValueError):
+                return None
+            if base is None:
+                base = 0 if no == shard - 1 else 1 if no == shard else None
+            if base is None or no != shard - 1 + base:
+                return None
+        for name, ty, dims in otensors:
+            if name not in seen:
+                seen.add(name)
+                merged.append((name, ty, dims))
+    return kv, merged
 
 
 def gguf_params(gguf_source):
@@ -3434,7 +3689,8 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
                    if GGML_TYPE_NAMES[t] not in GGUF_ENGINE_TYPES})
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
-                       "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
+                       "(have F32/F16/BF16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/"
+                       "IQ4_NL/IQ4_XS); convert with q4nx-build")
     # llama.cpp's quantizers MIX types by importance: the body at the named quant,
     # the output projection and the attention V at a finer one (a Q4_1 file holds
     # Q6_K beside its Q4_1; an IQ4_XS file holds Q5_K). So the name is a hint, not
@@ -3937,13 +4193,17 @@ def main():
     gguf_names = []
     tree = {}
     gguf_source = None
+    gguf_installed = []
     cache = None
     if local_dir:
-        gguf_names = [e.name for e in local_dir.iterdir() if e.is_file() and e.suffix == ".gguf"]
+        gguf_names = [p.relative_to(local_dir).as_posix()
+                      for p in local_dir.rglob("*.gguf") if p.is_file()]
     else:
         try:
             tree = ms_file_tree(repo)[1] if modelscope else hf_file_tree(repo)
-            gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
+            # Unsloth puts each UD quant in its own subdirectory; root_file_names
+            # made those repos look like a q4nx install with no weights.
+            gguf_names = gguf_file_names(tree)
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
     # A FLUX DiT is a GGUF repo too, and `choose_gguf_file` would install it as a language
@@ -4007,8 +4267,7 @@ def main():
                 f"{repo_arg}: ':QUANT' is for GGUF repositories, and this repository has no .gguf files "
                 f"(files present: {', '.join(all_files) or 'none'})")
         compat = sorted({(gguf_quant_suffix(n) or "").upper() for n in gguf_names
-                         if gguf_quant_family(gguf_quant_suffix(n), gguf_pref) in gguf_pref
-                         and not re.search(r"-\d+-of-\d+\.gguf$", n)})
+                         if gguf_quant_family(gguf_quant_suffix(n), gguf_pref) in gguf_pref})
         files = ", ".join(sorted(gguf_names))
         raise SystemExit(
             f"{repo_arg}: no compatible '{gguf_want}' GGUF in that repository.\n"
@@ -4063,6 +4322,9 @@ def main():
             raise SystemExit(
                 f"{repo_arg}: no compatible GGUF installs from that repository.\n"
                 + "\n".join(f"  {n}: {why}" for n, why in gguf_refused.items() if n.endswith(".gguf")))
+        gguf_pairs = gguf_install_pairs(gguf_name, available=gguf_names)
+        gguf_sources = [remote for remote, _ in gguf_pairs]
+        gguf_installed = [dest for _, dest in gguf_pairs]
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
@@ -4351,10 +4613,11 @@ def main():
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
         if gguf_mode and not npue_embed:
+            shards = "" if len(gguf_installed) <= 1 else f" (+{len(gguf_installed) - 1} shards)"
             if whisper_model:
-                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, host dequant)")
+                print(f"weights        : {gguf_name} -> model.gguf{shards} (GGUF-direct, host dequant)")
             else:
-                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, q4_1 pools)")
+                print(f"weights        : {gguf_name} -> model.gguf{shards} (GGUF-direct, q4_1 pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
             # The geometry decision, in the dry run: which set serves this file,
             # or why none does. This is what makes `oflm add --dry-run <repo>` the
@@ -4378,7 +4641,8 @@ def main():
             # the checkpoint (or the checkpoint the adapter stages from the
             # GGUF), so the `gguf kernels` question does not apply.
             if gguf_mode:
-                print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct; "
+                shards = "" if len(gguf_installed) <= 1 else f" (+{len(gguf_installed) - 1} shards)"
+                print(f"weights        : {gguf_name} -> model.gguf{shards} (GGUF-direct; "
                       f"staged as an F32 checkpoint on first load)")
                 print(f"design set     : {base_entry.get('npue_design_family')}")
                 print("tokenizer      : container vocab.txt (base repo's, else "
@@ -4425,7 +4689,8 @@ def main():
             gguf_name = None
     # --- acquire model files ---
     if gguf_mode and not args.quiet:
-        log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
+        extra = "" if len(gguf_installed) <= 1 else f" (+{len(gguf_installed) - 1} sibling shards)"
+        log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf{extra}")
         # Which candidates we passed over is our business, not the user's: a dozen lines of
         # "skipping X: quant Y not supported" reads as errors and trains people to ignore
         # the output. Available under --verbose for a dev chasing a repo.
@@ -4445,9 +4710,9 @@ def main():
         # GGUF-direct path asks for ONE file by name, and a snapshot with only
         # the config (or with a different quant) is not it. Fall through to the
         # download then, rather than copying a cache that cannot serve.
-        if snapshot and gguf_mode and not (Path(snapshot) / gguf_name).is_file():
+        if snapshot and gguf_mode and not all((Path(snapshot) / n).is_file() for n in gguf_sources):
             if not args.quiet:
-                log(f"[INFO] The local cache has no {gguf_name}; downloading it.")
+                log(f"[INFO] The local cache has no complete GGUF set; downloading it.")
             snapshot = None
         if snapshot:
             if not args.quiet:
@@ -4470,7 +4735,7 @@ def main():
             # first load, including config.json / vocab.txt / 1_Pooling when
             # the base repo cannot be reached -- so the GGUF is the only file
             # this install cannot do without.
-            required = ["model.gguf"]
+            required = list(gguf_installed or ["model.gguf"])
         else:
             # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are
             # absent for some families (e.g. gte has no vocab.txt) and are
@@ -4482,11 +4747,12 @@ def main():
                         and (target / "model.open.safetensors").is_file()
                         and (target / "weights_manifest.json").is_file()
                         and (target / "generation_config.json").is_file())
-        required = (["model.gguf", "tokenizer.json", "tokenizer_config.json",
+        weights = gguf_installed or ["model.gguf"]
+        required = (weights + ["tokenizer.json", "tokenizer_config.json",
                      "generation_config.json"]   # whisper: the hf-decode protocol needs it
                     if gguf_mode and whisper_model
                     else [] if whisper_open
-                    else ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode
+                    else weights + ["tokenizer.json", "tokenizer_config.json"] if gguf_mode
                     else REQUIRED_FILES)
     missing = [f for f in required if not (target / f).is_file()]
     if (not gguf_mode and whisper_model
@@ -4501,7 +4767,7 @@ def main():
         # Granite's folded multipliers exist only there). The chain climbs past
         # the quant repo: a quant of a finetune of a base tries each level in
         # order until every file resolves.
-        aux_missing = [f for f in missing if f != "model.gguf"]
+        aux_missing = [f for f in missing if f not in gguf_installed]
         if npue_embed:
             # The NpuEmbeddings packer reads vocab.txt and 1_Pooling beside
             # config.json; the base repo has the author's own copies. Missing

@@ -45,8 +45,8 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 # the GGUF reader and the elementwise helpers (rms, rotate_half RoPE, silu, bf16 rounding) are Flint's
 # reference's; they hold no model logic
-from flint_gguf_reference import Gguf, bf, rms, rope, silu  # noqa: E402
-from hyv3_gguf_reference import attention  # noqa: E402  (causal, every row, double accumulation)
+from lfm_gguf_ref import LfmGguf as Gguf, attention, bf, rope  # noqa: E402
+from replica_dense import rms  # noqa: E402
 
 
 def rope_inv_freq(cfg: dict, hd: int) -> np.ndarray:

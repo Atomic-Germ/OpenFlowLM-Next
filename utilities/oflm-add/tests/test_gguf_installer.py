@@ -9,7 +9,7 @@ sys.path.insert(0, str(OFLM_ADD))
 import oflm_add  # noqa: E402
 
 
-def test_choose_gguf_prefers_q4_1_and_refuses_multipart():
+def test_choose_gguf_prefers_single_file_over_the_same_quant_in_parts():
     chosen, refused = oflm_add.choose_gguf_file([
         "model-Q8_0.gguf",
         "model-Q4_0.gguf",
@@ -18,7 +18,26 @@ def test_choose_gguf_prefers_q4_1_and_refuses_multipart():
     ])
 
     assert chosen == "model-Q4_1.gguf"
-    assert "multi-part GGUF" in refused["model-Q4_1-00001-of-00002.gguf"]
+    # A split set is a CANDIDATE now, not a refusal. The note merely says the
+    # single-file export of that quant won the tie.
+    assert "single-file export" in refused["model-Q4_1-00001-of-00002.gguf"]
+
+
+def test_ud_quant_names_map_to_the_underlying_ggml_family():
+    ud_q4 = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+    assert oflm_add.gguf_quant_suffix(ud_q4) == "UD-Q4_K_XL"
+    assert oflm_add.gguf_quant_family("UD-Q4_K_XL") == "Q4_K"
+    assert oflm_add.gguf_quant_family("UD-IQ4_XS") == "IQ4"
+    assert oflm_add.gguf_quant_of(ud_q4) == "Q4_K"
+    assert oflm_add.split_quant_request("unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL") == (
+        "unsloth/Qwen3.8-27B-GGUF", "UD-Q4_K_XL")
+
+    chosen, refused = oflm_add.choose_gguf_file([
+        f"UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-{i:05d}-of-00004.gguf"
+        for i in range(1, 5)
+    ], want="UD-Q4_K_XL")
+    assert chosen.endswith("-00001-of-00004.gguf")
+    assert not any("not supported" in why for why in refused.values())
 
 
 def test_local_q4nx_can_take_precedence_over_gguf(tmp_path):
@@ -521,6 +540,112 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     trap.write_bytes(_gguf_bytes(_llama_kv(), [("w", 31, [8, 8])]))
     ok, note = oflm_add.verify_gguf_choice(str(trap), "t.gguf", "Q4_0")
     assert not ok and "Q4_0_4_4" in note
+
+
+def _split_names():
+    return [f"UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-{i:05d}-of-00004.gguf"
+            for i in range(1, 5)]
+
+
+def test_split_install_pairs_map_shards_beside_model_gguf():
+    names = _split_names()
+    pairs = oflm_add.gguf_install_pairs(names[0], available=names)
+    assert pairs == [
+        (names[0], "model.gguf"),
+        *[(names[i], f"model.gguf-{i + 1:05d}-of-00004") for i in range(1, 4)],
+    ]
+    # Already-installed spelling: part 1 is model.gguf; the siblings are found
+    # from the split.count metadata and map to the same installed layout.
+    assert [dest for _, dest in oflm_add.gguf_install_pairs("model.gguf", count=4)] == [
+        dest for _, dest in pairs]
+
+
+def test_split_inventory_merges_shards_and_verifies(tmp_path):
+    part1 = tmp_path / "part-00001-of-00002.gguf"
+    part2 = tmp_path / "part-00002-of-00002.gguf"
+    # Unsloth writes split.no 0-based; the file names are the order authority.
+    kv1 = [("general.architecture", (8, "qwen4exp")), ("split.no", (4, 0)),
+           ("split.count", (4, 2))]
+    kv2 = [("general.architecture", (8, "qwen4exp")), ("split.no", (4, 1)),
+           ("split.count", (4, 2))]
+    part1.write_bytes(_gguf_bytes(kv1, [("output_norm.weight", 0, [8])]))
+    part2.write_bytes(_gguf_bytes(kv2, [("w", 12, [8, 8]), ("down", 7, [8, 8])]))
+    kv, tensors = oflm_add.read_gguf_inventory(str(part1))
+    assert kv["general.architecture"] == "qwen4exp"
+    assert {name for name, _, _ in tensors} == {"output_norm.weight", "w", "down"}
+    ok, note = oflm_add.verify_gguf_choice(str(part1), part1.name, "Q4_K")
+    assert ok and "3 tensors" in note
+    # The installed form is read the same way (model.gguf + numbered sibling).
+    (tmp_path / "model.gguf").write_bytes(part1.read_bytes())
+    (tmp_path / "model.gguf-00002-of-00002").write_bytes(part2.read_bytes())
+    kv, tensors = oflm_add.read_gguf_inventory(str(tmp_path / "model.gguf"))
+    assert len(tensors) == 3
+
+
+def test_split_inventory_accepts_both_split_no_conventions(tmp_path):
+    """llama.cpp numbers shards 1..N; Unsloth numbers them 0..N-1."""
+    part1 = tmp_path / "Model-00001-of-00002.gguf"
+    part2 = tmp_path / "Model-00002-of-00002.gguf"
+    for base, expect in ((0, True), (1, True), (0, False)):
+        kv1 = [("split.no", (4, base)), ("split.count", (4, 2))]
+        # The third case is a BROKEN set: shard 2 repeats shard 1's number.
+        no2 = base + 1 if expect else base
+        kv2 = [("split.no", (4, no2)), ("split.count", (4, 2))]
+        part1.write_bytes(_gguf_bytes(kv1, [("w", 0, [8])]))
+        part2.write_bytes(_gguf_bytes(kv2, [("v", 0, [8])]))
+        inv = oflm_add.read_gguf_inventory(str(part1))
+        assert (inv is not None) is expect
+        if inv:
+            assert {name for name, _, _ in inv[1]} == {"w", "v"}
+
+
+def test_fetch_assets_downloads_every_split_shard(monkeypatch, tmp_path):
+    names = _split_names()
+    tree = [{"path": n, "lfs": {"size": 100 * (i + 1)}} for i, n in enumerate(names)]
+    monkeypatch.setattr(oflm_add, "hf_file_tree", lambda repo: tree)
+    calls = []
+    monkeypatch.setattr(
+        oflm_add, "download_file",
+        lambda url, dest, **kwargs: calls.append((url, dest, kwargs)),
+    )
+    obtained = oflm_add.fetch_assets("unsloth/Flash-Next", tmp_path,
+                                     gguf_name=names[0], quiet=True)
+    assert [o for o in obtained if o.startswith("model.gguf")] == [
+        "model.gguf", "model.gguf-00002-of-00004",
+        "model.gguf-00003-of-00004", "model.gguf-00004-of-00004",
+    ]
+    assert [url.rsplit("/", 1)[-1] for url, _, _ in calls] == [
+        n.rsplit("/", 1)[-1] for n in names]
+    assert [dest.name for _, dest, _ in calls] == [
+        "model.gguf", "model.gguf-00002-of-00004",
+        "model.gguf-00003-of-00004", "model.gguf-00004-of-00004"]
+
+
+def test_copy_from_dir_copies_every_split_shard(tmp_path):
+    names = _split_names()
+    src = tmp_path / "src"
+    (src / "UD-Q4_K_XL").mkdir(parents=True)
+    for i, name in enumerate(names, 1):
+        (src / name).write_bytes(bytes([i]) * i)
+    dest = tmp_path / "dest"
+    obtained = oflm_add.copy_from_dir(src, dest, gguf_name=names[0])
+    assert [o for o in obtained if o.startswith("model.gguf")] == [
+        "model.gguf", "model.gguf-00002-of-00004",
+        "model.gguf-00003-of-00004", "model.gguf-00004-of-00004",
+    ]
+    for i in range(1, 5):
+        leaf = "model.gguf" if i == 1 else f"model.gguf-{i:05d}-of-00004"
+        assert (dest / leaf).read_bytes() == bytes([i]) * i
+
+
+def test_gguf_byte_size_sums_split_shards(tmp_path):
+    names = _split_names()
+    tree = [{"path": n, "lfs": {"size": 100 * (i + 1)}} for i, n in enumerate(names)]
+    assert oflm_add.gguf_byte_size("Org/M", False, None, None, names[0], tree) == 1000
+    for i, n in enumerate(names, 1):
+        (tmp_path / ("model.gguf" if i == 1 else f"model.gguf-{i:05d}-of-00004")).write_bytes(
+            b"x" * (10 * i))
+    assert oflm_add.gguf_byte_size("Org/M", False, tmp_path, None, names[0], tree) == 100
 
 
 def test_extract_tokenizer_from_gguf_round_trips(tmp_path):

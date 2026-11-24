@@ -67,7 +67,8 @@ def decode(q: np.ndarray, k: np.ndarray, v: np.ndarray, qn: np.ndarray, kn: np.n
            cs: np.ndarray, cache_k: np.ndarray, cache_v: np.ndarray, *,
            nh: int, kvh: int, hd: int, eps: float, qk_norm: bool, post: bool,
            interleaved: bool = False, pair: int | None = None,
-           v_norm: bool = False, attn_scale: float | None = None):
+           v_norm: bool = False, attn_scale: float | None = None,
+           gate: np.ndarray | None = None):
     """The attention step: the new position's rows plus the cached window.
 
     `cache_k` / `cache_v` are the window's bf16 rows ([rows, KVH, HD]). The
@@ -96,6 +97,10 @@ def decode(q: np.ndarray, k: np.ndarray, v: np.ndarray, qn: np.ndarray, kn: np.n
         a = np.exp(s - s.max())
         p = a / a.sum()
         og[h] = p @ rows_v[:, kv]
+    if gate is not None:
+        # ATTN_GATE: og = (o / l) * sigmoid(g), one f32 per channel, elementwise
+        g = np.asarray(gate, np.float64)
+        og = og / (1.0 + np.exp(-g))
     return np.stack([kp, vp]), og
 
 

@@ -1994,7 +1994,7 @@ void Core::bench_decode(int reps) {
     auto replay = [&](int l, std::map<std::string, BenchStat>& into) {
         double ms = 0;
         for (const Step& s : types_[l]->program) {
-            if (s.op != "run") { route(kerns_.at(s.kernel), l, s.act_off); continue; }
+            if (s.op != "run") { host_step(s, l); continue; }
             const auto [submit, wait] = run_split(kerns_.at(s.kernel), s.args, l);
             into[s.kernel].add(submit, wait);
             ms += submit + wait;
@@ -2442,6 +2442,98 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     timing_.route_ms += ms_since(t0);
 }
 
+void Core::hy_route(const Step& s, int layer) {
+    // LFM2.5 / HY V3's router (transformers' top-k router with a sigmoid gate, llama.cpp's
+    // build_moe_ffn with expert_gating_func=2): logits = W xm over xm as the mixer wrote it
+    // (bf16 [hidden_real] at act a_xm), in double; s = sigmoid(logit); the top `r_topk` of
+    // s + bias (the selection bias, F32 [experts], ties to the lower expert); their UNBIASED
+    // scores renormalised times r_scale into slots 0..r_topk-1; then `shared`'s pool experts
+    // at weight 1. The weights (f32[r_slots]) go at a_w beside xm; the slots into the kernel's
+    // moeroute2 fills. All of it is family arithmetic from the GGUF's own F32 router and bias.
+    auto t0 = std::chrono::steady_clock::now();
+    Kern& k = kerns_.at(s.kernel);
+    if (k.moe2.empty())
+        throw std::runtime_error("open_qwen36: hy_route on " + k.name + ", which has no routed-expert table");
+    const size_t S = s.r_slots;
+    if (S != w_->moe.topk || S > 16)
+        throw std::runtime_error("open_qwen36: hy_route slots must be the moe slots, at most 16");
+    uint32_t idx[16] = {0};
+    float wv[16] = {0};
+    if (s.r_dense) {
+        for (size_t j = 0; j < S; ++j) { idx[j] = static_cast<uint32_t>(j); wv[j] = 1.0f; }
+    } else {
+        const size_t hr = s.hidden_real, E = s.r_experts, K = s.r_topk;
+        if (hr > w_->hidden || E > w_->moe.experts || K + s.shared.size() != S)
+            throw std::runtime_error("open_qwen36: hy_route geometry (topk + shared must be the slots)");
+        auto it = hy_router_.find(layer);
+        if (it == hy_router_.end()) {
+            auto with_layer = [&](std::string n) {
+                for (size_t p = n.find("{l}"); p != std::string::npos; p = n.find("{l}"))
+                    n.replace(p, 3, std::to_string(layer));
+                return n;
+            };
+            std::vector<float> w = file_->f32(with_layer(s.router));
+            std::vector<float> b = file_->f32(with_layer(s.router_bias));
+            if (w.size() != E * hr || b.size() != E)
+                throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) +
+                                         ": hy_route's router is not [" + std::to_string(E) + ", " +
+                                         std::to_string(hr) + "] with a [" + std::to_string(E) + "] bias");
+            it = hy_router_.emplace(layer, std::make_pair(std::move(w), std::move(b))).first;
+        }
+        const std::vector<float>& W = it->second.first;
+        const std::vector<float>& B = it->second.second;
+        xrt::bo& act = act_[layer];
+        // xm was just written by the mixer on the device; the host reads it back through
+        // the engine's one read_back (request-isolation safe).
+        read_back(act, hr * 2, s.a_xm);
+        const uint16_t* xb = reinterpret_cast<const uint16_t*>(act.map<uint8_t*>() + s.a_xm);
+        std::vector<double> x(hr);
+        for (size_t i = 0; i < hr; ++i) x[i] = bf16_to_f32(xb[i]);
+        std::vector<double> score(E), choice(E);
+        for (size_t e = 0; e < E; ++e) {
+            const float* wr = W.data() + e * hr;
+            double acc = 0.0;
+            for (size_t i = 0; i < hr; ++i) acc += static_cast<double>(wr[i]) * x[i];
+            score[e] = 1.0 / (1.0 + std::exp(-acc));
+            choice[e] = score[e] + static_cast<double>(B[e]);
+        }
+        std::vector<uint32_t> order(E);
+        for (size_t e = 0; e < E; ++e) order[e] = static_cast<uint32_t>(e);
+        std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return choice[a] > choice[b]; });
+        double sum = 0.0;
+        for (size_t j = 0; j < K; ++j) sum += score[order[j]];
+        for (size_t j = 0; j < K; ++j) {
+            idx[j] = order[j];
+            wv[j] = static_cast<float>(score[order[j]] / (sum + 1e-20) * s.r_scale);
+        }
+        for (size_t j = 0; j < s.shared.size(); ++j) {
+            idx[K + j] = s.shared[j];
+            wv[K + j] = 1.0f;
+        }
+    }
+    xrt::bo& act = act_[layer];
+    uint8_t* a = act.map<uint8_t*>();
+    std::memcpy(a + s.a_w, wv, sizeof wv);
+    act.sync(XCL_BO_SYNC_BO_TO_DEVICE, sizeof wv, s.a_w);
+    if (route_log_on_) {
+        std::vector<uint8_t> rec(sizeof idx + sizeof wv);
+        std::memcpy(rec.data(), idx, sizeof idx);
+        std::memcpy(rec.data() + sizeof idx, wv, sizeof wv);
+        route_log_.push_back({layer, std::move(rec)});
+    }
+    for (size_t j = 0; j < S; ++j)
+        if (idx[j] >= w_->moe.experts)
+            throw std::runtime_error("open_qwen36: hy_route slot expert " + std::to_string(idx[j]));
+    stream_patch::moe2_apply(k.iw(), k.moe2, idx, w_->moe);
+    k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    timing_.route_ms += ms_since(t0);
+}
+
+void Core::host_step(const Step& s, int layer) {
+    if (s.op == "hy_route") hy_route(s, layer);
+    else route(kerns_.at(s.kernel), layer, s.act_off);
+}
+
 void Core::arm_route_records() {
     // Every router record's idx slot -> the sentinel, so route() can tell a record this step's
     // dispatch wrote from one it has not landed yet. Called with nothing outstanding; the
@@ -2701,7 +2793,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                     timing_.part1_ms += ms;
                     timing_.dispatch_ms += ms;
                 } else {
-                    route(kerns_.at(s.kernel), l, s.act_off);
+                    host_step(s, l);
                 }
             }
             tail_in = start_run(kerns_.at(prog.back().kernel), prog.back().args, l);

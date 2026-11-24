@@ -27,8 +27,8 @@ HERE = Path(__file__).resolve().parent
 OK = HERE.parents[1]
 sys.path.insert(0, str(OK))
 sys.path.insert(0, str(OK / "model"))
-from flint_gguf_reference import Gguf, rms, rope, silu  # noqa: E402
-from hyv3_gguf_reference import attention  # noqa: E402
+from lfm_gguf_ref import LfmGguf as Gguf, attention, rope, silu  # noqa: E402
+from replica_dense import rms  # noqa: E402
 from lfm2moe_gguf_reference import forward, rope_inv_freq, route  # noqa: E402
 from recipes import lfm2moe as FR  # noqa: E402
 from recipes import flint_pack as P  # noqa: E402

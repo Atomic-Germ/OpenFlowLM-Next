@@ -199,8 +199,13 @@ def attn_gate_support(spec_path: Path) -> tuple[bool, str]:
         return False, (f"the attention probe only gates dense-family geometries; "
                        f"family {s.family!r} needs its family procedure")
     g = mod.geometry(s)
+    if not hasattr(mod, "attn_flags"):
+        return False, (f"family {s.family!r} has no attn_flags(), so the probe cannot build "
+                       f"the kernel configuration this family ships")
     if g.RB not in (1, 2, 4):
         return False, f"RB={g.RB} (the probe covers only RB 1/2/4)"
+    if getattr(g, "PTAB_ELEMS", 1) not in (1, 2):
+        return False, f"a position record of {g.PTAB_ELEMS} elements (attn.h handles one or two)"
     return True, ""
 
 
