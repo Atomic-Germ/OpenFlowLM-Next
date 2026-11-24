@@ -124,6 +124,13 @@ def toolchain_env(mod) -> dict:
     lib = Path(mod.XRT_ROOT) / "lib"
     if lib.is_dir():
         env["LD_LIBRARY_PATH"] = os.pathsep.join([str(lib), env.get("LD_LIBRARY_PATH", "")])
+    # The op gates run fixture scripts that import `open_kernels.q4_1_pack` and
+    # `gguf_pool` as packages. op-gate.py's standalone toolchain() puts the repo
+    # root on PYTHONPATH; this shared builder must do the same or a fixture fails
+    # with ModuleNotFoundError and the spec is parked in candidates for an
+    # ENVIRONMENT reason rather than a geometry/gate reason.
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(ROOT), env.get("PYTHONPATH", "")) if p)
     return env
 
 

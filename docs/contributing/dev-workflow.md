@@ -62,12 +62,21 @@ oflm dev env-check
 | `oflm dev probe-sizes [args...]` | Probe GGUF repos for `served/would_build/unreadable/...` | `utilities/probe-family-sizes.py` |
 | `oflm dev export-kernels [args...]` | Export/build open kernel xclbin sets | `utilities/export-kernels.py` |
 | `oflm dev op-gate [args...]` | Run fixtures to validate missing catalogue points | `utilities/op-gate.py` |
+| `oflm dev gen-kernel-spec [args...]` | Derive a candidate geometry spec from a repo/GGUF | `utilities/gen-kernel-spec.py` |
+| `oflm dev gen-base-patch [args...]` | Populate `recipes/patches.json` from a repo's base chain (`HF_TOKEN` forwarded for gated bases) | `utilities/gen-base-patch.py` |
+| `oflm dev spec-gaps [args...]` | Report registry/checkout sizes with no kernel spec | `utilities/spec-gaps.py` |
+| `oflm dev validate-spec [args...]` | Check a spec's geometry/export name before it ships | `utilities/register-spec.py` |
+| `oflm dev add-point [args...]` | Record a validated point in the op catalogue | `utilities/catalogue-add-point.py` |
+| `oflm dev refresh-model-info [args...]` | Refresh `src/model_info.json` hashes/sizes from HuggingFace | `utilities/refresh-model-info.py` |
+| `oflm dev family-doctor` | Check the machine-verifiable family/registration invariants (no NPU needed) | `utilities/family-doctor.py` |
+| `oflm dev verify-family [args...]` | Run NPU-free model checks + a production-bar report honestly marked `needs-measurement` | `utilities/verify-family.py` |
+| `oflm dev add-family --repo <user>/<repo>` | Make a repo installable by geometry, doing the least work: report "already served" if a set matches, delegate a new size to `build-new-spec --repo` (which parks failures in `candidates/` without registry edits), or register a new family with refusing arithmetic stubs verified by `family-doctor`. Advanced `--name <key>` registers directly. | `utilities/add-family.py` |
 | `oflm dev run-kernel <cfg> [args...]` | Run a `.cfg` fixture on NPU via `open_kernels/harness/run_kernel` (builds harness if needed; `OFLM_RUN_KERNEL` overrides) | `open_kernels/harness` |
 | `oflm dev clean-specs [--dry-run]` | Remove failed/candidate specs in `open_kernels/recipes/candidates/` | built-in |
 | `oflm dev clean-kernels [--sets]` | Remove kernel export scratch (and optionally `src/xclbins/*`) | `utilities/clean-kernels.py` |
 | `oflm dev env-check` | Show toolchain/environment status | built-in |
 
-Aliases like `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec`, `run-kernel`/`harness`/`run_kernel` are accepted.
+Aliases like `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec`, `run-kernel`/`harness`/`run_kernel`, `gen-spec`, `base-patch`, `check-spec`/`register-spec`, `add-point`/`catalogue-add-point`, `refresh-info`, `spec-gaps`, and `family-doctor` are accepted.
 
 The commands above wrap the whole spec → gate → catalogue → rebuild → validate flow, including spec generation from a GGUF-only repo (`oflm dev build-new-spec --repo <user>/<repo>`, or `--gguf-file <local.gguf>`). You do not need to run the underlying Python scripts by hand; their options are passed through unchanged by each `oflm dev` subcommand. Specialized exports in `open_kernels/` (e.g. `export_whisper_kernels.py`, `export_dit_kernels.py`, `compose_elf.py`) and `open_embedding/` tooling are still separate.
 

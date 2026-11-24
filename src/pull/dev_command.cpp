@@ -191,6 +191,36 @@ void print_help() {
         << "  op-gate [args...]          Validate missing catalogue points by running fixtures\n"
         << "                             (wraps utilities/op-gate.py)\n"
         << "      e.g. oflm dev op-gate --spec qwen3-8b\n"
+        << "  gen-kernel-spec [args...]  Derive a candidate geometry spec from a repo/GGUF\n"
+        << "                             (wraps utilities/gen-kernel-spec.py)\n"
+        << "      e.g. oflm dev gen-kernel-spec --repo Qwen/Qwen3-8B --dry-run\n"
+        << "  gen-base-patch [args...]   Populate the base-model patch file from repo crawling\n"
+        << "                             (wraps utilities/gen-base-patch.py)\n"
+        << "      e.g. oflm dev gen-base-patch --repo unsloth/Llama-3.2-1B-Instruct-GGUF\n"
+        << "           oflm dev gen-base-patch --from-specs --refresh\n"
+        << "  spec-gaps [args...]        Report registry/checkout sizes with no kernel spec\n"
+        << "                             (wraps utilities/spec-gaps.py)\n"
+        << "  validate-spec [args...]    Check a spec's geometry/name before it ships\n"
+        << "                             (wraps utilities/register-spec.py; alias: register-spec)\n"
+        << "      e.g. oflm dev validate-spec qwen3-8b\n"
+        << "  add-point [args...]        Record a validated point in the op catalogue\n"
+        << "                             (wraps utilities/catalogue-add-point.py)\n"
+        << "      e.g. oflm dev add-point --op attn --point \"64, 16, 8, 64, True, False, False, False\" --note Qwen3-0.6B\n"
+        << "  refresh-model-info [args]  Refresh src/model_info.json hashes/sizes from HuggingFace\n"
+        << "                             (wraps utilities/refresh-model-info.py)\n"
+        << "  family-doctor              Check machine-verifiable family/registration invariants\n"
+        << "                             (wraps utilities/family-doctor.py; no NPU needed)\n"
+        << "      e.g. oflm dev family-doctor\n"
+        << "  verify-family [args...]    Run NPU-free model checks + the production-bar report\n"
+        << "                             (wraps utilities/verify-family.py)\n"
+        << "      e.g. oflm dev verify-family --gguf model.gguf\n"
+        << "           oflm dev verify-family --model-dir DIR --hf-shard shard.safetensors --json\n"
+        << "  add-family --repo <repo>   Make a repo installable by geometry, doing the least work\n"
+        << "                             (alias/nothing if a set already serves it; delegates new sizes\n"
+        << "                              to build-new-spec; new architectures get verified stubs)\n"
+        << "      e.g. oflm dev add-family --repo unsloth/granite-4.0-h-small-GGUF\n"
+        << "           oflm dev add-family --repo <user>/<repo> --apply\n"
+        << "           oflm dev add-family --name mythos --recipe dense --apply  (advanced)\n"
         << "  run-kernel <cfg> [args]    Run open_kernels harness (run_kernel) on a .cfg fixture\n"
         << "                             (builds harness if needed; OFLM_RUN_KERNEL overrides)\n"
         << "  clean-specs [--dry-run]    Remove failed/candidate specs from\n"
@@ -199,7 +229,10 @@ void print_help() {
         << "  env-check                  Show toolchain/environment status\n"
         << "  help                       Show this help\n\n"
         << "Aliases accepted: --build-new-spec, --probe-sizes, --export-kernels, --op-gate,\n"
-        << "                  --clean-specs, --env-check, new-spec, run-kernel, harness, run_kernel.\n\n"
+        << "                  --clean-specs, --env-check, new-spec, run-kernel, harness, run_kernel,\n"
+        << "                  gen-spec, base-patch, check-spec, register-spec, add-point,\n"
+        << "                  catalogue-add-point, refresh-info, spec-gaps, family-doctor,\n"
+        << "                  verify-family, add-family.\n\n"
         << "Notes:\n"
         << "  - Geometry is the identity: new sizes of supported families are specs + builds,\n"
         << "    not new kernel code. `build-new-spec` runs SPEC->BUILD->GATE->CATALOGUE->REBUILD->REGISTER.\n"
@@ -388,6 +421,35 @@ int run(int argc, char* argv[]) {
     }
     if (cmd == "op-gate") {
         return run_script(repo, "utilities/op-gate.py", argc - 1, argv + 1, true);
+    }
+    // Pure-Python authoring/validation helpers: expose them through the one
+    // developer entry point rather than asking anyone to remember a script path.
+    if (cmd == "gen-kernel-spec" || cmd == "gen-spec") {
+        return run_script(repo, "utilities/gen-kernel-spec.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "gen-base-patch" || cmd == "base-patch") {
+        return run_script(repo, "utilities/gen-base-patch.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "spec-gaps") {
+        return run_script(repo, "utilities/spec-gaps.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "validate-spec" || cmd == "check-spec" || cmd == "register-spec") {
+        return run_script(repo, "utilities/register-spec.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "add-point" || cmd == "catalogue-add-point") {
+        return run_script(repo, "utilities/catalogue-add-point.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "refresh-model-info" || cmd == "refresh-info") {
+        return run_script(repo, "utilities/refresh-model-info.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "family-doctor") {
+        return run_script(repo, "utilities/family-doctor.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "verify-family") {
+        return run_script(repo, "utilities/verify-family.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "add-family") {
+        return run_script(repo, "utilities/add-family.py", argc - 1, argv + 1, false);
     }
     if (cmd == "run-kernel" || cmd == "run_kernel" || cmd == "harness") {
         return run_kernel_cmd(repo, argc - 1, argv + 1);
