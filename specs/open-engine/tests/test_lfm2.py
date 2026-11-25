@@ -234,6 +234,10 @@ def test_no_shipped_models_hash_moved():
         "granite-4.0-h-small-gguf.json": "sha256:3b7d224b27b47f9a42dcc3cc1059ccfc42de4b2abc82bb33346a37f7bc86be44",
         "nanbeige4.1-3b-i1-gguf.json": "sha256:24b44931f69caf6da34ceca67f68df6a909b0c9018e2c967a7d03ed2cb345981",
         "llama-3.2-3b-gguf.json": "sha256:ad241778ac39247a1ec5a8baeb9fef2a3b1f3b2c153aafed78b95d6de385a06a",
+        "lfm3-1.7b-gguf.json": "sha256:9380f77d7c8e6dfa557e9f599392408bd4386f44ab2e2969fc73af065a197c06",
+        "lfm2.5-24b-a2b-gguf.json": "sha256:ef9bab104443ff57e54dfc35c80e31b6ab2b64c6bd8eb42cec5077cbf91b31d7",
+        "lfm2.5-8b-a1b-gguf.json": "sha256:2734c318a994cbd694fe902c5df2edc529e445b8047333df9efcb6b791ac6826",
+        "lfm2-1.2b-gguf.json": "sha256:3b0be3f2642a5a661c33df1bb585c3212ae676ae24705bebbe103b782d97abd9",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

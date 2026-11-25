@@ -75,6 +75,10 @@ EXPECTED = {
     "hunyuan-a13b-instruct-gguf": "Hunyuan-A13B-Instruct-GGUF-NPU2",
     "nanbeige4.1-3b-i1-gguf": "Nanbeige4.1-3B-i1-GGUF-NPU2",
     "llama-3.2-3b-gguf": "Llama-3.2-3B-GGUF-NPU2",
+    "lfm3-1.7b-gguf": "LFM3-1.7B-GGUF-NPU2",
+    "lfm2.5-24b-a2b-gguf": "LFM2.5-24B-A2B-GGUF-NPU2",
+    "lfm2.5-8b-a1b-gguf": "LFM2.5-8B-A1B-GGUF-NPU2",
+    "lfm2-1.2b-gguf": "LFM2-1.2B-GGUF-NPU2",
 }
 
 

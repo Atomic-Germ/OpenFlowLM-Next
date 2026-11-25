@@ -139,6 +139,24 @@ python utilities/gen-kernel-spec.py --gguf model.gguf --out open_kernels/recipes
 python utilities/build-new-spec.py --spec <name>
 ```
 
+### Unsloth UD quants and split files
+
+`oflm add` accepts `repo:UD-Q4_K_XL` (and `:UD-IQ4_XS`). The `UD-` prefix is a
+dynamic mix, not a tensor type: strip it and verify the real ggml types in the
+header. `UD-Q4_K_XL` mixes Q4_K gates/ups with Q5_1 MoE downs, Q8_0 projections,
+F32 norms and BF16 indexer tensors; the packers now ingest Q5_0/Q5_1 as well.
+
+Big Unsloth exports are split. Install part 1 as `model.gguf` and its siblings
+as `model.gguf-00002-of-00004` (no trailing `.gguf` on the siblings). `GgufFile`
+maps every shard, merges the tensor tables and remembers each tensor's shard;
+`read_gguf_inventory()` does the same on header prefixes, with shard 1 as the
+metadata authority. Unsloth's `split.no` is **0-based** (llama.cpp's is
+1-based), so infer the convention from the first shard and trust the
+`-NNNNN-of-NNNNN` file names for order. A set whose metadata lives in part 1
+and tensors in the later parts reads as zero tensors if only part 1 is parsed.
+These are weight-layout facts, not a new family: do not add kernels for a
+GGUF's `general.architecture` unless its arithmetic is actually new.
+
 A fine-tune never gets its own kernels. If the base model's spec already
 covers the geometry, `gen-kernel-spec.py` writes a `link_to` spec and
 `build-new-spec.py` stops with "the base model already has kernels".

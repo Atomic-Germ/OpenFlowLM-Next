@@ -78,10 +78,11 @@ def test_the_spec_round_trips_and_the_family_routes_to_its_own_recipe():
     assert ModelSpec.from_dict(s.to_dict()) == s
     assert families.for_spec(s).__name__ == "recipes.lfm2moe"
     assert "lfm2moe" in families.FAMILIES
-    from recipes import flint, hyv3, lfm2
-    for other in (lfm2.recipe, flint.geometry, hyv3.geometry):
-        with pytest.raises(Exception):
-            other(s)
+    from recipes import lfm2
+    # another family's recipe refuses this spec (our tree carries lfm2; flint/hyv3 are
+    # not ported here, so the check is made against the family we do have)
+    with pytest.raises(Exception):
+        lfm2.recipe(s, 4096)
 
 
 def test_lfm2_still_derives_its_own_family():
@@ -161,7 +162,7 @@ def test_the_manifest_is_its_own_gguf_view_with_a_tied_q8_head():
     m = manifest(spec())
     assert m["layers"][:3] == ["short_conv_dense", "short_conv_dense", "full_attention"]
     assert m["gguf"]["layers"] == m["layers"] and m["gguf"]["pack"] == m["pack"] and "gguf" not in m["gguf"]
-    assert m["pack"]["lm_head"]["ops"][0]["op"] == "gx_lmhead"
+    assert m["pack"]["lm_head"]["ops"][0]["op"] == "lmhead_q8"
     assert m["pack"]["lm_head"]["ops"][0]["tensor"] == m["pack"]["embed"]["tensor"] == "token_embd.weight"
     assert m["pack"]["norm"]["tensor"] == "token_embd_norm.weight"
     assert m["builds"]["lm_head_q8"]["env"]["LMHEAD_SCALES_F32"] == "1"

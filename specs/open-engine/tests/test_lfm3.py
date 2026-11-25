@@ -221,7 +221,7 @@ def test_the_gate_expansion_repeats_each_heads_row():
 
 def test_the_reference_rope_zero_tail_leaves_the_second_half_of_the_pairs_alone():
     sys.path.insert(0, str(ROOT / "open_kernels" / "model"))
-    from flint_gguf_reference import rope
+    from lfm_gguf_ref import rope
     from lfm3_gguf_reference import inv_freq
     inv = inv_freq(1e6, 128, 0.5)
     x = np.random.default_rng(0).standard_normal((3, 2, 128)).astype(np.float32)
