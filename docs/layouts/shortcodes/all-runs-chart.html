@@ -1,23 +1,10 @@
 {{- .Page.Store.Set "hasECharts" true -}}
 {{- $dataKey := .Get "data" | default "all_runs" -}}
-{{- $height := .Get "height" | default "390px" -}}
-{{- $defaultMetric := .Get "metric" | default "output" -}}
 {{- $dataset := index site.Data.benchmarks $dataKey -}}
 {{- $uid := printf "oflm-allruns-%s-%d" ($dataKey | urlize) .Ordinal -}}
 {{- if $dataset -}}
-<div class="oflm-chart-card" data-oflm-allruns-chart="{{ $uid }}" data-default-metric="{{ $defaultMetric }}">
-    <div class="oflm-chart-header">
-        <div>
-            <h3 class="oflm-chart-title">{{ $dataset.title }}</h3>
-            <p class="oflm-chart-subtitle">{{ $dataset.subtitle }}</p>
-        </div>
-        <div class="oflm-pill-tabs" role="tablist" aria-label="All runs metric selector">
-            <button type="button" class="{{ if eq $defaultMetric "output" }}active{{ end }}" data-metric="output">Decode / Texts/s</button>
-            <button type="button" class="{{ if eq $defaultMetric "tokens" }}active{{ end }}" data-metric="tokens">Prompt / Tokens/s</button>
-            <button type="button" class="{{ if eq $defaultMetric "latency" }}active{{ end }}" data-metric="latency">Latency / TTFT (ms)</button>
-        </div>
-    </div>
-    <div class="oflm-echarts-canvas" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} interactive chart"></div>
+<div class="oflm-facet-container" data-oflm-allruns-chart="{{ $uid }}">
+    <div class="oflm-facet-grid" aria-label="{{ $dataset.title }}"></div>
     <script type="application/json" class="oflm-chart-payload">{{ $dataset | jsonify | safeJS }}</script>
 </div>
 {{- else -}}

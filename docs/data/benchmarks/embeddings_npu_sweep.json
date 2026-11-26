@@ -1,198 +1,143 @@
 {
   "slug": "embeddings-npu-sweep",
-  "title": "Batched NPU Embedding Throughput Across 7 Models",
-  "subtitle": "AMD Ryzen AI 9 HX 370 (32 GB RAM) \u00b7 OpenFlowLM NPU Runtime \u00b7 End-to-end wall clock",
+  "title": "Batched Embedding Scaling Across 7 Models (n=1 to n=128)",
+  "subtitle": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM · OpenFlowLM NPU Runtime · End-to-end wall clock (mean of 3 runs)",
+  "modality": "Embeddings",
   "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M (32 GB RAM)",
-  "stack": "OpenFlowLM NPU Runtime \u00b7 Performance mode",
+  "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+  "stack": "OpenFlowLM NPU Runtime · Performance mode",
   "batches": [
     "n=1",
+    "n=2",
+    "n=4",
     "n=8",
     "n=16",
     "n=32",
-    "n=64"
+    "n=64",
+    "n=128"
+  ],
+  "batch_sizes": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128
   ],
   "models": [
     {
       "tag": "all-minilm:l6-v2",
       "name": "all-MiniLM-L6-v2",
+      "dims": 384,
       "backend": "Batched NPU",
-      "throughput_tps": [
-        108.0,
-        785.5,
-        850.2,
-        1035.7,
-        1305.0
-      ],
-      "speedup_x": [
-        0.99,
-        5.99,
-        6.64,
-        8.07,
-        10.05
-      ],
-      "latency_ms": [
-        9.3,
-        10.2,
-        18.8,
-        30.9,
-        49.1
-      ]
+      "peak_tps": 1305.0,
+      "peak_batch": 64,
+      "single_text_tps": 108.0,
+      "single_text_ms": 9.3,
+      "throughput_tps": [108.0, 217.9, 433.8, 785.5, 850.2, 1035.7, 1305.0, 1102.1],
+      "latency_s": [0.0093, 0.0092, 0.0092, 0.0102, 0.0188, 0.0309, 0.0491, 0.1162],
+      "latency_ms": [9.3, 9.2, 9.2, 10.2, 18.8, 30.9, 49.1, 116.2],
+      "looped_s": [0.0092, 0.0170, 0.0322, 0.0613, 0.1250, 0.2497, 0.4928, 0.9911],
+      "speedup_x": [0.99, 1.84, 3.49, 5.99, 6.64, 8.07, 10.05, 8.53],
+      "tokens_tps": [3240, 5448, 10410, 16790, 18758, 22850, 28791, 24314]
     },
     {
       "tag": "bge-small:en-v1.5",
       "name": "bge-small-en-v1.5",
+      "dims": 384,
       "backend": "Batched NPU",
-      "throughput_tps": [
-        53.3,
-        379.4,
-        357.0,
-        395.8,
-        565.4
-      ],
-      "speedup_x": [
-        1.04,
-        6.63,
-        6.43,
-        7.0,
-        10.03
-      ],
-      "latency_ms": [
-        18.8,
-        21.2,
-        44.8,
-        80.9,
-        114.0
-      ]
+      "peak_tps": 565.4,
+      "peak_batch": 64,
+      "single_text_tps": 53.3,
+      "single_text_ms": 18.8,
+      "throughput_tps": [53.3, 103.6, 212.5, 379.4, 357.0, 395.8, 565.4, 409.7],
+      "latency_s": [0.0188, 0.0193, 0.0188, 0.0212, 0.0448, 0.0809, 0.1140, 0.3134],
+      "latency_ms": [18.8, 19.3, 18.8, 21.2, 44.8, 80.9, 114.0, 313.4],
+      "looped_s": [0.0195, 0.0381, 0.0727, 0.1403, 0.2882, 0.5660, 1.1435, 2.3192],
+      "speedup_x": [1.04, 1.97, 3.86, 6.63, 6.43, 7.00, 10.03, 7.40],
+      "tokens_tps": [1598, 2589, 5100, 8110, 7876, 8732, 12474, 9039]
     },
     {
       "tag": "bge-base:en-v1.5",
       "name": "bge-base-en-v1.5",
+      "dims": 768,
       "backend": "Batched NPU",
-      "throughput_tps": [
-        39.5,
-        255.0,
-        228.3,
-        240.6,
-        311.3
-      ],
-      "speedup_x": [
-        0.99,
-        6.43,
-        5.44,
-        5.73,
-        7.55
-      ],
-      "latency_ms": [
-        25.3,
-        31.4,
-        70.1,
-        133.0,
-        205.6
-      ]
+      "peak_tps": 311.3,
+      "peak_batch": 64,
+      "single_text_tps": 39.5,
+      "single_text_ms": 25.3,
+      "throughput_tps": [39.5, 77.6, 154.7, 255.0, 228.3, 240.6, 311.3, 253.0],
+      "latency_s": [0.0253, 0.0258, 0.0259, 0.0314, 0.0701, 0.1330, 0.2056, 0.5059],
+      "latency_ms": [25.3, 25.8, 25.9, 31.4, 70.1, 133.0, 205.6, 505.9],
+      "looped_s": [0.0250, 0.0490, 0.1011, 0.2018, 0.3811, 0.7628, 1.5513, 3.1064],
+      "speedup_x": [0.99, 1.90, 3.91, 6.43, 5.44, 5.73, 7.55, 6.14],
+      "tokens_tps": [1186, 1940, 3712, 5451, 5037, 5308, 6868, 5582]
     },
     {
       "tag": "nomic-embed-text:v1.5",
       "name": "nomic-embed-text-v1.5",
+      "dims": 768,
       "backend": "Batched NPU",
-      "throughput_tps": [
-        29.6,
-        188.9,
-        178.5,
-        175.1,
-        239.0
-      ],
-      "speedup_x": [
-        1.02,
-        5.59,
-        5.37,
-        5.01,
-        6.94
-      ],
-      "latency_ms": [
-        33.8,
-        43.0,
-        90.5,
-        186.4,
-        268.2
-      ]
+      "peak_tps": 239.0,
+      "peak_batch": 64,
+      "single_text_tps": 29.6,
+      "single_text_ms": 33.8,
+      "throughput_tps": [29.6, 63.3, 131.5, 188.9, 178.5, 175.1, 239.0, 187.4],
+      "latency_s": [0.0338, 0.0317, 0.0306, 0.0430, 0.0905, 0.1864, 0.2682, 0.6849],
+      "latency_ms": [33.8, 31.7, 30.6, 43.0, 90.5, 186.4, 268.2, 684.9],
+      "looped_s": [0.0344, 0.0618, 0.1259, 0.2403, 0.4861, 0.9344, 1.8608, 3.8620],
+      "speedup_x": [1.02, 1.95, 4.12, 5.59, 5.37, 5.01, 6.94, 5.64],
+      "tokens_tps": [1006, 1836, 3683, 4794, 4653, 4563, 6228, 4885]
     },
     {
       "tag": "gte-multilingual:base",
       "name": "gte-multilingual-base",
+      "dims": 768,
       "backend": "Batched NPU",
-      "throughput_tps": [
-        28.0,
-        167.0,
-        143.7,
-        148.9,
-        231.1
-      ],
-      "speedup_x": [
-        1.01,
-        5.46,
-        4.97,
-        5.12,
-        7.99
-      ],
-      "latency_ms": [
-        35.7,
-        49.2,
-        111.3,
-        214.9,
-        276.9
-      ]
+      "peak_tps": 231.1,
+      "peak_batch": 64,
+      "single_text_tps": 28.0,
+      "single_text_ms": 35.7,
+      "throughput_tps": [28.0, 56.0, 105.1, 167.0, 143.7, 148.9, 231.1, 156.8],
+      "latency_s": [0.0357, 0.0357, 0.0381, 0.0492, 0.1113, 0.2149, 0.2769, 0.8161],
+      "latency_ms": [35.7, 35.7, 38.1, 49.2, 111.3, 214.9, 276.9, 816.1],
+      "looped_s": [0.0361, 0.0676, 0.1412, 0.2686, 0.5533, 1.0995, 2.2119, 4.3621],
+      "speedup_x": [1.01, 1.89, 3.71, 5.46, 4.97, 5.12, 7.99, 5.34],
+      "tokens_tps": [981, 1819, 3364, 4591, 3880, 4022, 6241, 4235]
     },
     {
       "tag": "bge-large:en-v1.5",
       "name": "bge-large-en-v1.5",
+      "dims": 1024,
       "backend": "Batched NPU",
-      "throughput_tps": [
-        13.5,
-        81.8,
-        70.0,
-        71.6,
-        89.9
-      ],
-      "speedup_x": [
-        0.98,
-        5.79,
-        4.94,
-        5.01,
-        6.35
-      ],
-      "latency_ms": [
-        74.1,
-        97.8,
-        228.7,
-        446.8,
-        712.1
-      ]
+      "peak_tps": 89.9,
+      "peak_batch": 64,
+      "single_text_tps": 13.5,
+      "single_text_ms": 74.1,
+      "throughput_tps": [13.5, 28.0, 56.0, 81.8, 70.0, 71.6, 89.9, 77.6],
+      "latency_s": [0.0741, 0.0716, 0.0715, 0.0978, 0.2287, 0.4468, 0.7121, 1.6505],
+      "latency_ms": [74.1, 71.6, 71.5, 97.8, 228.7, 446.8, 712.1, 1650.5],
+      "looped_s": [0.0725, 0.1407, 0.2827, 0.5660, 1.1292, 2.2371, 4.5209, 9.0313],
+      "speedup_x": [0.98, 1.96, 3.95, 5.79, 4.94, 5.01, 6.35, 5.47],
+      "tokens_tps": [406, 699, 1343, 1749, 1543, 1580, 1984, 1711]
     },
     {
       "tag": "embed-gemma:300m",
       "name": "EmbeddingGemma-300M",
+      "dims": 768,
       "backend": "NPU + CPU",
-      "throughput_tps": [
-        1.4,
-        1.6,
-        1.6,
-        null,
-        null
-      ],
-      "speedup_x": [
-        0.98,
-        0.97,
-        1.07,
-        null,
-        null
-      ],
-      "latency_ms": [
-        699.2,
-        5156.8,
-        9937.8,
-        null,
-        null
-      ]
+      "peak_tps": 1.6,
+      "peak_batch": 4,
+      "single_text_tps": 1.4,
+      "single_text_ms": 699.2,
+      "throughput_tps": [1.4, 1.4, 1.6, 1.6, 1.6, null, null, null],
+      "latency_s": [0.6992, 1.3817, 2.5648, 5.1568, 9.9378, null, null, null],
+      "latency_ms": [699.2, 1381.7, 2564.8, 5156.8, 9937.8, null, null, null],
+      "looped_s": [0.6882, 1.3295, 2.6754, 4.9844, 10.6397, null, null, null],
+      "speedup_x": [0.98, 0.96, 1.04, 0.97, 1.07, null, null, null],
+      "tokens_tps": [null, null, null, null, null, null, null, null]
     }
   ]
 }

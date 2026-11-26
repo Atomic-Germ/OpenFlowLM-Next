@@ -341,71 +341,7 @@
     return makeBadge('llm', 'cloud_done', 'Community');
   }
 
-  // Group rows by (model, task), averaging community-submitted runs while preserving repo sweeps
-  function aggregateModels(rows) {
-    const groups = new Map();
-    rows.forEach(function (r) {
-      const isComm = r.source !== 'verified_seed' && r.status !== 'seed';
-      const key = r.model + '||' + r.task + '||' + (isComm ? 'community' : 'seed');
-      if (!groups.has(key)) {
-        groups.set(key, {
-          model: r.model,
-          task: r.task,
-          isCommunity: isComm,
-          submissions: 0,
-          decSum: 0, decN: 0,
-          preSum: 0, preN: 0,
-          ttftSum: 0, ttftN: 0,
-          stagesMap: new Map()
-        });
-      }
-      const g = groups.get(key);
-      g.submissions += 1;
-      if (r.headline?.decode != null && Number(r.headline.decode) > 0) {
-        g.decSum += Number(r.headline.decode);
-        g.decN += 1;
-      }
-      if (r.headline?.prefill != null && Number(r.headline.prefill) > 0) {
-        g.preSum += Number(r.headline.prefill);
-        g.preN += 1;
-      }
-      if (r.headline?.ttft_ms != null && Number(r.headline.ttft_ms) > 0) {
-        g.ttftSum += Number(r.headline.ttft_ms);
-        g.ttftN += 1;
-      }
-      (r.stages || []).forEach(function (s) {
-        const k = Number(s.ctx_k);
-        if (!g.stagesMap.has(k)) {
-          g.stagesMap.set(k, { decSum: 0, decN: 0, preSum: 0, preN: 0 });
-        }
-        const sg = g.stagesMap.get(k);
-        if (s.decode_avg != null) { sg.decSum += Number(s.decode_avg); sg.decN += 1; }
-        if (s.prefill_avg != null) { sg.preSum += Number(s.prefill_avg); sg.preN += 1; }
-      });
-    });
-
-    return Array.from(groups.values()).map(function (g) {
-      const stages = {};
-      g.stagesMap.forEach(function (sg, k) {
-        stages[k] = {
-          decode_avg: sg.decN ? (sg.decSum / sg.decN) : null,
-          prefill_avg: sg.preN ? (sg.preSum / sg.preN) : null
-        };
-      });
-      return {
-        model: g.model,
-        task: g.task,
-        isCommunity: g.isCommunity,
-        submissions: g.submissions,
-        decodeAvg: g.decN ? (g.decSum / g.decN) : null,
-        prefillAvg: g.preN ? (g.preSum / g.preN) : null,
-        ttftAvg: g.ttftN ? (g.ttftSum / g.ttftN) : null,
-        stages: stages
-      };
-    });
-  }
-
-  // ==================== LEADERBOARD & ANALYTICS ====================
+  // ==================== LEADERBOARD ====================
   async function initLeaderboardPage() {
     let rawRows = [];
     let usingSeed = false;
@@ -427,270 +363,6 @@
     }
 
     let currentRows = rawRows.slice();
-    let modelsMetric = 'decode';
-    let trendsMode = 'llm';
-
-    const chartRefs = {};
-
-    function ensureChart(key, elId, renderFn) {
-      if (!window.echarts) return null;
-      const el = document.getElementById(elId);
-      if (!el) return null;
-      if (!chartRefs[key]) {
-        const inst = window.echarts.init(el, null, { renderer: 'svg' });
-        chartRefs[key] = { chart: inst, render: renderFn };
-        if (window.OFLMCharts && typeof window.OFLMCharts.register === 'function') {
-          window.OFLMCharts.register(inst, renderFn);
-        }
-      }
-      return chartRefs[key];
-    }
-
-    function renderModelsChart() {
-      const ref = ensureChart('models', 'cb-chart-models', renderModelsChart);
-      if (!ref) return;
-      const t = getTokens();
-      const items = aggregateModels(currentRows).filter(function (g) {
-        if (modelsMetric === 'prefill') return g.prefillAvg != null && g.prefillAvg > 0;
-        if (modelsMetric === 'ttft') return g.ttftAvg != null && g.ttftAvg > 0;
-        return g.decodeAvg != null && g.decodeAvg > 0;
-      });
-      items.sort(function (a, b) {
-        if (modelsMetric === 'prefill') return a.prefillAvg - b.prefillAvg;
-        if (modelsMetric === 'ttft') return b.ttftAvg - a.ttftAvg;
-        return a.decodeAvg - b.decodeAvg;
-      });
-
-      const labels = items.map(function (g) {
-        return g.model + (g.isCommunity ? ' (Community avg)' : '');
-      });
-      const vals = items.map(function (g) {
-        if (modelsMetric === 'prefill') return Number(g.prefillAvg.toFixed(2));
-        if (modelsMetric === 'ttft') return Number(g.ttftAvg.toFixed(1));
-        return Number(g.decodeAvg.toFixed(2));
-      });
-      const xTitle = modelsMetric === 'prefill'
-        ? 'Prompt / Encoder Throughput (tok/s · log scale)'
-        : (modelsMetric === 'ttft' ? 'Latency / TTFT (ms · log scale, lower is faster)' : 'Decode (tok/s) or Texts/s (log scale)');
-
-      ref.chart.setOption({
-        backgroundColor: 'transparent',
-        grid: { left: 215, right: 32, top: 24, bottom: 44 },
-        tooltip: {
-          trigger: 'axis',
-          axisPointer: { type: 'shadow' },
-          backgroundColor: t.tooltipBg,
-          borderColor: t.tooltipBorder,
-          textStyle: { color: t.text, fontSize: 12.5 }
-        },
-        xAxis: {
-          type: 'log',
-          name: xTitle,
-          nameLocation: 'middle',
-          nameGap: 28,
-          nameTextStyle: { color: t.muted, fontWeight: 600 },
-          axisLabel: { color: t.muted },
-          axisLine: { lineStyle: { color: t.axis } },
-          splitLine: { lineStyle: { color: t.grid } }
-        },
-        yAxis: {
-          type: 'category',
-          data: labels,
-          axisLabel: { color: t.text, fontWeight: 600, fontSize: 11.5 },
-          axisLine: { lineStyle: { color: t.axis } }
-        },
-        series: [{
-          name: xTitle,
-          type: 'bar',
-          barMaxWidth: 26,
-          data: vals.map(function (v, idx) {
-            const row = items[idx];
-            return {
-              value: Math.max(0.1, v),
-              itemStyle: {
-                color: row.isCommunity ? t.primary : t.secondary,
-                borderRadius: [0, 5, 5, 0]
-              }
-            };
-          })
-        }]
-      }, true);
-    }
-
-    function renderHardwareChart() {
-      const ref = ensureChart('hardware', 'cb-chart-hardware', renderHardwareChart);
-      if (!ref) return;
-      const t = getTokens();
-      const grouped = {};
-      currentRows.forEach(function (r) {
-        const hw = r.cpu || r.hardware || 'Unknown Hardware';
-        if (!grouped[hw]) grouped[hw] = { count: 0, sum: 0, peakThroughput: 0, models: [] };
-        grouped[hw].count += 1;
-        const val = Number(r.headline?.decode || 0);
-        if (val > 0) grouped[hw].sum += val;
-        if (val > grouped[hw].peakThroughput) grouped[hw].peakThroughput = val;
-        grouped[hw].models.push(r.model);
-      });
-      const hwKeys = Object.keys(grouped);
-      const xLabels = hwKeys.map(function (k) { return k + ' (n=' + grouped[k].count + ')'; });
-      const meanVals = hwKeys.map(function (k) { return Math.max(0.1, Number((grouped[k].sum / grouped[k].count).toFixed(2))); });
-      const peakVals = hwKeys.map(function (k) { return Math.max(0.1, Number(grouped[k].peakThroughput.toFixed(2))); });
-
-      ref.chart.setOption({
-        backgroundColor: 'transparent',
-        grid: { left: 64, right: 32, top: 76, bottom: 52 },
-        legend: {
-          top: 2,
-          left: 'center',
-          itemGap: 18,
-          textStyle: { color: t.text, fontSize: 12 }
-        },
-        tooltip: {
-          trigger: 'axis',
-          backgroundColor: t.tooltipBg,
-          borderColor: t.tooltipBorder,
-          textStyle: { color: t.text, fontSize: 12.5 }
-        },
-        xAxis: {
-          type: 'category',
-          data: xLabels,
-          axisLabel: { color: t.text, fontWeight: 600, interval: 0 },
-          axisLine: { lineStyle: { color: t.axis } }
-        },
-        yAxis: [
-          {
-            type: 'log',
-            name: 'Throughput (tok/s or txt/s · log scale)',
-            nameGap: 14,
-            nameTextStyle: { color: t.muted, fontWeight: 600, align: 'left', padding: [0, 0, 0, -28] },
-            axisLabel: { color: t.muted },
-            axisLine: { show: true, lineStyle: { color: t.axis } },
-            splitLine: { lineStyle: { color: t.grid } }
-          }
-        ],
-        series: [
-          {
-            name: 'Mean Throughput',
-            type: 'bar',
-            barMaxWidth: 38,
-            itemStyle: { color: t.primary, borderRadius: [6, 6, 0, 0] },
-            data: meanVals
-          },
-          {
-            name: 'Peak Throughput',
-            type: 'bar',
-            barMaxWidth: 38,
-            itemStyle: { color: t.secondary, borderRadius: [6, 6, 0, 0] },
-            data: peakVals
-          }
-        ]
-      }, true);
-    }
-
-    function renderTrendsChart() {
-      const ref = ensureChart('trends', 'cb-chart-trends', renderTrendsChart);
-      if (!ref) return;
-      const t = getTokens();
-      const targetTask = trendsMode === 'llm' ? 'LLM' : 'Embedding';
-      const subset = currentRows.filter(function (r) {
-        return r.task === targetTask && Array.isArray(r.stages) && r.stages.length > 0;
-      });
-      const sourceRows = subset.length ? subset : SEED_RUNS.filter(function (r) { return r.task === targetTask; });
-      const groupedModels = aggregateModels(sourceRows);
-
-      const stageSet = new Set();
-      groupedModels.forEach(function (g) {
-        Object.keys(g.stages).forEach(function (k) { stageSet.add(Number(k)); });
-      });
-      const stagesSorted = Array.from(stageSet).sort(function (a, b) { return a - b; });
-      const xLabels = stagesSorted.map(function (k) {
-        return targetTask === 'LLM' ? (k + 'k') : ('n=' + k);
-      });
-
-      const series = [];
-      groupedModels.forEach(function (g, idx) {
-        const color = t.palette[idx % t.palette.length];
-        const tagLabel = g.model + (g.isCommunity ? ' (Community avg)' : '');
-
-        if (targetTask === 'LLM') {
-          series.push({
-            name: tagLabel + ' Prefill (tok/s)',
-            type: 'line',
-            smooth: 0.2,
-            symbol: 'circle',
-            symbolSize: 7,
-            itemStyle: { color: t.primary },
-            lineStyle: { width: 2.5, color: t.primary },
-            data: stagesSorted.map(function (k) { return g.stages[k]?.prefill_avg != null ? Number(g.stages[k].prefill_avg.toFixed(2)) : null; })
-          });
-          series.push({
-            name: tagLabel + ' Decode (tok/s)',
-            type: 'line',
-            smooth: 0.2,
-            symbol: 'diamond',
-            symbolSize: 8,
-            itemStyle: { color: t.secondary },
-            lineStyle: { width: 2.5, color: t.secondary },
-            data: stagesSorted.map(function (k) { return g.stages[k]?.decode_avg != null ? Number(g.stages[k].decode_avg.toFixed(2)) : null; })
-          });
-        } else {
-          series.push({
-            name: tagLabel,
-            type: 'line',
-            smooth: 0.18,
-            symbol: 'circle',
-            symbolSize: 7,
-            itemStyle: { color: color },
-            lineStyle: { width: 2.4, color: color },
-            data: stagesSorted.map(function (k) { return g.stages[k]?.decode_avg != null ? Number(g.stages[k].decode_avg.toFixed(1)) : null; })
-          });
-        }
-      });
-
-      // Single logarithmic vertical axis for both LLM (Prefill + Decode tok/s) and Embeddings (texts/s)
-      const yAxis = [
-        {
-          type: 'log',
-          name: targetTask === 'LLM' ? 'Throughput (tok/s · log scale)' : 'Throughput (texts/s · log scale)',
-          nameGap: 14,
-          nameTextStyle: { color: t.muted, fontWeight: 600, align: 'left', padding: [0, 0, 0, -28] },
-          axisLabel: { color: t.muted },
-          axisLine: { show: true, lineStyle: { color: t.axis } },
-          splitLine: { lineStyle: { color: t.grid } }
-        }
-      ];
-
-      ref.chart.setOption({
-        backgroundColor: 'transparent',
-        grid: { left: 62, right: 28, top: 76, bottom: 46 },
-        legend: {
-          top: 2,
-          left: targetTask === 'LLM' ? 'center' : 0,
-          right: targetTask === 'LLM' ? undefined : 20,
-          type: 'scroll',
-          itemGap: 14,
-          textStyle: { color: t.text, fontSize: 11.5 }
-        },
-        tooltip: {
-          trigger: 'axis',
-          backgroundColor: t.tooltipBg,
-          borderColor: t.tooltipBorder,
-          textStyle: { color: t.text, fontSize: 12 }
-        },
-        xAxis: {
-          type: 'category',
-          name: targetTask === 'LLM' ? 'Context Length' : 'Batch Stage',
-          nameLocation: 'middle',
-          nameGap: 28,
-          nameTextStyle: { color: t.muted, fontWeight: 600 },
-          data: xLabels,
-          axisLabel: { color: t.text, fontWeight: 600 },
-          axisLine: { lineStyle: { color: t.axis } }
-        },
-        yAxis: yAxis,
-        series: series
-      }, true);
-    }
 
     function updateStats(rows) {
       const elRuns = $('#cb-stat-runs');
@@ -794,9 +466,6 @@
       }
 
       updateStats(currentRows);
-      renderModelsChart();
-      renderHardwareChart();
-      renderTrendsChart();
     }
 
     ['f-model', 'f-task', 'f-hardware', 'f-backend', 'f-quant', 'f-sort'].forEach(function (id) {
@@ -819,47 +488,6 @@
         applyFiltersAndRender();
       });
     }
-
-    // Main view tabs
-    const panels = {
-      leaderboard: $('#cb-panel-leaderboard'),
-      models: $('#cb-panel-models'),
-      hardware: $('#cb-panel-hardware'),
-      trends: $('#cb-panel-trends')
-    };
-
-    document.querySelectorAll('#cb-view-tabs button').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        document.querySelectorAll('#cb-view-tabs button').forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        const target = btn.dataset.cbTab;
-        Object.keys(panels).forEach(function (k) {
-          if (panels[k]) panels[k].classList.toggle('d-none', k !== target);
-        });
-        if (chartRefs[target]) {
-          chartRefs[target].render();
-          chartRefs[target].chart.resize();
-        }
-      });
-    });
-
-    document.querySelectorAll('#cb-models-metric button').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        document.querySelectorAll('#cb-models-metric button').forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        modelsMetric = btn.dataset.metric;
-        renderModelsChart();
-      });
-    });
-
-    document.querySelectorAll('#cb-trends-mode button').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        document.querySelectorAll('#cb-trends-mode button').forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        trendsMode = btn.dataset.mode;
-        renderTrendsChart();
-      });
-    });
 
     applyFiltersAndRender();
   }
@@ -965,16 +593,33 @@
         ? '<tr><th>Hardware Survey</th><td>Included (anonymous SHA-256 machine hash)</td></tr>'
         : '';
 
+      const leftSubTitle = isEmbed
+        ? 'Throughput <span class="oflm-subchart-unit">(texts/s · linear from 0, higher is faster)</span>'
+        : 'Prefill vs. Decode Throughput <span class="oflm-subchart-unit">(tok/s · log scale, higher is faster)</span>';
+      const rightSubTitle = isEmbed
+        ? 'Batch Speedup vs. Single Text <span class="oflm-subchart-unit">(× looped baseline · linear from 0)</span>'
+        : 'Time to First Token <span class="oflm-subchart-unit">(seconds · linear from 0, lower is faster)</span>';
+
       container.innerHTML =
         statsHtml +
         '<div class="oflm-chart-card">' +
           '<div class="oflm-chart-header">' +
             '<div>' +
-              '<h3 class="oflm-chart-title">' + esc(d.model) + ' Stage Curve</h3>' +
-              '<div class="oflm-pill-row mt-1">' + renderTaskBadge(d.task) + renderBackendBadge(d.backend) + renderQuantBadge(d.quantization) + '<span class="small ms-1" style="color: var(--oflm-muted);">' + esc(d.hardware) + (d.ram_spec ? ' · ' + esc(d.ram_spec) : '') + '</span></div>' +
+              '<div class="oflm-chart-meta mb-1">' + renderTaskBadge(d.task) + renderBackendBadge(d.backend) + renderQuantBadge(d.quantization) + '</div>' +
+              '<h3 class="oflm-chart-title">' + esc(d.model) + ' Stage Scaling</h3>' +
+              '<p class="oflm-chart-subtitle">' + esc(d.hardware) + (d.ram_spec ? ' · ' + esc(d.ram_spec) : '') + '</p>' +
             '</div>' +
           '</div>' +
-          '<div id="cb-detail-chart" class="oflm-echarts-canvas" style="width: 100%; height: 350px;" aria-label="Benchmark stage scaling chart"></div>' +
+          '<div class="oflm-small-multiples">' +
+            '<div class="oflm-subchart">' +
+              '<div class="oflm-subchart-title">' + leftSubTitle + '</div>' +
+              '<div id="cb-detail-chart-a" class="oflm-echarts-canvas" style="width: 100%; height: 310px;" aria-label="Primary stage scaling chart"></div>' +
+            '</div>' +
+            '<div class="oflm-subchart">' +
+              '<div class="oflm-subchart-title">' + rightSubTitle + '</div>' +
+              '<div id="cb-detail-chart-b" class="oflm-echarts-canvas" style="width: 100%; height: 310px;" aria-label="Secondary stage scaling chart"></div>' +
+            '</div>' +
+          '</div>' +
         '</div>' +
         '<h2 class="h4 fw-bold mt-4 mb-3">Per-' + (isEmbed ? 'Batch' : 'Context') + ' Stage Measurements</h2>' +
         '<div class="oflm-table-wrap"><table class="oflm-table"><thead>' + stageHeadHtml + '</thead><tbody>' + stageRowsHtml + '</tbody></table></div>' +
@@ -993,100 +638,118 @@
         '</tbody></table></div>';
 
       if (window.echarts && stages.length) {
-        const chartEl = document.getElementById('cb-detail-chart');
-        if (detailChart) {
-          detailChart.dispose();
-          detailChart = null;
+        const elA = document.getElementById('cb-detail-chart-a');
+        const elB = document.getElementById('cb-detail-chart-b');
+        if (detailChart && Array.isArray(detailChart)) {
+          detailChart.forEach(function (c) { try { c.dispose(); } catch (_err) {} });
+        } else if (detailChart) {
+          try { detailChart.dispose(); } catch (_err) {}
         }
-        detailChart = window.echarts.init(chartEl, null, { renderer: 'svg' });
-        const drawDetail = function () {
-          if (!detailChart) return;
+        const chartA = window.echarts.init(elA, null, { renderer: 'svg' });
+        const chartB = window.echarts.init(elB, null, { renderer: 'svg' });
+        detailChart = [chartA, chartB];
+
+        const labels = stages.map(function (s) { return isEmbed ? ('n=' + s.ctx_k) : (s.ctx_k + 'k'); });
+
+        const drawA = function () {
           const t = getTokens();
-          const labels = stages.map(function (s) { return isEmbed ? ('n=' + s.ctx_k) : (s.ctx_k + 'k'); });
-          // For LLM runs, use a single logarithmic vertical axis for Prefill + Decode (same tok/s unit)
-          const detailYAxis = isEmbed
-            ? [
+          if (isEmbed) {
+            chartA.setOption({
+              backgroundColor: 'transparent',
+              grid: { left: 52, right: 20, top: 32, bottom: 42 },
+              tooltip: { trigger: 'axis', backgroundColor: t.tooltipBg, borderColor: t.tooltipBorder, textStyle: { color: t.text, fontSize: 12.5 } },
+              xAxis: { type: 'category', name: 'Batch Size', nameLocation: 'middle', nameGap: 25, nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11.5 }, data: labels, axisLabel: { color: t.text, fontWeight: 600 }, axisLine: { lineStyle: { color: t.axis } }, axisTick: { show: false } },
+              yAxis: { type: 'value', min: 0, axisLabel: { color: t.muted, fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: t.grid } } },
+              series: [{
+                name: 'Texts / sec',
+                type: 'bar',
+                barMaxWidth: 34,
+                itemStyle: { color: t.primary, borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top', distance: 5, color: t.text, fontSize: 10.5, fontWeight: 700, formatter: function (p) { return p.value >= 100 ? Math.round(p.value) + '' : Number(p.value).toFixed(1); } },
+                data: stages.map(function (s) { return s.decode_avg; })
+              }]
+            }, true);
+          } else {
+            chartA.setOption({
+              backgroundColor: 'transparent',
+              grid: { left: 52, right: 20, top: 40, bottom: 42 },
+              legend: { top: 2, left: 0, itemGap: 16, textStyle: { color: t.text, fontSize: 12 } },
+              tooltip: { trigger: 'axis', backgroundColor: t.tooltipBg, borderColor: t.tooltipBorder, textStyle: { color: t.text, fontSize: 12.5 } },
+              xAxis: { type: 'category', name: 'Context Length', nameLocation: 'middle', nameGap: 25, nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11.5 }, data: labels, axisLabel: { color: t.text, fontWeight: 600 }, axisLine: { lineStyle: { color: t.axis } }, axisTick: { show: false } },
+              yAxis: { type: 'log', min: 4, axisLabel: { color: t.muted, fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: t.grid } } },
+              series: [
                 {
-                  type: 'value',
-                  name: 'Texts / sec',
-                  nameGap: 14,
-                  nameTextStyle: { color: t.primary, fontWeight: 600, align: 'left', padding: [0, 0, 0, -28] },
-                  axisLabel: { color: t.muted },
-                  axisLine: { show: true, lineStyle: { color: t.axis } },
-                  splitLine: { lineStyle: { color: t.grid } }
+                  name: 'Prefill (tok/s)',
+                  type: 'line',
+                  smooth: 0.15,
+                  symbol: 'circle',
+                  symbolSize: 7,
+                  itemStyle: { color: t.primary },
+                  lineStyle: { width: 2.5, color: t.primary },
+                  label: { show: true, position: 'top', distance: 6, color: t.primary, fontSize: 10.5, fontWeight: 700, formatter: function (p) { return Math.round(p.value) + ''; } },
+                  data: stages.map(function (s) { return s.prefill_avg; })
                 },
                 {
-                  type: 'value',
-                  name: 'Speedup (x)',
-                  nameGap: 14,
-                  nameTextStyle: { color: t.secondary, fontWeight: 600, align: 'right', padding: [0, -28, 0, 0] },
-                  axisLabel: { color: t.muted },
-                  axisLine: { show: true, lineStyle: { color: t.axis } },
-                  splitLine: { show: false }
+                  name: 'Decode (tok/s)',
+                  type: 'line',
+                  smooth: 0.15,
+                  symbol: 'diamond',
+                  symbolSize: 8,
+                  itemStyle: { color: t.secondary },
+                  lineStyle: { width: 2.5, color: t.secondary },
+                  label: { show: true, position: 'top', distance: 6, color: t.secondary, fontSize: 10.5, fontWeight: 700, formatter: function (p) { return Number(p.value).toFixed(1); } },
+                  data: stages.map(function (s) { return s.decode_avg; })
                 }
               ]
-            : [
-                {
-                  type: 'log',
-                  name: 'Throughput (tok/s · log scale)',
-                  nameGap: 14,
-                  nameTextStyle: { color: t.muted, fontWeight: 600, align: 'left', padding: [0, 0, 0, -28] },
-                  axisLabel: { color: t.muted },
-                  axisLine: { show: true, lineStyle: { color: t.axis } },
-                  splitLine: { lineStyle: { color: t.grid } }
-                }
-              ];
+            }, true);
+          }
+        };
 
-          detailChart.setOption({
-            backgroundColor: 'transparent',
-            grid: { left: 62, right: isEmbed ? 64 : 28, top: 76, bottom: 46 },
-            legend: { top: 2, left: 'center', itemGap: 18, textStyle: { color: t.text, fontSize: 12 } },
-            tooltip: {
-              trigger: 'axis',
-              backgroundColor: t.tooltipBg,
-              borderColor: t.tooltipBorder,
-              textStyle: { color: t.text, fontSize: 12.5 }
-            },
-            xAxis: {
-              type: 'category',
-              name: isEmbed ? 'Batch Size' : 'Context Length',
-              nameLocation: 'middle',
-              nameGap: 28,
-              nameTextStyle: { color: t.muted, fontWeight: 600 },
-              data: labels,
-              axisLabel: { color: t.text, fontWeight: 600 },
-              axisLine: { lineStyle: { color: t.axis } }
-            },
-            yAxis: detailYAxis,
-            series: [
-              {
-                name: isEmbed ? 'Texts / sec' : 'Prefill (tok/s)',
+        const drawB = function () {
+          const t = getTokens();
+          if (isEmbed) {
+            chartB.setOption({
+              backgroundColor: 'transparent',
+              grid: { left: 48, right: 20, top: 32, bottom: 42 },
+              tooltip: { trigger: 'axis', backgroundColor: t.tooltipBg, borderColor: t.tooltipBorder, textStyle: { color: t.text, fontSize: 12.5 } },
+              xAxis: { type: 'category', name: 'Batch Size', nameLocation: 'middle', nameGap: 25, nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11.5 }, data: labels, axisLabel: { color: t.text, fontWeight: 600 }, axisLine: { lineStyle: { color: t.axis } }, axisTick: { show: false } },
+              yAxis: { type: 'value', min: 0, axisLabel: { color: t.muted, fontSize: 11, formatter: function (v) { return v + '×'; } }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: t.grid } } },
+              series: [{
+                name: 'Batch Speedup',
                 type: 'line',
-                yAxisIndex: 0,
-                smooth: 0.2,
+                smooth: 0.15,
                 symbol: 'circle',
-                symbolSize: 8,
-                itemStyle: { color: t.primary },
-                lineStyle: { width: 2.5, color: t.primary },
-                data: stages.map(function (s) { return isEmbed ? s.decode_avg : s.prefill_avg; })
-              },
-              {
-                name: isEmbed ? 'Batch Speedup (x)' : 'Decode (tok/s)',
-                type: 'line',
-                yAxisIndex: isEmbed ? 1 : 0,
-                smooth: 0.2,
-                symbol: 'diamond',
-                symbolSize: 8,
+                symbolSize: 7,
                 itemStyle: { color: t.secondary },
                 lineStyle: { width: 2.5, color: t.secondary },
-                data: stages.map(function (s) { return isEmbed ? s.speedup : s.decode_avg; })
-              }
-            ]
-          }, true);
+                label: { show: true, position: 'top', distance: 6, color: t.secondary, fontSize: 10.5, fontWeight: 700, formatter: function (p) { return Number(p.value).toFixed(1) + '×'; } },
+                data: stages.map(function (s) { return s.speedup; })
+              }]
+            }, true);
+          } else {
+            chartB.setOption({
+              backgroundColor: 'transparent',
+              grid: { left: 52, right: 20, top: 32, bottom: 42 },
+              tooltip: { trigger: 'axis', backgroundColor: t.tooltipBg, borderColor: t.tooltipBorder, textStyle: { color: t.text, fontSize: 12.5 } },
+              xAxis: { type: 'category', name: 'Context Length', nameLocation: 'middle', nameGap: 25, nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11.5 }, data: labels, axisLabel: { color: t.text, fontWeight: 600 }, axisLine: { lineStyle: { color: t.axis } }, axisTick: { show: false } },
+              yAxis: { type: 'value', min: 0, axisLabel: { color: t.muted, fontSize: 11, formatter: function (v) { return v + 's'; } }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: t.grid } } },
+              series: [{
+                name: 'TTFT (s)',
+                type: 'bar',
+                barMaxWidth: 34,
+                itemStyle: { color: t.amber, borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top', distance: 5, color: t.text, fontSize: 10.5, fontWeight: 700, formatter: function (p) { return Number(p.value).toFixed(1) + 's'; } },
+                data: stages.map(function (s) { return s.ttft_avg_s; })
+              }]
+            }, true);
+          }
         };
-        drawDetail();
+
+        drawA();
+        drawB();
         if (window.OFLMCharts && typeof window.OFLMCharts.register === 'function') {
-          window.OFLMCharts.register(detailChart, drawDetail);
+          window.OFLMCharts.register(chartA, drawA);
+          window.OFLMCharts.register(chartB, drawB);
         }
       }
     }

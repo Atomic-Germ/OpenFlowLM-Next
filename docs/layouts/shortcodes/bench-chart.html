@@ -1,24 +1,31 @@
 {{- .Page.Store.Set "hasECharts" true -}}
 {{- $dataKey := .Get "data" | default "qwen35_2b_ryzen_ai_350" -}}
-{{- $height := .Get "height" | default "380px" -}}
-{{- $defaultMetric := .Get "metric" | default "dual" -}}
+{{- $height := .Get "height" | default "330px" -}}
 {{- $dataset := index site.Data.benchmarks $dataKey -}}
 {{- $uid := printf "oflm-bench-%s-%d" ($dataKey | urlize) .Ordinal -}}
 {{- if $dataset -}}
-<div class="oflm-chart-card" data-oflm-chart="{{ $uid }}" data-default-metric="{{ $defaultMetric }}">
+<div class="oflm-chart-card" data-oflm-chart="{{ $uid }}">
     <div class="oflm-chart-header">
         <div>
+            <div class="oflm-chart-meta mb-1">
+                <span class="oflm-badge llm"><span class="material-icons" aria-hidden="true">chat</span><span>Chat</span></span>
+                <span class="oflm-badge neutral"><span class="material-icons" aria-hidden="true">memory</span><span>{{ $dataset.cpu | default $dataset.hardware }}</span></span>
+                <span class="oflm-badge quant mono"><span>Q4_K_M</span></span>
+            </div>
             <h3 class="oflm-chart-title">{{ $dataset.title }}</h3>
-            <p class="oflm-chart-subtitle">{{ $dataset.hardware }} · {{ $dataset.stack }} · Shaded band &amp; whiskers show mean ± 1σ</p>
-        </div>
-        <div class="oflm-pill-tabs" role="tablist" aria-label="Benchmark metric selector">
-            <button type="button" class="{{ if eq $defaultMetric "dual" }}active{{ end }}" data-metric="dual">Prefill + Decode</button>
-            <button type="button" class="{{ if eq $defaultMetric "decode" }}active{{ end }}" data-metric="decode">Decode (tok/s)</button>
-            <button type="button" class="{{ if eq $defaultMetric "prefill" }}active{{ end }}" data-metric="prefill">Prefill (tok/s)</button>
-            <button type="button" class="{{ if eq $defaultMetric "ttft" }}active{{ end }}" data-metric="ttft">TTFT (s)</button>
+            <p class="oflm-chart-subtitle">{{ $dataset.hardware }} · {{ $dataset.stack }} · Error bars show mean ± 1σ</p>
         </div>
     </div>
-    <div class="oflm-echarts-canvas" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} interactive chart"></div>
+    <div class="oflm-small-multiples">
+        <div class="oflm-subchart">
+            <div class="oflm-subchart-title">Prefill vs. Decode Throughput <span class="oflm-subchart-unit">(tok/s · log scale, higher is faster)</span></div>
+            <div class="oflm-echarts-canvas" data-subchart="throughput" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} throughput scaling chart"></div>
+        </div>
+        <div class="oflm-subchart">
+            <div class="oflm-subchart-title">Time to First Token <span class="oflm-subchart-unit">(seconds · linear from 0, lower is faster)</span></div>
+            <div class="oflm-echarts-canvas" data-subchart="ttft" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} time to first token chart"></div>
+        </div>
+    </div>
     <script type="application/json" class="oflm-chart-payload">{{ $dataset | jsonify | safeJS }}</script>
 </div>
 {{- else -}}

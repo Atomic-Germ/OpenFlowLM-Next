@@ -902,6 +902,56 @@ a.oflm-badge {
     color: var(--oflm-muted);
     margin: 0.15rem 0 0 0;
   }
+
+  .oflm-chart-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+  }
+}
+
+.oflm-facet-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.05rem;
+  margin: 0.75rem 0 1.35rem 0;
+
+  .oflm-facet-card {
+    margin: 0;
+  }
+}
+
+.oflm-small-multiples {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
+
+  @media (max-width: 991.98px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.oflm-subchart {
+  min-width: 0;
+  background-color: var(--oflm-bg-subtle);
+  border: 1px solid var(--oflm-border);
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem 0.4rem 0.85rem;
+
+  .oflm-subchart-title {
+    font-size: 0.84rem;
+    font-weight: 700;
+    color: var(--oflm-text);
+    margin-bottom: 0.25rem;
+  }
+
+  .oflm-subchart-unit {
+    font-weight: 500;
+    font-size: 0.76rem;
+    color: var(--oflm-muted);
+  }
 }
 
 .oflm-pill-tabs {

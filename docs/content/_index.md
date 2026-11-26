@@ -59,45 +59,18 @@ oflm pull flux2-klein:4b
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-3">
 <div>
 <div class="mb-2">{{< b k="npu" t="Measured NPU Speeds" icon="speed" >}}</div>
-<h2 class="fw-bold mb-1">Measured Throughput Across Models</h2>
-<p class="mb-0" style="color: var(--oflm-muted);">Repository benchmark sweeps and averaged community runs on AMD Ryzen AI systems.</p>
+<h2 class="fw-bold mb-1">Measured Throughput by Hardware &amp; Modality</h2>
+<p class="mb-0" style="color: var(--oflm-muted);">Faceted per AMD Ryzen AI NPU platform and workload so devices and units are never mixed on the same axis.</p>
 </div>
 <div class="d-flex flex-wrap align-items-center gap-2">
-<div class="oflm-pill-tabs" id="oflm-home-bench-tabs" role="tablist" aria-label="Homepage benchmark views">
-<button type="button" class="active" data-home-bench="all">All Runs</button>
-<button type="button" data-home-bench="ctx">Context Scaling (1k-32k)</button>
-</div>
 <a href="benchmarks/" class="btn btn-sm btn-primary">All Benchmarks</a>
 <a href="benchmarks/submit/" class="btn btn-sm btn-outline-primary">Submit Run</a>
 </div>
 </div>
 
-<div id="oflm-home-panel-all">
 {{< all-runs-chart >}}
-</div>
 
-<div id="oflm-home-panel-ctx" class="d-none">
 {{< bench-chart data="qwen35_2b_ryzen_ai_350" >}}
-</div>
-
-<script>
-(function () {
-  const btns = document.querySelectorAll('#oflm-home-bench-tabs button');
-  const pAll = document.getElementById('oflm-home-panel-all');
-  const pCtx = document.getElementById('oflm-home-panel-ctx');
-  if (!btns.length || !pAll || !pCtx) return;
-  btns.forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      btns.forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      const showAll = btn.dataset.homeBench === 'all';
-      pAll.classList.toggle('d-none', !showAll);
-      pCtx.classList.toggle('d-none', showAll);
-      window.dispatchEvent(new Event('resize'));
-    });
-  });
-})();
-</script>
 </div>
 
 <div class="pt-3 mt-2">
