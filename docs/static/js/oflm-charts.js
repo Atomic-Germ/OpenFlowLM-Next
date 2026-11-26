@@ -94,6 +94,46 @@
         return m ? m[1] : 'Performance';
     }
 
+    const HYBRID_TIPS = {
+        open_qwen35: 'Token generation and projections run on the NPU; light recurrent state updates during long prompts run on the CPU.',
+        open_qwen36: 'Attention and active expert layers run on the NPU; lightweight expert routing runs on the CPU.',
+        open_qwen36_moe: 'Attention and active expert layers run on the NPU; lightweight expert routing runs on the CPU.',
+        open_lfm2: 'Dense layers and attention run on the NPU; short-convolution steps during prompt reading run on the CPU.',
+        open_embedding: 'Linear projections run on the NPU; attention and vector pooling run on the CPU.',
+        open_embedgemma: 'Linear projections run on the NPU; attention and vector pooling run on the CPU.',
+        open_whisper: 'All 32 audio encoder layers run on the NPU; the 4-layer text decoder runs on the CPU.'
+    };
+
+    function resolveInferenceInfo(run) {
+        if (run && run.inference_type) {
+            const isHybrid = /cpu/i.test(run.inference_type);
+            return {
+                label: run.inference_type,
+                isHybrid: isHybrid,
+                tip: run.inference_tip || (isHybrid ? HYBRID_TIPS[String(run.backend || '').toLowerCase()] || '' : '')
+            };
+        }
+        const key = String((run && run.backend) || '').replace(/\s*\(.*?\)\s*$/i, '').trim().toLowerCase();
+        if (HYBRID_TIPS[key]) {
+            return { label: 'NPU + CPU', isHybrid: true, tip: HYBRID_TIPS[key] };
+        }
+        return { label: 'NPU', isHybrid: false, tip: '' };
+    }
+
+    function renderInferenceBadge(info, interactiveTip) {
+        if (!info) return '';
+        if (info.isHybrid) {
+            const tipAttrs = (interactiveTip && info.tip)
+                ? (' data-oflm-tip="' + esc(info.tip) + '" tabindex="0" role="note" aria-label="' + esc(info.label + ': ' + info.tip) + '"')
+                : '';
+            const infoIcon = (interactiveTip && info.tip)
+                ? '<span class="material-icons oflm-badge-info" aria-hidden="true">info</span>'
+                : '';
+            return '<span class="oflm-badge hybrid"' + tipAttrs + '><span class="material-icons" aria-hidden="true">splitscreen</span><span>' + esc(info.label) + '</span>' + infoIcon + '</span>';
+        }
+        return '<span class="oflm-badge open"><span class="material-icons" aria-hidden="true">memory</span><span>' + esc(info.label) + '</span></span>';
+    }
+
     function inferMinRamGb(run) {
         if (run && run.min_ram_gb) return Number(run.min_ram_gb);
         const mod = getModalityMeta(run && run.task);
@@ -244,6 +284,7 @@
                     tag: tag,
                     task: r.task,
                     modality: mod,
+                    inferenceInfo: resolveInferenceInfo(r),
                     minRamGb: inferMinRamGb(r),
                     unit: r.output_unit || (isEmbed ? 'txt/s' : 'tok/s'),
                     p1Label: isEmbed ? 'Peak Batched Throughput' : 'Token Decode',
@@ -547,8 +588,8 @@
         const xMed = xScale(stat.median);
 
         const tip = stat.max > stat.min
-            ? (row.npuShort + ' — Median: ' + fmtCompactRate(stat.median) + ' ' + unit + ' | Min: ' + fmtCompactRate(stat.min) + ' (' + stat.minConfig + ') | Max: ' + fmtCompactRate(stat.max) + ' (' + stat.maxConfig + ')')
-            : (row.npuShort + ' — ' + fmtCompactRate(stat.median) + ' ' + unit + ' (' + stat.minConfig + ', n=' + row.totalRuns + ')');
+            ? (row.npuShort + ': Median ' + fmtCompactRate(stat.median) + ' ' + unit + ' | Min ' + fmtCompactRate(stat.min) + ' (' + stat.minConfig + ') | Max ' + fmtCompactRate(stat.max) + ' (' + stat.maxConfig + ')')
+            : (row.npuShort + ': ' + fmtCompactRate(stat.median) + ' ' + unit + ' (' + stat.minConfig + ', n=' + row.totalRuns + ')');
 
         let inner = '<line x1="' + padL + '" y1="12" x2="' + (sw - padR) + '" y2="12" stroke="' + t.grid + '" stroke-width="2" />';
         if (stat.max > stat.min) {
@@ -586,6 +627,7 @@
         let activeQuant = null;
         let hlMem = null;
         let hlNpu = null;
+        let ddOpen = false;
         let childCharts = [];
 
         function renderWidget() {
@@ -613,51 +655,58 @@
             const memCols = summary.memCols;
             const t = getThemeTokens();
 
-            // Selector bar (scales cleanly: pills when <= 10 models, <select> when > 10)
-            let modelControlHtml;
-            if (models.length <= 10) {
-                modelControlHtml = '<div class="oflm-model-pills" role="group" aria-label="Select benchmark model">' +
-                    models.map(function (m) {
-                        const active = m.tag === activeModelTag ? ' active' : '';
-                        return '<button type="button" class="oflm-model-pill' + active + '" data-select-model="' + esc(m.tag) + '">' +
-                            '<code>' + esc(m.tag) + '</code>' +
-                            '<span class="oflm-pill-mod">' + esc(m.modality.label) + '</span>' +
-                        '</button>';
-                    }).join('') +
-                '</div>';
-            } else {
-                modelControlHtml = '<select class="oflm-bench-select" data-select-model-dd aria-label="Select benchmark model">' +
-                    models.map(function (m) {
-                        return '<option value="' + esc(m.tag) + '"' + (m.tag === activeModelTag ? ' selected' : '') + '>' +
-                            esc(m.tag + ' (' + m.modality.label + ')') +
-                        '</option>';
-                    }).join('') +
-                '</select>';
-            }
+            // Hierarchical dropdown: models with their quantizations nested underneath
+            const menuGroupsHtml = models.map(function (m) {
+                const qList = Array.from(m.quants.keys());
+                const optsHtml = qList.map(function (q) {
+                    const qEntries = m.quants.get(q) || [];
+                    const npuSet = new Set(qEntries.map(function (e) { return e.npuShort; }));
+                    const rCount = qEntries.reduce(function (acc, e) { return acc + e.runs; }, 0);
+                    const isActive = m.tag === activeModelTag && q === activeQuant;
+                    return '<button type="button" class="oflm-dd-option' + (isActive ? ' active' : '') + '" role="option" aria-selected="' + (isActive ? 'true' : 'false') + '" data-pick-model="' + esc(m.tag) + '" data-pick-quant="' + esc(q) + '">' +
+                        '<span class="oflm-dd-opt-left">' +
+                            '<span class="oflm-badge quant mono"><span>' + esc(q) + '</span></span>' +
+                            '<span class="oflm-dd-opt-meta">' + npuSet.size + (npuSet.size === 1 ? ' NPU' : ' NPUs') + ' · ' + rCount + ' runs</span>' +
+                        '</span>' +
+                        (isActive ? '<span class="material-icons oflm-dd-check" aria-hidden="true">check</span>' : '') +
+                    '</button>';
+                }).join('');
 
-            const quantHtml = '<div class="oflm-quant-pills" role="group" aria-label="Select quantization">' +
-                quantKeys.map(function (q) {
-                    const active = q === activeQuant ? ' active' : '';
-                    return '<button type="button" class="oflm-quant-pill' + active + '" data-select-quant="' + esc(q) + '">' + esc(q) + '</button>';
-                }).join('') +
-            '</div>';
+                return '<div class="oflm-dd-group" role="group" aria-label="' + esc(m.tag) + '">' +
+                    '<div class="oflm-dd-group-head">' +
+                        '<code class="oflm-dd-model-name">' + esc(m.tag) + '</code>' +
+                        '<span class="oflm-dd-group-badges">' +
+                            '<span class="oflm-badge ' + esc(m.modality.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(m.modality.icon) + '</span><span>' + esc(m.modality.label) + '</span></span>' +
+                            renderInferenceBadge(m.inferenceInfo, false) +
+                        '</span>' +
+                    '</div>' +
+                    '<div class="oflm-dd-options">' + optsHtml + '</div>' +
+                '</div>';
+            }).join('');
 
             const totalRuns = npuRows.reduce(function (acc, r) { return acc + r.totalRuns; }, 0);
-            const metaStrip =
-                '<div class="oflm-chart-meta">' +
-                    '<span class="oflm-badge ' + esc(model.modality.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(model.modality.icon) + '</span><span>' + esc(model.modality.label) + '</span></span>' +
-                    '<span class="oflm-badge quant mono"><span>' + esc(activeQuant) + '</span></span>' +
-                    '<span class="oflm-badge neutral"><span>Fits ≥ ' + esc(model.minRamGb) + ' GB RAM</span></span>' +
-                    '<span class="small ms-1" style="color: var(--oflm-muted);">' + npuRows.length + (npuRows.length === 1 ? ' XDNA2 NPU' : ' XDNA2 NPUs') + ' · ' + memCols.length + (memCols.length === 1 ? ' memory config' : ' memory configs') + ' · ' + totalRuns + ' runs</span>' +
-                '</div>';
 
             const selectorCard =
                 '<div class="oflm-bench-selector">' +
                     '<div class="oflm-bench-selector-row">' +
-                        '<div class="oflm-bench-selector-group"><span class="oflm-group-label">Model:</span>' + modelControlHtml + '</div>' +
-                        '<div class="oflm-bench-selector-group"><span class="oflm-group-label">Quant:</span>' + quantHtml + '</div>' +
+                        '<div class="oflm-dd' + (ddOpen ? ' is-open' : '') + '">' +
+                            '<button type="button" class="oflm-dd-trigger" data-dd-toggle aria-haspopup="listbox" aria-expanded="' + (ddOpen ? 'true' : 'false') + '">' +
+                                '<span class="oflm-dd-trigger-main">' +
+                                    '<code class="oflm-dd-trigger-model">' + esc(model.tag) + '</code>' +
+                                    '<span class="oflm-badge quant mono"><span>' + esc(activeQuant) + '</span></span>' +
+                                    '<span class="oflm-badge ' + esc(model.modality.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(model.modality.icon) + '</span><span>' + esc(model.modality.label) + '</span></span>' +
+                                    renderInferenceBadge(model.inferenceInfo, false) +
+                                '</span>' +
+                                '<span class="material-icons oflm-dd-chevron" aria-hidden="true">expand_more</span>' +
+                            '</button>' +
+                            '<div class="oflm-dd-menu" role="listbox" aria-label="Models and quantizations">' + menuGroupsHtml + '</div>' +
+                        '</div>' +
+                        '<div class="oflm-chart-meta">' +
+                            renderInferenceBadge(model.inferenceInfo, true) +
+                            '<span class="oflm-badge neutral"><span>Fits ≥ ' + esc(model.minRamGb) + ' GB RAM</span></span>' +
+                            '<span class="small" style="color: var(--oflm-muted);">' + npuRows.length + (npuRows.length === 1 ? ' XDNA2 NPU' : ' XDNA2 NPUs') + ' · ' + memCols.length + (memCols.length === 1 ? ' memory config' : ' memory configs') + ' · ' + totalRuns + ' runs</span>' +
+                        '</div>' +
                     '</div>' +
-                    '<div class="oflm-bench-selector-meta">' + metaStrip + '</div>' +
                 '</div>';
 
             if (viewMode === 'compact') {
@@ -798,31 +847,24 @@
                 }
             }
 
-            // Bind selector & matrix interactions
-            bodyEl.querySelectorAll('[data-select-model]').forEach(function (btn) {
-                btn.addEventListener('click', function () {
-                    activeModelTag = btn.dataset.selectModel;
-                    activeQuant = null;
-                    hlMem = null;
-                    hlNpu = null;
-                    renderWidget();
-                });
-            });
-            const dd = bodyEl.querySelector('[data-select-model-dd]');
-            if (dd) {
-                dd.addEventListener('change', function () {
-                    activeModelTag = dd.value;
-                    activeQuant = null;
-                    hlMem = null;
-                    hlNpu = null;
-                    renderWidget();
+            // Bind dropdown & matrix interactions
+            const ddEl = bodyEl.querySelector('.oflm-dd');
+            const ddToggle = bodyEl.querySelector('[data-dd-toggle]');
+            if (ddToggle && ddEl) {
+                ddToggle.addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    ddOpen = !ddOpen;
+                    ddEl.classList.toggle('is-open', ddOpen);
+                    ddToggle.setAttribute('aria-expanded', ddOpen ? 'true' : 'false');
                 });
             }
-            bodyEl.querySelectorAll('[data-select-quant]').forEach(function (btn) {
+            bodyEl.querySelectorAll('[data-pick-model]').forEach(function (btn) {
                 btn.addEventListener('click', function () {
-                    activeQuant = btn.dataset.selectQuant;
+                    activeModelTag = btn.dataset.pickModel;
+                    activeQuant = btn.dataset.pickQuant;
                     hlMem = null;
                     hlNpu = null;
+                    ddOpen = false;
                     renderWidget();
                 });
             });
@@ -853,6 +895,32 @@
                 });
             }
         }
+
+        document.addEventListener('click', function (ev) {
+            if (!ddOpen) return;
+            const ddEl = bodyEl.querySelector('.oflm-dd');
+            if (ddEl && !ddEl.contains(ev.target)) {
+                ddOpen = false;
+                ddEl.classList.remove('is-open');
+                const btn = ddEl.querySelector('[data-dd-toggle]');
+                if (btn) btn.setAttribute('aria-expanded', 'false');
+            }
+        });
+
+        document.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Escape' && ddOpen) {
+                ddOpen = false;
+                const ddEl = bodyEl.querySelector('.oflm-dd');
+                if (ddEl) {
+                    ddEl.classList.remove('is-open');
+                    const btn = ddEl.querySelector('[data-dd-toggle]');
+                    if (btn) {
+                        btn.setAttribute('aria-expanded', 'false');
+                        btn.focus();
+                    }
+                }
+            }
+        });
 
         renderWidget();
 
@@ -1281,6 +1349,7 @@
                 return {
                     model: r.model,
                     task: r.task,
+                    backend: r.backend || '',
                     source: r.source || (r.status === 'seed' ? 'verified_seed' : 'community'),
                     status: r.status,
                     hardware_platform: r.cpu || extractHardwarePlatform(r),

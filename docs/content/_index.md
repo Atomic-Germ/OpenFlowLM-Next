@@ -59,8 +59,8 @@ oflm pull flux2-klein:4b
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-3">
 <div>
 <div class="mb-2">{{< b k="npu" t="Measured NPU Speeds" icon="speed" >}}</div>
-<h2 class="fw-bold mb-1">Measured Performance by Model &amp; XDNA2 NPU</h2>
-<p class="mb-0" style="color: var(--oflm-muted);">Pick a model and quantization to compare XDNA2 NPUs across memory speeds and power modes.</p>
+<h2 class="fw-bold mb-1">Performance by Model &amp; XDNA2 NPU</h2>
+<p class="mb-0" style="color: var(--oflm-muted);">Choose a model and quantization to compare XDNA2 NPUs across memory speeds and power modes.</p>
 </div>
 <div class="d-flex flex-wrap align-items-center gap-2">
 <a href="benchmarks/" class="btn btn-sm btn-primary">All Benchmarks</a>
@@ -69,8 +69,6 @@ oflm pull flux2-klein:4b
 </div>
 
 {{< all-runs-chart view="compact" >}}
-
-{{< bench-chart data="qwen35_2b_ryzen_ai_350" >}}
 </div>
 
 <div class="pt-3 mt-2">

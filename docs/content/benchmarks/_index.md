@@ -1,6 +1,6 @@
 ---
 title: "Benchmarks & Hardware Leaderboard"
-description: "Measured AMD Ryzen AI NPU throughput, context scaling, batched embedding sweeps, and community hardware submissions."
+description: "AMD Ryzen AI NPU throughput across models, quantizations, and memory configurations, plus community hardware runs."
 url: "/benchmarks/"
 aliases:
   - /benchmarks/community/
@@ -23,38 +23,26 @@ ctas:
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
 <div class="d-flex flex-wrap align-items-center gap-2">
-<h2 class="h4 fw-bold mb-0">Measured NPU Throughput by Model, Quantization &amp; Memory</h2>
+<h2 class="h4 fw-bold mb-0">Throughput by Model, Quantization &amp; Memory</h2>
 {{< b k="wip" issue="240" t="Expanded Family Sweeps #240" >}}
 </div>
 </div>
-<p class="small mb-3" style="color: var(--oflm-muted);">Select a model and quantization to compare XDNA2 NPUs. Each NPU row shows the median dot and min–max range across RAM speeds and power modes; hover any row for exact min/max configs or click the NPU × Memory matrix to highlight a memory tier.</p>
+<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Each NPU row plots the median dot and min-max range across RAM speeds and power modes. Hover a row for min and max configs, or click the matrix to highlight a memory tier.</p>
 
 {{< all-runs-chart view="full" >}}
-
-<div class="mt-4 pt-2">
-<h2 class="h4 fw-bold mb-1">Chat Context Scaling (1k to 32k)</h2>
-<p class="small mb-3" style="color: var(--oflm-muted);">Prefill speed, decode speed, and time to first token across context lengths on a single Ryzen AI 7 350 system.</p>
-{{< bench-chart data="qwen35_2b_ryzen_ai_350" >}}
-</div>
-
-<div class="mt-4 pt-2">
-<h2 class="h4 fw-bold mb-1">Batched Embedding Scaling (n=1 to n=128)</h2>
-<p class="small mb-3" style="color: var(--oflm-muted);">End-to-end wall clock across 7 embedding models on AMD Ryzen AI 9 HX 370 (mean of 3 runs, performance power mode, bit-identical vectors vs. single text).</p>
-{{< embed-chart >}}
-</div>
 
 <div class="mt-4 pt-2" data-cb-page="leaderboard">
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
 <div>
 <h2 class="h4 fw-bold mb-1">Runs &amp; Community Leaderboard</h2>
-<p class="small mb-0" style="color: var(--oflm-muted);">Select any row to inspect full per-stage measurements, scaling curves, and system specs.</p>
+<p class="small mb-0" style="color: var(--oflm-muted);">Click any row for per-stage context or batch curves and system specs.</p>
 </div>
 <a href="submit/" class="btn btn-sm btn-primary"><span class="material-icons align-middle size-18 me-1">upload_file</span>Submit Run</a>
 </div>
 
 <div id="cb-seed-banner" class="alert alert-info d-none mb-3" role="status">
-<div class="small mb-0"><strong>Verified Runs &amp; Community Submissions:</strong> Static preview shows repository sweeps and averaged community runs; live submissions load automatically on <code>openflowlm.org</code>. Share your hardware speeds with <code>oflm bench &lt;tag&gt; --submit</code> or <a href="submit/">Submit Run</a>.</div>
+<div class="small mb-0"><strong>Verified Runs &amp; Community Submissions:</strong> This static preview shows repository sweeps and averaged community runs. Live submissions load on <code>openflowlm.org</code>. Upload your speeds with <code>oflm bench &lt;tag&gt; --submit</code> or <a href="submit/">Submit Run</a>.</div>
 </div>
 
 <div class="oflm-stat-grid" id="cb-stats">

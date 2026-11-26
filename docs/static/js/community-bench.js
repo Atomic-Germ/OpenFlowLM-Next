@@ -785,7 +785,7 @@
       const token = tokData?.token || '';
       if (!token) {
         if (msg) {
-          msg.innerHTML = 'Community Benchmarks Worker API is not reachable on this static preview host. On <code>openflowlm.org</code> (or via <code>oflm bench --submit</code>), this form posts directly to the live Worker endpoint.';
+          msg.innerHTML = 'Community Benchmarks Worker API is unreachable on this static preview host. On <code>openflowlm.org</code> (or via <code>oflm bench --submit</code>), this form posts to the live Worker endpoint.';
         }
         return;
       }

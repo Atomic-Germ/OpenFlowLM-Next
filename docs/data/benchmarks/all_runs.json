@@ -1,11 +1,14 @@
 {
   "slug": "all-npu-runs",
-  "title": "Measured NPU Throughput by Model, Quantization & Memory",
-  "subtitle": "Select a model and quantization to compare XDNA2 NPUs across memory speed and power configurations",
+  "title": "NPU Throughput by Model, Quantization, and Memory",
+  "subtitle": "Pick a model and quantization to compare XDNA2 NPUs across memory speeds and power modes",
   "runs": [
     {
       "model": "qwen3.5:2b",
       "task": "LLM",
+      "backend": "open_qwen35",
+      "inference_type": "NPU + CPU",
+      "inference_tip": "Token generation and projections run on the NPU; light recurrent state updates during long prompts run on the CPU.",
       "source": "community",
       "hardware_platform": "AMD Ryzen AI 7 350 w/ Radeon 860M",
       "hardware": "Framework Laptop 13 (AMD Ryzen AI 7 350 w/ Radeon 860M, 32 GB DDR5-5600)",
@@ -23,6 +26,8 @@
     {
       "model": "all-minilm:l6-v2",
       "task": "Embedding",
+      "backend": "open_npue",
+      "inference_type": "NPU",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",
@@ -42,6 +47,8 @@
     {
       "model": "bge-small:en-v1.5",
       "task": "Embedding",
+      "backend": "open_npue",
+      "inference_type": "NPU",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",
@@ -61,6 +68,8 @@
     {
       "model": "bge-base:en-v1.5",
       "task": "Embedding",
+      "backend": "open_npue",
+      "inference_type": "NPU",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",
@@ -80,6 +89,8 @@
     {
       "model": "nomic-embed-text:v1.5",
       "task": "Embedding",
+      "backend": "open_npue",
+      "inference_type": "NPU",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",
@@ -99,6 +110,8 @@
     {
       "model": "gte-multilingual:base",
       "task": "Embedding",
+      "backend": "open_npue",
+      "inference_type": "NPU",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",
@@ -118,6 +131,8 @@
     {
       "model": "bge-large:en-v1.5",
       "task": "Embedding",
+      "backend": "open_npue",
+      "inference_type": "NPU",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",
@@ -137,6 +152,9 @@
     {
       "model": "embed-gemma:300m",
       "task": "Embedding",
+      "backend": "open_embedding",
+      "inference_type": "NPU + CPU",
+      "inference_tip": "Linear projections run on the NPU; attention and vector pooling run on the CPU.",
       "source": "verified_seed",
       "hardware_platform": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
       "hardware": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M · 32 GB RAM",

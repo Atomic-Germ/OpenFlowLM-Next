@@ -978,71 +978,172 @@ a.oflm-badge {
   }
 }
 
-.oflm-model-pills,
-.oflm-quant-pills {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 0.32rem;
-}
+.oflm-dd {
+  position: relative;
+  min-width: 280px;
+  max-width: 100%;
 
-.oflm-model-pill,
-.oflm-quant-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  border: 1px solid var(--oflm-border);
-  background-color: var(--oflm-bg);
-  color: var(--oflm-text);
-  font-size: 0.78rem;
-  font-weight: 600;
-  padding: 0.28rem 0.6rem;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.14s ease;
+  &.is-open {
+    .oflm-dd-trigger {
+      border-color: var(--oflm-accent);
+      box-shadow: 0 0 0 2px var(--oflm-accent-soft);
+    }
 
-  code {
-    background: transparent !important;
-    color: inherit !important;
-    padding: 0 !important;
-    font-size: 0.78rem !important;
-    font-weight: 600 !important;
-  }
+    .oflm-dd-chevron {
+      transform: rotate(180deg);
+    }
 
-  .oflm-pill-mod {
-    font-size: 0.68rem;
-    font-weight: 500;
-    color: var(--oflm-muted);
-  }
-
-  &:hover {
-    border-color: var(--oflm-accent);
-  }
-
-  &.active {
-    background-color: var(--oflm-accent);
-    border-color: var(--oflm-accent);
-    color: #ffffff;
-
-    .oflm-pill-mod {
-      color: rgba(255, 255, 255, 0.82);
+    .oflm-dd-menu {
+      display: block;
     }
   }
 }
 
-.oflm-quant-pill {
-  font-family: var(--oflm-font-mono) !important;
-  font-size: 0.74rem;
-  padding: 0.26rem 0.55rem;
-}
-
-.oflm-bench-select {
+.oflm-dd-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
   background-color: var(--oflm-bg);
   color: var(--oflm-text);
   border: 1px solid var(--oflm-border);
+  border-radius: 8px;
+  padding: 0.48rem 0.72rem;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease;
+
+  &:hover {
+    border-color: var(--oflm-accent);
+  }
+}
+
+.oflm-dd-trigger-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+}
+
+.oflm-dd-trigger-model {
+  font-weight: 700 !important;
+  font-size: 0.86rem !important;
+  background: transparent !important;
+  color: var(--oflm-text) !important;
+  padding: 0 !important;
+}
+
+.oflm-dd-chevron {
+  font-size: 1.15rem !important;
+  color: var(--oflm-muted);
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+
+.oflm-dd-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 340px;
+  width: max-content;
+  max-width: unquote("min(460px, 90vw)");
+  max-height: 360px;
+  overflow-y: auto;
+  background-color: var(--oflm-surface);
+  border: 1px solid var(--oflm-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  padding: 0.45rem;
+}
+
+[data-dark-mode] .oflm-dd-menu {
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
+}
+
+.oflm-dd-group {
+  padding: 0.35rem 0.25rem;
+
+  & + .oflm-dd-group {
+    border-top: 1px solid var(--oflm-border);
+    margin-top: 0.25rem;
+    padding-top: 0.5rem;
+  }
+}
+
+.oflm-dd-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  padding: 0.12rem 0.45rem 0.32rem 0.45rem;
+}
+
+.oflm-dd-model-name {
+  font-size: 0.8rem !important;
+  font-weight: 700 !important;
+  background: transparent !important;
+  color: var(--oflm-text) !important;
+  padding: 0 !important;
+}
+
+.oflm-dd-group-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.oflm-dd-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  padding-left: 0.6rem;
+}
+
+.oflm-dd-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--oflm-text);
   border-radius: 6px;
-  padding: 0.35rem 0.65rem;
-  font-size: 0.82rem;
-  font-weight: 600;
+  padding: 0.32rem 0.5rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+
+  &:hover {
+    background-color: var(--oflm-surface-hover);
+  }
+
+  &.active {
+    background-color: var(--oflm-accent-soft);
+    border-color: var(--oflm-accent);
+  }
+}
+
+.oflm-dd-opt-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.oflm-dd-opt-meta {
+  font-size: 0.74rem;
+  color: var(--oflm-muted);
+}
+
+.oflm-dd-check {
+  font-size: 1rem !important;
+  color: var(--oflm-accent);
 }
 
 .oflm-npu-matrix {
