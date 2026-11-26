@@ -23,13 +23,13 @@ ctas:
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
 <div class="d-flex flex-wrap align-items-center gap-2">
-<h2 class="h4 fw-bold mb-0">Measured NPU Throughput by Hardware &amp; Modality</h2>
+<h2 class="h4 fw-bold mb-0">Measured NPU Throughput by Model, Quantization &amp; Memory</h2>
 {{< b k="wip" issue="240" t="Expanded Family Sweeps #240" >}}
 </div>
 </div>
-<p class="small mb-3" style="color: var(--oflm-muted);">Each chart compares models on a single AMD Ryzen AI NPU platform with a single unit. Paired metrics appear side-by-side with direct numeric labels.</p>
+<p class="small mb-3" style="color: var(--oflm-muted);">Select a model and quantization to compare XDNA2 NPUs. Each NPU row shows the median dot and min–max range across RAM speeds and power modes; hover any row for exact min/max configs or click the NPU × Memory matrix to highlight a memory tier.</p>
 
-{{< all-runs-chart >}}
+{{< all-runs-chart view="full" >}}
 
 <div class="mt-4 pt-2">
 <h2 class="h4 fw-bold mb-1">Chat Context Scaling (1k to 32k)</h2>

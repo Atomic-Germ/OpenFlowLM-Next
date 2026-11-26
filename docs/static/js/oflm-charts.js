@@ -1,6 +1,8 @@
 /* OpenFlowLM Apache ECharts runtime with Light/Dark [data-dark-mode] sync.
- * Follows Cleveland & McGill perceptual hierarchy, Tufte/Few direct labeling,
- * small multiples, and strict hardware/modality/unit faceting.
+ * Architecture:
+ *  - Model + Quantization selector -> XDNA2 NPU min-max range (across RAM/power configs) + median dot
+ *  - Linked NPU x Memory Config matrix (full view on /benchmarks/, fused compact view on homepage)
+ *  - Side-by-side small multiples for Chat Context Scaling & Embedding Batch Scaling
  */
 (function () {
     'use strict';
@@ -26,12 +28,13 @@
             tooltipBg: dark ? '#1e202b' : '#ffffff',
             tooltipBorder: dark ? '#323648' : '#dce3ee',
             primary: dark ? '#6d94ff' : '#2554d4',
-            primaryBand: dark ? 'rgba(109, 148, 255, 0.16)' : 'rgba(37, 84, 212, 0.12)',
+            primaryBand: dark ? 'rgba(109, 148, 255, 0.22)' : 'rgba(37, 84, 212, 0.18)',
             secondary: dark ? '#34d399' : '#059669',
-            secondaryBand: dark ? 'rgba(52, 211, 153, 0.16)' : 'rgba(5, 150, 105, 0.12)',
+            secondaryBand: dark ? 'rgba(52, 211, 153, 0.22)' : 'rgba(5, 150, 105, 0.18)',
             amber: dark ? '#fbbf24' : '#d97706',
-            amberBand: dark ? 'rgba(251, 191, 36, 0.16)' : 'rgba(217, 119, 6, 0.12)',
-            // High-contrast, colorblind-conscious palette for multi-series scaling curves
+            amberBand: dark ? 'rgba(251, 191, 36, 0.20)' : 'rgba(217, 119, 6, 0.16)',
+            capsuleFill: dark ? 'rgba(148, 163, 184, 0.26)' : 'rgba(100, 116, 139, 0.22)',
+            capsuleStroke: dark ? 'rgba(148, 163, 184, 0.55)' : 'rgba(71, 85, 105, 0.45)',
             palette: dark
                 ? ['#6d94ff', '#34d399', '#fbbf24', '#f472b6', '#38bdf8', '#c084fc', '#fb7185']
                 : ['#2554d4', '#059669', '#d97706', '#db2777', '#0284c7', '#7c3aed', '#e11d48']
@@ -61,10 +64,49 @@
     function extractHardwarePlatform(run) {
         if (run && run.hardware_platform) return String(run.hardware_platform).trim();
         if (run && run.cpu) return String(run.cpu).trim();
-        const raw = String((run && run.hardware) || 'Unknown NPU Platform').trim();
+        const raw = String((run && run.hardware) || 'Unknown XDNA2 NPU').trim();
         const ryzenMatch = raw.match(/(AMD\s+Ryzen\s+AI[^,)·]+)/i);
         if (ryzenMatch) return ryzenMatch[1].trim();
         return raw.split('·')[0].trim();
+    }
+
+    function shortNpuName(platform) {
+        return String(platform || '')
+            .replace(/^AMD\s+/i, '')
+            .replace(/\s+w\/\s+Radeon\s+\S+/i, '')
+            .trim();
+    }
+
+    function extractMemoryConfig(run) {
+        if (run && run.memory_config) return String(run.memory_config).trim();
+        const src = String((run && (run.ram_spec || run.hardware)) || '');
+        const lp = src.match(/(LPDDR5X?-\d{4})/i);
+        if (lp) return lp[1].toUpperCase() + ' (Unified)';
+        const ddr = src.match(/(DDR5-\d{4})/i);
+        if (ddr) return ddr[1].toUpperCase() + ' (Non-Unified)';
+        return 'System RAM';
+    }
+
+    function extractPowerMode(run) {
+        if (run && run.power_mode) return String(run.power_mode).trim();
+        const osStr = String((run && run.os) || '');
+        const m = osStr.match(/(Performance|Balanced|Power[- ]?Saver|Turbo)/i);
+        return m ? m[1] : 'Performance';
+    }
+
+    function inferMinRamGb(run) {
+        if (run && run.min_ram_gb) return Number(run.min_ram_gb);
+        const mod = getModalityMeta(run && run.task);
+        if (mod.key === 'embed') return 4;
+        const m = String((run && run.model) || '').match(/:(\d+(?:\.\d+)?)b\b/i);
+        if (m) {
+            const b = parseFloat(m[1]);
+            if (b <= 3) return 8;
+            if (b <= 10) return 16;
+            if (b <= 20) return 32;
+            return 48;
+        }
+        return 16;
     }
 
     function fmtNum(val, digits) {
@@ -83,6 +125,13 @@
         if (n >= 1000) return Math.round(n).toLocaleString('en-US');
         if (n >= 100) return n.toFixed(1);
         return n.toFixed(1);
+    }
+
+    function medianOf(nums) {
+        if (!nums.length) return null;
+        const s = nums.slice().sort(function (a, b) { return a - b; });
+        const mid = Math.floor(s.length / 2);
+        return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
     }
 
     const activeInstances = [];
@@ -170,215 +219,266 @@
         };
     }
 
-    // ==================== FACETED PAIRED-BAR PANELS ====================
+    // ==================== NPU-CENTRIC MODEL + QUANT -> RANGE & MATRIX ====================
 
-    function aggregateFacetRuns(runs) {
-        const byFacet = new Map();
+    function indexRunsByModelAndQuant(runs) {
+        const modelsMap = new Map();
         (runs || []).forEach(function (r) {
-            const platform = extractHardwarePlatform(r);
+            const tag = String(r.model || '').trim();
+            if (!tag) return;
             const mod = getModalityMeta(r.task);
-            const facetKey = platform + '||' + mod.key;
-            if (!byFacet.has(facetKey)) {
-                byFacet.set(facetKey, {
-                    platform: platform,
-                    modality: mod,
-                    hardwareDetails: new Set(),
-                    modelsMap: new Map()
-                });
-            }
-            const facet = byFacet.get(facetKey);
-            if (r.hardware) facet.hardwareDetails.add(r.hardware);
+            const quant = String(r.quant || 'Default').trim();
+            const npuFull = extractHardwarePlatform(r);
+            const npuShort = shortNpuName(npuFull);
+            const memCfg = extractMemoryConfig(r);
+            const power = extractPowerMode(r);
+            const isEmbed = mod.key === 'embed';
 
-            const isComm = r.source !== 'verified_seed' && r.status !== 'seed';
-            const modelKey = r.model + '||' + (isComm ? 'community' : 'seed');
-            if (!facet.modelsMap.has(modelKey)) {
-                facet.modelsMap.set(modelKey, {
-                    model: r.model,
+            const p1 = r.output_tps != null ? Number(r.output_tps) : null;
+            const p2 = isEmbed
+                ? (r.single_tps != null ? Number(r.single_tps) : null)
+                : (r.token_tps != null ? Number(r.token_tps) : null);
+
+            if (!modelsMap.has(tag)) {
+                modelsMap.set(tag, {
+                    tag: tag,
                     task: r.task,
                     modality: mod,
-                    isCommunity: isComm,
-                    quantSet: new Set(),
-                    stage: r.stage || '',
-                    outputUnit: r.output_unit || (mod.key === 'embed' ? 'txt/s' : 'tok/s'),
-                    submissions: 0,
-                    iterations: 0,
-                    outSum: 0, outN: 0,
-                    tokSum: 0, tokN: 0,
-                    singleSum: 0, singleN: 0,
-                    latSum: 0, latN: 0,
-                    singleLatSum: 0, singleLatN: 0
+                    minRamGb: inferMinRamGb(r),
+                    unit: r.output_unit || (isEmbed ? 'txt/s' : 'tok/s'),
+                    p1Label: isEmbed ? 'Peak Batched Throughput' : 'Token Decode',
+                    p1Sub: isEmbed ? 'txt/s · batched NPU (higher is faster)' : 'tok/s · 1k ctx (memory-bandwidth bound)',
+                    p2Label: isEmbed ? 'Single-Text Throughput (n=1)' : 'Prompt Prefill',
+                    p2Sub: isEmbed ? 'txt/s · low-latency path (higher is faster)' : 'tok/s · 1k ctx (NPU-compute bound)',
+                    quants: new Map()
                 });
             }
-            const m = facet.modelsMap.get(modelKey);
-            m.submissions += 1;
-            m.iterations += Number(r.runs || 1);
-            if (r.quant) m.quantSet.add(r.quant);
-            if (r.output_tps != null && Number(r.output_tps) > 0) {
-                m.outSum += Number(r.output_tps);
-                m.outN += 1;
+            const mEntry = modelsMap.get(tag);
+            if (!mEntry.quants.has(quant)) {
+                mEntry.quants.set(quant, []);
             }
-            if (r.token_tps != null && Number(r.token_tps) > 0) {
-                m.tokSum += Number(r.token_tps);
-                m.tokN += 1;
-            }
-            if (r.single_tps != null && Number(r.single_tps) > 0) {
-                m.singleSum += Number(r.single_tps);
-                m.singleN += 1;
-            }
-            if (r.latency_ms != null && Number(r.latency_ms) > 0) {
-                m.latSum += Number(r.latency_ms);
-                m.latN += 1;
-            }
-            if (r.single_latency_ms != null && Number(r.single_latency_ms) > 0) {
-                m.singleLatSum += Number(r.single_latency_ms);
-                m.singleLatN += 1;
-            }
+            mEntry.quants.get(quant).push({
+                npuFull: npuFull,
+                npuShort: npuShort,
+                memCfg: memCfg,
+                power: power,
+                stage: r.stage || '',
+                runs: Number(r.runs || 1),
+                isCommunity: r.source !== 'verified_seed' && r.status !== 'seed',
+                p1: p1,
+                p2: p2,
+                tokenTps: r.token_tps != null ? Number(r.token_tps) : null,
+                latencyMs: r.latency_ms != null ? Number(r.latency_ms) : null
+            });
         });
 
-        return Array.from(byFacet.values()).map(function (f) {
-            const items = Array.from(f.modelsMap.values()).map(function (m) {
-                return {
-                    model: m.model,
-                    task: m.task,
-                    modality: m.modality,
-                    isCommunity: m.isCommunity,
-                    quant: Array.from(m.quantSet).join(', '),
-                    stage: m.stage,
-                    outputUnit: m.outputUnit,
-                    submissions: m.submissions,
-                    iterations: m.iterations,
-                    outputAvg: m.outN ? (m.outSum / m.outN) : null,
-                    tokenAvg: m.tokN ? (m.tokSum / m.tokN) : null,
-                    singleAvg: m.singleN ? (m.singleSum / m.singleN) : null,
-                    latencyAvg: m.latN ? (m.latSum / m.latN) : null,
-                    singleLatencyAvg: m.singleLatN ? (m.singleLatSum / m.singleLatN) : null
-                };
-            });
-            // Sort ascending for ECharts yAxis category (bottom-to-top => fastest at top)
-            items.sort(function (a, b) {
-                return (a.outputAvg || 0) - (b.outputAvg || 0);
-            });
-            return {
-                platform: f.platform,
-                modality: f.modality,
-                hardwareDetails: Array.from(f.hardwareDetails),
-                items: items
-            };
-        }).sort(function (a, b) {
+        return Array.from(modelsMap.values()).sort(function (a, b) {
             if (a.modality.order !== b.modality.order) return a.modality.order - b.modality.order;
-            return a.platform.localeCompare(b.platform);
+            return a.tag.localeCompare(b.tag);
         });
     }
 
-    function buildFacetGroupedBarOption(facet) {
-        const t = getThemeTokens();
-        const mod = facet.modality;
-        const items = facet.items;
-        const isEmbed = mod.key === 'embed';
-        const isLlmLike = mod.key === 'llm' || mod.key === 'vlm';
-        const unit = isEmbed ? 'txt/s' : (items[0]?.outputUnit || 'tok/s');
+    function buildNpuSummaries(entries) {
+        const memSet = new Set();
+        const byNpu = new Map();
 
-        const yLabels = items.map(function (item) {
-            const q = item.quant ? ('  [' + item.quant + ']') : '';
-            return item.model + q;
+        entries.forEach(function (e) {
+            memSet.add(e.memCfg);
+            if (!byNpu.has(e.npuShort)) {
+                byNpu.set(e.npuShort, {
+                    npuShort: e.npuShort,
+                    npuFull: e.npuFull,
+                    entries: [],
+                    byMem: new Map()
+                });
+            }
+            const grp = byNpu.get(e.npuShort);
+            grp.entries.push(e);
+            if (!grp.byMem.has(e.memCfg)) {
+                grp.byMem.set(e.memCfg, []);
+            }
+            grp.byMem.get(e.memCfg).push(e);
         });
 
-        let seriesAName, seriesBName, dataA, dataB;
-        if (isEmbed) {
-            seriesAName = 'Peak Batched (txt/s)';
-            seriesBName = 'Single-Text n=1 (txt/s)';
-            dataA = items.map(function (it) { return it.outputAvg != null ? Number(it.outputAvg.toFixed(1)) : null; });
-            dataB = items.map(function (it) { return it.singleAvg != null ? Number(it.singleAvg.toFixed(1)) : null; });
-        } else if (isLlmLike) {
-            seriesAName = 'Prompt Prefill (tok/s)';
-            seriesBName = 'Token Decode (tok/s)';
-            dataA = items.map(function (it) { return it.tokenAvg != null ? Number(it.tokenAvg.toFixed(2)) : null; });
-            dataB = items.map(function (it) { return it.outputAvg != null ? Number(it.outputAvg.toFixed(2)) : null; });
-        } else {
-            seriesAName = 'Throughput (' + unit + ')';
-            seriesBName = null;
-            dataA = items.map(function (it) { return it.outputAvg != null ? Number(it.outputAvg.toFixed(2)) : null; });
-            dataB = [];
+        function summarizeMetric(list, key) {
+            const valid = list.filter(function (x) { return x[key] != null && x[key] > 0; });
+            if (!valid.length) return null;
+            valid.sort(function (a, b) { return a[key] - b[key]; });
+            const vals = valid.map(function (x) { return x[key]; });
+            const minEntry = valid[0];
+            const maxEntry = valid[valid.length - 1];
+            return {
+                min: minEntry[key],
+                max: maxEntry[key],
+                median: medianOf(vals),
+                minConfig: minEntry.memCfg + ' · ' + minEntry.power,
+                maxConfig: maxEntry.memCfg + ' · ' + maxEntry.power,
+                count: valid.length
+            };
         }
 
-        const allVals = dataA.concat(dataB).filter(function (v) { return v != null && v > 0; });
-        const maxVal = allVals.length ? Math.max.apply(null, allVals) : 100;
-        const minVal = allVals.length ? Math.min.apply(null, allVals) : 1;
-        const useLog = allVals.length > 1 && (maxVal / minVal) >= 12;
-
-        const hasSeriesB = Boolean(seriesBName) && dataB.some(function (v) { return v != null; });
-        const series = [];
-
-        const labelStyle = {
-            show: true,
-            position: 'right',
-            distance: 6,
-            color: t.text,
-            fontSize: 11.5,
-            fontWeight: 600,
-            fontFamily: 'JetBrains Mono, ui-monospace, monospace'
-        };
-
-        series.push({
-            name: seriesAName,
-            type: 'bar',
-            barMaxWidth: 20,
-            barGap: '18%',
-            itemStyle: { color: t.primary, borderRadius: [0, 4, 4, 0] },
-            label: Object.assign({}, labelStyle, {
-                formatter: function (p) {
-                    if (p.value == null) return '';
-                    return fmtCompactRate(p.value) + ' ' + unit;
-                }
-            }),
-            data: dataA
+        const npuRows = Array.from(byNpu.values()).map(function (grp) {
+            const memSummaries = {};
+            grp.byMem.forEach(function (list, memKey) {
+                const totalRuns = list.reduce(function (acc, item) { return acc + item.runs; }, 0);
+                memSummaries[memKey] = {
+                    p1: summarizeMetric(list, 'p1'),
+                    p2: summarizeMetric(list, 'p2'),
+                    runs: totalRuns,
+                    configs: list.length
+                };
+            });
+            const totalRuns = grp.entries.reduce(function (acc, item) { return acc + item.runs; }, 0);
+            return {
+                npuShort: grp.npuShort,
+                npuFull: grp.npuFull,
+                totalRuns: totalRuns,
+                memCount: grp.byMem.size,
+                p1: summarizeMetric(grp.entries, 'p1'),
+                p2: summarizeMetric(grp.entries, 'p2'),
+                byMem: memSummaries
+            };
         });
 
-        if (hasSeriesB) {
-            series.push({
-                name: seriesBName,
-                type: 'bar',
-                barMaxWidth: 20,
-                barGap: '18%',
-                itemStyle: { color: t.secondary, borderRadius: [0, 4, 4, 0] },
-                label: Object.assign({}, labelStyle, {
-                    formatter: function (p) {
-                        if (p.value == null) return '';
-                        return fmtCompactRate(p.value) + ' ' + unit;
-                    }
-                }),
-                data: dataB
+        // Sort ascending so ECharts yAxis category puts fastest NPU at top
+        npuRows.sort(function (a, b) {
+            return ((a.p1 && a.p1.median) || 0) - ((b.p1 && b.p1.median) || 0);
+        });
+
+        const memCols = Array.from(memSet).sort();
+        return { npuRows: npuRows, memCols: memCols };
+    }
+
+    function buildNpuRangeOption(model, quant, npuRows, metricKey, hlMem, hlNpu) {
+        const t = getThemeTokens();
+        const unit = model.unit;
+        const accentColor = metricKey === 'p1' ? t.primary : t.secondary;
+
+        const validRows = npuRows.filter(function (row) { return row[metricKey] != null; });
+        const yLabels = validRows.map(function (row) { return row.npuShort; });
+        const maxVal = validRows.length
+            ? Math.max.apply(null, validRows.map(function (r) { return r[metricKey].max; }))
+            : 10;
+        const xMax = Math.ceil(maxVal * 1.28);
+
+        const rangeData = validRows.map(function (row, idx) {
+            const stat = row[metricKey];
+            return [idx, stat.min, stat.max, stat.median];
+        });
+
+        const medianData = validRows.map(function (row, idx) {
+            const stat = row[metricKey];
+            return {
+                value: [stat.median, idx],
+                row: row,
+                stat: stat
+            };
+        });
+
+        const highlightData = [];
+        if (hlMem) {
+            validRows.forEach(function (row, idx) {
+                if (hlNpu && row.npuShort !== hlNpu) return;
+                const cell = row.byMem[hlMem];
+                if (cell && cell[metricKey]) {
+                    highlightData.push({
+                        value: [cell[metricKey].median, idx],
+                        npuShort: row.npuShort,
+                        memCfg: hlMem,
+                        val: cell[metricKey].median
+                    });
+                }
             });
         }
 
-        const xMax = useLog
-            ? Math.pow(10, Math.ceil(Math.log10(maxVal * 2.8)))
-            : Math.ceil(maxVal * 1.28);
+        const series = [
+            // Min-Max capsule bar across RAM speeds & power modes
+            {
+                name: 'Min–Max Range (RAM / Power)',
+                type: 'custom',
+                z: 2,
+                renderItem: function (params, api) {
+                    const yIdx = api.value(0);
+                    const lo = api.value(1);
+                    const hi = api.value(2);
+                    const pLo = api.coord([lo, yIdx]);
+                    const pHi = api.coord([hi, yIdx]);
+                    const pZero = api.coord([0, yIdx]);
+                    const barH = 14;
+
+                    const children = [
+                        // Subtle baseline rail from 0 to min
+                        {
+                            type: 'line',
+                            shape: { x1: pZero[0], y1: pLo[1], x2: pLo[0], y2: pLo[1] },
+                            style: { stroke: t.grid, lineWidth: 2 }
+                        }
+                    ];
+
+                    if (hi > lo) {
+                        const w = Math.max(8, pHi[0] - pLo[0]);
+                        children.push({
+                            type: 'rect',
+                            shape: { x: pLo[0], y: pLo[1] - barH / 2, width: w, height: barH, r: barH / 2 },
+                            style: { fill: t.capsuleFill, stroke: t.capsuleStroke, lineWidth: 1 }
+                        });
+                    }
+                    return { type: 'group', children: children };
+                },
+                data: rangeData
+            },
+            // Median dot with direct numeric label
+            {
+                name: 'Median',
+                type: 'scatter',
+                symbol: 'circle',
+                symbolSize: 12,
+                z: 5,
+                itemStyle: {
+                    color: accentColor,
+                    borderColor: t.tooltipBg,
+                    borderWidth: 2
+                },
+                label: {
+                    show: true,
+                    position: 'right',
+                    distance: 10,
+                    color: t.text,
+                    fontSize: 11.5,
+                    fontWeight: 700,
+                    fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+                    formatter: function (p) {
+                        const stat = p.data.stat;
+                        if (stat.max > stat.min) {
+                            return fmtCompactRate(stat.median) + ' (' + fmtCompactRate(stat.min) + '–' + fmtCompactRate(stat.max) + ')';
+                        }
+                        return fmtCompactRate(stat.median) + ' ' + unit;
+                    }
+                },
+                data: medianData
+            }
+        ];
+
+        if (highlightData.length) {
+            series.push({
+                name: hlMem,
+                type: 'scatter',
+                symbol: 'diamond',
+                symbolSize: 14,
+                z: 7,
+                itemStyle: {
+                    color: t.amber,
+                    borderColor: t.tooltipBg,
+                    borderWidth: 2
+                },
+                data: highlightData
+            });
+        }
 
         return {
             backgroundColor: 'transparent',
-            animationDuration: 280,
-            grid: { left: 205, right: 98, top: 38, bottom: 40 },
-            legend: {
-                show: hasSeriesB,
-                top: 2,
-                left: 0,
-                itemWidth: 12,
-                itemHeight: 10,
-                itemGap: 18,
-                textStyle: { color: t.text, fontSize: 12, fontWeight: 500 }
-            },
-            toolbox: {
-                right: 0,
-                top: 0,
-                iconStyle: { borderColor: t.muted },
-                feature: {
-                    saveAsImage: {
-                        title: 'Save SVG',
-                        name: 'oflm-' + mod.key + '-' + facet.platform.toLowerCase().replace(/[^a-z0-9]+/g, '-')
-                    }
-                }
-            },
+            animationDuration: 260,
+            grid: { left: 132, right: 120, top: 20, bottom: 38 },
             tooltip: {
                 trigger: 'axis',
                 axisPointer: { type: 'shadow' },
@@ -389,51 +489,34 @@
                 formatter: function (params) {
                     if (!params || !params.length) return '';
                     const idx = params[0].dataIndex;
-                    const item = items[idx];
-                    if (!item) return '';
-                    const prov = item.isCommunity
-                        ? ('Community avg (' + item.iterations + ' runs)')
-                        : ('Repo sweep (' + item.iterations + ' runs)');
+                    const row = validRows[idx];
+                    if (!row || !row[metricKey]) return '';
+                    const stat = row[metricKey];
                     const lines = [
-                        '<div style="font-weight:700;margin-bottom:3px;">' + esc(item.model) + ' · ' + esc(mod.label) + '</div>',
-                        '<div style="font-size:11.5px;opacity:0.82;margin-bottom:4px;">' + esc(facet.platform) + ' · ' + esc(prov) + '</div>'
+                        '<div style="font-weight:700;margin-bottom:3px;">' + esc(row.npuFull) + '</div>',
+                        '<div style="font-size:11.5px;opacity:0.82;margin-bottom:5px;">' + esc(model.tag) + ' · ' + esc(quant) + ' · ' + row.totalRuns + ' run(s) across ' + row.memCount + ' memory config(s)</div>',
+                        '<div>Median: <strong>' + fmtCompactRate(stat.median) + ' ' + esc(unit) + '</strong></div>'
                     ];
-                    if (isEmbed) {
-                        if (item.outputAvg != null) {
-                            lines.push('<div>Peak Batched (' + esc(item.stage) + '): <strong>' + fmtNum(item.outputAvg, 1) + ' txt/s</strong></div>');
-                        }
-                        if (item.singleAvg != null) {
-                            const gain = item.outputAvg ? (item.outputAvg / item.singleAvg).toFixed(1) + '×' : '';
-                            lines.push('<div>Single-Text (n=1): <strong>' + fmtNum(item.singleAvg, 1) + ' txt/s</strong>' + (gain ? ' (' + gain + ' batch gain)' : '') + '</div>');
-                        }
-                        if (item.tokenAvg != null) {
-                            lines.push('<div>Encoder Tokens: <strong>' + fmtNum(item.tokenAvg, 0) + ' tok/s</strong></div>');
-                        }
-                        if (item.singleLatencyAvg != null) {
-                            lines.push('<div>Single-Text Latency: <strong>' + fmtNum(item.singleLatencyAvg, 1) + ' ms</strong></div>');
-                        }
+                    if (stat.max > stat.min) {
+                        lines.push('<div>Min: <strong>' + fmtCompactRate(stat.min) + ' ' + esc(unit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.minConfig) + ')</span></div>');
+                        lines.push('<div>Max: <strong>' + fmtCompactRate(stat.max) + ' ' + esc(unit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.maxConfig) + ')</span></div>');
                     } else {
-                        if (item.tokenAvg != null) {
-                            lines.push('<div>Prompt Prefill (' + esc(item.stage) + '): <strong>' + fmtNum(item.tokenAvg, 2) + ' tok/s</strong></div>');
-                        }
-                        if (item.outputAvg != null) {
-                            lines.push('<div>Token Decode (' + esc(item.stage) + '): <strong>' + fmtNum(item.outputAvg, 2) + ' tok/s</strong></div>');
-                        }
-                        if (item.latencyAvg != null) {
-                            lines.push('<div>Time to First Token: <strong>' + (item.latencyAvg / 1000).toFixed(2) + ' s</strong></div>');
-                        }
+                        lines.push('<div>Measured config: <strong>' + esc(stat.minConfig) + '</strong></div>');
+                    }
+                    if (hlMem && row.byMem[hlMem] && row.byMem[hlMem][metricKey]) {
+                        lines.push('<div style="margin-top:4px;color:' + t.amber + ';">Selected (' + esc(hlMem) + '): <strong>' + fmtCompactRate(row.byMem[hlMem][metricKey].median) + ' ' + esc(unit) + '</strong></div>');
                     }
                     return lines.join('');
                 }
             },
             xAxis: {
-                type: useLog ? 'log' : 'value',
-                min: useLog ? (minVal < 2 ? 1 : undefined) : 0,
+                type: 'value',
+                min: 0,
                 max: xMax,
-                name: unit + (useLog ? ' (log scale · higher is faster)' : ' (higher is faster)'),
+                name: unit + ' (higher is faster)',
                 nameLocation: 'middle',
-                nameGap: 24,
-                nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11.5 },
+                nameGap: 23,
+                nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11 },
                 axisLabel: { color: t.muted, fontSize: 11 },
                 axisLine: { show: false },
                 axisTick: { show: false },
@@ -442,7 +525,7 @@
             yAxis: {
                 type: 'category',
                 data: yLabels,
-                axisLabel: { color: t.text, fontWeight: 600, fontSize: 11.5 },
+                axisLabel: { color: t.text, fontWeight: 700, fontSize: 11.5 },
                 axisLine: { lineStyle: { color: t.axis } },
                 axisTick: { show: false }
             },
@@ -450,60 +533,338 @@
         };
     }
 
-    function renderFacetedRunPanels(gridEl, runs, existingEntries) {
-        disposeInstances(existingEntries);
-        const created = [];
-        const facets = aggregateFacetRuns(runs);
-        if (!facets.length) {
-            gridEl.innerHTML = '<div class="oflm-chart-card"><p class="small mb-0" style="color: var(--oflm-muted);">No benchmark runs match the current selection.</p></div>';
-            return created;
+    function renderCompactSparkbarSvg(row, maxVal, unit, t) {
+        const stat = row.p1;
+        if (!stat) return '<span style="color:var(--oflm-muted);">-</span>';
+        const sw = 220;
+        const sh = 24;
+        const padL = 6;
+        const padR = 76;
+        const plotW = sw - padL - padR;
+        const xScale = function (v) { return padL + (v / (maxVal * 1.08)) * plotW; };
+        const xLo = xScale(stat.min);
+        const xHi = xScale(stat.max);
+        const xMed = xScale(stat.median);
+
+        const tip = stat.max > stat.min
+            ? (row.npuShort + ' — Median: ' + fmtCompactRate(stat.median) + ' ' + unit + ' | Min: ' + fmtCompactRate(stat.min) + ' (' + stat.minConfig + ') | Max: ' + fmtCompactRate(stat.max) + ' (' + stat.maxConfig + ')')
+            : (row.npuShort + ' — ' + fmtCompactRate(stat.median) + ' ' + unit + ' (' + stat.minConfig + ', n=' + row.totalRuns + ')');
+
+        let inner = '<line x1="' + padL + '" y1="12" x2="' + (sw - padR) + '" y2="12" stroke="' + t.grid + '" stroke-width="2" />';
+        if (stat.max > stat.min) {
+            const w = Math.max(8, xHi - xLo);
+            inner += '<rect x="' + xLo.toFixed(1) + '" y="6" width="' + w.toFixed(1) + '" height="12" rx="6" fill="' + t.capsuleFill + '" stroke="' + t.capsuleStroke + '" stroke-width="1" />';
+        } else {
+            inner += '<line x1="' + padL + '" y1="12" x2="' + xMed.toFixed(1) + '" y2="12" stroke="' + t.primaryBand + '" stroke-width="4" stroke-linecap="round" />';
+        }
+        inner += '<circle cx="' + xMed.toFixed(1) + '" cy="12" r="5" fill="' + t.primary + '" stroke="' + t.tooltipBg + '" stroke-width="1.5" />';
+        const labelStr = stat.max > stat.min
+            ? (fmtCompactRate(stat.min) + '–' + fmtCompactRate(stat.max))
+            : (fmtCompactRate(stat.median) + ' ' + unit);
+        inner += '<text x="' + (sw - padR + 6) + '" y="16" font-size="11" font-weight="700" fill="' + t.text + '" font-family="JetBrains Mono, ui-monospace, monospace">' + esc(labelStr) + '</text>';
+
+        return '<span class="oflm-sparkbar-wrap" data-oflm-tip="' + esc(tip) + '" tabindex="0">' +
+            '<svg viewBox="0 0 ' + sw + ' ' + sh + '" class="oflm-sparkbar-svg" role="img" aria-label="' + esc(tip) + '">' + inner + '</svg>' +
+        '</span>';
+    }
+
+    function initNpuBenchWidget(container) {
+        if (!window.echarts) return;
+        const bodyEl = container.querySelector('.oflm-npu-bench-body');
+        const payloadEl = container.querySelector('.oflm-chart-payload');
+        if (!bodyEl || !payloadEl) return;
+
+        let dataset;
+        try {
+            dataset = JSON.parse(payloadEl.textContent);
+        } catch (_err) {
+            return;
         }
 
-        gridEl.innerHTML = '';
-        facets.forEach(function (facet) {
-            const mod = facet.modality;
-            const isEmbed = mod.key === 'embed';
-            const isLlmLike = mod.key === 'llm' || mod.key === 'vlm';
-            const hasCommunity = facet.items.some(function (it) { return it.isCommunity; });
-            const hasSeed = facet.items.some(function (it) { return !it.isCommunity; });
-            const provText = hasCommunity && hasSeed
-                ? 'Repo sweeps & community avg'
-                : (hasCommunity ? 'Community average' : 'Repository sweep');
-            const metricDesc = isEmbed
-                ? 'Peak Batched vs. Single-Text (n=1) · txt/s'
-                : (isLlmLike ? 'Prompt Prefill vs. Token Decode · tok/s (1k ctx)' : 'Measured throughput');
-            const detailLine = facet.hardwareDetails[0] || facet.platform;
-            const chartHeight = Math.max(158, facet.items.length * 56 + 74);
+        const viewMode = container.dataset.view || 'full'; // 'full' (Variation 1) or 'compact' (Variation 2)
+        let activeModelTag = null;
+        let activeQuant = null;
+        let hlMem = null;
+        let hlNpu = null;
+        let childCharts = [];
 
-            const card = document.createElement('div');
-            card.className = 'oflm-chart-card oflm-facet-card';
-            card.innerHTML =
-                '<div class="oflm-chart-header">' +
-                    '<div>' +
-                        '<div class="oflm-chart-meta mb-1">' +
-                            '<span class="oflm-badge ' + esc(mod.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(mod.icon) + '</span><span>' + esc(mod.label) + '</span></span>' +
-                            '<span class="oflm-badge neutral"><span class="material-icons" aria-hidden="true">memory</span><span>' + esc(facet.platform) + '</span></span>' +
-                            '<span class="oflm-badge ' + (hasCommunity ? 'llm' : 'ok') + '"><span>' + esc(provText) + '</span></span>' +
-                        '</div>' +
-                        '<h3 class="oflm-chart-title">' + esc(mod.label) + ' on ' + esc(facet.platform) + '</h3>' +
-                        '<p class="oflm-chart-subtitle">' + esc(metricDesc) + ' · ' + esc(detailLine) + '</p>' +
+        function renderWidget() {
+            disposeInstances(childCharts);
+            childCharts = [];
+
+            const models = indexRunsByModelAndQuant(dataset.runs || []);
+            if (!models.length) {
+                bodyEl.innerHTML = '<div class="oflm-chart-card"><p class="small mb-0" style="color: var(--oflm-muted);">No benchmark runs available.</p></div>';
+                return;
+            }
+
+            if (!activeModelTag || !models.some(function (m) { return m.tag === activeModelTag; })) {
+                activeModelTag = models[0].tag;
+            }
+            const model = models.find(function (m) { return m.tag === activeModelTag; });
+            const quantKeys = Array.from(model.quants.keys());
+            if (!activeQuant || !quantKeys.includes(activeQuant)) {
+                activeQuant = quantKeys[0];
+            }
+
+            const entries = model.quants.get(activeQuant) || [];
+            const summary = buildNpuSummaries(entries);
+            const npuRows = summary.npuRows;
+            const memCols = summary.memCols;
+            const t = getThemeTokens();
+
+            // Selector bar (scales cleanly: pills when <= 10 models, <select> when > 10)
+            let modelControlHtml;
+            if (models.length <= 10) {
+                modelControlHtml = '<div class="oflm-model-pills" role="group" aria-label="Select benchmark model">' +
+                    models.map(function (m) {
+                        const active = m.tag === activeModelTag ? ' active' : '';
+                        return '<button type="button" class="oflm-model-pill' + active + '" data-select-model="' + esc(m.tag) + '">' +
+                            '<code>' + esc(m.tag) + '</code>' +
+                            '<span class="oflm-pill-mod">' + esc(m.modality.label) + '</span>' +
+                        '</button>';
+                    }).join('') +
+                '</div>';
+            } else {
+                modelControlHtml = '<select class="oflm-bench-select" data-select-model-dd aria-label="Select benchmark model">' +
+                    models.map(function (m) {
+                        return '<option value="' + esc(m.tag) + '"' + (m.tag === activeModelTag ? ' selected' : '') + '>' +
+                            esc(m.tag + ' (' + m.modality.label + ')') +
+                        '</option>';
+                    }).join('') +
+                '</select>';
+            }
+
+            const quantHtml = '<div class="oflm-quant-pills" role="group" aria-label="Select quantization">' +
+                quantKeys.map(function (q) {
+                    const active = q === activeQuant ? ' active' : '';
+                    return '<button type="button" class="oflm-quant-pill' + active + '" data-select-quant="' + esc(q) + '">' + esc(q) + '</button>';
+                }).join('') +
+            '</div>';
+
+            const totalRuns = npuRows.reduce(function (acc, r) { return acc + r.totalRuns; }, 0);
+            const metaStrip =
+                '<div class="oflm-chart-meta">' +
+                    '<span class="oflm-badge ' + esc(model.modality.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(model.modality.icon) + '</span><span>' + esc(model.modality.label) + '</span></span>' +
+                    '<span class="oflm-badge quant mono"><span>' + esc(activeQuant) + '</span></span>' +
+                    '<span class="oflm-badge neutral"><span>Fits ≥ ' + esc(model.minRamGb) + ' GB RAM</span></span>' +
+                    '<span class="small ms-1" style="color: var(--oflm-muted);">' + npuRows.length + (npuRows.length === 1 ? ' XDNA2 NPU' : ' XDNA2 NPUs') + ' · ' + memCols.length + (memCols.length === 1 ? ' memory config' : ' memory configs') + ' · ' + totalRuns + ' runs</span>' +
+                '</div>';
+
+            const selectorCard =
+                '<div class="oflm-bench-selector">' +
+                    '<div class="oflm-bench-selector-row">' +
+                        '<div class="oflm-bench-selector-group"><span class="oflm-group-label">Model:</span>' + modelControlHtml + '</div>' +
+                        '<div class="oflm-bench-selector-group"><span class="oflm-group-label">Quant:</span>' + quantHtml + '</div>' +
                     '</div>' +
-                '</div>' +
-                '<div class="oflm-echarts-canvas" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(mod.label + ' benchmark chart on ' + facet.platform) + '"></div>';
+                    '<div class="oflm-bench-selector-meta">' + metaStrip + '</div>' +
+                '</div>';
 
-            gridEl.appendChild(card);
-            const canvas = card.querySelector('.oflm-echarts-canvas');
-            const chart = window.echarts.init(canvas, null, { renderer: 'svg' });
-            const renderFn = function () {
-                chart.setOption(buildFacetGroupedBarOption(facet), true);
-            };
-            renderFn();
-            const entry = { chart: chart, render: renderFn };
-            activeInstances.push(entry);
-            created.push(entry);
+            if (viewMode === 'compact') {
+                // VARIATION 2 (Homepage): Ultra-compact fused NPU x Memory table with inline range + median sparkbar
+                const maxP1 = npuRows.length
+                    ? Math.max.apply(null, npuRows.map(function (r) { return (r.p1 && r.p1.max) || 1; }))
+                    : 1;
+                const displayRows = npuRows.slice().reverse(); // fastest at top
+
+                const headerCols = memCols.map(function (mc) {
+                    return '<th class="text-end">' + esc(mc) + '</th>';
+                }).join('');
+
+                const bodyRows = displayRows.map(function (row) {
+                    const cells = memCols.map(function (mc) {
+                        const cell = row.byMem[mc];
+                        if (!cell || !cell.p1) {
+                            return '<td class="text-end" style="color: var(--oflm-muted);">—</td>';
+                        }
+                        const p2Str = cell.p2 ? (' <span class="small" style="color: var(--oflm-muted);">/ ' + fmtCompactRate(cell.p2.median) + '</span>') : '';
+                        return '<td class="text-end oflm-mono-cell"><strong>' + fmtCompactRate(cell.p1.median) + '</strong>' + p2Str + '</td>';
+                    }).join('');
+
+                    return '<tr>' +
+                        '<td><div class="fw-semibold">' + esc(row.npuShort) + '</div></td>' +
+                        '<td>' + renderCompactSparkbarSvg(row, maxP1, model.unit, t) + '</td>' +
+                        cells +
+                    '</tr>';
+                }).join('');
+
+                bodyEl.innerHTML =
+                    '<div class="oflm-chart-card">' +
+                        selectorCard +
+                        '<div class="oflm-table-wrap mb-0 mt-3">' +
+                            '<table class="oflm-table oflm-npu-matrix">' +
+                                '<thead><tr>' +
+                                    '<th>XDNA2 NPU</th>' +
+                                    '<th>' + esc(model.p1Label) + ' Range &amp; Median (' + esc(model.unit) + ')</th>' +
+                                    headerCols +
+                                '</tr></thead>' +
+                                '<tbody>' + bodyRows + '</tbody>' +
+                            '</table>' +
+                        '</div>' +
+                        '<p class="small mb-0 mt-2" style="color: var(--oflm-muted);">Dot shows median; range bar shows min–max across memory speeds &amp; power modes (hover sparkbar for exact min/max configs). Cells show ' + esc(model.p1Label) + ' / ' + esc(model.p2Label) + ' (' + esc(model.unit) + ').</p>' +
+                    '</div>';
+            } else {
+                // VARIATION 1 (/benchmarks/): Side-by-side NPU range+median charts + linked NPU x Memory matrix
+                const hasP2 = npuRows.some(function (r) { return r.p2 != null; });
+                const chartHeight = Math.max(155, npuRows.length * 52 + 64);
+
+                const displayRows = npuRows.slice().reverse(); // fastest at top in matrix
+                const maxP1 = npuRows.length
+                    ? Math.max.apply(null, npuRows.map(function (r) { return (r.p1 && r.p1.median) || 1; }))
+                    : 1;
+
+                const matrixHead = memCols.map(function (mc) {
+                    const isHl = hlMem === mc && !hlNpu;
+                    return '<th class="text-center oflm-matrix-col' + (isHl ? ' is-selected' : '') + '" data-hl-col="' + esc(mc) + '">' +
+                        '<div>' + esc(mc) + '</div>' +
+                    '</th>';
+                }).join('');
+
+                const matrixRows = displayRows.map(function (row) {
+                    const cells = memCols.map(function (mc) {
+                        const cell = row.byMem[mc];
+                        if (!cell || !cell.p1) {
+                            return '<td class="text-center" style="color: var(--oflm-muted);">—</td>';
+                        }
+                        const isCellHl = hlMem === mc && (!hlNpu || hlNpu === row.npuShort);
+                        const ratio = Math.min(1, cell.p1.median / maxP1);
+                        const alpha = (0.06 + 0.16 * ratio).toFixed(2);
+                        const bg = t.dark
+                            ? 'rgba(109, 148, 255, ' + alpha + ')'
+                            : 'rgba(37, 84, 212, ' + alpha + ')';
+                        const p2Line = cell.p2
+                            ? '<div class="small" style="color: var(--oflm-muted);">' + fmtCompactRate(cell.p2.median) + ' · n=' + cell.runs + '</div>'
+                            : '<div class="small" style="color: var(--oflm-muted);">n=' + cell.runs + '</div>';
+                        return '<td class="text-center oflm-matrix-cell' + (isCellHl ? ' is-selected' : '') + '" data-hl-npu="' + esc(row.npuShort) + '" data-hl-mem="' + esc(mc) + '" style="background-color:' + bg + ';">' +
+                            '<div class="fw-bold oflm-mono-cell">' + fmtCompactRate(cell.p1.median) + ' <span class="small fw-normal" style="color: var(--oflm-muted);">' + esc(model.unit) + '</span></div>' +
+                            p2Line +
+                        '</td>';
+                    }).join('');
+
+                    return '<tr>' +
+                        '<td><div class="fw-semibold">' + esc(row.npuShort) + '</div><div class="small" style="color: var(--oflm-muted);">' + esc(row.npuFull) + '</div></td>' +
+                        cells +
+                    '</tr>';
+                }).join('');
+
+                const clearBtnHtml = (hlMem || hlNpu)
+                    ? '<button type="button" class="btn btn-sm btn-link p-0 text-decoration-none" data-clear-hl>Clear highlight</button>'
+                    : '';
+
+                bodyEl.innerHTML =
+                    '<div class="oflm-chart-card">' +
+                        selectorCard +
+                        '<div class="' + (hasP2 ? 'oflm-small-multiples' : '') + ' mt-3">' +
+                            '<div class="oflm-subchart">' +
+                                '<div class="oflm-subchart-title">' + esc(model.p1Label) + ' <span class="oflm-subchart-unit">(' + esc(model.p1Sub) + ')</span></div>' +
+                                '<div class="oflm-echarts-canvas" data-npu-panel="p1" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' ' + model.p1Label) + '"></div>' +
+                            '</div>' +
+                            (hasP2
+                                ? '<div class="oflm-subchart">' +
+                                      '<div class="oflm-subchart-title">' + esc(model.p2Label) + ' <span class="oflm-subchart-unit">(' + esc(model.p2Sub) + ')</span></div>' +
+                                      '<div class="oflm-echarts-canvas" data-npu-panel="p2" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' ' + model.p2Label) + '"></div>' +
+                                  '</div>'
+                                : '') +
+                        '</div>' +
+                        '<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3 mb-2">' +
+                            '<div class="small fw-semibold" style="color: var(--oflm-muted);">NPU × Memory Configuration Matrix <span class="fw-normal">(click any column or cell to highlight above; hover dots for min/max configs)</span></div>' +
+                            clearBtnHtml +
+                        '</div>' +
+                        '<div class="oflm-table-wrap mb-0">' +
+                            '<table class="oflm-table oflm-npu-matrix">' +
+                                '<thead><tr><th>XDNA2 NPU</th>' + matrixHead + '</tr></thead>' +
+                                '<tbody>' + matrixRows + '</tbody>' +
+                            '</table>' +
+                        '</div>' +
+                    '</div>';
+
+                const p1El = bodyEl.querySelector('[data-npu-panel="p1"]');
+                if (p1El) {
+                    const c1 = window.echarts.init(p1El, null, { renderer: 'svg' });
+                    const r1 = function () { c1.setOption(buildNpuRangeOption(model, activeQuant, npuRows, 'p1', hlMem, hlNpu), true); };
+                    r1();
+                    const e1 = { chart: c1, render: r1 };
+                    activeInstances.push(e1);
+                    childCharts.push(e1);
+                }
+                const p2El = bodyEl.querySelector('[data-npu-panel="p2"]');
+                if (p2El) {
+                    const c2 = window.echarts.init(p2El, null, { renderer: 'svg' });
+                    const r2 = function () { c2.setOption(buildNpuRangeOption(model, activeQuant, npuRows, 'p2', hlMem, hlNpu), true); };
+                    r2();
+                    const e2 = { chart: c2, render: r2 };
+                    activeInstances.push(e2);
+                    childCharts.push(e2);
+                }
+            }
+
+            // Bind selector & matrix interactions
+            bodyEl.querySelectorAll('[data-select-model]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    activeModelTag = btn.dataset.selectModel;
+                    activeQuant = null;
+                    hlMem = null;
+                    hlNpu = null;
+                    renderWidget();
+                });
+            });
+            const dd = bodyEl.querySelector('[data-select-model-dd]');
+            if (dd) {
+                dd.addEventListener('change', function () {
+                    activeModelTag = dd.value;
+                    activeQuant = null;
+                    hlMem = null;
+                    hlNpu = null;
+                    renderWidget();
+                });
+            }
+            bodyEl.querySelectorAll('[data-select-quant]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    activeQuant = btn.dataset.selectQuant;
+                    hlMem = null;
+                    hlNpu = null;
+                    renderWidget();
+                });
+            });
+            bodyEl.querySelectorAll('[data-hl-col]').forEach(function (th) {
+                th.addEventListener('click', function () {
+                    const mc = th.dataset.hlCol;
+                    hlNpu = null;
+                    hlMem = (hlMem === mc && !hlNpu) ? null : mc;
+                    renderWidget();
+                });
+            });
+            bodyEl.querySelectorAll('[data-hl-npu]').forEach(function (td) {
+                td.addEventListener('click', function () {
+                    const n = td.dataset.hlNpu;
+                    const mc = td.dataset.hlMem;
+                    const same = hlNpu === n && hlMem === mc;
+                    hlNpu = same ? null : n;
+                    hlMem = same ? null : mc;
+                    renderWidget();
+                });
+            });
+            const clearBtn = bodyEl.querySelector('[data-clear-hl]');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', function () {
+                    hlMem = null;
+                    hlNpu = null;
+                    renderWidget();
+                });
+            }
+        }
+
+        renderWidget();
+
+        // Re-render compact SVG sparkbars on light/dark theme switch
+        document.addEventListener('oflm:themechange', function () {
+            if (viewMode === 'compact') renderWidget();
         });
 
-        return created;
+        allRunsUpdaters.push(function (liveRuns) {
+            dataset = Object.assign({}, dataset, { runs: liveRuns });
+            renderWidget();
+        });
     }
 
     // ==================== LLM CONTEXT SCALING SMALL MULTIPLES ====================
@@ -857,27 +1218,6 @@
         registerInstance(ttftChart, renderTtft);
     }
 
-    function initAllRunsCard(container) {
-        if (!window.echarts) return;
-        const gridEl = container.querySelector('.oflm-facet-grid');
-        const payloadEl = container.querySelector('.oflm-chart-payload');
-        if (!gridEl || !payloadEl) return;
-
-        let dataset;
-        try {
-            dataset = JSON.parse(payloadEl.textContent);
-        } catch (_err) {
-            return;
-        }
-
-        let panelEntries = renderFacetedRunPanels(gridEl, dataset.runs || [], []);
-
-        allRunsUpdaters.push(function (liveRuns) {
-            dataset = Object.assign({}, dataset, { runs: liveRuns });
-            panelEntries = renderFacetedRunPanels(gridEl, dataset.runs || [], panelEntries);
-        });
-    }
-
     function initEmbedCard(card) {
         if (!window.echarts) return;
         const payloadEl = card.querySelector('.oflm-chart-payload');
@@ -904,7 +1244,7 @@
     }
 
     function bootAllCharts() {
-        document.querySelectorAll('[data-oflm-allruns-chart]').forEach(initAllRunsCard);
+        document.querySelectorAll('[data-oflm-allruns-chart]').forEach(initNpuBenchWidget);
         document.querySelectorAll('[data-oflm-chart]').forEach(initLlmCard);
         document.querySelectorAll('[data-oflm-embed-chart]').forEach(initEmbedCard);
     }
@@ -930,7 +1270,6 @@
         getModalityMeta: getModalityMeta,
         extractHardwarePlatform: extractHardwarePlatform,
         register: registerInstance,
-        renderFacetedRunPanels: renderFacetedRunPanels,
         syncLiveRuns: function (rawRows) {
             if (!Array.isArray(rawRows) || !rawRows.length) return;
             const mapped = rawRows.map(function (r) {
@@ -946,6 +1285,8 @@
                     status: r.status,
                     hardware_platform: r.cpu || extractHardwarePlatform(r),
                     hardware: r.hardware + (mem && !String(r.hardware).includes('GB') ? ' · ' + mem : ''),
+                    memory_config: extractMemoryConfig(r),
+                    power_mode: extractPowerMode(r),
                     quant: r.quantization || '',
                     runs: r.runs || 1,
                     stage: r.headline?.ctx_k != null ? (isEmbed ? 'n=' + r.headline.ctx_k : r.headline.ctx_k + 'k ctx') : '',

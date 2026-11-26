@@ -954,6 +954,131 @@ a.oflm-badge {
   }
 }
 
+.oflm-bench-selector {
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--oflm-border);
+
+  .oflm-bench-selector-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem 1rem;
+  }
+
+  .oflm-bench-selector-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .oflm-bench-selector-meta {
+    margin-top: 0.65rem;
+  }
+}
+
+.oflm-model-pills,
+.oflm-quant-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.32rem;
+}
+
+.oflm-model-pill,
+.oflm-quant-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--oflm-border);
+  background-color: var(--oflm-bg);
+  color: var(--oflm-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.28rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.14s ease;
+
+  code {
+    background: transparent !important;
+    color: inherit !important;
+    padding: 0 !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+  }
+
+  .oflm-pill-mod {
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: var(--oflm-muted);
+  }
+
+  &:hover {
+    border-color: var(--oflm-accent);
+  }
+
+  &.active {
+    background-color: var(--oflm-accent);
+    border-color: var(--oflm-accent);
+    color: #ffffff;
+
+    .oflm-pill-mod {
+      color: rgba(255, 255, 255, 0.82);
+    }
+  }
+}
+
+.oflm-quant-pill {
+  font-family: var(--oflm-font-mono) !important;
+  font-size: 0.74rem;
+  padding: 0.26rem 0.55rem;
+}
+
+.oflm-bench-select {
+  background-color: var(--oflm-bg);
+  color: var(--oflm-text);
+  border: 1px solid var(--oflm-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.oflm-npu-matrix {
+  .oflm-mono-cell {
+    font-family: var(--oflm-font-mono) !important;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th.oflm-matrix-col,
+  td.oflm-matrix-cell {
+    cursor: pointer;
+    transition: background-color 0.14s ease, box-shadow 0.14s ease;
+
+    &:hover {
+      box-shadow: inset 0 0 0 1px var(--oflm-accent);
+    }
+
+    &.is-selected {
+      box-shadow: inset 0 0 0 2px var(--oflm-accent);
+    }
+  }
+}
+
+.oflm-sparkbar-wrap {
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+
+.oflm-sparkbar-svg {
+  width: 220px;
+  max-width: 100%;
+  height: 24px;
+  display: block;
+}
+
 .oflm-pill-tabs {
   display: inline-flex;
   flex-wrap: wrap;
