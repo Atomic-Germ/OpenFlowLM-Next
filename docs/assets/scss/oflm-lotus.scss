@@ -1090,25 +1090,18 @@ a.oflm-badge {
 }
 
 .oflm-dd-mod-btn {
-  border: 1px solid var(--oflm-border);
-  background-color: var(--oflm-bg);
-  color: var(--oflm-muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 0.16rem 0.52rem;
-  border-radius: 999px;
   cursor: pointer;
-  transition: all 0.12s ease;
+  opacity: 0.62;
+  transition: opacity 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
 
   &:hover {
-    color: var(--oflm-text);
-    border-color: var(--oflm-accent);
+    opacity: 0.92;
+    transform: translateY(-1px);
   }
 
   &.active {
-    background-color: var(--oflm-accent);
-    border-color: var(--oflm-accent);
-    color: #ffffff;
+    opacity: 1;
+    box-shadow: 0 0 0 1.5px var(--oflm-accent);
   }
 }
 

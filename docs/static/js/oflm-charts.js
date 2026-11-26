@@ -441,6 +441,7 @@
                 name: seriesName,
                 type: 'custom',
                 z: 4,
+                encode: { y: 0, x: [1, 2, 3] },
                 itemStyle: { color: color },
                 renderItem: function (params, api) {
                     const yIdx = api.value(0);
@@ -524,6 +525,7 @@
                     type: 'custom',
                     silent: true,
                     z: 8,
+                    encode: { x: 0, y: 1 },
                     tooltip: { show: false },
                     renderItem: function (params, api) {
                         const pt = api.coord([api.value(0), api.value(1)]);
@@ -563,7 +565,9 @@
                 textStyle: { color: t.text, fontSize: 12 },
                 formatter: function (params) {
                     if (!params || !params.length) return '';
-                    const row = npuRows[params[0].dataIndex];
+                    const p0 = params[0];
+                    const rowIdx = Array.isArray(p0.value) ? p0.value[0] : p0.dataIndex;
+                    const row = npuRows[rowIdx];
                     if (!row) return '';
                     const lines = [
                         '<div style="font-weight:700;margin-bottom:3px;">' + esc(row.npuFull) + '</div>',
@@ -587,7 +591,7 @@
                 type: useLog ? 'log' : 'value',
                 min: xMin,
                 max: xMax,
-                name: unit + (useLog ? ' (log scale · higher is better)' : ' (higher is better)'),
+                name: unit + (useLog ? ' (log scale)' : ''),
                 nameLocation: 'middle',
                 nameGap: 23,
                 nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11 },
@@ -736,7 +740,7 @@
                 type: 'value',
                 min: 0,
                 max: xMax,
-                name: latUnit + ' (lower is better)',
+                name: latUnit,
                 nameLocation: 'middle',
                 nameGap: 23,
                 nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11 },
@@ -883,16 +887,19 @@
             const memCols = summary.memCols;
             const t = getThemeTokens();
 
-            // Modality filter buttons present in current dataset
+            // Badge-style modality filter pills present in current dataset
             const modMap = new Map();
             models.forEach(function (m) {
                 if (!modMap.has(m.modality.key)) modMap.set(m.modality.key, m.modality);
             });
             const modButtonsHtml =
-                '<button type="button" class="oflm-dd-mod-btn' + (filterModality === 'all' ? ' active' : '') + '" data-dd-mod="all">All</button>' +
+                '<button type="button" class="oflm-badge neutral oflm-dd-mod-btn' + (filterModality === 'all' ? ' active' : '') + '" data-dd-mod="all"><span>All</span></button>' +
                 Array.from(modMap.values()).map(function (mm) {
                     const active = filterModality === mm.key ? ' active' : '';
-                    return '<button type="button" class="oflm-dd-mod-btn' + active + '" data-dd-mod="' + esc(mm.key) + '">' + esc(mm.label) + '</button>';
+                    return '<button type="button" class="oflm-badge ' + esc(mm.badgeClass) + ' oflm-dd-mod-btn' + active + '" data-dd-mod="' + esc(mm.key) + '">' +
+                        '<span class="material-icons" aria-hidden="true">' + esc(mm.icon) + '</span>' +
+                        '<span>' + esc(mm.label) + '</span>' +
+                    '</button>';
                 }).join('');
 
             const totalRuns = npuRows.reduce(function (acc, r) { return acc + r.totalRuns; }, 0);
