@@ -259,7 +259,7 @@
         };
     }
 
-    // ==================== NPU-CENTRIC MODEL + QUANT -> RANGE & MATRIX ====================
+    // ==================== NPU-CENTRIC MODEL + QUANT -> PAIRED BARS, TTFT RANGE & MATRIX ====================
 
     function indexRunsByModelAndQuant(runs) {
         const modelsMap = new Map();
@@ -274,10 +274,18 @@
             const power = extractPowerMode(r);
             const isEmbed = mod.key === 'embed';
 
-            const p1 = r.output_tps != null ? Number(r.output_tps) : null;
-            const p2 = isEmbed
-                ? (r.single_tps != null ? Number(r.single_tps) : null)
+            // barA = Prefill (Chat) or Peak Batched (Embed); barB = Decode (Chat) or Single-Text n=1 (Embed)
+            const barA = isEmbed
+                ? (r.output_tps != null ? Number(r.output_tps) : null)
                 : (r.token_tps != null ? Number(r.token_tps) : null);
+            const barB = isEmbed
+                ? (r.single_tps != null ? Number(r.single_tps) : null)
+                : (r.output_tps != null ? Number(r.output_tps) : null);
+
+            // Latency: TTFT in seconds for Chat/Vision, Call Latency in ms for Embeddings
+            const latVal = r.latency_ms != null
+                ? (isEmbed ? Number(r.latency_ms) : Number(r.latency_ms) / 1000.0)
+                : null;
 
             if (!modelsMap.has(tag)) {
                 modelsMap.set(tag, {
@@ -287,10 +295,10 @@
                     inferenceInfo: resolveInferenceInfo(r),
                     minRamGb: inferMinRamGb(r),
                     unit: r.output_unit || (isEmbed ? 'txt/s' : 'tok/s'),
-                    p1Label: isEmbed ? 'Peak Batched Throughput' : 'Token Decode',
-                    p1Sub: isEmbed ? 'txt/s · batched NPU (higher is faster)' : 'tok/s · 1k ctx (memory-bandwidth bound)',
-                    p2Label: isEmbed ? 'Single-Text Throughput (n=1)' : 'Prompt Prefill',
-                    p2Sub: isEmbed ? 'txt/s · low-latency path (higher is faster)' : 'tok/s · 1k ctx (NPU-compute bound)',
+                    barALabel: isEmbed ? 'Peak Batched' : 'Prefill',
+                    barBLabel: isEmbed ? 'Single-Text (n=1)' : 'Decode',
+                    latLabel: isEmbed ? 'Batched Call Latency' : 'Time to First Token (TTFT)',
+                    latUnit: isEmbed ? 'ms' : 's',
                     quants: new Map()
                 });
             }
@@ -306,10 +314,10 @@
                 stage: r.stage || '',
                 runs: Number(r.runs || 1),
                 isCommunity: r.source !== 'verified_seed' && r.status !== 'seed',
-                p1: p1,
-                p2: p2,
-                tokenTps: r.token_tps != null ? Number(r.token_tps) : null,
-                latencyMs: r.latency_ms != null ? Number(r.latency_ms) : null
+                barA: barA,
+                barB: barB,
+                lat: latVal,
+                singleLatMs: r.single_latency_ms != null ? Number(r.single_latency_ms) : null
             });
         });
 
@@ -363,8 +371,9 @@
             grp.byMem.forEach(function (list, memKey) {
                 const totalRuns = list.reduce(function (acc, item) { return acc + item.runs; }, 0);
                 memSummaries[memKey] = {
-                    p1: summarizeMetric(list, 'p1'),
-                    p2: summarizeMetric(list, 'p2'),
+                    barA: summarizeMetric(list, 'barA'),
+                    barB: summarizeMetric(list, 'barB'),
+                    lat: summarizeMetric(list, 'lat'),
                     runs: totalRuns,
                     configs: list.length
                 };
@@ -375,67 +384,251 @@
                 npuFull: grp.npuFull,
                 totalRuns: totalRuns,
                 memCount: grp.byMem.size,
-                p1: summarizeMetric(grp.entries, 'p1'),
-                p2: summarizeMetric(grp.entries, 'p2'),
+                barA: summarizeMetric(grp.entries, 'barA'),
+                barB: summarizeMetric(grp.entries, 'barB'),
+                lat: summarizeMetric(grp.entries, 'lat'),
                 byMem: memSummaries
             };
         });
 
-        // Sort ascending so ECharts yAxis category puts fastest NPU at top
+        // Sort ascending so ECharts yAxis puts fastest NPU at top
         npuRows.sort(function (a, b) {
-            return ((a.p1 && a.p1.median) || 0) - ((b.p1 && b.p1.median) || 0);
+            const av = (a.barB && a.barB.median) || (a.barA && a.barA.median) || 0;
+            const bv = (b.barB && b.barB.median) || (b.barA && b.barA.median) || 0;
+            return av - bv;
         });
 
         const memCols = Array.from(memSet).sort();
         return { npuRows: npuRows, memCols: memCols };
     }
 
-    function buildNpuRangeOption(model, quant, npuRows, metricKey, hlMem, hlNpu) {
+    function fmtLat(val, latUnit) {
+        if (val == null) return '-';
+        if (latUnit === 's') return Number(val).toFixed(2) + ' s';
+        if (val >= 1000) return Math.round(val).toLocaleString('en-US') + ' ms';
+        return Number(val).toFixed(1) + ' ms';
+    }
+
+    function buildCombinedThroughputOption(model, quant, npuRows, hlMem, hlNpu) {
         const t = getThemeTokens();
         const unit = model.unit;
-        const accentColor = metricKey === 'p1' ? t.primary : t.secondary;
+        const yLabels = npuRows.map(function (r) { return r.npuShort; });
 
-        const validRows = npuRows.filter(function (row) { return row[metricKey] != null; });
-        const yLabels = validRows.map(function (row) { return row.npuShort; });
-        const maxVal = validRows.length
-            ? Math.max.apply(null, validRows.map(function (r) { return r[metricKey].max; }))
-            : 10;
-        const xMax = Math.ceil(maxVal * 1.28);
+        const dataA = npuRows.map(function (r) { return r.barA ? Number(r.barA.median.toFixed(2)) : null; });
+        const dataB = npuRows.map(function (r) { return r.barB ? Number(r.barB.median.toFixed(2)) : null; });
+        const hasA = dataA.some(function (v) { return v != null; });
+        const hasB = dataB.some(function (v) { return v != null; });
 
-        const rangeData = validRows.map(function (row, idx) {
-            const stat = row[metricKey];
-            return [idx, stat.min, stat.max, stat.median];
+        const allVals = [];
+        npuRows.forEach(function (r) {
+            if (r.barA) { allVals.push(r.barA.min, r.barA.max); }
+            if (r.barB) { allVals.push(r.barB.min, r.barB.max); }
         });
+        const maxVal = allVals.length ? Math.max.apply(null, allVals) : 100;
+        const minVal = allVals.length ? Math.min.apply(null, allVals) : 1;
+        const useLog = allVals.length > 1 && (maxVal / minVal) >= 12;
+        const xMax = useLog
+            ? Math.pow(10, Math.ceil(Math.log10(maxVal * 3.2)))
+            : Math.ceil(maxVal * 1.32);
 
-        const medianData = validRows.map(function (row, idx) {
-            const stat = row[metricKey];
-            return {
-                value: [stat.median, idx],
-                row: row,
-                stat: stat
-            };
-        });
+        const labelCfg = {
+            show: true,
+            position: 'right',
+            distance: 7,
+            color: t.text,
+            fontSize: 11,
+            fontWeight: 700,
+            fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+            formatter: function (p) {
+                if (p.value == null) return '';
+                return fmtCompactRate(p.value) + ' ' + unit;
+            }
+        };
 
-        const highlightData = [];
-        if (hlMem) {
-            validRows.forEach(function (row, idx) {
-                if (hlNpu && row.npuShort !== hlNpu) return;
-                const cell = row.byMem[hlMem];
-                if (cell && cell[metricKey]) {
-                    highlightData.push({
-                        value: [cell[metricKey].median, idx],
-                        npuShort: row.npuShort,
-                        memCfg: hlMem,
-                        val: cell[metricKey].median
-                    });
-                }
+        const series = [];
+        if (hasA) {
+            series.push({
+                name: model.barALabel + ' (' + unit + ')',
+                type: 'bar',
+                barMaxWidth: 20,
+                barGap: '20%',
+                z: 3,
+                itemStyle: { color: t.primary, borderRadius: [0, 4, 4, 0] },
+                label: labelCfg,
+                data: dataA
+            });
+        }
+        if (hasB) {
+            series.push({
+                name: model.barBLabel + ' (' + unit + ')',
+                type: 'bar',
+                barMaxWidth: 20,
+                barGap: '20%',
+                z: 3,
+                itemStyle: { color: t.secondary, borderRadius: [0, 4, 4, 0] },
+                label: labelCfg,
+                data: dataB
             });
         }
 
+        // Overlay min-max whiskers for any NPU with >1 RAM/power config
+        const whiskerItems = [];
+        npuRows.forEach(function (row, idx) {
+            if (hasA && row.barA && row.barA.max > row.barA.min) {
+                whiskerItems.push([idx, row.barA.min, row.barA.max, hasB ? -11 : 0]);
+            }
+            if (hasB && row.barB && row.barB.max > row.barB.min) {
+                whiskerItems.push([idx, row.barB.min, row.barB.max, hasA ? 11 : 0]);
+            }
+        });
+        if (whiskerItems.length) {
+            series.push({
+                name: 'Min-Max Range',
+                type: 'custom',
+                silent: true,
+                z: 6,
+                tooltip: { show: false },
+                renderItem: function (params, api) {
+                    const yIdx = api.value(0);
+                    const lo = api.value(1);
+                    const hi = api.value(2);
+                    const yOff = api.value(3);
+                    const pLo = api.coord([lo, yIdx]);
+                    const pHi = api.coord([hi, yIdx]);
+                    const y = pLo[1] + yOff;
+                    const cap = 4;
+                    return {
+                        type: 'group',
+                        children: [
+                            { type: 'line', shape: { x1: pLo[0], y1: y, x2: pHi[0], y2: y }, style: { stroke: t.text, lineWidth: 1.6 } },
+                            { type: 'line', shape: { x1: pLo[0], y1: y - cap, x2: pLo[0], y2: y + cap }, style: { stroke: t.text, lineWidth: 1.6 } },
+                            { type: 'line', shape: { x1: pHi[0], y1: y - cap, x2: pHi[0], y2: y + cap }, style: { stroke: t.text, lineWidth: 1.6 } }
+                        ]
+                    };
+                },
+                data: whiskerItems
+            });
+        }
+
+        // Highlight marker when user clicks a memory config in the matrix
+        if (hlMem) {
+            const hlPts = [];
+            npuRows.forEach(function (row, idx) {
+                if (hlNpu && row.npuShort !== hlNpu) return;
+                const cell = row.byMem[hlMem];
+                if (!cell) return;
+                if (hasA && cell.barA) hlPts.push([cell.barA.median, idx, hasB ? -11 : 0]);
+                if (hasB && cell.barB) hlPts.push([cell.barB.median, idx, hasA ? 11 : 0]);
+            });
+            if (hlPts.length) {
+                series.push({
+                    name: hlMem,
+                    type: 'custom',
+                    silent: true,
+                    z: 8,
+                    tooltip: { show: false },
+                    renderItem: function (params, api) {
+                        const pt = api.coord([api.value(0), api.value(1)]);
+                        const y = pt[1] + api.value(2);
+                        const d = 6;
+                        return {
+                            type: 'polygon',
+                            shape: { points: [[pt[0], y - d], [pt[0] + d, y], [pt[0], y + d], [pt[0] - d, y]] },
+                            style: { fill: t.amber, stroke: t.tooltipBg, lineWidth: 1.6 }
+                        };
+                    },
+                    data: hlPts
+                });
+            }
+        }
+
+        return {
+            backgroundColor: 'transparent',
+            animationDuration: 260,
+            grid: { left: 126, right: 98, top: 36, bottom: 38 },
+            legend: {
+                show: hasA && hasB,
+                top: 2,
+                left: 0,
+                itemWidth: 12,
+                itemHeight: 10,
+                itemGap: 16,
+                textStyle: { color: t.text, fontSize: 11.5, fontWeight: 600 }
+            },
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'shadow' },
+                backgroundColor: t.tooltipBg,
+                borderColor: t.tooltipBorder,
+                borderWidth: 1,
+                textStyle: { color: t.text, fontSize: 12 },
+                formatter: function (params) {
+                    if (!params || !params.length) return '';
+                    const row = npuRows[params[0].dataIndex];
+                    if (!row) return '';
+                    const lines = [
+                        '<div style="font-weight:700;margin-bottom:3px;">' + esc(row.npuFull) + '</div>',
+                        '<div style="font-size:11px;opacity:0.82;margin-bottom:5px;">' + esc(model.tag) + ' · ' + esc(quant) + ' · ' + row.totalRuns + ' runs across ' + row.memCount + ' memory config(s)</div>'
+                    ];
+                    function pushStat(label, stat) {
+                        if (!stat) return;
+                        lines.push('<div>' + esc(label) + ' median: <strong>' + fmtCompactRate(stat.median) + ' ' + esc(unit) + '</strong></div>');
+                        if (stat.max > stat.min) {
+                            lines.push('<div style="font-size:11px;opacity:0.82;padding-left:8px;">Min ' + fmtCompactRate(stat.min) + ' (' + esc(stat.minConfig) + ') | Max ' + fmtCompactRate(stat.max) + ' (' + esc(stat.maxConfig) + ')</div>');
+                        } else {
+                            lines.push('<div style="font-size:11px;opacity:0.82;padding-left:8px;">Config: ' + esc(stat.minConfig) + '</div>');
+                        }
+                    }
+                    pushStat(model.barALabel, row.barA);
+                    pushStat(model.barBLabel, row.barB);
+                    return lines.join('');
+                }
+            },
+            xAxis: {
+                type: useLog ? 'log' : 'value',
+                min: useLog ? (minVal < 2 ? 1 : undefined) : 0,
+                max: xMax,
+                name: unit + (useLog ? ' (log scale · higher is better)' : ' (higher is better)'),
+                nameLocation: 'middle',
+                nameGap: 23,
+                nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11 },
+                axisLabel: { color: t.muted, fontSize: 11 },
+                axisLine: { show: false },
+                axisTick: { show: false },
+                splitLine: { lineStyle: { color: t.grid } }
+            },
+            yAxis: {
+                type: 'category',
+                data: yLabels,
+                axisLabel: { color: t.text, fontWeight: 700, fontSize: 11.5 },
+                axisLine: { lineStyle: { color: t.axis } },
+                axisTick: { show: false }
+            },
+            series: series
+        };
+    }
+
+    function buildLatencyRangeOption(model, quant, npuRows, hlMem, hlNpu) {
+        const t = getThemeTokens();
+        const latUnit = model.latUnit;
+        const validRows = npuRows.filter(function (row) { return row.lat != null; });
+        const yLabels = validRows.map(function (row) { return row.npuShort; });
+        const maxVal = validRows.length
+            ? Math.max.apply(null, validRows.map(function (r) { return r.lat.max; }))
+            : 10;
+        const xMax = maxVal * 1.3;
+
+        const rangeData = validRows.map(function (row, idx) {
+            return [idx, row.lat.min, row.lat.max, row.lat.median];
+        });
+
+        const medianData = validRows.map(function (row, idx) {
+            return { value: [row.lat.median, idx], row: row, stat: row.lat };
+        });
+
         const series = [
-            // Min-Max capsule bar across RAM speeds & power modes
             {
-                name: 'Min–Max Range (RAM / Power)',
+                name: 'Min-Max Range',
                 type: 'custom',
                 z: 2,
                 renderItem: function (params, api) {
@@ -446,40 +639,28 @@
                     const pHi = api.coord([hi, yIdx]);
                     const pZero = api.coord([0, yIdx]);
                     const barH = 14;
-
                     const children = [
-                        // Subtle baseline rail from 0 to min
-                        {
-                            type: 'line',
-                            shape: { x1: pZero[0], y1: pLo[1], x2: pLo[0], y2: pLo[1] },
-                            style: { stroke: t.grid, lineWidth: 2 }
-                        }
+                        { type: 'line', shape: { x1: pZero[0], y1: pLo[1], x2: pLo[0], y2: pLo[1] }, style: { stroke: t.grid, lineWidth: 2 } }
                     ];
-
                     if (hi > lo) {
                         const w = Math.max(8, pHi[0] - pLo[0]);
                         children.push({
                             type: 'rect',
                             shape: { x: pLo[0], y: pLo[1] - barH / 2, width: w, height: barH, r: barH / 2 },
-                            style: { fill: t.capsuleFill, stroke: t.capsuleStroke, lineWidth: 1 }
+                            style: { fill: t.amberBand, stroke: t.amber, lineWidth: 1 }
                         });
                     }
                     return { type: 'group', children: children };
                 },
                 data: rangeData
             },
-            // Median dot with direct numeric label
             {
                 name: 'Median',
                 type: 'scatter',
                 symbol: 'circle',
                 symbolSize: 12,
                 z: 5,
-                itemStyle: {
-                    color: accentColor,
-                    borderColor: t.tooltipBg,
-                    borderWidth: 2
-                },
+                itemStyle: { color: t.amber, borderColor: t.tooltipBg, borderWidth: 2 },
                 label: {
                     show: true,
                     position: 'right',
@@ -491,61 +672,63 @@
                     formatter: function (p) {
                         const stat = p.data.stat;
                         if (stat.max > stat.min) {
-                            return fmtCompactRate(stat.median) + ' (' + fmtCompactRate(stat.min) + '–' + fmtCompactRate(stat.max) + ')';
+                            return fmtLat(stat.median, latUnit) + ' (' + fmtLat(stat.min, latUnit) + ' - ' + fmtLat(stat.max, latUnit) + ')';
                         }
-                        return fmtCompactRate(stat.median) + ' ' + unit;
+                        return fmtLat(stat.median, latUnit);
                     }
                 },
                 data: medianData
             }
         ];
 
-        if (highlightData.length) {
-            series.push({
-                name: hlMem,
-                type: 'scatter',
-                symbol: 'diamond',
-                symbolSize: 14,
-                z: 7,
-                itemStyle: {
-                    color: t.amber,
-                    borderColor: t.tooltipBg,
-                    borderWidth: 2
-                },
-                data: highlightData
+        if (hlMem) {
+            const hlPts = [];
+            validRows.forEach(function (row, idx) {
+                if (hlNpu && row.npuShort !== hlNpu) return;
+                const cell = row.byMem[hlMem];
+                if (cell && cell.lat) {
+                    hlPts.push({ value: [cell.lat.median, idx] });
+                }
             });
+            if (hlPts.length) {
+                series.push({
+                    name: hlMem,
+                    type: 'scatter',
+                    symbol: 'diamond',
+                    symbolSize: 14,
+                    z: 7,
+                    itemStyle: { color: t.primary, borderColor: t.tooltipBg, borderWidth: 2 },
+                    data: hlPts
+                });
+            }
         }
 
         return {
             backgroundColor: 'transparent',
             animationDuration: 260,
-            grid: { left: 132, right: 120, top: 20, bottom: 38 },
+            grid: { left: 126, right: 110, top: 36, bottom: 38 },
             tooltip: {
                 trigger: 'axis',
                 axisPointer: { type: 'shadow' },
                 backgroundColor: t.tooltipBg,
                 borderColor: t.tooltipBorder,
                 borderWidth: 1,
-                textStyle: { color: t.text, fontSize: 12.5 },
+                textStyle: { color: t.text, fontSize: 12 },
                 formatter: function (params) {
                     if (!params || !params.length) return '';
-                    const idx = params[0].dataIndex;
-                    const row = validRows[idx];
-                    if (!row || !row[metricKey]) return '';
-                    const stat = row[metricKey];
+                    const row = validRows[params[0].dataIndex];
+                    if (!row || !row.lat) return '';
+                    const stat = row.lat;
                     const lines = [
                         '<div style="font-weight:700;margin-bottom:3px;">' + esc(row.npuFull) + '</div>',
-                        '<div style="font-size:11.5px;opacity:0.82;margin-bottom:5px;">' + esc(model.tag) + ' · ' + esc(quant) + ' · ' + row.totalRuns + ' run(s) across ' + row.memCount + ' memory config(s)</div>',
-                        '<div>Median: <strong>' + fmtCompactRate(stat.median) + ' ' + esc(unit) + '</strong></div>'
+                        '<div style="font-size:11px;opacity:0.82;margin-bottom:5px;">' + esc(model.tag) + ' · ' + esc(quant) + ' · ' + esc(model.latLabel) + '</div>',
+                        '<div>Median: <strong>' + fmtLat(stat.median, latUnit) + '</strong></div>'
                     ];
                     if (stat.max > stat.min) {
-                        lines.push('<div>Min: <strong>' + fmtCompactRate(stat.min) + ' ' + esc(unit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.minConfig) + ')</span></div>');
-                        lines.push('<div>Max: <strong>' + fmtCompactRate(stat.max) + ' ' + esc(unit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.maxConfig) + ')</span></div>');
+                        lines.push('<div>Min (fastest): <strong>' + fmtLat(stat.min, latUnit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.minConfig) + ')</span></div>');
+                        lines.push('<div>Max (slowest): <strong>' + fmtLat(stat.max, latUnit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.maxConfig) + ')</span></div>');
                     } else {
                         lines.push('<div>Measured config: <strong>' + esc(stat.minConfig) + '</strong></div>');
-                    }
-                    if (hlMem && row.byMem[hlMem] && row.byMem[hlMem][metricKey]) {
-                        lines.push('<div style="margin-top:4px;color:' + t.amber + ';">Selected (' + esc(hlMem) + '): <strong>' + fmtCompactRate(row.byMem[hlMem][metricKey].median) + ' ' + esc(unit) + '</strong></div>');
                     }
                     return lines.join('');
                 }
@@ -554,7 +737,7 @@
                 type: 'value',
                 min: 0,
                 max: xMax,
-                name: unit + ' (higher is faster)',
+                name: latUnit + ' (lower is better)',
                 nameLocation: 'middle',
                 nameGap: 23,
                 nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11 },
@@ -575,7 +758,7 @@
     }
 
     function renderCompactSparkbarSvg(row, maxVal, unit, t) {
-        const stat = row.p1;
+        const stat = row.barB || row.barA;
         if (!stat) return '<span style="color:var(--oflm-muted);">-</span>';
         const sw = 220;
         const sh = 24;
@@ -628,7 +811,53 @@
         let hlMem = null;
         let hlNpu = null;
         let ddOpen = false;
+        let filterQuery = '';
+        let filterModality = 'all';
         let childCharts = [];
+
+        function buildDropdownListHtml(models) {
+            const q = filterQuery.trim().toLowerCase();
+            const filtered = models.filter(function (m) {
+                const modOk = filterModality === 'all' || m.modality.key === filterModality;
+                if (!modOk) return false;
+                if (!q) return true;
+                if (m.tag.toLowerCase().includes(q)) return true;
+                if (m.modality.label.toLowerCase().includes(q)) return true;
+                return Array.from(m.quants.keys()).some(function (qk) { return qk.toLowerCase().includes(q); });
+            });
+
+            if (!filtered.length) {
+                return '<div class="oflm-dd-empty">No models match "' + esc(filterQuery) + '".</div>';
+            }
+
+            return filtered.map(function (m) {
+                const qList = Array.from(m.quants.keys());
+                const optsHtml = qList.map(function (qk) {
+                    const qEntries = m.quants.get(qk) || [];
+                    const npuSet = new Set(qEntries.map(function (e) { return e.npuShort; }));
+                    const rCount = qEntries.reduce(function (acc, e) { return acc + e.runs; }, 0);
+                    const isActive = m.tag === activeModelTag && qk === activeQuant;
+                    return '<button type="button" class="oflm-dd-option' + (isActive ? ' active' : '') + '" role="option" aria-selected="' + (isActive ? 'true' : 'false') + '" data-pick-model="' + esc(m.tag) + '" data-pick-quant="' + esc(qk) + '">' +
+                        '<span class="oflm-dd-opt-left">' +
+                            '<span class="oflm-badge quant mono"><span>' + esc(qk) + '</span></span>' +
+                            '<span class="oflm-dd-opt-meta">' + npuSet.size + (npuSet.size === 1 ? ' NPU' : ' NPUs') + ' · ' + rCount + ' runs</span>' +
+                        '</span>' +
+                        (isActive ? '<span class="material-icons oflm-dd-check" aria-hidden="true">check</span>' : '') +
+                    '</button>';
+                }).join('');
+
+                return '<div class="oflm-dd-group" role="group" aria-label="' + esc(m.tag) + '">' +
+                    '<div class="oflm-dd-group-head">' +
+                        '<code class="oflm-dd-model-name">' + esc(m.tag) + '</code>' +
+                        '<span class="oflm-dd-group-badges">' +
+                            '<span class="oflm-badge ' + esc(m.modality.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(m.modality.icon) + '</span><span>' + esc(m.modality.label) + '</span></span>' +
+                            renderInferenceBadge(m.inferenceInfo, false) +
+                        '</span>' +
+                    '</div>' +
+                    '<div class="oflm-dd-options">' + optsHtml + '</div>' +
+                '</div>';
+            }).join('');
+        }
 
         function renderWidget() {
             disposeInstances(childCharts);
@@ -655,34 +884,17 @@
             const memCols = summary.memCols;
             const t = getThemeTokens();
 
-            // Hierarchical dropdown: models with their quantizations nested underneath
-            const menuGroupsHtml = models.map(function (m) {
-                const qList = Array.from(m.quants.keys());
-                const optsHtml = qList.map(function (q) {
-                    const qEntries = m.quants.get(q) || [];
-                    const npuSet = new Set(qEntries.map(function (e) { return e.npuShort; }));
-                    const rCount = qEntries.reduce(function (acc, e) { return acc + e.runs; }, 0);
-                    const isActive = m.tag === activeModelTag && q === activeQuant;
-                    return '<button type="button" class="oflm-dd-option' + (isActive ? ' active' : '') + '" role="option" aria-selected="' + (isActive ? 'true' : 'false') + '" data-pick-model="' + esc(m.tag) + '" data-pick-quant="' + esc(q) + '">' +
-                        '<span class="oflm-dd-opt-left">' +
-                            '<span class="oflm-badge quant mono"><span>' + esc(q) + '</span></span>' +
-                            '<span class="oflm-dd-opt-meta">' + npuSet.size + (npuSet.size === 1 ? ' NPU' : ' NPUs') + ' · ' + rCount + ' runs</span>' +
-                        '</span>' +
-                        (isActive ? '<span class="material-icons oflm-dd-check" aria-hidden="true">check</span>' : '') +
-                    '</button>';
+            // Modality filter buttons present in current dataset
+            const modMap = new Map();
+            models.forEach(function (m) {
+                if (!modMap.has(m.modality.key)) modMap.set(m.modality.key, m.modality);
+            });
+            const modButtonsHtml =
+                '<button type="button" class="oflm-dd-mod-btn' + (filterModality === 'all' ? ' active' : '') + '" data-dd-mod="all">All</button>' +
+                Array.from(modMap.values()).map(function (mm) {
+                    const active = filterModality === mm.key ? ' active' : '';
+                    return '<button type="button" class="oflm-dd-mod-btn' + active + '" data-dd-mod="' + esc(mm.key) + '">' + esc(mm.label) + '</button>';
                 }).join('');
-
-                return '<div class="oflm-dd-group" role="group" aria-label="' + esc(m.tag) + '">' +
-                    '<div class="oflm-dd-group-head">' +
-                        '<code class="oflm-dd-model-name">' + esc(m.tag) + '</code>' +
-                        '<span class="oflm-dd-group-badges">' +
-                            '<span class="oflm-badge ' + esc(m.modality.badgeClass) + '"><span class="material-icons" aria-hidden="true">' + esc(m.modality.icon) + '</span><span>' + esc(m.modality.label) + '</span></span>' +
-                            renderInferenceBadge(m.inferenceInfo, false) +
-                        '</span>' +
-                    '</div>' +
-                    '<div class="oflm-dd-options">' + optsHtml + '</div>' +
-                '</div>';
-            }).join('');
 
             const totalRuns = npuRows.reduce(function (acc, r) { return acc + r.totalRuns; }, 0);
 
@@ -699,7 +911,13 @@
                                 '</span>' +
                                 '<span class="material-icons oflm-dd-chevron" aria-hidden="true">expand_more</span>' +
                             '</button>' +
-                            '<div class="oflm-dd-menu" role="listbox" aria-label="Models and quantizations">' + menuGroupsHtml + '</div>' +
+                            '<div class="oflm-dd-menu" role="listbox" aria-label="Models and quantizations">' +
+                                '<div class="oflm-dd-controls">' +
+                                    '<input type="search" class="oflm-dd-search" data-dd-search value="' + esc(filterQuery) + '" placeholder="Filter models..." autocomplete="off" aria-label="Filter models by name" />' +
+                                    '<div class="oflm-dd-mod-bar" role="group" aria-label="Filter by modality">' + modButtonsHtml + '</div>' +
+                                '</div>' +
+                                '<div class="oflm-dd-list" data-dd-list>' + buildDropdownListHtml(models) + '</div>' +
+                            '</div>' +
                         '</div>' +
                         '<div class="oflm-chart-meta">' +
                             renderInferenceBadge(model.inferenceInfo, true) +
@@ -710,11 +928,15 @@
                 '</div>';
 
             if (viewMode === 'compact') {
-                // VARIATION 2 (Homepage): Ultra-compact fused NPU x Memory table with inline range + median sparkbar
-                const maxP1 = npuRows.length
-                    ? Math.max.apply(null, npuRows.map(function (r) { return (r.p1 && r.p1.max) || 1; }))
+                // VARIATION 2 (Homepage): Fused NPU x Memory table with inline range + median sparkbar
+                const maxPrimary = npuRows.length
+                    ? Math.max.apply(null, npuRows.map(function (r) {
+                        const s = r.barB || r.barA;
+                        return (s && s.max) || 1;
+                    }))
                     : 1;
-                const displayRows = npuRows.slice().reverse(); // fastest at top
+                const displayRows = npuRows.slice().reverse();
+                const sparkTitle = model.modality.key === 'embed' ? model.barALabel : model.barBLabel;
 
                 const headerCols = memCols.map(function (mc) {
                     return '<th class="text-end">' + esc(mc) + '</th>';
@@ -723,16 +945,18 @@
                 const bodyRows = displayRows.map(function (row) {
                     const cells = memCols.map(function (mc) {
                         const cell = row.byMem[mc];
-                        if (!cell || !cell.p1) {
-                            return '<td class="text-end" style="color: var(--oflm-muted);">—</td>';
+                        if (!cell || (!cell.barA && !cell.barB)) {
+                            return '<td class="text-end" style="color: var(--oflm-muted);">-</td>';
                         }
-                        const p2Str = cell.p2 ? (' <span class="small" style="color: var(--oflm-muted);">/ ' + fmtCompactRate(cell.p2.median) + '</span>') : '';
-                        return '<td class="text-end oflm-mono-cell"><strong>' + fmtCompactRate(cell.p1.median) + '</strong>' + p2Str + '</td>';
+                        const mainStat = model.modality.key === 'embed' ? cell.barA : (cell.barB || cell.barA);
+                        const subStat = model.modality.key === 'embed' ? cell.barB : cell.barA;
+                        const subStr = subStat ? (' <span class="small" style="color: var(--oflm-muted);">/ ' + fmtCompactRate(subStat.median) + '</span>') : '';
+                        return '<td class="text-end oflm-mono-cell"><strong>' + fmtCompactRate(mainStat.median) + '</strong>' + subStr + '</td>';
                     }).join('');
 
                     return '<tr>' +
                         '<td><div class="fw-semibold">' + esc(row.npuShort) + '</div></td>' +
-                        '<td>' + renderCompactSparkbarSvg(row, maxP1, model.unit, t) + '</td>' +
+                        '<td>' + renderCompactSparkbarSvg(row, maxPrimary, model.unit, t) + '</td>' +
                         cells +
                     '</tr>';
                 }).join('');
@@ -744,22 +968,25 @@
                             '<table class="oflm-table oflm-npu-matrix">' +
                                 '<thead><tr>' +
                                     '<th>XDNA2 NPU</th>' +
-                                    '<th>' + esc(model.p1Label) + ' Range &amp; Median (' + esc(model.unit) + ')</th>' +
+                                    '<th>' + esc(sparkTitle) + ' Range &amp; Median (' + esc(model.unit) + ', higher is better)</th>' +
                                     headerCols +
                                 '</tr></thead>' +
                                 '<tbody>' + bodyRows + '</tbody>' +
                             '</table>' +
                         '</div>' +
-                        '<p class="small mb-0 mt-2" style="color: var(--oflm-muted);">Dot shows median; range bar shows min–max across memory speeds &amp; power modes (hover sparkbar for exact min/max configs). Cells show ' + esc(model.p1Label) + ' / ' + esc(model.p2Label) + ' (' + esc(model.unit) + ').</p>' +
+                        '<p class="small mb-0 mt-2" style="color: var(--oflm-muted);">Dot shows median; range bar shows min-max across memory speeds and power modes (hover sparkbar for min and max configs). Cells show ' + esc(model.modality.key === 'embed' ? (model.barALabel + ' / ' + model.barBLabel) : (model.barBLabel + ' / ' + model.barALabel)) + ' (' + esc(model.unit) + ').</p>' +
                     '</div>';
             } else {
-                // VARIATION 1 (/benchmarks/): Side-by-side NPU range+median charts + linked NPU x Memory matrix
-                const hasP2 = npuRows.some(function (r) { return r.p2 != null; });
-                const chartHeight = Math.max(155, npuRows.length * 52 + 64);
+                // VARIATION 1 (/benchmarks/): Combined Prefill+Decode bars on left, TTFT/Latency range on right + linked matrix
+                const hasLat = npuRows.some(function (r) { return r.lat != null; });
+                const chartHeight = Math.max(175, npuRows.length * 64 + 72);
 
-                const displayRows = npuRows.slice().reverse(); // fastest at top in matrix
-                const maxP1 = npuRows.length
-                    ? Math.max.apply(null, npuRows.map(function (r) { return (r.p1 && r.p1.median) || 1; }))
+                const displayRows = npuRows.slice().reverse();
+                const maxMain = npuRows.length
+                    ? Math.max.apply(null, npuRows.map(function (r) {
+                        const s = model.modality.key === 'embed' ? r.barA : (r.barB || r.barA);
+                        return (s && s.median) || 1;
+                    }))
                     : 1;
 
                 const matrixHead = memCols.map(function (mc) {
@@ -772,21 +999,24 @@
                 const matrixRows = displayRows.map(function (row) {
                     const cells = memCols.map(function (mc) {
                         const cell = row.byMem[mc];
-                        if (!cell || !cell.p1) {
-                            return '<td class="text-center" style="color: var(--oflm-muted);">—</td>';
+                        if (!cell || (!cell.barA && !cell.barB)) {
+                            return '<td class="text-center" style="color: var(--oflm-muted);">-</td>';
                         }
+                        const mainStat = model.modality.key === 'embed' ? cell.barA : (cell.barB || cell.barA);
+                        const subStat = model.modality.key === 'embed' ? cell.barB : cell.barA;
                         const isCellHl = hlMem === mc && (!hlNpu || hlNpu === row.npuShort);
-                        const ratio = Math.min(1, cell.p1.median / maxP1);
+                        const ratio = Math.min(1, mainStat.median / maxMain);
                         const alpha = (0.06 + 0.16 * ratio).toFixed(2);
                         const bg = t.dark
                             ? 'rgba(109, 148, 255, ' + alpha + ')'
                             : 'rgba(37, 84, 212, ' + alpha + ')';
-                        const p2Line = cell.p2
-                            ? '<div class="small" style="color: var(--oflm-muted);">' + fmtCompactRate(cell.p2.median) + ' · n=' + cell.runs + '</div>'
-                            : '<div class="small" style="color: var(--oflm-muted);">n=' + cell.runs + '</div>';
+                        const subParts = [];
+                        if (subStat) subParts.push(fmtCompactRate(subStat.median) + ' ' + model.unit);
+                        if (cell.lat) subParts.push(fmtLat(cell.lat.median, model.latUnit));
+                        subParts.push('n=' + cell.runs);
                         return '<td class="text-center oflm-matrix-cell' + (isCellHl ? ' is-selected' : '') + '" data-hl-npu="' + esc(row.npuShort) + '" data-hl-mem="' + esc(mc) + '" style="background-color:' + bg + ';">' +
-                            '<div class="fw-bold oflm-mono-cell">' + fmtCompactRate(cell.p1.median) + ' <span class="small fw-normal" style="color: var(--oflm-muted);">' + esc(model.unit) + '</span></div>' +
-                            p2Line +
+                            '<div class="fw-bold oflm-mono-cell">' + fmtCompactRate(mainStat.median) + ' <span class="small fw-normal" style="color: var(--oflm-muted);">' + esc(model.unit) + '</span></div>' +
+                            '<div class="small" style="color: var(--oflm-muted);">' + esc(subParts.join(' · ')) + '</div>' +
                         '</td>';
                     }).join('');
 
@@ -800,23 +1030,28 @@
                     ? '<button type="button" class="btn btn-sm btn-link p-0 text-decoration-none" data-clear-hl>Clear highlight</button>'
                     : '';
 
+                const leftTitle = model.barALabel + ' &amp; ' + model.barBLabel + ' Throughput';
+                const leftSub = model.unit + ' · higher is better';
+                const rightTitle = model.latLabel;
+                const rightSub = model.latUnit + ' · min-max range &amp; median, lower is better';
+
                 bodyEl.innerHTML =
                     '<div class="oflm-chart-card">' +
                         selectorCard +
-                        '<div class="' + (hasP2 ? 'oflm-small-multiples' : '') + ' mt-3">' +
+                        '<div class="' + (hasLat ? 'oflm-small-multiples' : '') + ' mt-3">' +
                             '<div class="oflm-subchart">' +
-                                '<div class="oflm-subchart-title">' + esc(model.p1Label) + ' <span class="oflm-subchart-unit">(' + esc(model.p1Sub) + ')</span></div>' +
-                                '<div class="oflm-echarts-canvas" data-npu-panel="p1" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' ' + model.p1Label) + '"></div>' +
+                                '<div class="oflm-subchart-title">' + leftTitle + ' <span class="oflm-subchart-unit">(' + leftSub + ')</span></div>' +
+                                '<div class="oflm-echarts-canvas" data-npu-panel="tp" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' throughput chart') + '"></div>' +
                             '</div>' +
-                            (hasP2
+                            (hasLat
                                 ? '<div class="oflm-subchart">' +
-                                      '<div class="oflm-subchart-title">' + esc(model.p2Label) + ' <span class="oflm-subchart-unit">(' + esc(model.p2Sub) + ')</span></div>' +
-                                      '<div class="oflm-echarts-canvas" data-npu-panel="p2" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' ' + model.p2Label) + '"></div>' +
+                                      '<div class="oflm-subchart-title">' + esc(rightTitle) + ' <span class="oflm-subchart-unit">(' + rightSub + ')</span></div>' +
+                                      '<div class="oflm-echarts-canvas" data-npu-panel="lat" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' latency range chart') + '"></div>' +
                                   '</div>'
                                 : '') +
                         '</div>' +
                         '<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3 mb-2">' +
-                            '<div class="small fw-semibold" style="color: var(--oflm-muted);">NPU × Memory Configuration Matrix <span class="fw-normal">(click any column or cell to highlight above; hover dots for min/max configs)</span></div>' +
+                            '<div class="small fw-semibold" style="color: var(--oflm-muted);">NPU × Memory Configuration Matrix <span class="fw-normal">(click a column or cell to highlight above)</span></div>' +
                             clearBtnHtml +
                         '</div>' +
                         '<div class="oflm-table-wrap mb-0">' +
@@ -827,19 +1062,19 @@
                         '</div>' +
                     '</div>';
 
-                const p1El = bodyEl.querySelector('[data-npu-panel="p1"]');
-                if (p1El) {
-                    const c1 = window.echarts.init(p1El, null, { renderer: 'svg' });
-                    const r1 = function () { c1.setOption(buildNpuRangeOption(model, activeQuant, npuRows, 'p1', hlMem, hlNpu), true); };
+                const tpEl = bodyEl.querySelector('[data-npu-panel="tp"]');
+                if (tpEl) {
+                    const c1 = window.echarts.init(tpEl, null, { renderer: 'svg' });
+                    const r1 = function () { c1.setOption(buildCombinedThroughputOption(model, activeQuant, npuRows, hlMem, hlNpu), true); };
                     r1();
                     const e1 = { chart: c1, render: r1 };
                     activeInstances.push(e1);
                     childCharts.push(e1);
                 }
-                const p2El = bodyEl.querySelector('[data-npu-panel="p2"]');
-                if (p2El) {
-                    const c2 = window.echarts.init(p2El, null, { renderer: 'svg' });
-                    const r2 = function () { c2.setOption(buildNpuRangeOption(model, activeQuant, npuRows, 'p2', hlMem, hlNpu), true); };
+                const latEl = bodyEl.querySelector('[data-npu-panel="lat"]');
+                if (latEl) {
+                    const c2 = window.echarts.init(latEl, null, { renderer: 'svg' });
+                    const r2 = function () { c2.setOption(buildLatencyRangeOption(model, activeQuant, npuRows, hlMem, hlNpu), true); };
                     r2();
                     const e2 = { chart: c2, render: r2 };
                     activeInstances.push(e2);
@@ -847,27 +1082,63 @@
                 }
             }
 
-            // Bind dropdown & matrix interactions
+            // Bind dropdown interactions
             const ddEl = bodyEl.querySelector('.oflm-dd');
             const ddToggle = bodyEl.querySelector('[data-dd-toggle]');
+            const ddSearch = bodyEl.querySelector('[data-dd-search]');
+            const ddList = bodyEl.querySelector('[data-dd-list]');
+
+            function bindOptionClicks() {
+                if (!ddList) return;
+                ddList.querySelectorAll('[data-pick-model]').forEach(function (btn) {
+                    btn.addEventListener('click', function () {
+                        activeModelTag = btn.dataset.pickModel;
+                        activeQuant = btn.dataset.pickQuant;
+                        hlMem = null;
+                        hlNpu = null;
+                        ddOpen = false;
+                        renderWidget();
+                    });
+                });
+            }
+
             if (ddToggle && ddEl) {
                 ddToggle.addEventListener('click', function (ev) {
                     ev.stopPropagation();
                     ddOpen = !ddOpen;
                     ddEl.classList.toggle('is-open', ddOpen);
                     ddToggle.setAttribute('aria-expanded', ddOpen ? 'true' : 'false');
+                    if (ddOpen && ddSearch) {
+                        setTimeout(function () { ddSearch.focus(); }, 10);
+                    }
                 });
             }
-            bodyEl.querySelectorAll('[data-pick-model]').forEach(function (btn) {
-                btn.addEventListener('click', function () {
-                    activeModelTag = btn.dataset.pickModel;
-                    activeQuant = btn.dataset.pickQuant;
-                    hlMem = null;
-                    hlNpu = null;
-                    ddOpen = false;
-                    renderWidget();
+
+            if (ddSearch && ddList) {
+                ddSearch.addEventListener('click', function (ev) { ev.stopPropagation(); });
+                ddSearch.addEventListener('input', function () {
+                    filterQuery = ddSearch.value;
+                    ddList.innerHTML = buildDropdownListHtml(models);
+                    bindOptionClicks();
+                });
+            }
+
+            bodyEl.querySelectorAll('[data-dd-mod]').forEach(function (btn) {
+                btn.addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    filterModality = btn.dataset.ddMod;
+                    bodyEl.querySelectorAll('[data-dd-mod]').forEach(function (b) {
+                        b.classList.toggle('active', b.dataset.ddMod === filterModality);
+                    });
+                    if (ddList) {
+                        ddList.innerHTML = buildDropdownListHtml(models);
+                        bindOptionClicks();
+                    }
                 });
             });
+
+            bindOptionClicks();
+
             bodyEl.querySelectorAll('[data-hl-col]').forEach(function (th) {
                 th.addEventListener('click', function () {
                     const mc = th.dataset.hlCol;
@@ -924,7 +1195,6 @@
 
         renderWidget();
 
-        // Re-render compact SVG sparkbars on light/dark theme switch
         document.addEventListener('oflm:themechange', function () {
             if (viewMode === 'compact') renderWidget();
         });

@@ -27,7 +27,7 @@ ctas:
 {{< b k="wip" issue="240" t="Expanded Family Sweeps #240" >}}
 </div>
 </div>
-<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Each NPU row plots the median dot and min-max range across RAM speeds and power modes. Hover a row for min and max configs, or click the matrix to highlight a memory tier.</p>
+<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Each NPU row pairs Prefill and Decode (or Batched and Single-Text) bars alongside a TTFT or latency range chart across RAM speeds and power modes. Hover any bar or range for min and max configs, or click the matrix to highlight a memory tier.</p>
 
 {{< all-runs-chart view="full" >}}
 
@@ -42,7 +42,7 @@ ctas:
 </div>
 
 <div id="cb-seed-banner" class="alert alert-info d-none mb-3" role="status">
-<div class="small mb-0"><strong>Verified Runs &amp; Community Submissions:</strong> This static preview shows repository sweeps and averaged community runs. Live submissions load on <code>openflowlm.org</code>. Upload your speeds with <code>oflm bench &lt;tag&gt; --submit</code> or <a href="submit/">Submit Run</a>.</div>
+<div class="small mb-0"><strong>Reference &amp; Community Runs:</strong> This static preview shows reference runs and averaged community runs. Live submissions load on <code>openflowlm.org</code>. Upload your speeds with <code>oflm bench &lt;tag&gt; --submit</code> or <a href="submit/">Submit Run</a>.</div>
 </div>
 
 <div class="oflm-stat-grid" id="cb-stats">

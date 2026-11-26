@@ -333,7 +333,7 @@
 
   function renderSourceBadge(source, status) {
     if (source === 'verified_seed' || status === 'seed') {
-      return makeBadge('ok', 'verified', 'Repo Sweep');
+      return makeBadge('ok', 'verified', 'Reference');
     }
     if (status && String(status).toLowerCase() === 'pending') {
       return makeBadge('wip', 'schedule', 'Pending');
@@ -349,7 +349,7 @@
     const apiQuery = new URLSearchParams({ page: '1', size: '100', status: 'validated', sort: 'decode' });
     const liveData = await fetchJsonSafe(API + '/benchmarks?' + apiQuery.toString());
     if (liveData && Array.isArray(liveData.results) && liveData.results.length > 0) {
-      // Merge live community submissions with verified repo sweeps so all runs are always represented
+      // Merge live community submissions with reference runs so all runs are represented
       const liveIds = new Set(liveData.results.map(function (r) { return String(r.id); }));
       rawRows = liveData.results.concat(SEED_RUNS.filter(function (sr) { return !liveIds.has(sr.id); }));
       if (window.OFLMCharts && typeof window.OFLMCharts.syncLiveRuns === 'function') {
@@ -373,7 +373,7 @@
       const elTopLlmNote = $('#cb-stat-top-llm-note');
 
       if (elRuns) elRuns.textContent = String(rows.length);
-      if (elRunsNote) elRunsNote.textContent = usingSeed ? 'Repo sweeps + community avg' : 'Repo & community runs';
+      if (elRunsNote) elRunsNote.textContent = usingSeed ? 'Reference + community avg' : 'Reference & community runs';
       if (elModels) elModels.textContent = String(new Set(rows.map(function (r) { return r.model; })).size);
       if (elHw) elHw.textContent = String(new Set(rows.map(function (r) { return r.cpu || r.hardware; })).size);
 
@@ -594,11 +594,11 @@
         : '';
 
       const leftSubTitle = isEmbed
-        ? 'Throughput <span class="oflm-subchart-unit">(texts/s · linear from 0, higher is faster)</span>'
-        : 'Prefill vs. Decode Throughput <span class="oflm-subchart-unit">(tok/s · log scale, higher is faster)</span>';
+        ? 'Throughput <span class="oflm-subchart-unit">(texts/s · linear from 0, higher is better)</span>'
+        : 'Prefill vs. Decode Throughput <span class="oflm-subchart-unit">(tok/s · log scale, higher is better)</span>';
       const rightSubTitle = isEmbed
-        ? 'Batch Speedup vs. Single Text <span class="oflm-subchart-unit">(× looped baseline · linear from 0)</span>'
-        : 'Time to First Token <span class="oflm-subchart-unit">(seconds · linear from 0, lower is faster)</span>';
+        ? 'Batch Speedup vs. Single Text <span class="oflm-subchart-unit">(× looped baseline · linear from 0, higher is better)</span>'
+        : 'Time to First Token <span class="oflm-subchart-unit">(seconds · linear from 0, lower is better)</span>';
 
       container.innerHTML =
         statsHtml +

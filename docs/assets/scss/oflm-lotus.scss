@@ -1051,13 +1051,78 @@ a.oflm-badge {
   min-width: 340px;
   width: max-content;
   max-width: unquote("min(460px, 90vw)");
-  max-height: 360px;
-  overflow-y: auto;
   background-color: var(--oflm-surface);
   border: 1px solid var(--oflm-border);
   border-radius: 10px;
   box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  overflow: hidden;
+}
+
+.oflm-dd-controls {
+  padding: 0.55rem 0.6rem 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--oflm-border);
+  background-color: var(--oflm-bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.oflm-dd-search {
+  width: 100%;
+  background-color: var(--oflm-bg);
+  color: var(--oflm-text);
+  border: 1px solid var(--oflm-border);
+  border-radius: 6px;
+  padding: 0.36rem 0.6rem;
+  font-size: 0.8rem;
+
+  &:focus {
+    outline: none;
+    border-color: var(--oflm-accent);
+    box-shadow: 0 0 0 2px var(--oflm-accent-soft);
+  }
+}
+
+.oflm-dd-mod-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+}
+
+.oflm-dd-mod-btn {
+  border: 1px solid var(--oflm-border);
+  background-color: var(--oflm-bg);
+  color: var(--oflm-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.16rem 0.52rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+
+  &:hover {
+    color: var(--oflm-text);
+    border-color: var(--oflm-accent);
+  }
+
+  &.active {
+    background-color: var(--oflm-accent);
+    border-color: var(--oflm-accent);
+    color: #ffffff;
+  }
+}
+
+.oflm-dd-list {
+  max-height: 300px;
+  overflow-y: auto;
   padding: 0.45rem;
+}
+
+.oflm-dd-empty {
+  padding: 0.85rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--oflm-muted);
+  text-align: center;
 }
 
 [data-dark-mode] .oflm-dd-menu {

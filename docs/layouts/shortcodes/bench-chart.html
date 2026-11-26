@@ -18,11 +18,11 @@
     </div>
     <div class="oflm-small-multiples">
         <div class="oflm-subchart">
-            <div class="oflm-subchart-title">Prefill vs. Decode Throughput <span class="oflm-subchart-unit">(tok/s · log scale, higher is faster)</span></div>
+            <div class="oflm-subchart-title">Prefill vs. Decode Throughput <span class="oflm-subchart-unit">(tok/s · log scale, higher is better)</span></div>
             <div class="oflm-echarts-canvas" data-subchart="throughput" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} throughput scaling chart"></div>
         </div>
         <div class="oflm-subchart">
-            <div class="oflm-subchart-title">Time to First Token <span class="oflm-subchart-unit">(seconds · linear from 0, lower is faster)</span></div>
+            <div class="oflm-subchart-title">Time to First Token <span class="oflm-subchart-unit">(seconds · linear from 0, lower is better)</span></div>
             <div class="oflm-echarts-canvas" data-subchart="ttft" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} time to first token chart"></div>
         </div>
     </div>
