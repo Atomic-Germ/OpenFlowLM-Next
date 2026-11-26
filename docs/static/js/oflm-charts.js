@@ -414,10 +414,8 @@
         const unit = model.unit;
         const yLabels = npuRows.map(function (r) { return r.npuShort; });
 
-        const dataA = npuRows.map(function (r) { return r.barA ? Number(r.barA.median.toFixed(2)) : null; });
-        const dataB = npuRows.map(function (r) { return r.barB ? Number(r.barB.median.toFixed(2)) : null; });
-        const hasA = dataA.some(function (v) { return v != null; });
-        const hasB = dataB.some(function (v) { return v != null; });
+        const hasA = npuRows.some(function (r) { return r.barA != null; });
+        const hasB = npuRows.some(function (r) { return r.barB != null; });
 
         const allVals = [];
         npuRows.forEach(function (r) {
@@ -427,87 +425,87 @@
         const maxVal = allVals.length ? Math.max.apply(null, allVals) : 100;
         const minVal = allVals.length ? Math.min.apply(null, allVals) : 1;
         const useLog = allVals.length > 1 && (maxVal / minVal) >= 12;
+        const xMin = useLog ? (minVal < 2 ? 1 : Math.pow(10, Math.floor(Math.log10(minVal)))) : 0;
         const xMax = useLog
             ? Math.pow(10, Math.ceil(Math.log10(maxVal * 3.2)))
             : Math.ceil(maxVal * 1.32);
 
-        const labelCfg = {
-            show: true,
-            position: 'right',
-            distance: 7,
-            color: t.text,
-            fontSize: 11,
-            fontWeight: 700,
-            fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-            formatter: function (p) {
-                if (p.value == null) return '';
-                return fmtCompactRate(p.value) + ' ' + unit;
-            }
-        };
-
-        const series = [];
-        if (hasA) {
-            series.push({
-                name: model.barALabel + ' (' + unit + ')',
-                type: 'bar',
-                barMaxWidth: 20,
-                barGap: '20%',
-                z: 3,
-                itemStyle: { color: t.primary, borderRadius: [0, 4, 4, 0] },
-                label: labelCfg,
-                data: dataA
+        function makeRangeDotSeries(seriesName, metricKey, color, bandFill, yOff) {
+            const rowsData = [];
+            npuRows.forEach(function (row, idx) {
+                const stat = row[metricKey];
+                if (!stat) return;
+                rowsData.push([idx, stat.min, stat.max, stat.median]);
             });
-        }
-        if (hasB) {
-            series.push({
-                name: model.barBLabel + ' (' + unit + ')',
-                type: 'bar',
-                barMaxWidth: 20,
-                barGap: '20%',
-                z: 3,
-                itemStyle: { color: t.secondary, borderRadius: [0, 4, 4, 0] },
-                label: labelCfg,
-                data: dataB
-            });
-        }
-
-        // Overlay min-max whiskers for any NPU with >1 RAM/power config
-        const whiskerItems = [];
-        npuRows.forEach(function (row, idx) {
-            if (hasA && row.barA && row.barA.max > row.barA.min) {
-                whiskerItems.push([idx, row.barA.min, row.barA.max, hasB ? -11 : 0]);
-            }
-            if (hasB && row.barB && row.barB.max > row.barB.min) {
-                whiskerItems.push([idx, row.barB.min, row.barB.max, hasA ? 11 : 0]);
-            }
-        });
-        if (whiskerItems.length) {
-            series.push({
-                name: 'Min-Max Range',
+            return {
+                name: seriesName,
                 type: 'custom',
-                silent: true,
-                z: 6,
-                tooltip: { show: false },
+                z: 4,
+                itemStyle: { color: color },
                 renderItem: function (params, api) {
                     const yIdx = api.value(0);
                     const lo = api.value(1);
                     const hi = api.value(2);
-                    const yOff = api.value(3);
+                    const med = api.value(3);
+                    const pStart = api.coord([xMin, yIdx]);
                     const pLo = api.coord([lo, yIdx]);
                     const pHi = api.coord([hi, yIdx]);
-                    const y = pLo[1] + yOff;
-                    const cap = 4;
-                    return {
-                        type: 'group',
-                        children: [
-                            { type: 'line', shape: { x1: pLo[0], y1: y, x2: pHi[0], y2: y }, style: { stroke: t.text, lineWidth: 1.6 } },
-                            { type: 'line', shape: { x1: pLo[0], y1: y - cap, x2: pLo[0], y2: y + cap }, style: { stroke: t.text, lineWidth: 1.6 } },
-                            { type: 'line', shape: { x1: pHi[0], y1: y - cap, x2: pHi[0], y2: y + cap }, style: { stroke: t.text, lineWidth: 1.6 } }
-                        ]
-                    };
+                    const pMed = api.coord([med, yIdx]);
+                    const y = pMed[1] + yOff;
+                    const capH = 12;
+
+                    const children = [
+                        {
+                            type: 'line',
+                            shape: { x1: pStart[0], y1: y, x2: pLo[0], y2: y },
+                            style: { stroke: t.grid, lineWidth: 1.5 }
+                        }
+                    ];
+
+                    if (hi > lo) {
+                        const w = Math.max(8, pHi[0] - pLo[0]);
+                        children.push({
+                            type: 'rect',
+                            shape: { x: pLo[0], y: y - capH / 2, width: w, height: capH, r: capH / 2 },
+                            style: { fill: bandFill, stroke: color, lineWidth: 1.2 }
+                        });
+                    }
+
+                    // Median dot
+                    children.push({
+                        type: 'circle',
+                        shape: { cx: pMed[0], cy: y, r: 5.5 },
+                        style: { fill: color, stroke: t.tooltipBg, lineWidth: 1.8 }
+                    });
+
+                    // Direct numeric label to the right of max/median
+                    const labelX = Math.max(pHi[0], pMed[0]) + 9;
+                    const labelText = hi > lo
+                        ? (fmtCompactRate(med) + ' (' + fmtCompactRate(lo) + '-' + fmtCompactRate(hi) + ')')
+                        : (fmtCompactRate(med) + ' ' + unit);
+                    children.push({
+                        type: 'text',
+                        style: {
+                            x: labelX,
+                            y: y + 4,
+                            text: labelText,
+                            fill: t.text,
+                            font: '700 11px JetBrains Mono, ui-monospace, monospace'
+                        }
+                    });
+
+                    return { type: 'group', children: children };
                 },
-                data: whiskerItems
-            });
+                data: rowsData
+            };
+        }
+
+        const series = [];
+        if (hasA) {
+            series.push(makeRangeDotSeries(model.barALabel + ' (' + unit + ')', 'barA', t.primary, t.primaryBand, hasB ? -11 : 0));
+        }
+        if (hasB) {
+            series.push(makeRangeDotSeries(model.barBLabel + ' (' + unit + ')', 'barB', t.secondary, t.secondaryBand, hasA ? 11 : 0));
         }
 
         // Highlight marker when user clicks a memory config in the matrix
@@ -545,12 +543,13 @@
         return {
             backgroundColor: 'transparent',
             animationDuration: 260,
-            grid: { left: 126, right: 98, top: 36, bottom: 38 },
+            grid: { left: 126, right: 112, top: 36, bottom: 38 },
             legend: {
                 show: hasA && hasB,
                 top: 2,
                 left: 0,
-                itemWidth: 12,
+                icon: 'circle',
+                itemWidth: 10,
                 itemHeight: 10,
                 itemGap: 16,
                 textStyle: { color: t.text, fontSize: 11.5, fontWeight: 600 }
@@ -586,7 +585,7 @@
             },
             xAxis: {
                 type: useLog ? 'log' : 'value',
-                min: useLog ? (minVal < 2 ? 1 : undefined) : 0,
+                min: xMin,
                 max: xMax,
                 name: unit + (useLog ? ' (log scale · higher is better)' : ' (higher is better)'),
                 nameLocation: 'middle',

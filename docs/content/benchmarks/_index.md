@@ -27,7 +27,7 @@ ctas:
 {{< b k="wip" issue="240" t="Expanded Family Sweeps #240" >}}
 </div>
 </div>
-<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Each NPU row pairs Prefill and Decode (or Batched and Single-Text) bars alongside a TTFT or latency range chart across RAM speeds and power modes. Hover any bar or range for min and max configs, or click the matrix to highlight a memory tier.</p>
+<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Each NPU row plots Prefill and Decode (or Batched and Single-Text) min-max ranges with median dots, paired with a TTFT or latency range chart across RAM speeds and power modes. Hover any row for min and max configs, or click the matrix to highlight a memory tier.</p>
 
 {{< all-runs-chart view="full" >}}
 
