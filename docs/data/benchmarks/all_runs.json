@@ -1,6 +1,6 @@
 {
   "slug": "all-npu-runs",
-  "title": "NPU Throughput by Model, Quantization, and Memory",
+  "title": "Model Performance",
   "subtitle": "Pick a model and quantization to compare XDNA2 NPUs across memory speeds and power modes",
   "runs": [
     {

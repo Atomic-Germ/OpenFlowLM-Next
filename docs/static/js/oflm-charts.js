@@ -282,9 +282,12 @@
                 ? (r.single_tps != null ? Number(r.single_tps) : null)
                 : (r.output_tps != null ? Number(r.output_tps) : null);
 
-            // Latency: TTFT in seconds for Chat/Vision, Call Latency in ms for Embeddings
-            const latVal = r.latency_ms != null
+            // Latency: TTFT (s) for Chat/Vision; Peak Batched (ms) + Single-Text n=1 (ms) for Embeddings
+            const latA = r.latency_ms != null
                 ? (isEmbed ? Number(r.latency_ms) : Number(r.latency_ms) / 1000.0)
+                : null;
+            const latB = isEmbed && r.single_latency_ms != null
+                ? Number(r.single_latency_ms)
                 : null;
 
             if (!modelsMap.has(tag)) {
@@ -297,7 +300,8 @@
                     unit: r.output_unit || (isEmbed ? 'txt/s' : 'tok/s'),
                     barALabel: isEmbed ? 'Peak Batched' : 'Prefill',
                     barBLabel: isEmbed ? 'Single-Text (n=1)' : 'Decode',
-                    latLabel: isEmbed ? 'Batched Call Latency' : 'Time to First Token (TTFT)',
+                    latALabel: isEmbed ? 'Peak Batched' : 'TTFT',
+                    latBLabel: isEmbed ? 'Single-Text (n=1)' : null,
                     latUnit: isEmbed ? 'ms' : 's',
                     quants: new Map()
                 });
@@ -316,8 +320,8 @@
                 isCommunity: r.source !== 'verified_seed' && r.status !== 'seed',
                 barA: barA,
                 barB: barB,
-                lat: latVal,
-                singleLatMs: r.single_latency_ms != null ? Number(r.single_latency_ms) : null
+                latA: latA,
+                latB: latB
             });
         });
 
@@ -373,7 +377,8 @@
                 memSummaries[memKey] = {
                     barA: summarizeMetric(list, 'barA'),
                     barB: summarizeMetric(list, 'barB'),
-                    lat: summarizeMetric(list, 'lat'),
+                    latA: summarizeMetric(list, 'latA'),
+                    latB: summarizeMetric(list, 'latB'),
                     runs: totalRuns,
                     configs: list.length
                 };
@@ -386,7 +391,8 @@
                 memCount: grp.byMem.size,
                 barA: summarizeMetric(grp.entries, 'barA'),
                 barB: summarizeMetric(grp.entries, 'barB'),
-                lat: summarizeMetric(grp.entries, 'lat'),
+                latA: summarizeMetric(grp.entries, 'latA'),
+                latB: summarizeMetric(grp.entries, 'latB'),
                 byMem: memSummaries
             };
         });
@@ -409,18 +415,20 @@
         return Number(val).toFixed(1) + ' ms';
     }
 
-    function buildCombinedThroughputOption(model, quant, npuRows, hlMem, hlNpu) {
+    function buildDualRangeOption(opts) {
         const t = getThemeTokens();
-        const unit = model.unit;
+        const npuRows = opts.npuRows;
+        const unit = opts.unit;
+        const fmtVal = opts.fmtVal;
         const yLabels = npuRows.map(function (r) { return r.npuShort; });
 
-        const hasA = npuRows.some(function (r) { return r.barA != null; });
-        const hasB = npuRows.some(function (r) { return r.barB != null; });
+        const hasA = npuRows.some(function (r) { return r[opts.keyA] != null; });
+        const hasB = Boolean(opts.keyB) && npuRows.some(function (r) { return r[opts.keyB] != null; });
 
         const allVals = [];
         npuRows.forEach(function (r) {
-            if (r.barA) { allVals.push(r.barA.min, r.barA.max); }
-            if (r.barB) { allVals.push(r.barB.min, r.barB.max); }
+            if (hasA && r[opts.keyA]) { allVals.push(r[opts.keyA].min, r[opts.keyA].max); }
+            if (hasB && r[opts.keyB]) { allVals.push(r[opts.keyB].min, r[opts.keyB].max); }
         });
         const maxVal = allVals.length ? Math.max.apply(null, allVals) : 100;
         const minVal = allVals.length ? Math.min.apply(null, allVals) : 1;
@@ -428,7 +436,7 @@
         const xMin = useLog ? (minVal < 2 ? 1 : Math.pow(10, Math.floor(Math.log10(minVal)))) : 0;
         const xMax = useLog
             ? Math.pow(10, Math.ceil(Math.log10(maxVal * 3.2)))
-            : Math.ceil(maxVal * 1.32);
+            : (maxVal * 1.32);
 
         function makeRangeDotSeries(seriesName, metricKey, color, bandFill, yOff) {
             const rowsData = [];
@@ -482,8 +490,8 @@
                     // Direct numeric label to the right of max/median
                     const labelX = Math.max(pHi[0], pMed[0]) + 9;
                     const labelText = hi > lo
-                        ? (fmtCompactRate(med) + ' (' + fmtCompactRate(lo) + '-' + fmtCompactRate(hi) + ')')
-                        : (fmtCompactRate(med) + ' ' + unit);
+                        ? (fmtVal(med) + ' (' + fmtVal(lo) + ' - ' + fmtVal(hi) + ')')
+                        : fmtVal(med);
                     children.push({
                         type: 'text',
                         style: {
@@ -502,26 +510,35 @@
         }
 
         const series = [];
+        const legendNames = [];
+        const colorA = opts.colorA;
+        const bandA = opts.bandA;
+        const colorB = opts.colorB;
+        const bandB = opts.bandB;
+
         if (hasA) {
-            series.push(makeRangeDotSeries(model.barALabel + ' (' + unit + ')', 'barA', t.primary, t.primaryBand, hasB ? -11 : 0));
+            const nameA = opts.labelA + ' (' + unit + ')';
+            legendNames.push(nameA);
+            series.push(makeRangeDotSeries(nameA, opts.keyA, colorA, bandA, hasB ? -11 : 0));
         }
         if (hasB) {
-            series.push(makeRangeDotSeries(model.barBLabel + ' (' + unit + ')', 'barB', t.secondary, t.secondaryBand, hasA ? 11 : 0));
+            const nameB = opts.labelB + ' (' + unit + ')';
+            legendNames.push(nameB);
+            series.push(makeRangeDotSeries(nameB, opts.keyB, colorB, bandB, hasA ? 11 : 0));
         }
 
-        // Highlight marker when user clicks a memory config in the matrix
-        if (hlMem) {
+        // Memory-tier highlight: crisp ringed halo in the SAME color as each track (excluded from legend)
+        if (opts.hlMem) {
             const hlPts = [];
             npuRows.forEach(function (row, idx) {
-                if (hlNpu && row.npuShort !== hlNpu) return;
-                const cell = row.byMem[hlMem];
+                if (opts.hlNpu && row.npuShort !== opts.hlNpu) return;
+                const cell = row.byMem[opts.hlMem];
                 if (!cell) return;
-                if (hasA && cell.barA) hlPts.push([cell.barA.median, idx, hasB ? -11 : 0]);
-                if (hasB && cell.barB) hlPts.push([cell.barB.median, idx, hasA ? 11 : 0]);
+                if (hasA && cell[opts.keyA]) hlPts.push([cell[opts.keyA].median, idx, hasB ? -11 : 0, 0]);
+                if (hasB && cell[opts.keyB]) hlPts.push([cell[opts.keyB].median, idx, hasA ? 11 : 0, 1]);
             });
             if (hlPts.length) {
                 series.push({
-                    name: hlMem,
                     type: 'custom',
                     silent: true,
                     z: 8,
@@ -530,11 +547,21 @@
                     renderItem: function (params, api) {
                         const pt = api.coord([api.value(0), api.value(1)]);
                         const y = pt[1] + api.value(2);
-                        const d = 6;
+                        const trackColor = api.value(3) === 0 ? colorA : colorB;
                         return {
-                            type: 'polygon',
-                            shape: { points: [[pt[0], y - d], [pt[0] + d, y], [pt[0], y + d], [pt[0] - d, y]] },
-                            style: { fill: t.amber, stroke: t.tooltipBg, lineWidth: 1.6 }
+                            type: 'group',
+                            children: [
+                                {
+                                    type: 'circle',
+                                    shape: { cx: pt[0], cy: y, r: 9.5 },
+                                    style: { fill: 'none', stroke: trackColor, lineWidth: 2 }
+                                },
+                                {
+                                    type: 'circle',
+                                    shape: { cx: pt[0], cy: y, r: 4.5 },
+                                    style: { fill: t.tooltipBg, stroke: trackColor, lineWidth: 2.2 }
+                                }
+                            ]
                         };
                     },
                     data: hlPts
@@ -547,7 +574,8 @@
             animationDuration: 260,
             grid: { left: 126, right: 112, top: 36, bottom: 38 },
             legend: {
-                show: hasA && hasB,
+                show: legendNames.length > 0,
+                data: legendNames,
                 top: 2,
                 left: 0,
                 icon: 'circle',
@@ -571,19 +599,19 @@
                     if (!row) return '';
                     const lines = [
                         '<div style="font-weight:700;margin-bottom:3px;">' + esc(row.npuFull) + '</div>',
-                        '<div style="font-size:11px;opacity:0.82;margin-bottom:5px;">' + esc(model.tag) + ' · ' + esc(quant) + ' · ' + row.totalRuns + ' runs across ' + row.memCount + ' memory config(s)</div>'
+                        '<div style="font-size:11px;opacity:0.82;margin-bottom:5px;">' + esc(opts.modelTag) + ' · ' + esc(opts.quant) + ' · ' + row.totalRuns + ' runs across ' + row.memCount + ' memory config(s)</div>'
                     ];
                     function pushStat(label, stat) {
                         if (!stat) return;
-                        lines.push('<div>' + esc(label) + ' median: <strong>' + fmtCompactRate(stat.median) + ' ' + esc(unit) + '</strong></div>');
+                        lines.push('<div>' + esc(label) + ' median: <strong>' + esc(fmtVal(stat.median)) + '</strong></div>');
                         if (stat.max > stat.min) {
-                            lines.push('<div style="font-size:11px;opacity:0.82;padding-left:8px;">Min ' + fmtCompactRate(stat.min) + ' (' + esc(stat.minConfig) + ') | Max ' + fmtCompactRate(stat.max) + ' (' + esc(stat.maxConfig) + ')</div>');
+                            lines.push('<div style="font-size:11px;opacity:0.82;padding-left:8px;">Min ' + esc(fmtVal(stat.min)) + ' (' + esc(stat.minConfig) + ') | Max ' + esc(fmtVal(stat.max)) + ' (' + esc(stat.maxConfig) + ')</div>');
                         } else {
                             lines.push('<div style="font-size:11px;opacity:0.82;padding-left:8px;">Config: ' + esc(stat.minConfig) + '</div>');
                         }
                     }
-                    pushStat(model.barALabel, row.barA);
-                    pushStat(model.barBLabel, row.barB);
+                    if (hasA) pushStat(opts.labelA, row[opts.keyA]);
+                    if (hasB) pushStat(opts.labelB, row[opts.keyB]);
                     return lines.join('');
                 }
             },
@@ -611,153 +639,47 @@
         };
     }
 
+    function buildCombinedThroughputOption(model, quant, npuRows, hlMem, hlNpu) {
+        const t = getThemeTokens();
+        return buildDualRangeOption({
+            modelTag: model.tag,
+            quant: quant,
+            npuRows: npuRows,
+            keyA: 'barA',
+            keyB: 'barB',
+            labelA: model.barALabel,
+            labelB: model.barBLabel,
+            colorA: t.primary,
+            bandA: t.primaryBand,
+            colorB: t.secondary,
+            bandB: t.secondaryBand,
+            unit: model.unit,
+            fmtVal: function (v) { return fmtCompactRate(v) + ' ' + model.unit; },
+            hlMem: hlMem,
+            hlNpu: hlNpu
+        });
+    }
+
     function buildLatencyRangeOption(model, quant, npuRows, hlMem, hlNpu) {
         const t = getThemeTokens();
-        const latUnit = model.latUnit;
-        const validRows = npuRows.filter(function (row) { return row.lat != null; });
-        const yLabels = validRows.map(function (row) { return row.npuShort; });
-        const maxVal = validRows.length
-            ? Math.max.apply(null, validRows.map(function (r) { return r.lat.max; }))
-            : 10;
-        const xMax = maxVal * 1.3;
-
-        const rangeData = validRows.map(function (row, idx) {
-            return [idx, row.lat.min, row.lat.max, row.lat.median];
+        const hasDual = npuRows.some(function (r) { return r.latB != null; });
+        return buildDualRangeOption({
+            modelTag: model.tag,
+            quant: quant,
+            npuRows: npuRows,
+            keyA: 'latA',
+            keyB: hasDual ? 'latB' : null,
+            labelA: model.latALabel,
+            labelB: model.latBLabel,
+            colorA: hasDual ? t.primary : t.amber,
+            bandA: hasDual ? t.primaryBand : t.amberBand,
+            colorB: t.secondary,
+            bandB: t.secondaryBand,
+            unit: model.latUnit,
+            fmtVal: function (v) { return fmtLat(v, model.latUnit); },
+            hlMem: hlMem,
+            hlNpu: hlNpu
         });
-
-        const medianData = validRows.map(function (row, idx) {
-            return { value: [row.lat.median, idx], row: row, stat: row.lat };
-        });
-
-        const series = [
-            {
-                name: 'Min-Max Range',
-                type: 'custom',
-                z: 2,
-                renderItem: function (params, api) {
-                    const yIdx = api.value(0);
-                    const lo = api.value(1);
-                    const hi = api.value(2);
-                    const pLo = api.coord([lo, yIdx]);
-                    const pHi = api.coord([hi, yIdx]);
-                    const pZero = api.coord([0, yIdx]);
-                    const barH = 14;
-                    const children = [
-                        { type: 'line', shape: { x1: pZero[0], y1: pLo[1], x2: pLo[0], y2: pLo[1] }, style: { stroke: t.grid, lineWidth: 2 } }
-                    ];
-                    if (hi > lo) {
-                        const w = Math.max(8, pHi[0] - pLo[0]);
-                        children.push({
-                            type: 'rect',
-                            shape: { x: pLo[0], y: pLo[1] - barH / 2, width: w, height: barH, r: barH / 2 },
-                            style: { fill: t.amberBand, stroke: t.amber, lineWidth: 1 }
-                        });
-                    }
-                    return { type: 'group', children: children };
-                },
-                data: rangeData
-            },
-            {
-                name: 'Median',
-                type: 'scatter',
-                symbol: 'circle',
-                symbolSize: 12,
-                z: 5,
-                itemStyle: { color: t.amber, borderColor: t.tooltipBg, borderWidth: 2 },
-                label: {
-                    show: true,
-                    position: 'right',
-                    distance: 10,
-                    color: t.text,
-                    fontSize: 11.5,
-                    fontWeight: 700,
-                    fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-                    formatter: function (p) {
-                        const stat = p.data.stat;
-                        if (stat.max > stat.min) {
-                            return fmtLat(stat.median, latUnit) + ' (' + fmtLat(stat.min, latUnit) + ' - ' + fmtLat(stat.max, latUnit) + ')';
-                        }
-                        return fmtLat(stat.median, latUnit);
-                    }
-                },
-                data: medianData
-            }
-        ];
-
-        if (hlMem) {
-            const hlPts = [];
-            validRows.forEach(function (row, idx) {
-                if (hlNpu && row.npuShort !== hlNpu) return;
-                const cell = row.byMem[hlMem];
-                if (cell && cell.lat) {
-                    hlPts.push({ value: [cell.lat.median, idx] });
-                }
-            });
-            if (hlPts.length) {
-                series.push({
-                    name: hlMem,
-                    type: 'scatter',
-                    symbol: 'diamond',
-                    symbolSize: 14,
-                    z: 7,
-                    itemStyle: { color: t.primary, borderColor: t.tooltipBg, borderWidth: 2 },
-                    data: hlPts
-                });
-            }
-        }
-
-        return {
-            backgroundColor: 'transparent',
-            animationDuration: 260,
-            grid: { left: 126, right: 110, top: 36, bottom: 38 },
-            tooltip: {
-                trigger: 'axis',
-                axisPointer: { type: 'shadow' },
-                backgroundColor: t.tooltipBg,
-                borderColor: t.tooltipBorder,
-                borderWidth: 1,
-                textStyle: { color: t.text, fontSize: 12 },
-                formatter: function (params) {
-                    if (!params || !params.length) return '';
-                    const row = validRows[params[0].dataIndex];
-                    if (!row || !row.lat) return '';
-                    const stat = row.lat;
-                    const lines = [
-                        '<div style="font-weight:700;margin-bottom:3px;">' + esc(row.npuFull) + '</div>',
-                        '<div style="font-size:11px;opacity:0.82;margin-bottom:5px;">' + esc(model.tag) + ' · ' + esc(quant) + ' · ' + esc(model.latLabel) + '</div>',
-                        '<div>Median: <strong>' + fmtLat(stat.median, latUnit) + '</strong></div>'
-                    ];
-                    if (stat.max > stat.min) {
-                        lines.push('<div>Min (fastest): <strong>' + fmtLat(stat.min, latUnit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.minConfig) + ')</span></div>');
-                        lines.push('<div>Max (slowest): <strong>' + fmtLat(stat.max, latUnit) + '</strong> <span style="opacity:0.8;">(' + esc(stat.maxConfig) + ')</span></div>');
-                    } else {
-                        lines.push('<div>Measured config: <strong>' + esc(stat.minConfig) + '</strong></div>');
-                    }
-                    return lines.join('');
-                }
-            },
-            xAxis: {
-                type: 'value',
-                min: 0,
-                max: xMax,
-                name: latUnit,
-                nameLocation: 'middle',
-                nameGap: 23,
-                nameTextStyle: { color: t.muted, fontWeight: 600, fontSize: 11 },
-                axisLabel: { color: t.muted, fontSize: 11 },
-                axisLine: { show: false },
-                axisTick: { show: false },
-                splitLine: { lineStyle: { color: t.grid } }
-            },
-            yAxis: {
-                type: 'category',
-                data: yLabels,
-                axisLabel: { color: t.text, fontWeight: 700, fontSize: 11.5 },
-                axisLine: { lineStyle: { color: t.axis } },
-                axisTick: { show: false }
-            },
-            series: series
-        };
     }
 
     function renderCompactSparkbarSvg(row, maxVal, unit, t) {
@@ -983,8 +905,8 @@
                         '<p class="small mb-0 mt-2" style="color: var(--oflm-muted);">Dot shows median; range bar shows min-max across memory speeds and power modes (hover sparkbar for min and max configs). Cells show ' + esc(model.modality.key === 'embed' ? (model.barALabel + ' / ' + model.barBLabel) : (model.barBLabel + ' / ' + model.barALabel)) + ' (' + esc(model.unit) + ').</p>' +
                     '</div>';
             } else {
-                // VARIATION 1 (/benchmarks/): Combined Prefill+Decode bars on left, TTFT/Latency range on right + linked matrix
-                const hasLat = npuRows.some(function (r) { return r.lat != null; });
+                // VARIATION 1 (/benchmarks/): Throughput + Latency dual range charts + linked NPU x Memory matrix
+                const hasLat = npuRows.some(function (r) { return r.latA != null || r.latB != null; });
                 const chartHeight = Math.max(175, npuRows.length * 64 + 72);
 
                 const displayRows = npuRows.slice().reverse();
@@ -1018,7 +940,7 @@
                             : 'rgba(37, 84, 212, ' + alpha + ')';
                         const subParts = [];
                         if (subStat) subParts.push(fmtCompactRate(subStat.median) + ' ' + model.unit);
-                        if (cell.lat) subParts.push(fmtLat(cell.lat.median, model.latUnit));
+                        if (cell.latA) subParts.push(fmtLat(cell.latA.median, model.latUnit));
                         subParts.push('n=' + cell.runs);
                         return '<td class="text-center oflm-matrix-cell' + (isCellHl ? ' is-selected' : '') + '" data-hl-npu="' + esc(row.npuShort) + '" data-hl-mem="' + esc(mc) + '" style="background-color:' + bg + ';">' +
                             '<div class="fw-bold oflm-mono-cell">' + fmtCompactRate(mainStat.median) + ' <span class="small fw-normal" style="color: var(--oflm-muted);">' + esc(model.unit) + '</span></div>' +
@@ -1033,26 +955,27 @@
                 }).join('');
 
                 const clearBtnHtml = (hlMem || hlNpu)
-                    ? '<button type="button" class="btn btn-sm btn-link p-0 text-decoration-none" data-clear-hl>Clear highlight</button>'
+                    ? '<span class="d-inline-flex align-items-center gap-2 small">' +
+                          '<span class="oflm-badge neutral"><span>Highlighted: ' + esc(hlNpu ? (hlNpu + ' · ' + hlMem) : hlMem) + '</span></span>' +
+                          '<button type="button" class="btn btn-sm btn-link p-0 text-decoration-none" data-clear-hl>Clear</button>' +
+                      '</span>'
                     : '';
 
-                const leftTitle = model.barALabel + ' &amp; ' + model.barBLabel + ' Throughput';
                 const leftSub = model.unit + ' · higher is better';
-                const rightTitle = model.latLabel;
-                const rightSub = model.latUnit + ' · min-max range &amp; median, lower is better';
+                const rightSub = model.latUnit + ' · lower is better';
 
                 bodyEl.innerHTML =
                     '<div class="oflm-chart-card">' +
                         selectorCard +
                         '<div class="' + (hasLat ? 'oflm-small-multiples' : '') + ' mt-3">' +
                             '<div class="oflm-subchart">' +
-                                '<div class="oflm-subchart-title">' + leftTitle + ' <span class="oflm-subchart-unit">(' + leftSub + ')</span></div>' +
+                                '<div class="oflm-subchart-title">Throughput <span class="oflm-subchart-unit">(' + esc(leftSub) + ')</span></div>' +
                                 '<div class="oflm-echarts-canvas" data-npu-panel="tp" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' throughput chart') + '"></div>' +
                             '</div>' +
                             (hasLat
                                 ? '<div class="oflm-subchart">' +
-                                      '<div class="oflm-subchart-title">' + esc(rightTitle) + ' <span class="oflm-subchart-unit">(' + rightSub + ')</span></div>' +
-                                      '<div class="oflm-echarts-canvas" data-npu-panel="lat" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' latency range chart') + '"></div>' +
+                                      '<div class="oflm-subchart-title">Latency <span class="oflm-subchart-unit">(' + esc(rightSub) + ')</span></div>' +
+                                      '<div class="oflm-echarts-canvas" data-npu-panel="lat" style="width: 100%; height: ' + chartHeight + 'px;" aria-label="' + esc(model.tag + ' latency chart') + '"></div>' +
                                   '</div>'
                                 : '') +
                         '</div>' +

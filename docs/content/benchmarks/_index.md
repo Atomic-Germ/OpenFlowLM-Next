@@ -23,11 +23,11 @@ ctas:
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
 <div class="d-flex flex-wrap align-items-center gap-2">
-<h2 class="h4 fw-bold mb-0">Throughput by Model, Quantization &amp; Memory</h2>
+<h2 class="h4 fw-bold mb-0">Model Performance</h2>
 {{< b k="wip" issue="240" t="Expanded Family Sweeps #240" >}}
 </div>
 </div>
-<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Each NPU row plots Prefill and Decode (or Batched and Single-Text) min-max ranges with median dots, paired with a TTFT or latency range chart across RAM speeds and power modes. Hover any row for min and max configs, or click the matrix to highlight a memory tier.</p>
+<p class="small mb-3" style="color: var(--oflm-muted);">Pick a model and quantization below. Hover any row for min and max configs, or click the matrix to highlight a memory tier.</p>
 
 {{< all-runs-chart view="full" >}}
 
