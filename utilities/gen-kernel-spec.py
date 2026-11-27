@@ -149,17 +149,24 @@ def repo_gguf_url(repo: str) -> str | None:
     any single-file GGUF when every quant is one the kernels do not stream: for
     a SPEC, only the header matters, not whether the quant is servable.
     """
-    from oflm_add import choose_gguf_file, hf_file_tree, root_file_names
+    from oflm_add import (choose_gguf_file, gguf_file_names, hf_file_tree,
+                          model_gguf_names)
     try:
         tree = hf_file_tree(repo)
     except Exception as exc:                      # noqa: BLE001 - gated / offline
         print(f"warn: could not list {repo}: {exc}", file=sys.stderr)
         return None
-    names = root_file_names(tree)
+    # Every GGUF path, not just root files: Unsloth's dynamic quants live in
+    # `UD-Q4_K_XL/<name>-00001-of-00004.gguf`, and the header of part 1 names
+    # the geometry just as well as a root-level single file does.
+    names = gguf_file_names(tree)
     chosen, _ = choose_gguf_file(names)
     if not chosen:
-        single = [n for n in names if n.endswith(".gguf")
-                  and not re.search(r"-\d+-of-\d+\.gguf$", n)]
+        # Never fall back to a projector / draft head: its header names the
+        # wrong architecture (`dflash` for a `dspark-*` file) and would become
+        # the family. Only the model's own weights are a geometry source.
+        single = [n for n in model_gguf_names(names)
+                  if not re.search(r"-\d+-of-\d+\.gguf$", n)]
         chosen = single[0] if single else None
     if not chosen:
         return None

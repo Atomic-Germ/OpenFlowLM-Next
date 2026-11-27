@@ -1,0 +1,27 @@
+{
+  "lq": 1536,
+  "lk": 1536,
+  "lqp": 256,
+  "lkp": 64,
+  "dk": 64,
+  "dv": 64,
+  "num_heads": 20,
+  "num_heads_per_unroll": 2,
+  "num_cascade_stages": 4,
+  "valid_len": 1500,
+  "heads": 20,
+  "fp32_state": true,
+  "emulate_bfp16": true,
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "design_source": {
+    "path": "open_kernels/designs/whisper_fa",
+    "blob_sha1": {
+      "attn_fa.py": "993c42cdbf7d2c6f65269ada08ca3e8ba118d7cd",
+      "attn_npu2.cc": "e53eeefdf21aa682cf8e2fccee24f33ed8995d0a",
+      "attn_cascade_wrap.cc": "a743092979d4527cc26398039eb24a427352790f",
+      "zero.cc": "4aaf3470a9e6b3d4f8d4e8eeb90d51ae6b0a0164"
+    },
+    "mlir_aie_git_head": "unavailable"
+  }
+}

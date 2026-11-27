@@ -21,7 +21,10 @@ What it does, in order, and why each step exists:
                (utilities/op-gate.py: gemv_q4 at the new K, ln at the new width,
                ...). A point is written into the catalogue only after its
                fixture PASSES, so "the numbers are right" is checked, not
-               assumed, for every geometry the new size introduces.
+               assumed, for every geometry the new size introduces. An op with
+               no per-geometry fixture (router, moe) is DEFERRED, not a build
+               wall: those are validated through the whole-layer path, and the
+               build/attention gate/register still run.
   4. CATALOGUE the validated point is written into open_kernels/recipes/
                catalogue.py, so the next build of this size needs no override.
   5. REBUILD   the kernel set is compiled again through the validated path,
@@ -58,6 +61,14 @@ GEN_SPEC = ROOT / "utilities" / "gen-kernel-spec.py"
 ADD_POINT = ROOT / "utilities" / "catalogue-add-point.py"
 REGISTER = ROOT / "utilities" / "register-spec.py"
 OP_GATE = ROOT / "utilities" / "op-gate.py"
+
+def shown(path: Path) -> str:
+    """A path relative to the tree when it is inside it, else as given."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
 
 def run(cmd, env=None, cwd=None, check=True, quiet=False):
     cmd = [str(c) for c in cmd]
@@ -142,6 +153,14 @@ def preflight(spec_path: Path) -> tuple[list[str], list[tuple[str, dict]]]:
         try:
             for_spec(spec).recipe(spec)
         except OpRangeError as exc:
+            walls.append(str(exc))
+        except NotImplementedError as exc:
+            # A family whose recipe is deliberately not implemented. Same kind
+            # of wall as an OpRangeError: no gate can add a recipe.
+            walls.append(str(exc))
+        except ValueError as exc:
+            if "no recipe for family" not in str(exc):
+                raise
             walls.append(str(exc))
     return walls, missing
 
@@ -257,6 +276,7 @@ def main() -> int:
     if not a.repo and not a.spec:
         ap.error("--repo or --spec is required")
     name = a.spec_name
+    explicit_path: Path | None = None
     if a.spec:
         sp = Path(a.spec)
         # A spec stem can contain dots (qwen3-0.6b, qwen3-1.7b, lfm2-2.6b), so a
@@ -273,6 +293,9 @@ def main() -> int:
             print(f"build-new-spec: no such spec: {a.spec}", file=sys.stderr)
             return 1
         name = spec_path.stem
+        # Keep a path the caller gave us (build-new-family writes its candidate
+        # under build/new-family/, and a dry run must read THAT file).
+        explicit_path = spec_path
         print(f"-- spec {name} (given)", flush=True)
         goto_build = True
     else:
@@ -284,7 +307,7 @@ def main() -> int:
         except Exception:
             pass
         name = a.repo.split("/")[-1].lower()
-    spec_path = SPECS / f"{name}.json"
+    spec_path = explicit_path if explicit_path is not None else SPECS / f"{name}.json"
 
     # 1. the spec
     print(f"-- spec {name}", flush=True)
@@ -302,15 +325,19 @@ def main() -> int:
         if not existed:
             spec_path.unlink()
         return 0
-    print(f"   {spec_path.relative_to(ROOT)}", flush=True)
+    print(f"   {shown(spec_path)}", flush=True)
 
     geo = spec_geometry(spec_path)
     print(f"   family {geo['family']}, attention point {geo['point']}", flush=True)
     walls, missing = preflight(spec_path)
     for msg in walls:
         print(f"   the RECIPE does not support this shape: {msg}")
-        print("      (a width that does not fit the design -- a different recipe, or a "
-              "different family)")
+        if "no recipe for family" in msg or "the open kernels have no recipe for" in msg:
+            print("      (no recipe owns this family: `oflm dev build-new-family` will "
+                  "extend the nearest recipe and write a build report)")
+        else:
+            print("      (a width that does not fit the design -- a different recipe, or a "
+                  "different family)")
     if missing:
         print(f"   the catalogue has not validated {len(missing)} point(s) this size needs:")
         for op, kw in missing:
@@ -320,11 +347,17 @@ def main() -> int:
         # does not stay in the specs dir -- but it is not thrown away either:
         # a recipe that learns the shape (the FF split, say) picks it up.
         cand = ROOT / "open_kernels" / "recipes" / "candidates"
-        cand.mkdir(parents=True, exist_ok=True)
-        spec_path.rename(cand / spec_path.name)
-        print(f"build-new-spec: the recipe cannot build this shape, so the spec moved to "
-              f"{cand.relative_to(ROOT)} (the export would fail on it in the specs dir)",
-              file=sys.stderr)
+        if a.dry_run:
+            # A dry run never writes the tree. The caller is usually
+            # build-new-family with a candidate under build/new-family/.
+            print(f"build-new-spec: would park the spec in {cand.relative_to(ROOT)} "
+                  f"(the export would fail on it in the specs dir)", file=sys.stderr)
+        else:
+            cand.mkdir(parents=True, exist_ok=True)
+            spec_path.rename(cand / spec_path.name)
+            print(f"build-new-spec: the recipe cannot build this shape, so the spec moved to "
+                  f"{cand.relative_to(ROOT)} (the export would fail on it in the specs dir)",
+                  file=sys.stderr)
         return 1
     if a.dry_run:
         return 0
@@ -349,25 +382,32 @@ def main() -> int:
 
     # 3a. every op EXCEPT attention: run its own fixture and write the point.
     # Attention is 3b, because its gate builds the model's worker, not a fixture.
+    blocked: list[tuple[str, dict, str]] = []
     if missing:
         print("-- op gates: run each missing point's fixture before the build", flush=True)
         sys.path.insert(0, str(ROOT / "open_kernels"))
         from recipes.load import load_spec
         mod_gate = _load_module("_op_gate", OP_GATE)
         try:
-            mod_gate.gate_points(load_spec(spec_path), spec_path, py, env,
-                                 harness_binary(work), skip=("attn",))
+            gated, blocked = mod_gate.gate_points(load_spec(spec_path), spec_path, py, env,
+                                                  harness_binary(work), skip=("attn",))
         except mod_gate.GateError as exc:
             print(exc, file=sys.stderr)
-            msg = str(exc)
-            if "has no automated gate" in msg or "NOT_AUTOMATED" in msg:
-                print("   (that op has no runnable fixture: the size needs a DESIGN step, not a "
-                      "script run -- see utilities/op-gate.py NOT_AUTOMATED)", file=sys.stderr)
-            else:
-                print("   (fixture/gate failed for this geometry; see the error above. "
-                      "This may be a fixture/layout limit rather than a missing op fixture.)",
-                      file=sys.stderr)
+            print("   (a fixture that EXISTS failed at this geometry; that is a real shortfall, "
+                  "not a missing gate)", file=sys.stderr)
             return 1
+        if blocked:
+            # No per-geometry fixture does NOT mean the recipe cannot build the
+            # shape: router/moe are validated through the whole-layer MoE block.
+            # Recording them here and carrying on lets the build, attention gate
+            # and spec registration happen -- finish what IS scriptable first.
+            print(f"-- {len(blocked)} point(s) have no per-geometry fixture and are deferred "
+                  f"to the whole-layer gate:", flush=True)
+            for op, kw, why in blocked:
+                print(f"   {op} {kw}: {why}", flush=True)
+            (work / "blocked-points.json").write_text(
+                json.dumps([{"op": op, "kw": kw, "why": why} for op, kw, why in blocked],
+                           indent=2), encoding="utf-8")
 
     # 2. the kernel set compiles at this geometry
     if not a.skip_export:
@@ -418,17 +458,30 @@ def main() -> int:
     if rc != 0:
         return rc
 
-    if not a.skip_gate and not attn_validated and not attn_supported:
+    if blocked:
+        print(f"\n{name}: {len(blocked)} whole-layer point(s) are still unvalidated "
+              "(no per-geometry fixture):", flush=True)
+        for op, kw, why in blocked:
+            print(f"  {op} {kw}: {why}", flush=True)
+        print(f"  recorded in {work / 'blocked-points.json'}; validate through the "
+              "family's whole-layer procedure before calling the size supported.", flush=True)
+
+    skipped = [flag for flag, on in (("--skip-export", a.skip_export),
+                                     ("--skip-gate", a.skip_gate)) if on]
+    if skipped:
+        print(f"\n{name}: spec registered; skipped {', '.join(skipped)} this run, so no "
+              "built kernels are claimed.", flush=True)
+    elif not attn_validated and not attn_supported:
         print(f"\n{name}: spec and built kernels are ready; the ATTENTION point is still "
               "unvalidated.", flush=True)
         print(f"  {attn_why}", flush=True)
         print("  A plain `oflm dev export-kernels --spec ...` will hit the catalogue wall until "
               "that point is validated by its family procedure.", flush=True)
-        print(f"  commit: {spec_path.relative_to(ROOT)} and the two test files "
+        print(f"  commit: {shown(spec_path)} and the two test files "
               "register-spec.py touched")
     else:
         print(f"\n{name} is ready: the spec, the built kernels and the catalogue entry.")
-        print(f"  commit: {spec_path.relative_to(ROOT)}, open_kernels/recipes/catalogue.py and "
+        print(f"  commit: {shown(spec_path)}, open_kernels/recipes/catalogue.py and "
               "the two test files register-spec.py touched")
     return 0
 

@@ -48,6 +48,53 @@ static std::string render(const std::string& tmpl, const std::string& user,
     return t.apply(in, opts);
 }
 
+static std::string render_raw(minja::chat_template& t,
+                              const nlohmann::ordered_json& messages,
+                              const nlohmann::ordered_json& tools = nlohmann::ordered_json(),
+                              const nlohmann::ordered_json& extra_context = nlohmann::ordered_json()) {
+    minja::chat_template_inputs in;
+    in.messages = messages;
+    in.tools = tools;
+    in.extra_context = extra_context;
+    minja::chat_template_options opts;
+    opts.apply_polyfills = false;
+    return t.apply(in, opts);
+}
+
+static nlohmann::ordered_json sample_tools() {
+    return nlohmann::ordered_json::parse(R"([
+      {
+        "name": "get_weather",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the weather.",
+          "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+          }
+        }
+      }
+    ])");
+}
+
+static nlohmann::ordered_json sample_tool_history() {
+    return nlohmann::ordered_json::parse(R"([
+      {"role": "user", "content": "Weather in Paris?"},
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+          "id": "call_1",
+          "type": "function",
+          "function": {"name": "get_weather", "arguments": {"city": "Paris"}}
+        }]
+      },
+      {"role": "tool", "name": "get_weather", "tool_call_id": "call_1", "content": "{\"temp_c\": 21}"}
+    ])");
+}
+
 // ---------------------------------------------------------------------------
 // The Qwen3.x idiom: "is undefined or is true". The flag is absent in the
 // ordinary chat request, which is the case that used to throw.
@@ -114,9 +161,67 @@ static void test_defined_still_works() {
 }
 
 // ---------------------------------------------------------------------------
-// The real shipped template, rendered for an ordinary request. This is the test
-// that would have caught the outage.
+// The real shipped template, rendered for an ordinary request and for tool
+// traffic. These are the cases that would have caught the outage and the cases
+// where minja must use the template's native support rather than its polyfills.
 // ---------------------------------------------------------------------------
+static void test_shipped_template_capabilities(minja::chat_template& t) {
+    const auto& caps = t.original_caps();
+    ok(caps.supports_tools, "minja detects the shipped template's tool-schema support");
+    ok(caps.supports_tool_calls, "minja detects the shipped template's tool-call support");
+    ok(caps.supports_tool_responses, "minja detects the shipped template's tool-response support");
+    ok(caps.supports_parallel_tool_calls, "minja detects the shipped template's parallel tool-call support");
+}
+
+static void test_shipped_template_tools(minja::chat_template& t) {
+    const nlohmann::ordered_json messages = nlohmann::ordered_json::array(
+        {nlohmann::ordered_json{{"role", "user"}, {"content", "hello"}}});
+    try {
+        const std::string out = render_raw(t, messages, sample_tools());
+        ok(out.find("<tools>\n") != std::string::npos,
+           "the shipped template emits its tool-schema block");
+        ok(out.find("\"name\": \"get_weather\"") != std::string::npos,
+           "the tool-schema block carries the function name");
+        ok(out.find("\"city\"") != std::string::npos,
+           "the tool-schema block carries the function parameters");
+    } catch (const std::exception& e) {
+        ok(false, std::string("the shipped template renders tool schemas: threw ") + e.what());
+    }
+}
+
+static void test_shipped_template_tool_history(minja::chat_template& t) {
+    const nlohmann::ordered_json messages = sample_tool_history();
+    const std::string response = "<tool_response>\n{\"temp_c\": 21}\n</tool_response>";
+
+    try {
+        const std::string out = render_raw(t, messages);
+        const std::string xml_call =
+            "<tool_call>\n<function=get_weather>\n<"
+            "parameter=city>\nParis\n</"
+            "parameter>\n</function>\n</tool_call>";
+        ok(out.find(xml_call) != std::string::npos,
+           "assistant tool calls render with the template's XML envelope");
+        ok(out.find(response) != std::string::npos,
+           "tool results render with the template's response envelope");
+    } catch (const std::exception& e) {
+        ok(false, std::string("the shipped template renders XML tool history: threw ") + e.what());
+    }
+
+    try {
+        nlohmann::ordered_json extra_context;
+        extra_context["tool_call_format"] = "json";
+        const std::string out = render_raw(t, messages, nlohmann::ordered_json(), extra_context);
+        const std::string json_call =
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        ok(out.find(json_call) != std::string::npos,
+           "assistant tool calls render with the template's JSON envelope");
+        ok(out.find(response) != std::string::npos,
+           "JSON tool-call mode preserves tool responses");
+    } catch (const std::exception& e) {
+        ok(false, std::string("the shipped template renders JSON tool history: threw ") + e.what());
+    }
+}
+
 static void test_shipped_template(const std::string& path) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) {
@@ -128,13 +233,24 @@ static void test_shipped_template(const std::string& path) {
     size_t n;
     while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) tmpl.append(buf, n);
     std::fclose(f);
+
     try {
-        const std::string out = render(tmpl, "hello", false);
-        ok(!out.empty(), "the shipped template renders an ordinary request");
-        ok(out.find("hello") != std::string::npos, "the rendered prompt carries the user text");
+        minja::chat_template t(tmpl, "", "");
+        const nlohmann::ordered_json messages = nlohmann::ordered_json::array(
+            {nlohmann::ordered_json{{"role", "user"}, {"content", "hello"}}});
+        try {
+            const std::string out = render_raw(t, messages);
+            ok(!out.empty(), "the shipped template renders an ordinary request");
+            ok(out.find("hello") != std::string::npos, "the rendered prompt carries the user text");
+        } catch (const std::exception& e) {
+            ok(false, std::string("the shipped template renders an ordinary request: threw ") +
+                          e.what());
+        }
+        test_shipped_template_capabilities(t);
+        test_shipped_template_tools(t);
+        test_shipped_template_tool_history(t);
     } catch (const std::exception& e) {
-        ok(false, std::string("the shipped template renders an ordinary request: threw ") +
-                      e.what());
+        ok(false, std::string("the shipped chat template parses: threw ") + e.what());
     }
 }
 

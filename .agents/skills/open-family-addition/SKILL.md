@@ -6,8 +6,25 @@ description: Adding a new open-kernel family (or size) end to end — recipe vs.
 # Adding an open-kernel family
 
 Read `open-kernel-pipeline` first (the one-command path), then `open-gguf-direct`
-if the source is a GGUF. **This file is what neither covers: how to port a new
-family when several of the registry's checkpoints need to change in lockstep.**
+if the source is a GGUF. Start with `oflm dev build-new-family <repo>` (add
+`--dry-run` to see the classification without writing anything). For a
+`would_extend` result the command has already done the mechanical half:
+
+- built a candidate `ModelSpec` from the GGUF's standard keys and picked the
+  nearest checked-in recipe by geometry (layer shape counts much more than
+  headline numbers), then ran `build-new-spec.py` against it;
+- written `build/new-family/<repo>/RESEARCH.md` with the chosen recipe, the
+  tensors/metadata keys it does not explain, and the upstream references;
+- if the recipe could not build the shape, parked the spec in
+  `open_kernels/recipes/candidates/` with the reason and printed that path.
+
+A `would_extend` result is a build to verify, not a wall to work around: most
+new families are "same layer, different constants" and the extension is the
+right answer. **This file is what the pipeline does not cover: how to port a
+family when several of the registry's checkpoints need to change in lockstep,
+or when the numeric gates show the nearest recipe dropped a stage of the
+layer.** The `RESEARCH.md` diff and the numeric gates decide which case you are
+in; do not assume a successful export means correctness.
 
 The worked example is Gemma 4 12B (OPEN-FAMILY-GEMMA4), ported on `feat/gemma4-direct`
 on top of `feat/gguf-direct`. Everything below was built by doing that port, and
@@ -153,3 +170,11 @@ succeed with `OPEN_KERNELS_UNVALIDATED`-built kernels; nobody should call it
 validated until `build-new-spec.py` runs its attn gate and the op gates, and
 the points enter `CATALOGUE`. The local tuple matching an already-validated
 point is **not** sufficient — the knob tuple is separate.
+
+An op with **no per-geometry fixture** (`router`, `moe`) is not a build wall:
+`op-gate.py` reports it as BLOCKED and `build-new-spec.py` carries on to the
+build, attention gate and registration, recording the points in
+`build/attn-gate/<spec>/blocked-points.json`. Those points are validated by the
+whole-layer path, which is the remaining gate before the size is supported. A
+fixture that EXISTS and FAILS is different — that stops the run, because it is
+a real shortfall rather than an absent gate.

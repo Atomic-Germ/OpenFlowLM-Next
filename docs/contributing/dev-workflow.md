@@ -58,6 +58,7 @@ oflm dev env-check
 
 | Command | Purpose | Wraps / notes |
 |---|---|---|
+| `oflm dev build-new-family <repo> [args...]` | Derive geometry from a repo, classify served/would-build/would-extend, run the scriptable stages, install, and (for an unknown architecture) extend the nearest recipe and write a build report | `utilities/build-new-family.py` |
 | `oflm dev build-new-spec [args...]` | Derive/build/gate/catalogue/register a new geometry | `utilities/build-new-spec.py` |
 | `oflm dev probe-sizes [args...]` | Probe GGUF repos for `served/would_build/unreadable/...` | `utilities/probe-family-sizes.py` |
 | `oflm dev export-kernels [args...]` | Export/build open kernel xclbin sets | `utilities/export-kernels.py` |
@@ -67,9 +68,59 @@ oflm dev env-check
 | `oflm dev clean-kernels [--sets]` | Remove kernel export scratch (and optionally `src/xclbins/*`) | `utilities/clean-kernels.py` |
 | `oflm dev env-check` | Show toolchain/environment status | built-in |
 
-Aliases like `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec`, `run-kernel`/`harness`/`run_kernel` are accepted.
+Aliases like `--build-new-family`, `--build-new-spec`, `--probe-sizes`, `--export-kernels`, `--op-gate`, `--clean-specs`, `--env-check`, `new-spec`, `run-kernel`/`harness`/`run_kernel` are accepted.
 
 **Not yet wrapped (use directly as needed):** `utilities/gen-kernel-spec.py`, `utilities/register-spec.py`, `utilities/catalogue-add-point.py`, `utilities/audit-kernel-export.py`, `utilities/clean-kernels.py` options beyond basics, and specialized exports in `open_kernels/` (e.g. `export_whisper_kernels.py`, `export_dit_kernels.py`, `compose_elf.py`) and `open_embedding/` tooling. Wiring more of these into `oflm dev` is incremental as the workflow stabilizes.
+
+---
+
+## Typical workflow: onboard a repo
+
+`build-new-family` is the front door. It reads the weights' geometry (GGUF header
+first; the README `base_model` chain supplies config/tokenizer when a repo has
+none), then classifies the result:
+
+- **served** — a checked-in spec or installed set already covers this kernel
+  geometry **and** the install probe found a loadable GGUF. No new kernels;
+  `oflm add` links the existing set. A geometry hash match alone is not enough:
+  an unloadable quant is reported as `weights_blocked`, not `served`.
+- **would_build** — a known family at a new size. The derived spec is promoted
+  and `build-new-spec.py` runs the full SPEC -> BUILD -> GATE -> CATALOGUE ->
+  REBUILD -> REGISTER pipeline, then `oflm add` installs it.
+- **would_extend** — an architecture no recipe owns. The command reads the
+  model's own GGUF header and tensor table, writes a candidate spec from the
+  standard GGUF keys, scores the checked-in recipes against that geometry (layer
+  shape — experts, attention gate, convs — outweighs headline numbers), and
+  extends the nearest one through the same BUILD/INSTALL path as a known size.
+  `build/new-family/<repo>/RESEARCH.md` records the chosen recipe and the
+  tensors/metadata keys it does not explain, so the numeric gates can be
+  trusted. If the recipe cannot build the shape, the spec is parked in
+  `open_kernels/recipes/candidates/` with the reason and the command reports
+  that path instead of failing. `--family` picks a different recipe. Auxiliary
+  GGUFs (`mmproj-*`, `dspark-*`, `draft-*`, `mtp-*`) are excluded from model
+  selection, so a draft head cannot name the family.
+
+```bash
+# No repo changes: derive, classify, print the exact commands.
+oflm dev build-new-family Qwen/Qwen3-0.6B --dry-run
+
+# Reproduce an existing family end to end (known size => served, no build needed).
+oflm dev build-new-family unsloth/Qwen3.8-27B-GGUF --dry-run
+
+# Onboard a new size and install it.
+oflm dev build-new-family mradermacher/Qwen2.5-7B-Instruct-i1-GGUF
+```
+
+Useful overrides: `--gguf <file>` for a gated/private repo, `--tensor-repo` when
+the base-model guess is wrong, `--spec-name`/`--family` for explicit naming, and
+`--skip-build`/`--skip-install` to stop after a stage. A quant can be named as
+`user/repo:Q4_1`. The command uses `oflm add` (not the deprecated q4nx `oflm
+pack`) for install/link and registration.
+
+Numeric acceptance is not claimed by a successful build. Supply `--cli`,
+`--ref-model` and `--install-dir` to run the layer dump comparison and decode
+gates here; otherwise the required commands are printed as next steps. The
+production bar in `AGENTS.md` still applies.
 
 ---
 

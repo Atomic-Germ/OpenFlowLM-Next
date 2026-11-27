@@ -1,0 +1,30 @@
+{
+  "format": "oflm-open-whisper-kernels-v1",
+  "design": "design.json",
+  "streams": [
+    "conv1",
+    "conv2",
+    "qkv",
+    "o",
+    "fc1",
+    "fc2",
+    "xkv"
+  ],
+  "complete": true,
+  "emulate_bfp16": true,
+  "fa": true,
+  "hf_config_check": {
+    "model_type": "whisper",
+    "d_model": 1280,
+    "encoder_layers": 32,
+    "decoder_layers": 4,
+    "encoder_attention_heads": 20,
+    "decoder_attention_heads": 20,
+    "encoder_ffn_dim": 5120,
+    "decoder_ffn_dim": 5120,
+    "num_mel_bins": 128,
+    "max_source_positions": 1500,
+    "max_target_positions": 448,
+    "vocab_size": 51866
+  }
+}

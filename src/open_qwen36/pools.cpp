@@ -233,13 +233,14 @@ const uint8_t* q4_source(const WeightFile& m, const std::string& name, size_t ch
 void gguf_chunk(const GgufFile& g, const std::string& name, const GgufFile::TensorInfo& t,
                 size_t row0, size_t blk0, size_t rows, size_t in_dim, size_t ch, double fold,
                 std::vector<float>& rd, uint8_t* d) {
-    const bool kq = fold != 1.0 || t.type == GgufFile::Type::Q5_0 || t.type == GgufFile::Type::Q5_1 ||
+    const bool kq = fold != 1.0 || t.type == GgufFile::Type::Q2_0 ||
+                    t.type == GgufFile::Type::Q5_0 || t.type == GgufFile::Type::Q5_1 ||
                     t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
                     t.type == GgufFile::Type::Q5_K || t.type == GgufFile::Type::Q6_K ||
                     t.type == GgufFile::Type::IQ4_NL || t.type == GgufFile::Type::IQ4_XS;
     if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
         fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-             "requantizes Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS "
+             "requantizes Q2_0/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS "
              "(convert the others with q4nx-build)");
     if (ch != Q4_CHUNK && ch != GGUF_CHUNK)
         fail(name + ": pool chunk " + std::to_string(ch) +
@@ -775,13 +776,14 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // a raw GGUF is not). Scaling needs the decoded values, so it forces the
         // requant path even for a Q4_0/Q4_1 source.
         const bool fold = op.fold != 1.0;
-        const bool kq = fold || t.type == GgufFile::Type::Q5_0 || t.type == GgufFile::Type::Q5_1 ||
+        const bool kq = fold || t.type == GgufFile::Type::Q2_0 ||
+                        t.type == GgufFile::Type::Q5_0 || t.type == GgufFile::Type::Q5_1 ||
                         t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
                         t.type == GgufFile::Type::Q5_K || t.type == GgufFile::Type::Q6_K ||
                         t.type == GgufFile::Type::IQ4_NL || t.type == GgufFile::Type::IQ4_XS;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
             fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-                 "requantizes Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS "
+                 "requantizes Q2_0/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/IQ4_NL/IQ4_XS "
                  "(convert the others with q4nx-build)");
         // Which chunk law the POOL wants (m.chunk_bytes): the GGUF-direct twin
         // widens the block scales exactly to f32 (planes of 1024 B, codes at

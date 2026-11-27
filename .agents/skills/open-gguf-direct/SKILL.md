@@ -63,10 +63,71 @@ quantization steps the weights take on the way in:
   measured cos 0.75 against 0.993 for Q4_1: still coherent, but two lossy
   steps where one would do.
 
+`oflm add` does NOT convert the weights: it keeps the chosen GGUF as
+`model.gguf`. The re-quant to the q4_1 pool happens at **load time**, when
+`oflm run` / `oflm serve` builds the engine. Q4_1 is near-instant; the further
+the source is from it, the longer every load takes. So the preference order is
+also a load-time ranking, not just an accuracy one.
+
 Anything else (F16, BF16, Q2_K, Q3_K, Q5_0, `*_4_4` layouts, …) is refused at
 install with the quant named. `:QUANT` on the repo argument pins one file; the
 quant must run to the end of the stem, because `Q4_0_4_4` is a different
 tensor layout, not Q4_0.
+
+### Q2_0 / ternary models (Bonsai)
+
+The Bonsai ternary family has three packings of the SAME weights. Only one is
+a standard llama.cpp type:
+
+| file | file_type | tensor type | status |
+|---|---|---|---|
+| `...-Q2_0.gguf` | 41 | **42 = GGML_TYPE_Q2_0** | standard type; upstream llama.cpp b11556+ |
+| `...-PQ2_0.gguf` | 141 | **142** | Prism fork-only custom type |
+| `...-PTQ1_0.gguf` | 143 | **143** | Prism fork-only custom type |
+
+`GGML_TYPE_NAMES` here stops at 33, so even the standard Q2_0 file reads as
+"unknown tensor type [42]" until 41/42 are added. The dequantizer is tiny
+(`../llama.cpp/ggml/src/ggml-quants.c:dequantize_row_q2_0`): blocks of
+`QK2_0 = 64`, an fp16 scale `d`, and 16 bytes of 2-bit codes
+`00=-1, 01=0, 10=+1, 11=+2`, each multiplied by `d`. Weights are a blockwise
+Hadamard rotation folded into the stored values; the runtime applies the
+matching transform to activations (`prism.hadamard.version = 2`).
+
+Two ways to support it:
+
+1. **Expand at load (recommended first).** Add type 42 to `GGML_TYPE_NAMES` /
+   `GGUF_ENGINE_TYPES` and a `std_perm_gguf` branch that dequantizes Q2_0 rows
+   to f32, then hands them to the existing `requant_q4_1_chunks` path. No new
+   kernels or catalogue points; same pattern as Q6_K/Q4_K/IQ4. First load pays
+   the host-side expansion once (like a `.npue` build), then stock q4_1
+   kernels run.
+2. **Ingest natively.** A new `GgufFile::Type` and pool layout with ternary
+   kernels doing the Hadamard-domain GEMM. Only worth it to keep the 2-bit
+   density at runtime; it is a full kernel project.
+
+PQ2_0/PTQ1_0 need the Prism fork's decode law (types 142/143 have no upstream
+definition), so they are a separate, larger task. Do NOT conflate 141/142 with
+llama.cpp's 41/42.
+
+**Does option B (native 2-bit ingest) help?** Not enough to justify it first:
+
+- **Quality: no gain.** Q2_0 has only 4 levels per 64 weights; q4_1 has 16
+  levels per 32 with independent min/max, so the Q2_0 values are a strict
+  subset. Expansion is lossless relative to the source, and native ingest
+  cannot recover information that is not there.
+- **Speed: at most a bandwidth win.** Decode GEMV is bandwidth-bound, so
+  halving weight bytes *could* nearly double throughput. But the NPU's MMAC
+  is bf16 with no 2-bit datapath, and the Hadamard-domain weights require
+  applying a transform to activations at runtime (Prism's CUDA/Metal kernels
+  do this natively; ours would need new kernels and catalogue points). The
+  realistic speedup is smaller than 2x and costs a full kernel project.
+- **Where the expansion happens is free to choose.** Both options can do it
+  at first load, matching the existing `.npue` and q4_1-requant pattern. B
+  only changes whether the dequantized values are repacked as q4_1 or fed to
+  a new 2-bit kernel.
+
+So A first. Revisit B only if measured bandwidth shows q4_1 streaming is the
+bottleneck and the 2-bit NPU design is feasible.
 
 For **NpuEmbeddings** GGUF (`bert` / `nomic-bert`) the preference is
 `NPUE_GGUF_PREFERENCE = ["Q8_0", "F16", "BF16", "F32", "Q6_K", "Q5_K", "Q4_K",
@@ -137,6 +198,11 @@ Everything else is refused at pack time, pointing at `q4nx-build`.
 
 ## Embedding GGUF (two different paths)
 
+Both paths are served with `oflm serve -e 1` (the `-e`/`--embed` flag reserves
+the embedding model in the server process; it can run alongside `-a 1` Whisper
+and a chat model). Embedding GGUFs ARE first-class GGUF installs — `oflm add
+ggml-org/embeddinggemma-300M-GGUF` installs one exactly like a chat model.
+
 - **`embed-gemma`** (`EMBEDDING_FAMILIES`) loads through the existing bf16
   matmul kernels; the engine reads `model.gguf` and dequantizes. It needs no
   `gguf` manifest section. Its design set is
@@ -148,6 +214,15 @@ Everything else is refused at pack time, pointing at `q4nx-build`.
   `<dir>/<dir-name>.npue`. The staging directory is removed afterwards. The
   packers still read a HuggingFace checkpoint; the adapter is the fork-owned
   bridge, and nothing under `src/open_npue/` is modified.
+
+  First load is a one-time build, not a stall: the log names what it is doing
+  (`no container yet -- packing one from the GGUF`, `staged the GGUF as a
+  197-tensor F32 checkpoint`, `packed N tensors, M MB of tensor data`). The
+  resulting design is logged too — one xclbin with batched tiers, bfp16-emulated
+  MMAC, host-side gelu/softmax/layernorm, and weights staged on device once.
+  Later loads use the `.npue` directly. This is the same principle as the q4_1
+  re-quant: `oflm add` keeps the GGUF, and the expensive conversion happens at
+  first load, not at install.
 - `gte-multilingual` has no llama.cpp GGUF; it installs as safetensors.
 - A repo that ships **both** safetensors and a GGUF keeps the safetensors:
   that is the packers' native input, and the GGUF is a lossy re-encoding.

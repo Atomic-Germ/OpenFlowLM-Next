@@ -176,6 +176,11 @@ void print_help() {
         << "Usage: oflm dev <command> [args...]\n\n"
         << "Developer/toolchain workflows for OpenFlowLM (source/build environments).\n\n"
         << "Commands:\n"
+        << "  build-new-family <repo>    Onboard a repo: derive geometry, classify, build a\n"
+        << "                             known family's size, install, and print the evidence plan\n"
+        << "                             (wraps utilities/build-new-family.py)\n"
+        << "      e.g. oflm dev build-new-family Qwen/Qwen3-0.6B --dry-run\n"
+        << "           oflm dev build-new-family unsloth/Qwen3.8-27B-GGUF --skip-install\n"
         << "  build-new-spec [args...]   Build and validate a new kernel spec/geometry\n"
         << "                             (wraps utilities/build-new-spec.py)\n"
         << "      e.g. oflm dev build-new-spec --repo mradermacher/Qwen2.5-1.5B-Instruct-i1-GGUF\n"
@@ -198,11 +203,14 @@ void print_help() {
         << "  clean-kernels [--sets]     Remove kernel export scratch (and optionally exported sets)\n"
         << "  env-check                  Show toolchain/environment status\n"
         << "  help                       Show this help\n\n"
-        << "Aliases accepted: --build-new-spec, --probe-sizes, --export-kernels, --op-gate,\n"
-        << "                  --clean-specs, --env-check, new-spec, run-kernel, harness, run_kernel.\n\n"
+        << "Aliases accepted: --build-new-family, --build-new-spec, --probe-sizes,\n"
+        << "                  --export-kernels, --op-gate, --clean-specs, --env-check, new-spec,\n"
+        << "                  run-kernel, harness, run_kernel.\n\n"
         << "Notes:\n"
         << "  - Geometry is the identity: new sizes of supported families are specs + builds,\n"
         << "    not new kernel code. `build-new-spec` runs SPEC->BUILD->GATE->CATALOGUE->REBUILD->REGISTER.\n"
+        << "  - `build-new-family` is the front door: for an architecture no recipe owns it\n"
+        << "    extends the nearest recipe by geometry and writes a build report.\n"
         << "  - GATE/validation needs NPU hardware; compilation needs XRT + mlir-aie/Peano.\n"
         << "  - In source trees, `cmake --workflow --preset linux-default` or `source utilities/env.sh`\n"
         << "    prepares the toolchain. From packages, install openflowlm-devel/openflowlm-dev.\n"
@@ -377,6 +385,9 @@ int run(int argc, char* argv[]) {
 
     const fs::path repo = find_repo_root();
 
+    if (cmd == "build-new-family") {
+        return run_script(repo, "utilities/build-new-family.py", argc - 1, argv + 1, true);
+    }
     if (cmd == "build-new-spec" || cmd == "new-spec") {
         return run_script(repo, "utilities/build-new-spec.py", argc - 1, argv + 1, true);
     }

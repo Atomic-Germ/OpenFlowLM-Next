@@ -1,0 +1,84 @@
+{
+  "xrt-kernels": [
+    {
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/empty_0.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/main.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/conv.pdi",
+          "id": 3
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/npu_insts_full_elf_main_cfg_conv.bin",
+          "id": "cfg_conv"
+        }
+      ],
+      "name": "main"
+    },
+    {
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/empty_0.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/main.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/conv.pdi",
+          "id": 3
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae1024_conv06/prj/npu_insts_full_elf_conv_vae1024_conv06.bin",
+          "id": "vae1024_conv06"
+        }
+      ],
+      "name": "conv"
+    }
+  ]
+}

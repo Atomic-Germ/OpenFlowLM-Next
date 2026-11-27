@@ -536,18 +536,20 @@ static int print_quick_start() {
     std::cout << "New here? These are the steps:\n\n"
               << "  oflm add <huggingface-repo>   install a model and register it\n"
               << "                                 e.g. oflm add Atomic-Germ/Gemma-4-12B-it-i1-GGUF\n"
-              << "  oflm list                    see what this machine can run\n"
-              << "  oflm run <tag>               chat with it\n"
-              << "  oflm serve <tag>             OpenAI-compatible server (127.0.0.1:52625)\n"
-              << "  oflm serve -a 1              also load Whisper for transcription\n\n";
+              << "  oflm list                    lists installed models\n"
+              << "  oflm run <tag>               chat directly in the cli\n"
+              << "  oflm serve <tag>             OpenAI-compatible server (http://localhost:52625)\n"
+              << "  oflm serve -a 1              also load Whisper for transcription\n"
+              << "  oflm serve -e 1              also load an embedding model\n\n";
     std::cout << "Good first installs (open, and run on the NPU):\n"
               << "  Gemma 4 12B:       oflm add Atomic-Germ/Gemma-4-12B-it-i1-GGUF\n"
               << "  Whisper large-v3:  oflm add oxide-lab/whisper-large-v3-turbo-GGUF\n"
               << "  EmbeddingGemma:    oflm add ggml-org/embeddinggemma-300M-GGUF\n\n";
-    std::cout << "`oflm pull <tag>` downloads the small curated upstream set; `oflm add`\n"
-              << "installs anything GGUF or OpenNPU2 that matches an open-kernel geometry,\n"
-              << "including fine-tunes and community quants. An unknown tag is a\n"
-              << "refusal with instructions, never a silent substitute.\n\n";
+    std::cout << "`oflm add <repo>` is the canonical installer: any GGUF repo of a\n"
+              << "supported family, including fine-tunes and community quants, installs\n"
+              << "directly with no conversion and no pre-approved entry. `oflm pull <tag>`\n"
+              << "is the legacy curated-set path kept for the shipped collection; it does\n"
+              << "not apply to models installed with `oflm add`.\n\n";
 
     // The breadth, from the kernel tree this build actually ships -- the same
     // roots `oflm add` links from. The manifest's own family string groups

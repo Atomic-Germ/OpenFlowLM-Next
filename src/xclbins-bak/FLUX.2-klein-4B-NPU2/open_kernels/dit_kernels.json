@@ -1,0 +1,275 @@
+{
+  "family": "FLUX.2-klein-4B-NPU2",
+  "kernel": "dit_gemm",
+  "a": "bf16 [M, K] row-major",
+  "b": "bfp16ebs8, open_kernels/designs/dit_gemm/pack.py pack_b",
+  "c": "bf16 [M, N] row-major",
+  "resolutions": [
+    512,
+    1024
+  ],
+  "edits": [],
+  "streams": {
+    "txt_qkv": {
+      "M": 512,
+      "K": 3072,
+      "N": 9216,
+      "role": "double.text.qkv"
+    },
+    "txt_out": {
+      "M": 512,
+      "K": 3072,
+      "N": 3072,
+      "role": "double.text.out"
+    },
+    "txt_ffin": {
+      "M": 512,
+      "K": 3072,
+      "N": 18432,
+      "layout": {
+        "epi": {
+          "first_cb": 0
+        }
+      },
+      "role": "double.text.ff_in"
+    },
+    "txt_ffout": {
+      "M": 512,
+      "K": 9216,
+      "N": 3072,
+      "layout": {
+        "a_gather": true
+      },
+      "role": "double.text.ff_out"
+    },
+    "r512_img_qkv": {
+      "M": 1024,
+      "K": 3072,
+      "N": 9216,
+      "role": "double.image.qkv"
+    },
+    "r512_img_out": {
+      "M": 1024,
+      "K": 3072,
+      "N": 3072,
+      "role": "double.image.out"
+    },
+    "r512_img_ffin": {
+      "M": 1024,
+      "K": 3072,
+      "N": 18432,
+      "layout": {
+        "epi": {
+          "first_cb": 0
+        }
+      },
+      "role": "double.image.ff_in"
+    },
+    "r512_img_ffout": {
+      "M": 1024,
+      "K": 9216,
+      "N": 3072,
+      "layout": {
+        "a_gather": true
+      },
+      "role": "double.image.ff_out"
+    },
+    "r512_sgl_in": {
+      "M": 1536,
+      "K": 3072,
+      "N": 27648,
+      "role": "single.qkv_mlp_in",
+      "layout": {
+        "ldc": 33792,
+        "epi": {
+          "first_cb": 9,
+          "gap": 6144
+        }
+      }
+    },
+    "r512_sgl_out": {
+      "M": 1536,
+      "K": 12288,
+      "N": 3072,
+      "role": "single.out",
+      "layout": {
+        "a_gather": true,
+        "a_col": 9216,
+        "lda": 33792,
+        "a_size": 51904512
+      }
+    },
+    "r1024_img_qkv": {
+      "M": 4096,
+      "K": 3072,
+      "N": 9216,
+      "role": "double.image.qkv"
+    },
+    "r1024_img_out": {
+      "M": 4096,
+      "K": 3072,
+      "N": 3072,
+      "role": "double.image.out"
+    },
+    "r1024_img_ffin": {
+      "M": 4096,
+      "K": 3072,
+      "N": 18432,
+      "layout": {
+        "epi": {
+          "first_cb": 0
+        }
+      },
+      "role": "double.image.ff_in"
+    },
+    "r1024_img_ffout": {
+      "M": 4096,
+      "K": 9216,
+      "N": 3072,
+      "layout": {
+        "a_gather": true
+      },
+      "role": "double.image.ff_out"
+    },
+    "r1024_sgl_in": {
+      "M": 4608,
+      "K": 3072,
+      "N": 27648,
+      "role": "single.qkv_mlp_in",
+      "layout": {
+        "ldc": 33792,
+        "epi": {
+          "first_cb": 9,
+          "gap": 6144
+        }
+      }
+    },
+    "r1024_sgl_out": {
+      "M": 4608,
+      "K": 12288,
+      "N": 3072,
+      "role": "single.out",
+      "layout": {
+        "a_gather": true,
+        "a_col": 9216,
+        "lda": 33792,
+        "a_size": 155713536
+      }
+    },
+    "r512_x_emb": {
+      "M": 1024,
+      "K": 512,
+      "N": 3072,
+      "layout": {
+        "lda": 128,
+        "a_size": 131584
+      },
+      "role": "x_embedder (K 128 -> 512)"
+    },
+    "r512_proj_out": {
+      "M": 1024,
+      "K": 3072,
+      "N": 1024,
+      "role": "proj_out (N 128 -> 1024)"
+    },
+    "r1024_x_emb": {
+      "M": 4096,
+      "K": 512,
+      "N": 3072,
+      "layout": {
+        "lda": 128,
+        "a_size": 524800
+      },
+      "role": "x_embedder (K 128 -> 512)"
+    },
+    "r1024_proj_out": {
+      "M": 4096,
+      "K": 3072,
+      "N": 1024,
+      "role": "proj_out (N 128 -> 1024)"
+    },
+    "t_emb1": {
+      "M": 512,
+      "K": 512,
+      "N": 3072,
+      "layout": {
+        "lda": 256,
+        "a_size": 131584
+      },
+      "role": "timestep_embedder.linear_1 (K 256 -> 512; M = steps, padded)"
+    },
+    "t_emb2": {
+      "M": 512,
+      "K": 3072,
+      "N": 3072,
+      "role": "timestep_embedder.linear_2"
+    },
+    "mod": {
+      "M": 512,
+      "K": 3072,
+      "N": 184320,
+      "role": "modulation, all steps (M = steps padded)"
+    },
+    "ctx_emb": {
+      "M": 512,
+      "K": 7680,
+      "N": 3072,
+      "layout": {
+        "lda": 8192,
+        "a_size": 4194304
+      },
+      "role": "context_embedder (CTX row stride 8192)"
+    },
+    "te_qkv": {
+      "M": 512,
+      "K": 2560,
+      "N": 6144,
+      "layout": {
+        "lda": 3072,
+        "a_size": 1572864
+      },
+      "role": "text_encoder.qkv"
+    },
+    "te_o": {
+      "M": 512,
+      "K": 4096,
+      "N": 3072,
+      "role": "text_encoder.o"
+    },
+    "te_gu": {
+      "M": 512,
+      "K": 2560,
+      "N": 19456,
+      "layout": {
+        "lda": 3072,
+        "a_size": 1572864,
+        "epi": {
+          "first_cb": 0
+        }
+      },
+      "role": "text_encoder.gate_up"
+    },
+    "te_down": {
+      "M": 512,
+      "K": 9728,
+      "N": 3072,
+      "layout": {
+        "a_gather": true
+      },
+      "role": "text_encoder.down"
+    },
+    "vae512_gemm00": {
+      "M": 4096,
+      "K": 1024,
+      "N": 2048,
+      "role": "vae.attention.qkv"
+    },
+    "vae1024_gemm00": {
+      "M": 16384,
+      "K": 1024,
+      "N": 2048,
+      "role": "vae.attention.qkv"
+    }
+  },
+  "complete": true
+}

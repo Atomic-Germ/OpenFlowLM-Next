@@ -105,7 +105,7 @@ class Gguf:
                 raise SystemExit(
                     f"{self.path}: {name} is {ty} ({'a K-quant' if ty in range(10, 16) else 'unsupported'}). "
                     "This reader decodes F32/F16/BF16/Q4_0/Q4_1/Q8_0 -- use a Q4_1 or BF16 GGUF "
-                    "(Q4_1 is what the rest of the tree runs), or convert with q4nx-build.")
+                    "(Q4_1 is what the rest of the tree runs), or convert with `oflm pack`.")
             self.tensors[name] = (TYPES[ty], dims, off)
         align = int(self.kv.get("general.alignment", 32))
         self.data_base = p + ((align - p % align) % align)

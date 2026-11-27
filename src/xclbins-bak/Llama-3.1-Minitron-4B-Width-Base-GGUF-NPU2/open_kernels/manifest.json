@@ -1,0 +1,1298 @@
+{
+ "manifest_version": 1,
+ "family": "llama3",
+ "spec": {
+  "family": "llama3",
+  "hidden": 3072,
+  "num_layers": 32,
+  "layer_types": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "vocab": 128256,
+  "real_vocab": 128256,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 128,
+  "rotary_dim": 128,
+  "rope_theta": 500000.0,
+  "rope_scaling": null,
+  "rope_local_theta": 0.0,
+  "sliding_window": 0,
+  "qk_norm": false,
+  "attn_gate": false,
+  "lin_key_heads": 0,
+  "lin_value_heads": 0,
+  "lin_key_dim": 0,
+  "lin_value_dim": 0,
+  "conv_kernel": 0,
+  "intermediate": 9216,
+  "activation": "silu",
+  "sandwich_norms": false,
+  "num_experts": 0,
+  "experts_per_tok": 0,
+  "moe_intermediate": 0,
+  "shared_expert_intermediate": 0,
+  "norm_eps": 9.999999747378752e-06,
+  "quant": "q4_1",
+  "extra": {
+   "architecture": "llama",
+   "source": "gguf",
+   "model": "Llama-3.1-Minitron-4B-Width-Base-GGUF-NPU2"
+  }
+ },
+ "spec_hash": "sha256:6f459218194ac1cc34f284b0a3544fee0fd0352aa329adafa59a6b7d566b941d",
+ "build_key": "sha256:d00270f50c54c4aaf2f2a75172479a71388d0bd0dbe80079b57bf930b3a025d9",
+ "max_ctx_default": 4096,
+ "hf_config_check": {
+  "model_type": [
+   "llama"
+  ],
+  "hidden_size": 3072,
+  "num_hidden_layers": 32,
+  "vocab_size": 128256,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "intermediate_size": 9216
+ },
+ "hf_config_defaults": {},
+ "layout": {
+  "hidden": 3072,
+  "vocab": 128256,
+  "real_vocab": 128256,
+  "chunk_bytes": 5120,
+  "pool_bytes": 73400320,
+  "lmhead_pool_bytes": 247463936,
+  "kv_row": 4096,
+  "ptab_row": 2048,
+  "rotary_dim": 128,
+  "rope_theta": 500000.0,
+  "rope_inv_freq": [
+   1.0,
+   0.8146172338565447,
+   0.6636012376960885,
+   0.540581004635767,
+   0.44036660267178046,
+   0.3587302237512899,
+   0.2922278225730151,
+   0.23805382048035073,
+   0.19392274474868576,
+   0.1579728099090432,
+   0.12868737343265052,
+   0.10483095217796996,
+   0.08539710028576561,
+   0.06956594961416032,
+   0.05666962144529105,
+   0.04616405026546052,
+   0.03760603093086393,
+   0.030634520893224042,
+   0.024955408670558694,
+   0.020329105980970152,
+   0.016560440080994446,
+   0.013490419890226748,
+   0.010989528534539826,
+   0.0089522593361944,
+   0.007292664737217109,
+   0.005940730375674967,
+   0.004839421345719893,
+   0.003942276030116656,
+   0.003211445994752591,
+   0.0026160992529250353,
+   0.0021311195369119653,
+   0.0017360467021768657,
+   0.001414213562373095,
+   0.0011520427402627808,
+   0.0009384738703573802,
+   0.0007644969883171747,
+   0.000622772421914596,
+   0.0005073211476622092,
+   0.0004132725499855165,
+   0.00033665894149804206,
+   0.0002742481756762073,
+   0.00022340729025955574,
+   0.00018199142881462546,
+   0.00014825335432657046,
+   0.00012076973741146504,
+   9.838110942370891e-05,
+   8.01429472224798e-05,
+   6.528582597948755e-05,
+   5.318295896944988e-05,
+   4.3323754923999376e-05,
+   3.529227739646723e-05,
+   2.8749697389207996e-05,
+   2.341999896140934e-05,
+   1.9078334770866426e-05,
+   1.5541540297632344e-05,
+   1.266040656712728e-05,
+   1.031338537721246e-05,
+   8.40146146768135e-06,
+   6.8439753011549275e-06,
+   5.575220228409339e-06,
+   4.5416704806078695e-06,
+   3.699723044000707e-06,
+   3.013858152139171e-06,
+   2.455140791131609e-06
+  ],
+  "rope_pairing": "interleaved"
+ },
+ "layers": [
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense"
+ ],
+ "contexts": {
+  "dx": "dx/final.xclbin",
+  "ln": "ln/final.xclbin",
+  "lm": "lm_head_q4/final.xclbin",
+  "dxa": "dx_attn/final.xclbin",
+  "gemm": "gemm_n3072_k4096/final.xclbin"
+ },
+ "kernels": {
+  "ln": {
+   "context": "ln",
+   "insts": "ln/insts.bin",
+   "build": "ln"
+  },
+  "lm": {
+   "context": "lm",
+   "insts": "lm_head_q4/insts.bin",
+   "build": "lm_head_q4"
+  },
+  "dx": {
+   "context": "dx",
+   "insts": "dx/insts.bin",
+   "patch": "attnpos",
+   "build": "dx",
+   "window": 0
+  },
+  "dxB": {
+   "context": "dxa",
+   "insts": "dx_attn/insts.bin",
+   "patch": "attnpos",
+   "build": "dx_attn",
+   "window": 0
+  },
+  "gemm_n3072_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n3072_k4096/insts.bin",
+   "build": "gemm_n3072_k4096"
+  },
+  "gemm_n3072_k9216": {
+   "context": "gemm",
+   "insts": "gemm_n3072_k9216/insts.bin",
+   "build": "gemm_n3072_k9216"
+  },
+  "gemm_n6144_k3072": {
+   "context": "gemm",
+   "insts": "gemm_n6144_k3072/insts.bin",
+   "build": "gemm_n6144_k3072"
+  },
+  "gemm_n9216_k3072": {
+   "context": "gemm",
+   "insts": "gemm_n9216_k3072/insts.bin",
+   "build": "gemm_n9216_k3072"
+  }
+ },
+ "layer_types": {
+  "dense": {
+   "buffers": {
+    "consts": 16384,
+    "act": 155648,
+    "state": {
+     "kind": "kv",
+     "row": 4096
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "dx",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ]
+    }
+   ],
+   "gemm_block": {
+    "kind": "dense",
+    "t": 256,
+    "eps": 9.999999747378752e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n6144_k3072",
+      "args": [
+       "gqkv3_w",
+       "gemm_x_k3072",
+       "gemm_y_n6144"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n3072_k4096",
+      "args": [
+       "go_w",
+       "gemm_x_k4096",
+       "gemm_y_n3072"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n9216_k3072",
+      "args": [
+       "ggate_w",
+       "gemm_x_k3072",
+       "gemm_y_n9216"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n9216_k3072",
+      "args": [
+       "gup_w",
+       "gemm_x_k3072",
+       "gemm_y_n9216"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n3072_k9216",
+      "args": [
+       "gdown_w",
+       "gemm_x_k9216",
+       "gemm_y_n3072"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkv3_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1,
+       2
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       3
+      ]
+     },
+     "ggate_w": {
+      "from": "pool",
+      "ops": [
+       5
+      ]
+     },
+     "gup_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     },
+     "gdown_w": {
+      "from": "pool",
+      "ops": [
+       6
+      ]
+     }
+    },
+    "qw": 4096,
+    "kvw": 1024,
+    "ff": 9216,
+    "ad_q": 8192,
+    "ad_kvn": 24576,
+    "ad_og": 32768,
+    "attn_kernel": "dxB",
+    "attn_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "sandwich": false,
+    "act": "silu",
+    "norm_groups": 1
+   },
+   "pack": {
+    "pool": [
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+      "dst": 0,
+      "nch": 1536,
+      "in_dim": 3072
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+      "dst": 7864320,
+      "nch": 384,
+      "in_dim": 3072
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+      "dst": 9830400,
+      "nch": 384,
+      "in_dim": 3072
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+      "dst": 11796480,
+      "nch": 1536,
+      "in_dim": 4096
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.up_proj.weight",
+      "dst": 19660800,
+      "nch": 3456,
+      "in_dim": 3072
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+      "dst": 37355520,
+      "nch": 3456,
+      "in_dim": 3072
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.down_proj.weight",
+      "dst": 55050240,
+      "nch": 3456,
+      "in_dim": 9216
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 6144
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+      "dst": 6144,
+      "cap": 6144
+     }
+    ]
+   }
+  }
+ },
+ "tail": [
+  {
+   "op": "run",
+   "kernel": "ln",
+   "args": [
+    "xres",
+    "zero",
+    "normw",
+    "xresf",
+    "hn"
+   ]
+  },
+  {
+   "op": "run",
+   "kernel": "lm",
+   "args": [
+    "lmpool",
+    "hn",
+    "logits"
+   ]
+  }
+ ],
+ "globals": {
+  "xres": 12288,
+  "zero": 12288,
+  "normw": 6144,
+  "xresf": 12288,
+  "hn": 6144,
+  "logits": 513024,
+  "lmpool": 247463936,
+  "ptab": {
+   "per_row": 2048,
+   "inv_freq": [
+    1.0,
+    0.8146172338565447,
+    0.6636012376960885,
+    0.540581004635767,
+    0.44036660267178046,
+    0.3587302237512899,
+    0.2922278225730151,
+    0.23805382048035073,
+    0.19392274474868576,
+    0.1579728099090432,
+    0.12868737343265052,
+    0.10483095217796996,
+    0.08539710028576561,
+    0.06956594961416032,
+    0.05666962144529105,
+    0.04616405026546052,
+    0.03760603093086393,
+    0.030634520893224042,
+    0.024955408670558694,
+    0.020329105980970152,
+    0.016560440080994446,
+    0.013490419890226748,
+    0.010989528534539826,
+    0.0089522593361944,
+    0.007292664737217109,
+    0.005940730375674967,
+    0.004839421345719893,
+    0.003942276030116656,
+    0.003211445994752591,
+    0.0026160992529250353,
+    0.0021311195369119653,
+    0.0017360467021768657,
+    0.001414213562373095,
+    0.0011520427402627808,
+    0.0009384738703573802,
+    0.0007644969883171747,
+    0.000622772421914596,
+    0.0005073211476622092,
+    0.0004132725499855165,
+    0.00033665894149804206,
+    0.0002742481756762073,
+    0.00022340729025955574,
+    0.00018199142881462546,
+    0.00014825335432657046,
+    0.00012076973741146504,
+    9.838110942370891e-05,
+    8.01429472224798e-05,
+    6.528582597948755e-05,
+    5.318295896944988e-05,
+    4.3323754923999376e-05,
+    3.529227739646723e-05,
+    2.8749697389207996e-05,
+    2.341999896140934e-05,
+    1.9078334770866426e-05,
+    1.5541540297632344e-05,
+    1.266040656712728e-05,
+    1.031338537721246e-05,
+    8.40146146768135e-06,
+    6.8439753011549275e-06,
+    5.575220228409339e-06,
+    4.5416704806078695e-06,
+    3.699723044000707e-06,
+    3.013858152139171e-06,
+    2.455140791131609e-06
+   ],
+   "window": 0
+  },
+  "gact": 39845888,
+  "gemm_x_k4096": 2097152,
+  "gemm_y_n3072": 3145728,
+  "gemm_x_k9216": 4718592,
+  "gemm_x_k3072": 1572864,
+  "gemm_y_n6144": 6291456,
+  "gemm_y_n9216": 9437184
+ },
+ "builds": {
+  "dx": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_llama3_h3072",
+   "env": {}
+  },
+  "ln": {
+   "design": "ln/ln.py",
+   "build_dir": "ln/build_3072_1e-05",
+   "env": {
+    "LN_N": "3072",
+    "LN_EPS": "1e-05"
+   }
+  },
+  "lm_head_q4": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_128256",
+   "env": {
+    "LMHEAD_N": "128256",
+    "LMHEAD_K": "3072",
+    "LMHEAD_CORES": "8"
+   }
+  },
+  "dx_attn": {
+   "design": "dense/dx_attn.py",
+   "build_dir": "dense/build_dxa_llama3_h3072",
+   "env": {}
+  },
+  "gemm_n3072_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n3072_k4096_t256",
+   "env": {
+    "GQP_N": "3072",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n3072_k9216": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n3072_k9216_t256",
+   "env": {
+    "GQP_N": "3072",
+    "GQP_K": "9216",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n6144_k3072": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n6144_k3072_t256",
+   "env": {
+    "GQP_N": "6144",
+    "GQP_K": "3072",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n9216_k3072": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n9216_k3072_t256",
+   "env": {
+    "GQP_N": "9216",
+    "GQP_K": "3072",
+    "GQP_T": "256"
+   }
+  }
+ },
+ "pack": {
+  "pool_bytes": 73400320,
+  "chunk_bytes": 5120,
+  "lm_head": {
+   "pool_bytes": 247463936,
+   "ops": [
+    {
+     "op": "std_perm",
+     "tensor": "lm_head.weight",
+     "dst": 0,
+     "nch": 48096,
+     "in_dim": 3072
+    }
+   ]
+  },
+  "embed": {
+   "tensor": "model.embed_tokens.weight",
+   "dim": 3072
+  },
+  "norm": {
+   "tensor": "model.norm.weight",
+   "bytes": 6144
+  }
+ },
+ "gguf": {
+  "manifest_version": 1,
+  "family": "llama3",
+  "spec": {
+   "family": "llama3",
+   "hidden": 3072,
+   "num_layers": 32,
+   "layer_types": [
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense"
+   ],
+   "vocab": 128256,
+   "real_vocab": 128256,
+   "num_heads": 32,
+   "num_kv_heads": 8,
+   "head_dim": 128,
+   "rotary_dim": 128,
+   "rope_theta": 500000.0,
+   "rope_scaling": null,
+   "rope_local_theta": 0.0,
+   "sliding_window": 0,
+   "qk_norm": false,
+   "attn_gate": false,
+   "lin_key_heads": 0,
+   "lin_value_heads": 0,
+   "lin_key_dim": 0,
+   "lin_value_dim": 0,
+   "conv_kernel": 0,
+   "intermediate": 9216,
+   "activation": "silu",
+   "sandwich_norms": false,
+   "num_experts": 0,
+   "experts_per_tok": 0,
+   "moe_intermediate": 0,
+   "shared_expert_intermediate": 0,
+   "norm_eps": 9.999999747378752e-06,
+   "quant": "q4_1_gguf",
+   "extra": {
+    "architecture": "llama",
+    "source": "gguf",
+    "model": "Llama-3.1-Minitron-4B-Width-Base-GGUF-NPU2"
+   }
+  },
+  "spec_hash": "sha256:291d392daa6b5c17ad14bd890f39bffd06b01993bf1f1ae30f0342f943633ebf",
+  "build_key": "sha256:d00270f50c54c4aaf2f2a75172479a71388d0bd0dbe80079b57bf930b3a025d9",
+  "max_ctx_default": 4096,
+  "hf_config_check": {
+   "model_type": [
+    "llama"
+   ],
+   "hidden_size": 3072,
+   "num_hidden_layers": 32,
+   "vocab_size": 128256,
+   "num_attention_heads": 32,
+   "num_key_value_heads": 8,
+   "intermediate_size": 9216
+  },
+  "hf_config_defaults": {},
+  "layout": {
+   "hidden": 3072,
+   "vocab": 128256,
+   "real_vocab": 128256,
+   "chunk_bytes": 5120,
+   "pool_bytes": 73400320,
+   "lmhead_pool_bytes": 247463936,
+   "kv_row": 4096,
+   "ptab_row": 2048,
+   "rotary_dim": 128,
+   "rope_theta": 500000.0,
+   "rope_inv_freq": [
+    1.0,
+    0.8146172338565447,
+    0.6636012376960885,
+    0.540581004635767,
+    0.44036660267178046,
+    0.3587302237512899,
+    0.2922278225730151,
+    0.23805382048035073,
+    0.19392274474868576,
+    0.1579728099090432,
+    0.12868737343265052,
+    0.10483095217796996,
+    0.08539710028576561,
+    0.06956594961416032,
+    0.05666962144529105,
+    0.04616405026546052,
+    0.03760603093086393,
+    0.030634520893224042,
+    0.024955408670558694,
+    0.020329105980970152,
+    0.016560440080994446,
+    0.013490419890226748,
+    0.010989528534539826,
+    0.0089522593361944,
+    0.007292664737217109,
+    0.005940730375674967,
+    0.004839421345719893,
+    0.003942276030116656,
+    0.003211445994752591,
+    0.0026160992529250353,
+    0.0021311195369119653,
+    0.0017360467021768657,
+    0.001414213562373095,
+    0.0011520427402627808,
+    0.0009384738703573802,
+    0.0007644969883171747,
+    0.000622772421914596,
+    0.0005073211476622092,
+    0.0004132725499855165,
+    0.00033665894149804206,
+    0.0002742481756762073,
+    0.00022340729025955574,
+    0.00018199142881462546,
+    0.00014825335432657046,
+    0.00012076973741146504,
+    9.838110942370891e-05,
+    8.01429472224798e-05,
+    6.528582597948755e-05,
+    5.318295896944988e-05,
+    4.3323754923999376e-05,
+    3.529227739646723e-05,
+    2.8749697389207996e-05,
+    2.341999896140934e-05,
+    1.9078334770866426e-05,
+    1.5541540297632344e-05,
+    1.266040656712728e-05,
+    1.031338537721246e-05,
+    8.40146146768135e-06,
+    6.8439753011549275e-06,
+    5.575220228409339e-06,
+    4.5416704806078695e-06,
+    3.699723044000707e-06,
+    3.013858152139171e-06,
+    2.455140791131609e-06
+   ],
+   "rope_pairing": "interleaved"
+  },
+  "layers": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "contexts": {
+   "dx": "dx/final.xclbin",
+   "ln": "ln/final.xclbin",
+   "lm": "lm_head_q4/final.xclbin",
+   "dxa": "dx_attn/final.xclbin",
+   "gemm": "gemm_n3072_k4096/final.xclbin"
+  },
+  "kernels": {
+   "ln": {
+    "context": "ln",
+    "insts": "ln/insts.bin",
+    "build": "ln"
+   },
+   "lm": {
+    "context": "lm",
+    "insts": "lm_head_q4/insts.bin",
+    "build": "lm_head_q4"
+   },
+   "dx": {
+    "context": "dx",
+    "insts": "dx/insts.bin",
+    "patch": "attnpos",
+    "build": "dx",
+    "window": 0
+   },
+   "dxB": {
+    "context": "dxa",
+    "insts": "dx_attn/insts.bin",
+    "patch": "attnpos",
+    "build": "dx_attn",
+    "window": 0
+   },
+   "gemm_n3072_k4096": {
+    "context": "gemm",
+    "insts": "gemm_n3072_k4096/insts.bin",
+    "build": "gemm_n3072_k4096"
+   },
+   "gemm_n3072_k9216": {
+    "context": "gemm",
+    "insts": "gemm_n3072_k9216/insts.bin",
+    "build": "gemm_n3072_k9216"
+   },
+   "gemm_n6144_k3072": {
+    "context": "gemm",
+    "insts": "gemm_n6144_k3072/insts.bin",
+    "build": "gemm_n6144_k3072"
+   },
+   "gemm_n9216_k3072": {
+    "context": "gemm",
+    "insts": "gemm_n9216_k3072/insts.bin",
+    "build": "gemm_n9216_k3072"
+   }
+  },
+  "layer_types": {
+   "dense": {
+    "buffers": {
+     "consts": 16384,
+     "act": 155648,
+     "state": {
+      "kind": "kv",
+      "row": 4096
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "dx",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act",
+       "ptab"
+      ]
+     }
+    ],
+    "gemm_block": {
+     "kind": "dense",
+     "t": 256,
+     "eps": 9.999999747378752e-06,
+     "program": [
+      {
+       "op": "run",
+       "kernel": "gemm_n6144_k3072",
+       "args": [
+        "gqkv3_w",
+        "gemm_x_k3072",
+        "gemm_y_n6144"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n3072_k4096",
+       "args": [
+        "go_w",
+        "gemm_x_k4096",
+        "gemm_y_n3072"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n9216_k3072",
+       "args": [
+        "ggate_w",
+        "gemm_x_k3072",
+        "gemm_y_n9216"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n9216_k3072",
+       "args": [
+        "gup_w",
+        "gemm_x_k3072",
+        "gemm_y_n9216"
+       ]
+      },
+      {
+       "op": "run",
+       "kernel": "gemm_n3072_k9216",
+       "args": [
+        "gdown_w",
+        "gemm_x_k9216",
+        "gemm_y_n3072"
+       ]
+      }
+     ],
+     "weights": {
+      "gqkv3_w": {
+       "from": "pool",
+       "ops": [
+        0,
+        1,
+        2
+       ]
+      },
+      "go_w": {
+       "from": "pool",
+       "ops": [
+        3
+       ]
+      },
+      "ggate_w": {
+       "from": "pool",
+       "ops": [
+        5
+       ]
+      },
+      "gup_w": {
+       "from": "pool",
+       "ops": [
+        4
+       ]
+      },
+      "gdown_w": {
+       "from": "pool",
+       "ops": [
+        6
+       ]
+      }
+     },
+     "qw": 4096,
+     "kvw": 1024,
+     "ff": 9216,
+     "ad_q": 8192,
+     "ad_kvn": 24576,
+     "ad_og": 32768,
+     "attn_kernel": "dxB",
+     "attn_args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ],
+     "sandwich": false,
+     "act": "silu",
+     "norm_groups": 1
+    },
+    "pack": {
+     "pool": [
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+       "dst": 0,
+       "nch": 1536,
+       "in_dim": 3072
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+       "dst": 7864320,
+       "nch": 384,
+       "in_dim": 3072
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+       "dst": 9830400,
+       "nch": 384,
+       "in_dim": 3072
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+       "dst": 11796480,
+       "nch": 1536,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.up_proj.weight",
+       "dst": 19660800,
+       "nch": 3456,
+       "in_dim": 3072
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+       "dst": 37355520,
+       "nch": 3456,
+       "in_dim": 3072
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.down_proj.weight",
+       "dst": 55050240,
+       "nch": 3456,
+       "in_dim": 9216
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 6144
+      },
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+       "dst": 6144,
+       "cap": 6144
+      }
+     ]
+    }
+   }
+  },
+  "tail": [
+   {
+    "op": "run",
+    "kernel": "ln",
+    "args": [
+     "xres",
+     "zero",
+     "normw",
+     "xresf",
+     "hn"
+    ]
+   },
+   {
+    "op": "run",
+    "kernel": "lm",
+    "args": [
+     "lmpool",
+     "hn",
+     "logits"
+    ]
+   }
+  ],
+  "globals": {
+   "xres": 12288,
+   "zero": 12288,
+   "normw": 6144,
+   "xresf": 12288,
+   "hn": 6144,
+   "logits": 513024,
+   "lmpool": 247463936,
+   "ptab": {
+    "per_row": 2048,
+    "inv_freq": [
+     1.0,
+     0.8146172338565447,
+     0.6636012376960885,
+     0.540581004635767,
+     0.44036660267178046,
+     0.3587302237512899,
+     0.2922278225730151,
+     0.23805382048035073,
+     0.19392274474868576,
+     0.1579728099090432,
+     0.12868737343265052,
+     0.10483095217796996,
+     0.08539710028576561,
+     0.06956594961416032,
+     0.05666962144529105,
+     0.04616405026546052,
+     0.03760603093086393,
+     0.030634520893224042,
+     0.024955408670558694,
+     0.020329105980970152,
+     0.016560440080994446,
+     0.013490419890226748,
+     0.010989528534539826,
+     0.0089522593361944,
+     0.007292664737217109,
+     0.005940730375674967,
+     0.004839421345719893,
+     0.003942276030116656,
+     0.003211445994752591,
+     0.0026160992529250353,
+     0.0021311195369119653,
+     0.0017360467021768657,
+     0.001414213562373095,
+     0.0011520427402627808,
+     0.0009384738703573802,
+     0.0007644969883171747,
+     0.000622772421914596,
+     0.0005073211476622092,
+     0.0004132725499855165,
+     0.00033665894149804206,
+     0.0002742481756762073,
+     0.00022340729025955574,
+     0.00018199142881462546,
+     0.00014825335432657046,
+     0.00012076973741146504,
+     9.838110942370891e-05,
+     8.01429472224798e-05,
+     6.528582597948755e-05,
+     5.318295896944988e-05,
+     4.3323754923999376e-05,
+     3.529227739646723e-05,
+     2.8749697389207996e-05,
+     2.341999896140934e-05,
+     1.9078334770866426e-05,
+     1.5541540297632344e-05,
+     1.266040656712728e-05,
+     1.031338537721246e-05,
+     8.40146146768135e-06,
+     6.8439753011549275e-06,
+     5.575220228409339e-06,
+     4.5416704806078695e-06,
+     3.699723044000707e-06,
+     3.013858152139171e-06,
+     2.455140791131609e-06
+    ],
+    "window": 0
+   },
+   "gact": 39845888,
+   "gemm_x_k4096": 2097152,
+   "gemm_y_n3072": 3145728,
+   "gemm_x_k9216": 4718592,
+   "gemm_x_k3072": 1572864,
+   "gemm_y_n6144": 6291456,
+   "gemm_y_n9216": 9437184
+  },
+  "builds": {
+   "dx": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_llama3_h3072",
+    "env": {}
+   },
+   "ln": {
+    "design": "ln/ln.py",
+    "build_dir": "ln/build_3072_1e-05",
+    "env": {
+     "LN_N": "3072",
+     "LN_EPS": "1e-05"
+    }
+   },
+   "lm_head_q4": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_128256",
+    "env": {
+     "LMHEAD_N": "128256",
+     "LMHEAD_K": "3072",
+     "LMHEAD_CORES": "8"
+    }
+   },
+   "dx_attn": {
+    "design": "dense/dx_attn.py",
+    "build_dir": "dense/build_dxa_llama3_h3072",
+    "env": {}
+   },
+   "gemm_n3072_k4096": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n3072_k4096_t256",
+    "env": {
+     "GQP_N": "3072",
+     "GQP_K": "4096",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n3072_k9216": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n3072_k9216_t256",
+    "env": {
+     "GQP_N": "3072",
+     "GQP_K": "9216",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n6144_k3072": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n6144_k3072_t256",
+    "env": {
+     "GQP_N": "6144",
+     "GQP_K": "3072",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n9216_k3072": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n9216_k3072_t256",
+    "env": {
+     "GQP_N": "9216",
+     "GQP_K": "3072",
+     "GQP_T": "256"
+    }
+   }
+  },
+  "pack": {
+   "pool_bytes": 73400320,
+   "chunk_bytes": 5120,
+   "lm_head": {
+    "pool_bytes": 247463936,
+    "ops": [
+     {
+      "op": "std_perm_gguf",
+      "tensor": "lm_head.weight",
+      "dst": 0,
+      "nch": 48096,
+      "in_dim": 3072
+     }
+    ]
+   },
+   "embed": {
+    "tensor": "model.embed_tokens.weight",
+    "dim": 3072
+   },
+   "norm": {
+    "tensor": "model.norm.weight",
+    "bytes": 6144
+   }
+  }
+ }
+}

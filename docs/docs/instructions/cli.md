@@ -868,7 +868,10 @@ The shipped `model_list.json` is a suggestion list for `oflm list` and
 `oflm pull`; it is not a gate. `oflm add` records the tag in
 `settings.json`, and that is what `run`, `serve` and `list` read.
 
-Embedding models work the same way. An `NpuEmbeddings` GGUF (`bert` /
+Embedding models are GGUF installs too: `oflm add
+ggml-org/embeddinggemma-300M-GGUF` installs one like any chat model, and
+`oflm serve -e 1` loads the embedding model into the server (`-a 1` Whisper and
+a chat model can run in the same process). An `NpuEmbeddings` GGUF (`bert` /
 `nomic-bert`) is staged into a checkpoint and packed to `.npue` on first load;
 `embed-gemma` reads the GGUF through the existing bf16 kernels. Nomic declares
 named task prompts, so pass `--prompt-name` when serving it.

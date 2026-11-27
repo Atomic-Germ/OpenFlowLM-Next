@@ -1,0 +1,2852 @@
+{
+  "xrt-kernels": [
+    {
+      "name": "main",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_gemm_a.bin",
+          "id": "cfg_gemm_a"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_gemm_b.bin",
+          "id": "cfg_gemm_b"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_fa_a.bin",
+          "id": "cfg_fa_a"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_fa_b.bin",
+          "id": "cfg_fa_b"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_ew_a.bin",
+          "id": "cfg_ew_a"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_ew_b.bin",
+          "id": "cfg_ew_b"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_conv_a.bin",
+          "id": "cfg_conv_a"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_conv_b.bin",
+          "id": "cfg_conv_b"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_conv1_a.bin",
+          "id": "cfg_conv1_a"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_conv1_b.bin",
+          "id": "cfg_conv1_b"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_vew_a.bin",
+          "id": "cfg_vew_a"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/cfg/cfg_vew_b.bin",
+          "id": "cfg_vew_b"
+        }
+      ]
+    },
+    {
+      "name": "gemm",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/t_emb1/prj/npu_insts_full_elf_gemm_t_emb1.bin",
+          "id": "t_emb1"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/t_emb2/prj/npu_insts_full_elf_gemm_t_emb2.bin",
+          "id": "t_emb2"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/mod/prj/npu_insts_full_elf_gemm_mod.bin",
+          "id": "mod"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/te_qkv/prj/npu_insts_full_elf_gemm_te_qkv.bin",
+          "id": "te_qkv"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/te_o/prj/npu_insts_full_elf_gemm_te_o.bin",
+          "id": "te_o"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/te_gu/prj/npu_insts_full_elf_gemm_te_gu.bin",
+          "id": "te_gu"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/te_down/prj/npu_insts_full_elf_gemm_te_down.bin",
+          "id": "te_down"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_x_emb/prj/npu_insts_full_elf_gemm_r512_x_emb.bin",
+          "id": "r512_x_emb"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/ctx_emb/prj/npu_insts_full_elf_gemm_ctx_emb.bin",
+          "id": "ctx_emb"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/txt_qkv/prj/npu_insts_full_elf_gemm_txt_qkv.bin",
+          "id": "txt_qkv"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_img_qkv/prj/npu_insts_full_elf_gemm_r512_img_qkv.bin",
+          "id": "r512_img_qkv"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/txt_out/prj/npu_insts_full_elf_gemm_txt_out.bin",
+          "id": "txt_out"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_img_out/prj/npu_insts_full_elf_gemm_r512_img_out.bin",
+          "id": "r512_img_out"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/txt_ffin/prj/npu_insts_full_elf_gemm_txt_ffin.bin",
+          "id": "txt_ffin"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_img_ffin/prj/npu_insts_full_elf_gemm_r512_img_ffin.bin",
+          "id": "r512_img_ffin"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/txt_ffout/prj/npu_insts_full_elf_gemm_txt_ffout.bin",
+          "id": "txt_ffout"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_img_ffout/prj/npu_insts_full_elf_gemm_r512_img_ffout.bin",
+          "id": "r512_img_ffout"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_sgl_in/prj/npu_insts_full_elf_gemm_r512_sgl_in.bin",
+          "id": "r512_sgl_in"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_sgl_out/prj/npu_insts_full_elf_gemm_r512_sgl_out.bin",
+          "id": "r512_sgl_out"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/r512_proj_out/prj/npu_insts_full_elf_gemm_r512_proj_out.bin",
+          "id": "r512_proj_out"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/gemm/vae512_gemm00/prj/npu_insts_full_elf_gemm_vae512_gemm00.bin",
+          "id": "vae512_gemm00"
+        }
+      ]
+    },
+    {
+      "name": "fa",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        },
+        {
+          "name": "arg_3",
+          "offset": "0x18",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/fa/r512_attn_dbl/prj/npu_insts_full_elf_fa_r512_attn_dbl.bin",
+          "id": "r512_attn_dbl"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/fa/r512_attn_sgl/prj/npu_insts_full_elf_fa_r512_attn_sgl.bin",
+          "id": "r512_attn_sgl"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/fa/vae512_fa00/prj/npu_insts_full_elf_fa_vae512_fa00.bin",
+          "id": "vae512_fa00"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn.bin",
+          "id": "te_attn"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl1.bin",
+          "id": "te_attn_vl1"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl2.bin",
+          "id": "te_attn_vl2"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl3.bin",
+          "id": "te_attn_vl3"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl4.bin",
+          "id": "te_attn_vl4"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl5.bin",
+          "id": "te_attn_vl5"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl6.bin",
+          "id": "te_attn_vl6"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl7.bin",
+          "id": "te_attn_vl7"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl8.bin",
+          "id": "te_attn_vl8"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl9.bin",
+          "id": "te_attn_vl9"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl10.bin",
+          "id": "te_attn_vl10"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl11.bin",
+          "id": "te_attn_vl11"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl12.bin",
+          "id": "te_attn_vl12"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl13.bin",
+          "id": "te_attn_vl13"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl14.bin",
+          "id": "te_attn_vl14"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl15.bin",
+          "id": "te_attn_vl15"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl16.bin",
+          "id": "te_attn_vl16"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl17.bin",
+          "id": "te_attn_vl17"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl18.bin",
+          "id": "te_attn_vl18"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl19.bin",
+          "id": "te_attn_vl19"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl20.bin",
+          "id": "te_attn_vl20"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl21.bin",
+          "id": "te_attn_vl21"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl22.bin",
+          "id": "te_attn_vl22"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl23.bin",
+          "id": "te_attn_vl23"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl24.bin",
+          "id": "te_attn_vl24"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl25.bin",
+          "id": "te_attn_vl25"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl26.bin",
+          "id": "te_attn_vl26"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl27.bin",
+          "id": "te_attn_vl27"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl28.bin",
+          "id": "te_attn_vl28"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl29.bin",
+          "id": "te_attn_vl29"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl30.bin",
+          "id": "te_attn_vl30"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl31.bin",
+          "id": "te_attn_vl31"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl32.bin",
+          "id": "te_attn_vl32"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl33.bin",
+          "id": "te_attn_vl33"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl34.bin",
+          "id": "te_attn_vl34"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl35.bin",
+          "id": "te_attn_vl35"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl36.bin",
+          "id": "te_attn_vl36"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl37.bin",
+          "id": "te_attn_vl37"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl38.bin",
+          "id": "te_attn_vl38"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl39.bin",
+          "id": "te_attn_vl39"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl40.bin",
+          "id": "te_attn_vl40"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl41.bin",
+          "id": "te_attn_vl41"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl42.bin",
+          "id": "te_attn_vl42"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl43.bin",
+          "id": "te_attn_vl43"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl44.bin",
+          "id": "te_attn_vl44"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl45.bin",
+          "id": "te_attn_vl45"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl46.bin",
+          "id": "te_attn_vl46"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl47.bin",
+          "id": "te_attn_vl47"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl48.bin",
+          "id": "te_attn_vl48"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl49.bin",
+          "id": "te_attn_vl49"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl50.bin",
+          "id": "te_attn_vl50"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl51.bin",
+          "id": "te_attn_vl51"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl52.bin",
+          "id": "te_attn_vl52"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl53.bin",
+          "id": "te_attn_vl53"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl54.bin",
+          "id": "te_attn_vl54"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl55.bin",
+          "id": "te_attn_vl55"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl56.bin",
+          "id": "te_attn_vl56"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl57.bin",
+          "id": "te_attn_vl57"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl58.bin",
+          "id": "te_attn_vl58"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl59.bin",
+          "id": "te_attn_vl59"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl60.bin",
+          "id": "te_attn_vl60"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl61.bin",
+          "id": "te_attn_vl61"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl62.bin",
+          "id": "te_attn_vl62"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl63.bin",
+          "id": "te_attn_vl63"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl64.bin",
+          "id": "te_attn_vl64"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl65.bin",
+          "id": "te_attn_vl65"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl66.bin",
+          "id": "te_attn_vl66"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl67.bin",
+          "id": "te_attn_vl67"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl68.bin",
+          "id": "te_attn_vl68"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl69.bin",
+          "id": "te_attn_vl69"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl70.bin",
+          "id": "te_attn_vl70"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl71.bin",
+          "id": "te_attn_vl71"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl72.bin",
+          "id": "te_attn_vl72"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl73.bin",
+          "id": "te_attn_vl73"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl74.bin",
+          "id": "te_attn_vl74"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl75.bin",
+          "id": "te_attn_vl75"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl76.bin",
+          "id": "te_attn_vl76"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl77.bin",
+          "id": "te_attn_vl77"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl78.bin",
+          "id": "te_attn_vl78"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl79.bin",
+          "id": "te_attn_vl79"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl80.bin",
+          "id": "te_attn_vl80"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl81.bin",
+          "id": "te_attn_vl81"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl82.bin",
+          "id": "te_attn_vl82"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl83.bin",
+          "id": "te_attn_vl83"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl84.bin",
+          "id": "te_attn_vl84"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl85.bin",
+          "id": "te_attn_vl85"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl86.bin",
+          "id": "te_attn_vl86"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl87.bin",
+          "id": "te_attn_vl87"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl88.bin",
+          "id": "te_attn_vl88"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl89.bin",
+          "id": "te_attn_vl89"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl90.bin",
+          "id": "te_attn_vl90"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl91.bin",
+          "id": "te_attn_vl91"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl92.bin",
+          "id": "te_attn_vl92"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl93.bin",
+          "id": "te_attn_vl93"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl94.bin",
+          "id": "te_attn_vl94"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl95.bin",
+          "id": "te_attn_vl95"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl96.bin",
+          "id": "te_attn_vl96"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl97.bin",
+          "id": "te_attn_vl97"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl98.bin",
+          "id": "te_attn_vl98"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl99.bin",
+          "id": "te_attn_vl99"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl100.bin",
+          "id": "te_attn_vl100"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl101.bin",
+          "id": "te_attn_vl101"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl102.bin",
+          "id": "te_attn_vl102"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl103.bin",
+          "id": "te_attn_vl103"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl104.bin",
+          "id": "te_attn_vl104"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl105.bin",
+          "id": "te_attn_vl105"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl106.bin",
+          "id": "te_attn_vl106"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl107.bin",
+          "id": "te_attn_vl107"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl108.bin",
+          "id": "te_attn_vl108"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl109.bin",
+          "id": "te_attn_vl109"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl110.bin",
+          "id": "te_attn_vl110"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl111.bin",
+          "id": "te_attn_vl111"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl112.bin",
+          "id": "te_attn_vl112"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl113.bin",
+          "id": "te_attn_vl113"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl114.bin",
+          "id": "te_attn_vl114"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl115.bin",
+          "id": "te_attn_vl115"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl116.bin",
+          "id": "te_attn_vl116"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl117.bin",
+          "id": "te_attn_vl117"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl118.bin",
+          "id": "te_attn_vl118"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl119.bin",
+          "id": "te_attn_vl119"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl120.bin",
+          "id": "te_attn_vl120"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl121.bin",
+          "id": "te_attn_vl121"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl122.bin",
+          "id": "te_attn_vl122"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl123.bin",
+          "id": "te_attn_vl123"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl124.bin",
+          "id": "te_attn_vl124"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl125.bin",
+          "id": "te_attn_vl125"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl126.bin",
+          "id": "te_attn_vl126"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl127.bin",
+          "id": "te_attn_vl127"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl128.bin",
+          "id": "te_attn_vl128"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl129.bin",
+          "id": "te_attn_vl129"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl130.bin",
+          "id": "te_attn_vl130"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl131.bin",
+          "id": "te_attn_vl131"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl132.bin",
+          "id": "te_attn_vl132"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl133.bin",
+          "id": "te_attn_vl133"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl134.bin",
+          "id": "te_attn_vl134"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl135.bin",
+          "id": "te_attn_vl135"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl136.bin",
+          "id": "te_attn_vl136"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl137.bin",
+          "id": "te_attn_vl137"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl138.bin",
+          "id": "te_attn_vl138"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl139.bin",
+          "id": "te_attn_vl139"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl140.bin",
+          "id": "te_attn_vl140"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl141.bin",
+          "id": "te_attn_vl141"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl142.bin",
+          "id": "te_attn_vl142"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl143.bin",
+          "id": "te_attn_vl143"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl144.bin",
+          "id": "te_attn_vl144"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl145.bin",
+          "id": "te_attn_vl145"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl146.bin",
+          "id": "te_attn_vl146"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl147.bin",
+          "id": "te_attn_vl147"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl148.bin",
+          "id": "te_attn_vl148"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl149.bin",
+          "id": "te_attn_vl149"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl150.bin",
+          "id": "te_attn_vl150"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl151.bin",
+          "id": "te_attn_vl151"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl152.bin",
+          "id": "te_attn_vl152"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl153.bin",
+          "id": "te_attn_vl153"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl154.bin",
+          "id": "te_attn_vl154"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl155.bin",
+          "id": "te_attn_vl155"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl156.bin",
+          "id": "te_attn_vl156"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl157.bin",
+          "id": "te_attn_vl157"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl158.bin",
+          "id": "te_attn_vl158"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl159.bin",
+          "id": "te_attn_vl159"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl160.bin",
+          "id": "te_attn_vl160"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl161.bin",
+          "id": "te_attn_vl161"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl162.bin",
+          "id": "te_attn_vl162"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl163.bin",
+          "id": "te_attn_vl163"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl164.bin",
+          "id": "te_attn_vl164"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl165.bin",
+          "id": "te_attn_vl165"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl166.bin",
+          "id": "te_attn_vl166"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl167.bin",
+          "id": "te_attn_vl167"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl168.bin",
+          "id": "te_attn_vl168"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl169.bin",
+          "id": "te_attn_vl169"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl170.bin",
+          "id": "te_attn_vl170"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl171.bin",
+          "id": "te_attn_vl171"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl172.bin",
+          "id": "te_attn_vl172"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl173.bin",
+          "id": "te_attn_vl173"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl174.bin",
+          "id": "te_attn_vl174"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl175.bin",
+          "id": "te_attn_vl175"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl176.bin",
+          "id": "te_attn_vl176"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl177.bin",
+          "id": "te_attn_vl177"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl178.bin",
+          "id": "te_attn_vl178"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl179.bin",
+          "id": "te_attn_vl179"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl180.bin",
+          "id": "te_attn_vl180"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl181.bin",
+          "id": "te_attn_vl181"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl182.bin",
+          "id": "te_attn_vl182"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl183.bin",
+          "id": "te_attn_vl183"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl184.bin",
+          "id": "te_attn_vl184"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl185.bin",
+          "id": "te_attn_vl185"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl186.bin",
+          "id": "te_attn_vl186"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl187.bin",
+          "id": "te_attn_vl187"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl188.bin",
+          "id": "te_attn_vl188"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl189.bin",
+          "id": "te_attn_vl189"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl190.bin",
+          "id": "te_attn_vl190"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl191.bin",
+          "id": "te_attn_vl191"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl192.bin",
+          "id": "te_attn_vl192"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl193.bin",
+          "id": "te_attn_vl193"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl194.bin",
+          "id": "te_attn_vl194"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl195.bin",
+          "id": "te_attn_vl195"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl196.bin",
+          "id": "te_attn_vl196"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl197.bin",
+          "id": "te_attn_vl197"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl198.bin",
+          "id": "te_attn_vl198"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl199.bin",
+          "id": "te_attn_vl199"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl200.bin",
+          "id": "te_attn_vl200"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl201.bin",
+          "id": "te_attn_vl201"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl202.bin",
+          "id": "te_attn_vl202"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl203.bin",
+          "id": "te_attn_vl203"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl204.bin",
+          "id": "te_attn_vl204"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl205.bin",
+          "id": "te_attn_vl205"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl206.bin",
+          "id": "te_attn_vl206"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl207.bin",
+          "id": "te_attn_vl207"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl208.bin",
+          "id": "te_attn_vl208"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl209.bin",
+          "id": "te_attn_vl209"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl210.bin",
+          "id": "te_attn_vl210"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl211.bin",
+          "id": "te_attn_vl211"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl212.bin",
+          "id": "te_attn_vl212"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl213.bin",
+          "id": "te_attn_vl213"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl214.bin",
+          "id": "te_attn_vl214"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl215.bin",
+          "id": "te_attn_vl215"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl216.bin",
+          "id": "te_attn_vl216"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl217.bin",
+          "id": "te_attn_vl217"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl218.bin",
+          "id": "te_attn_vl218"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl219.bin",
+          "id": "te_attn_vl219"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl220.bin",
+          "id": "te_attn_vl220"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl221.bin",
+          "id": "te_attn_vl221"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl222.bin",
+          "id": "te_attn_vl222"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl223.bin",
+          "id": "te_attn_vl223"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl224.bin",
+          "id": "te_attn_vl224"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl225.bin",
+          "id": "te_attn_vl225"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl226.bin",
+          "id": "te_attn_vl226"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl227.bin",
+          "id": "te_attn_vl227"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl228.bin",
+          "id": "te_attn_vl228"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl229.bin",
+          "id": "te_attn_vl229"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl230.bin",
+          "id": "te_attn_vl230"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl231.bin",
+          "id": "te_attn_vl231"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl232.bin",
+          "id": "te_attn_vl232"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl233.bin",
+          "id": "te_attn_vl233"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl234.bin",
+          "id": "te_attn_vl234"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl235.bin",
+          "id": "te_attn_vl235"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl236.bin",
+          "id": "te_attn_vl236"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl237.bin",
+          "id": "te_attn_vl237"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl238.bin",
+          "id": "te_attn_vl238"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl239.bin",
+          "id": "te_attn_vl239"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl240.bin",
+          "id": "te_attn_vl240"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl241.bin",
+          "id": "te_attn_vl241"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl242.bin",
+          "id": "te_attn_vl242"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl243.bin",
+          "id": "te_attn_vl243"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl244.bin",
+          "id": "te_attn_vl244"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl245.bin",
+          "id": "te_attn_vl245"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl246.bin",
+          "id": "te_attn_vl246"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl247.bin",
+          "id": "te_attn_vl247"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl248.bin",
+          "id": "te_attn_vl248"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl249.bin",
+          "id": "te_attn_vl249"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl250.bin",
+          "id": "te_attn_vl250"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl251.bin",
+          "id": "te_attn_vl251"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl252.bin",
+          "id": "te_attn_vl252"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl253.bin",
+          "id": "te_attn_vl253"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl254.bin",
+          "id": "te_attn_vl254"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl255.bin",
+          "id": "te_attn_vl255"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl256.bin",
+          "id": "te_attn_vl256"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl257.bin",
+          "id": "te_attn_vl257"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl258.bin",
+          "id": "te_attn_vl258"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl259.bin",
+          "id": "te_attn_vl259"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl260.bin",
+          "id": "te_attn_vl260"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl261.bin",
+          "id": "te_attn_vl261"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl262.bin",
+          "id": "te_attn_vl262"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl263.bin",
+          "id": "te_attn_vl263"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl264.bin",
+          "id": "te_attn_vl264"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl265.bin",
+          "id": "te_attn_vl265"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl266.bin",
+          "id": "te_attn_vl266"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl267.bin",
+          "id": "te_attn_vl267"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl268.bin",
+          "id": "te_attn_vl268"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl269.bin",
+          "id": "te_attn_vl269"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl270.bin",
+          "id": "te_attn_vl270"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl271.bin",
+          "id": "te_attn_vl271"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl272.bin",
+          "id": "te_attn_vl272"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl273.bin",
+          "id": "te_attn_vl273"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl274.bin",
+          "id": "te_attn_vl274"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl275.bin",
+          "id": "te_attn_vl275"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl276.bin",
+          "id": "te_attn_vl276"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl277.bin",
+          "id": "te_attn_vl277"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl278.bin",
+          "id": "te_attn_vl278"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl279.bin",
+          "id": "te_attn_vl279"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl280.bin",
+          "id": "te_attn_vl280"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl281.bin",
+          "id": "te_attn_vl281"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl282.bin",
+          "id": "te_attn_vl282"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl283.bin",
+          "id": "te_attn_vl283"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl284.bin",
+          "id": "te_attn_vl284"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl285.bin",
+          "id": "te_attn_vl285"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl286.bin",
+          "id": "te_attn_vl286"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl287.bin",
+          "id": "te_attn_vl287"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl288.bin",
+          "id": "te_attn_vl288"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl289.bin",
+          "id": "te_attn_vl289"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl290.bin",
+          "id": "te_attn_vl290"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl291.bin",
+          "id": "te_attn_vl291"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl292.bin",
+          "id": "te_attn_vl292"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl293.bin",
+          "id": "te_attn_vl293"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl294.bin",
+          "id": "te_attn_vl294"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl295.bin",
+          "id": "te_attn_vl295"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl296.bin",
+          "id": "te_attn_vl296"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl297.bin",
+          "id": "te_attn_vl297"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl298.bin",
+          "id": "te_attn_vl298"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl299.bin",
+          "id": "te_attn_vl299"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl300.bin",
+          "id": "te_attn_vl300"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl301.bin",
+          "id": "te_attn_vl301"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl302.bin",
+          "id": "te_attn_vl302"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl303.bin",
+          "id": "te_attn_vl303"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl304.bin",
+          "id": "te_attn_vl304"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl305.bin",
+          "id": "te_attn_vl305"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl306.bin",
+          "id": "te_attn_vl306"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl307.bin",
+          "id": "te_attn_vl307"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl308.bin",
+          "id": "te_attn_vl308"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl309.bin",
+          "id": "te_attn_vl309"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl310.bin",
+          "id": "te_attn_vl310"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl311.bin",
+          "id": "te_attn_vl311"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl312.bin",
+          "id": "te_attn_vl312"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl313.bin",
+          "id": "te_attn_vl313"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl314.bin",
+          "id": "te_attn_vl314"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl315.bin",
+          "id": "te_attn_vl315"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl316.bin",
+          "id": "te_attn_vl316"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl317.bin",
+          "id": "te_attn_vl317"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl318.bin",
+          "id": "te_attn_vl318"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl319.bin",
+          "id": "te_attn_vl319"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl320.bin",
+          "id": "te_attn_vl320"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl321.bin",
+          "id": "te_attn_vl321"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl322.bin",
+          "id": "te_attn_vl322"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl323.bin",
+          "id": "te_attn_vl323"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl324.bin",
+          "id": "te_attn_vl324"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl325.bin",
+          "id": "te_attn_vl325"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl326.bin",
+          "id": "te_attn_vl326"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl327.bin",
+          "id": "te_attn_vl327"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl328.bin",
+          "id": "te_attn_vl328"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl329.bin",
+          "id": "te_attn_vl329"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl330.bin",
+          "id": "te_attn_vl330"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl331.bin",
+          "id": "te_attn_vl331"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl332.bin",
+          "id": "te_attn_vl332"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl333.bin",
+          "id": "te_attn_vl333"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl334.bin",
+          "id": "te_attn_vl334"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl335.bin",
+          "id": "te_attn_vl335"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl336.bin",
+          "id": "te_attn_vl336"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl337.bin",
+          "id": "te_attn_vl337"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl338.bin",
+          "id": "te_attn_vl338"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl339.bin",
+          "id": "te_attn_vl339"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl340.bin",
+          "id": "te_attn_vl340"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl341.bin",
+          "id": "te_attn_vl341"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl342.bin",
+          "id": "te_attn_vl342"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl343.bin",
+          "id": "te_attn_vl343"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl344.bin",
+          "id": "te_attn_vl344"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl345.bin",
+          "id": "te_attn_vl345"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl346.bin",
+          "id": "te_attn_vl346"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl347.bin",
+          "id": "te_attn_vl347"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl348.bin",
+          "id": "te_attn_vl348"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl349.bin",
+          "id": "te_attn_vl349"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl350.bin",
+          "id": "te_attn_vl350"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl351.bin",
+          "id": "te_attn_vl351"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl352.bin",
+          "id": "te_attn_vl352"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl353.bin",
+          "id": "te_attn_vl353"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl354.bin",
+          "id": "te_attn_vl354"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl355.bin",
+          "id": "te_attn_vl355"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl356.bin",
+          "id": "te_attn_vl356"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl357.bin",
+          "id": "te_attn_vl357"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl358.bin",
+          "id": "te_attn_vl358"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl359.bin",
+          "id": "te_attn_vl359"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl360.bin",
+          "id": "te_attn_vl360"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl361.bin",
+          "id": "te_attn_vl361"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl362.bin",
+          "id": "te_attn_vl362"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl363.bin",
+          "id": "te_attn_vl363"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl364.bin",
+          "id": "te_attn_vl364"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl365.bin",
+          "id": "te_attn_vl365"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl366.bin",
+          "id": "te_attn_vl366"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl367.bin",
+          "id": "te_attn_vl367"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl368.bin",
+          "id": "te_attn_vl368"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl369.bin",
+          "id": "te_attn_vl369"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl370.bin",
+          "id": "te_attn_vl370"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl371.bin",
+          "id": "te_attn_vl371"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl372.bin",
+          "id": "te_attn_vl372"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl373.bin",
+          "id": "te_attn_vl373"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl374.bin",
+          "id": "te_attn_vl374"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl375.bin",
+          "id": "te_attn_vl375"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl376.bin",
+          "id": "te_attn_vl376"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl377.bin",
+          "id": "te_attn_vl377"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl378.bin",
+          "id": "te_attn_vl378"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl379.bin",
+          "id": "te_attn_vl379"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl380.bin",
+          "id": "te_attn_vl380"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl381.bin",
+          "id": "te_attn_vl381"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl382.bin",
+          "id": "te_attn_vl382"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl383.bin",
+          "id": "te_attn_vl383"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl384.bin",
+          "id": "te_attn_vl384"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl385.bin",
+          "id": "te_attn_vl385"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl386.bin",
+          "id": "te_attn_vl386"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl387.bin",
+          "id": "te_attn_vl387"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl388.bin",
+          "id": "te_attn_vl388"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl389.bin",
+          "id": "te_attn_vl389"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl390.bin",
+          "id": "te_attn_vl390"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl391.bin",
+          "id": "te_attn_vl391"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl392.bin",
+          "id": "te_attn_vl392"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl393.bin",
+          "id": "te_attn_vl393"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl394.bin",
+          "id": "te_attn_vl394"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl395.bin",
+          "id": "te_attn_vl395"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl396.bin",
+          "id": "te_attn_vl396"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl397.bin",
+          "id": "te_attn_vl397"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl398.bin",
+          "id": "te_attn_vl398"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl399.bin",
+          "id": "te_attn_vl399"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl400.bin",
+          "id": "te_attn_vl400"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl401.bin",
+          "id": "te_attn_vl401"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl402.bin",
+          "id": "te_attn_vl402"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl403.bin",
+          "id": "te_attn_vl403"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl404.bin",
+          "id": "te_attn_vl404"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl405.bin",
+          "id": "te_attn_vl405"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl406.bin",
+          "id": "te_attn_vl406"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl407.bin",
+          "id": "te_attn_vl407"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl408.bin",
+          "id": "te_attn_vl408"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl409.bin",
+          "id": "te_attn_vl409"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl410.bin",
+          "id": "te_attn_vl410"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl411.bin",
+          "id": "te_attn_vl411"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl412.bin",
+          "id": "te_attn_vl412"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl413.bin",
+          "id": "te_attn_vl413"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl414.bin",
+          "id": "te_attn_vl414"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl415.bin",
+          "id": "te_attn_vl415"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl416.bin",
+          "id": "te_attn_vl416"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl417.bin",
+          "id": "te_attn_vl417"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl418.bin",
+          "id": "te_attn_vl418"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl419.bin",
+          "id": "te_attn_vl419"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl420.bin",
+          "id": "te_attn_vl420"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl421.bin",
+          "id": "te_attn_vl421"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl422.bin",
+          "id": "te_attn_vl422"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl423.bin",
+          "id": "te_attn_vl423"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl424.bin",
+          "id": "te_attn_vl424"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl425.bin",
+          "id": "te_attn_vl425"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl426.bin",
+          "id": "te_attn_vl426"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl427.bin",
+          "id": "te_attn_vl427"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl428.bin",
+          "id": "te_attn_vl428"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl429.bin",
+          "id": "te_attn_vl429"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl430.bin",
+          "id": "te_attn_vl430"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl431.bin",
+          "id": "te_attn_vl431"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl432.bin",
+          "id": "te_attn_vl432"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl433.bin",
+          "id": "te_attn_vl433"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl434.bin",
+          "id": "te_attn_vl434"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl435.bin",
+          "id": "te_attn_vl435"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl436.bin",
+          "id": "te_attn_vl436"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl437.bin",
+          "id": "te_attn_vl437"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl438.bin",
+          "id": "te_attn_vl438"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl439.bin",
+          "id": "te_attn_vl439"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl440.bin",
+          "id": "te_attn_vl440"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl441.bin",
+          "id": "te_attn_vl441"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl442.bin",
+          "id": "te_attn_vl442"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl443.bin",
+          "id": "te_attn_vl443"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl444.bin",
+          "id": "te_attn_vl444"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl445.bin",
+          "id": "te_attn_vl445"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl446.bin",
+          "id": "te_attn_vl446"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl447.bin",
+          "id": "te_attn_vl447"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl448.bin",
+          "id": "te_attn_vl448"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl449.bin",
+          "id": "te_attn_vl449"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl450.bin",
+          "id": "te_attn_vl450"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl451.bin",
+          "id": "te_attn_vl451"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl452.bin",
+          "id": "te_attn_vl452"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl453.bin",
+          "id": "te_attn_vl453"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl454.bin",
+          "id": "te_attn_vl454"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl455.bin",
+          "id": "te_attn_vl455"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl456.bin",
+          "id": "te_attn_vl456"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl457.bin",
+          "id": "te_attn_vl457"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl458.bin",
+          "id": "te_attn_vl458"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl459.bin",
+          "id": "te_attn_vl459"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl460.bin",
+          "id": "te_attn_vl460"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl461.bin",
+          "id": "te_attn_vl461"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl462.bin",
+          "id": "te_attn_vl462"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl463.bin",
+          "id": "te_attn_vl463"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl464.bin",
+          "id": "te_attn_vl464"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl465.bin",
+          "id": "te_attn_vl465"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl466.bin",
+          "id": "te_attn_vl466"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl467.bin",
+          "id": "te_attn_vl467"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl468.bin",
+          "id": "te_attn_vl468"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl469.bin",
+          "id": "te_attn_vl469"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl470.bin",
+          "id": "te_attn_vl470"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl471.bin",
+          "id": "te_attn_vl471"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl472.bin",
+          "id": "te_attn_vl472"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl473.bin",
+          "id": "te_attn_vl473"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl474.bin",
+          "id": "te_attn_vl474"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl475.bin",
+          "id": "te_attn_vl475"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl476.bin",
+          "id": "te_attn_vl476"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl477.bin",
+          "id": "te_attn_vl477"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl478.bin",
+          "id": "te_attn_vl478"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl479.bin",
+          "id": "te_attn_vl479"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl480.bin",
+          "id": "te_attn_vl480"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl481.bin",
+          "id": "te_attn_vl481"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl482.bin",
+          "id": "te_attn_vl482"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl483.bin",
+          "id": "te_attn_vl483"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl484.bin",
+          "id": "te_attn_vl484"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl485.bin",
+          "id": "te_attn_vl485"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl486.bin",
+          "id": "te_attn_vl486"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl487.bin",
+          "id": "te_attn_vl487"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl488.bin",
+          "id": "te_attn_vl488"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl489.bin",
+          "id": "te_attn_vl489"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl490.bin",
+          "id": "te_attn_vl490"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl491.bin",
+          "id": "te_attn_vl491"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl492.bin",
+          "id": "te_attn_vl492"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl493.bin",
+          "id": "te_attn_vl493"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl494.bin",
+          "id": "te_attn_vl494"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl495.bin",
+          "id": "te_attn_vl495"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl496.bin",
+          "id": "te_attn_vl496"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl497.bin",
+          "id": "te_attn_vl497"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl498.bin",
+          "id": "te_attn_vl498"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl499.bin",
+          "id": "te_attn_vl499"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl500.bin",
+          "id": "te_attn_vl500"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl501.bin",
+          "id": "te_attn_vl501"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl502.bin",
+          "id": "te_attn_vl502"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl503.bin",
+          "id": "te_attn_vl503"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl504.bin",
+          "id": "te_attn_vl504"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl505.bin",
+          "id": "te_attn_vl505"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl506.bin",
+          "id": "te_attn_vl506"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl507.bin",
+          "id": "te_attn_vl507"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl508.bin",
+          "id": "te_attn_vl508"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl509.bin",
+          "id": "te_attn_vl509"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl510.bin",
+          "id": "te_attn_vl510"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl511.bin",
+          "id": "te_attn_vl511"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vl/te_attn_vl512.bin",
+          "id": "te_attn_vl512"
+        }
+      ]
+    },
+    {
+      "name": "ew",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        },
+        {
+          "name": "arg_3",
+          "offset": "0x18",
+          "type": "char *"
+        },
+        {
+          "name": "arg_4",
+          "offset": "0x20",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/t_silu/prj/npu_insts_full_elf_ew_t_silu.bin",
+          "id": "t_silu"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/te_rms/prj/npu_insts_full_elf_ew_te_rms.bin",
+          "id": "te_rms"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/te_qk/prj/npu_insts_full_elf_ew_te_qk.bin",
+          "id": "te_qk"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/te_res_rms/prj/npu_insts_full_elf_ew_te_res_rms.bin",
+          "id": "te_res_rms"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/te_tap9/prj/npu_insts_full_elf_ew_te_tap9.bin",
+          "id": "te_tap9"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/te_tap18/prj/npu_insts_full_elf_ew_te_tap18.bin",
+          "id": "te_tap18"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/te_tap27/prj/npu_insts_full_elf_ew_te_tap27.bin",
+          "id": "te_tap27"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_ln_txt/prj/npu_insts_full_elf_ew_r512_ln_txt.bin",
+          "id": "r512_ln_txt"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_ln_img/prj/npu_insts_full_elf_ew_r512_ln_img.bin",
+          "id": "r512_ln_img"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_qk_txt/prj/npu_insts_full_elf_ew_r512_qk_txt.bin",
+          "id": "r512_qk_txt"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_qk_img/prj/npu_insts_full_elf_ew_r512_qk_img.bin",
+          "id": "r512_qk_img"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_res_txt/prj/npu_insts_full_elf_ew_r512_res_txt.bin",
+          "id": "r512_res_txt"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_res_img/prj/npu_insts_full_elf_ew_r512_res_img.bin",
+          "id": "r512_res_img"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_qk_sgl/prj/npu_insts_full_elf_ew_r512_qk_sgl.bin",
+          "id": "r512_qk_sgl"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_res_all/prj/npu_insts_full_elf_ew_r512_res_all.bin",
+          "id": "r512_res_all"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r512_euler/prj/npu_insts_full_elf_ew_r512_euler.bin",
+          "id": "r512_euler"
+        }
+      ]
+    },
+    {
+      "name": "conv",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv00/prj/npu_insts_full_elf_conv_vae512_conv00.bin",
+          "id": "vae512_conv00"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv01/prj/npu_insts_full_elf_conv_vae512_conv01.bin",
+          "id": "vae512_conv01"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv02/prj/npu_insts_full_elf_conv_vae512_conv02.bin",
+          "id": "vae512_conv02"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv03/prj/npu_insts_full_elf_conv_vae512_conv03.bin",
+          "id": "vae512_conv03"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv04/prj/npu_insts_full_elf_conv_vae512_conv04.bin",
+          "id": "vae512_conv04"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv05/prj/npu_insts_full_elf_conv_vae512_conv05.bin",
+          "id": "vae512_conv05"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv06/prj/npu_insts_full_elf_conv_vae512_conv06.bin",
+          "id": "vae512_conv06"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv07/prj/npu_insts_full_elf_conv_vae512_conv07.bin",
+          "id": "vae512_conv07"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv08/prj/npu_insts_full_elf_conv_vae512_conv08.bin",
+          "id": "vae512_conv08"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv/vae512_conv09/prj/npu_insts_full_elf_conv_vae512_conv09.bin",
+          "id": "vae512_conv09"
+        }
+      ]
+    },
+    {
+      "name": "conv1",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv1/vae512_conv100/prj/npu_insts_full_elf_conv1_vae512_conv100.bin",
+          "id": "vae512_conv100"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv1/vae512_conv101/prj/npu_insts_full_elf_conv1_vae512_conv101.bin",
+          "id": "vae512_conv101"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/conv1/vae512_conv102/prj/npu_insts_full_elf_conv1_vae512_conv102.bin",
+          "id": "vae512_conv102"
+        }
+      ]
+    },
+    {
+      "name": "vew",
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_1.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/empty_0.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/main.pdi",
+          "id": 3
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/gemm.pdi",
+          "id": 4
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/fa.pdi",
+          "id": 5
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/ew.pdi",
+          "id": 6
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv.pdi",
+          "id": 7
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/conv1.pdi",
+          "id": 8
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/_config/prj/vew.pdi",
+          "id": 9
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        },
+        {
+          "name": "arg_3",
+          "offset": "0x18",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew00/prj/npu_insts_full_elf_vew_vae512_vew00.bin",
+          "id": "vae512_vew00"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew01/prj/npu_insts_full_elf_vew_vae512_vew01.bin",
+          "id": "vae512_vew01"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew02/prj/npu_insts_full_elf_vew_vae512_vew02.bin",
+          "id": "vae512_vew02"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew03/prj/npu_insts_full_elf_vew_vae512_vew03.bin",
+          "id": "vae512_vew03"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew04/prj/npu_insts_full_elf_vew_vae512_vew04.bin",
+          "id": "vae512_vew04"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew05/prj/npu_insts_full_elf_vew_vae512_vew05.bin",
+          "id": "vae512_vew05"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew06/prj/npu_insts_full_elf_vew_vae512_vew06.bin",
+          "id": "vae512_vew06"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew07/prj/npu_insts_full_elf_vew_vae512_vew07.bin",
+          "id": "vae512_vew07"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew08/prj/npu_insts_full_elf_vew_vae512_vew08.bin",
+          "id": "vae512_vew08"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew09/prj/npu_insts_full_elf_vew_vae512_vew09.bin",
+          "id": "vae512_vew09"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew10/prj/npu_insts_full_elf_vew_vae512_vew10.bin",
+          "id": "vae512_vew10"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew11/prj/npu_insts_full_elf_vew_vae512_vew11.bin",
+          "id": "vae512_vew11"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew12/prj/npu_insts_full_elf_vew_vae512_vew12.bin",
+          "id": "vae512_vew12"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew13/prj/npu_insts_full_elf_vew_vae512_vew13.bin",
+          "id": "vae512_vew13"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew14/prj/npu_insts_full_elf_vew_vae512_vew14.bin",
+          "id": "vae512_vew14"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew15/prj/npu_insts_full_elf_vew_vae512_vew15.bin",
+          "id": "vae512_vew15"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew16/prj/npu_insts_full_elf_vew_vae512_vew16.bin",
+          "id": "vae512_vew16"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew17/prj/npu_insts_full_elf_vew_vae512_vew17.bin",
+          "id": "vae512_vew17"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew18/prj/npu_insts_full_elf_vew_vae512_vew18.bin",
+          "id": "vae512_vew18"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew19/prj/npu_insts_full_elf_vew_vae512_vew19.bin",
+          "id": "vae512_vew19"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew20/prj/npu_insts_full_elf_vew_vae512_vew20.bin",
+          "id": "vae512_vew20"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew21/prj/npu_insts_full_elf_vew_vae512_vew21.bin",
+          "id": "vae512_vew21"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew22/prj/npu_insts_full_elf_vew_vae512_vew22.bin",
+          "id": "vae512_vew22"
+        },
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/vew/vae512_vew23/prj/npu_insts_full_elf_vew_vae512_vew23.bin",
+          "id": "vae512_vew23"
+        }
+      ]
+    }
+  ]
+}

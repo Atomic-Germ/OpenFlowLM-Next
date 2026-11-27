@@ -1,39 +1,76 @@
-"""oflm_add - install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.
+"""
+`oflm add <user>/<repo>` is the Official, Canonical way to install a model.
 
-Installable as ``oflm-add`` (e.g. ``uv tool install oflm-add``) or runnable as a
-script (``python oflm_add/__init__.py`` or the legacy ``oflm-add.py`` shim).
+It is a first-class installer, not an optional helper for models too obscure for
+a curated list. The shipped `src/model_list.json` is a set of SUGGESTIONS -- it
+supplies default tags, families and sizes for the models it knows, and the tool
+works just as well for a GGUF repo it has never seen. The standard input is a
+Hugging Face or ModelScope repo (or its URL, or a local directory), and the
+standard weights are GGUF: any repo of a supported family can be installed
+directly, with no conversion step and no pre-approved model entry.
 
-Python-3 stdlib only (no pip packages). Works with any repo that
-already contains the runtime-ready files (config.json, model.q4nx,
-tokenizer.json, tokenizer_config.json, optionally chat_template.jinja):
+WHAT THE WEIGHT FILE SAYS IS THE AUTHORITY
+    For a GGUF install the file IS the model. `spec_from_gguf_source()` reads
+    its own metadata (general.architecture, widths, rope law, head layout) to
+    derive the geometry; config.json -- from the repo or its README `base_model`
+    chain -- is a HINT for what a GGUF does not carry (tokenizer, chat template,
+    vision tower), never the source of the geometry. Reading config first made a
+    translategemma GGUF look like "a different geometry" from the Gemma 3 4B set
+    it matches exactly: the config omitted rope_scaling that the GGUF said was
+    factor 8.0. The family likewise comes from what the model IS -- the GGUF
+    architecture, config model_type, then the base chain -- with the name only a
+    weak last resort (a fine-tune's name usually says nothing: Ornith-1.5-9B is
+    a Qwen3.5-9B). `derive_family()` documents that precedence; the installed
+    kernel set is the final fallback for a model whose own content names none.
 
-    python3 oflm-add.py Atomic-Germ/Qwen3.5-9B-Claude-4.8-Opus-NPU2
+KERNEL SETS ARE CHOSEN BY GEOMETRY, NOT BY NAME
+    `scan_kernel_sets()` asks each installed set whether it SERVES the model via
+    `ModelSpec.serves()`: same kernel hash, and a head at least as wide as the
+    model's (a set can carry a narrower head by zero-filling the extra rows, but
+    cannot stream past rows it was not built for). This is deliberately weaker
+    and one-sided than "hash identity for the whole model" -- a padded vocab is
+    not a different geometry. Names and `--xclbin-from` are labels, not routes.
+    When several sets serve (an installed copy, a per-model sibling, a fresh
+    export in the tree), the NEWEST manifest wins so a rebuild cannot be
+    shadowed by a stale copy. GGUF installs additionally require the set's
+    manifest to carry the f32-scale `gguf` section; a right-geometry set without
+    it is reported as such rather than silently linked. Across the system,
+    user and in-tree roots the newest manifest by mtime wins.
 
-Repo can be a Hugging Face repo id, a ModelScope repo id (--modelscope), a full
-Hugging Face URL, a ModelScope URL (www.modelscope.ai/.cn -- implies ModelScope
-without the flag), or a local directory holding the model files. The tag is
-derived from the repo name (e.g. Qwen3.5-9B-Claude-4.8-Opus-NPU2 ->
-qwen3.5-claude:9b); override with --tag. Defaults for the registry entry
-(family, engine, size, context length) are copied from the matching official
-OpenFlowLM entry.
+THE GGUF ITSELF IS SELECTED AND VERIFIED HERE
+    A repo may hold many quantizations, split shards, and files that are not the
+    model at all: vision projectors (`mmproj-*`), speculative draft heads
+    (`dspark-*`, `draft-*`, `mtp-*`) and calibration matrices. `model_gguf_names`
+    filters those out before selection -- a Q8 draft head used to outrank the
+    model's own Q4 weights and name the wrong architecture (`dflash`).
+    `choose_gguf_candidates()` walks compatible quants in preference order and
+    verifies tensor types against the header, falling through when a nominally
+    good file hides a type the NPU packers reject. `repo:QUANT` pins a quant.
+    Preference (`GGUF_QUANT_PREFERENCE`, `NPUE_GGUF_PREFERENCE`) is about how
+    many lossy steps the weights take to the q4_1 pool the kernels stream, or,
+    for NpuEmbeddings, pure source precision. Projectors are chosen separately
+    by `_projectors_in()` and installed beside the model.
 
-Open kernels are handled separately. They belong to a model's *spec* (its
-shape plus the per-role weight format), not to an official model name, so any
-installed set whose manifest.json carries the same spec_hash as this model
-drives it. oflm-add derives the spec from the installed config.json (+
-tokenizer.json and the model.q4nx header) via the open_kernels/recipes
-checkout, finds the matching set, and links it at <model dir>/open_kernels --
-the second place open_qwen36::Engine::find_kernels looks.
+WHAT IS INSTALLED AND REGISTERED
+    Model files are downloaded (or copied from a local dir) into the models
+    root; chat template, tokenizer and config are reconciled from the GGUF and
+    the base chain; the matching kernel set is linked at <model dir>/open_kernels.
+    A user-level registry and a single xclbin symlink are written -- the system
+    `model_list.json` and system xclbins are NEVER changed. The C++ `oflm add`
+    front hand-off (src/pull/add_command.cpp) locates this script or the bundled
+    package and sets OFLM_EXECUTABLE so the engine resolves links from the same
+    tree. GGUF installs never convert through the deprecated q4nx builder; the
+    legacy `.q4nx` container repos and the open-whisper safetensors builder are
+    the remaining paths that still use it.
 
-The script never rewrites the system model list or the system xclbins; it
-writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
-symlink into ~/.config/oflm/xclbins/ for the new model directory. Custom OFLM
-models usually do not ship xclbins (they are closed source), so the kernel symlink
-is always taken from the matching official model, keyed by family (engine) and
-size -- e.g. Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2. OpenFlowLM discovers
-both automatically -- it reads the user registry in preference to the shipped
-one and resolves each model's kernels under whichever xclbin root carries that
-model's directory -- so no environment variables are required.
+Aside from chat models the installer also handles llama.cpp-layout whisper GGUFs
+(open whisper_gemm kernel set), gemma embeddings, and NpuEmbeddings safetensors
+repos (`bge`, `nomic`, `minilm`, `gte`) whose `.npue` containers are packed on
+first load and whose kernels live under a design-set symlink. Each is routed by
+what the file IS, not by a name in a catalogue.
+
+Python-3 stdlib only; no pip packages. Run through `oflm add` or directly as
+`python utilities/oflm-add/oflm-add.py <repo>` (the `oflm-add.py` shim).
 """
 
 import argparse
@@ -83,7 +120,11 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # Hence exact formats first, then the requantized ones by how precise the SOURCE is (Q6_K
 # and Q8_0 requantize to something very close to a clean q4_1; IQ4 is the worst of both).
 # Size is the trade: Q8_0 is twice the download of Q4_1 for no gain over it.
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q6_K", "Q8_0", "Q5_K", "Q4_K", "IQ4"]
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q6_K", "Q8_0", "Q5_K", "Q4_K", "IQ4",
+                         # Q2_0 (llama.cpp type 42, Bonsai ternary): expanded
+                         # losslessly to q4_1 at first load, so it ranks with
+                         # the requantized families rather than above Q4_1.
+                         "Q2_0"]
 # The SAME choice for an NpuEmbeddings GGUF (bert / nomic-bert). Those packers
 # dequantize every tensor to F32 and pack the checkpoint, so there is no q4_1
 # pool to preserve and the source's precision is all that matters. Measured
@@ -231,7 +272,6 @@ def gguf_quant_family(suffix, preference=None):
 
 def gguf_quant_of(name, preference=None):
     """The quant family in a llama.cpp-style weight file name, e.g.
-    'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked or
     unknown -- 'Q4_0_4_4' is NOT 'Q4_0').
 
     Float formats (F16/BF16/F32) are recognized as their own families even
@@ -350,6 +390,34 @@ def split_quant_request(repo_arg: str):
     return head, _canon_quant_token(tail)
 
 
+# A GGUF repo can carry files that are not the model's own weights: the vision
+# projector (`mmproj-*.gguf`), a speculative-decoding draft head (`dspark-*`,
+# `draft-*`, `mtp-*`), or a calibration matrix. They share the extension and
+# sometimes a better quant than the model itself (unsloth's `dspark-...Q8_0`
+# outranks its `UD-Q4_K_XL`), so without this filter the draft head was chosen
+# as the model -- and its `general.architecture` (`dflash`) named the family.
+AUX_GGUF_PREFIXES = ("mmproj", "dspark", "draft", "mtp", "eagle", "medusa",
+                     "lookahead", "imatrix")
+AUX_GGUF_DIRS = {"dspark", "draft", "mtp", "mmproj", "imatrix",
+                 "mainline_support", "old_support"}
+
+
+def is_auxiliary_gguf(name):
+    """True for a projector / draft head / calibration GGUF, not model weights."""
+    p = Path(str(name))
+    if any(part.lower() in AUX_GGUF_DIRS for part in p.parts[:-1]):
+        return True
+    base = p.name.lower()
+    if "mmproj" in base:
+        return True
+    return base.split("-")[0].split("_")[0].split(".")[0] in AUX_GGUF_PREFIXES
+
+
+def model_gguf_names(names):
+    """The `.gguf` paths that are the model's own weights (aux files removed)."""
+    return [n for n in names if str(n).endswith(".gguf") and not is_auxiliary_gguf(n)]
+
+
 def _gguf_candidates(names, pref):
     """(candidates, refused) from a repo's GGUF paths.
 
@@ -361,6 +429,10 @@ def _gguf_candidates(names, pref):
     for n in names:
         if not n.endswith(".gguf"):
             continue
+        if is_auxiliary_gguf(n):
+            refused[n] = ("auxiliary GGUF (vision projector / draft head / "
+                          "calibration), not the model's weights")
+            continue
         info = gguf_shard_info(n)
         if info and info[0] != 1:
             refused[n] = f"part {info[0]} of a {info[1]}-part GGUF; installed beside part 1"
@@ -369,7 +441,7 @@ def _gguf_candidates(names, pref):
         q = gguf_quant_family(suffix, pref)
         if q not in pref:
             refused[n] = ("quant " + (suffix or "unmarked") + " not supported by the open kernels (have "
-                          + "/".join(pref) + "); convert with q4nx-build")
+                          + "/".join(pref) + ")")
             continue
         cands.append((pref.index(q), q, suffix, n))
     # A single-file export wins a tie with the same quant split across shards.
@@ -607,26 +679,20 @@ def kernel_set_refusal(model_name, family, notes, bases=(), build=None):
         # no amount of retrying a spec will change that. Say so plainly instead of pointing
         # at build-new-spec.py, which only adds a SIZE to a family that already has kernels.
         return (f"{head}{body}\n"
-                f"This build has no recipe for that architecture, so its geometry cannot be "
-                f"read from the file. Not supported yet -- nothing to match, nothing to build.")
+                f"This family is not supported yet -- https://github.com/Atomic-Germ/OpenFlowLM-Next to submit a request or PR.")
     if any("no GGUF-direct build" in n for n in notes):
         return (f"{head}{body}\n"
-                f"The kernels are installed; this build of the set predates GGUF-direct.\n"
-                f"Re-export the set with:\n"
-                f"  python utilities/export-kernels.py")
+                f"GGUF not yet implemented for this family.\n")
     if any("row head" in n for n in notes):
         return (f"{head}{body}\n"
-                f"The set's head cannot be widened at install time; this size needs its\n"
-                f"own kernels." + (f"\n  {build}" if build else ""))
+                f"This family is supported, the size needs its own kernels.\n"
+                f"Try `oflm dev build-new-spec --repo <user>/<repo>" + (f"\n  {build}" if build else ""))
     if build:
         return (f"{head}{body}\n"
-                f"Building this size's kernels did not succeed. To retry:\n  {build}")
-    # No checkout: the user cannot build anything, and telling them to run a script
-    # that is not installed is the same false gate in a different place.
+                f"Assembling kernel failed. See errors above.\n  {build}")
     return (f"{head}{body}\n"
-            f"This size's kernels are not part of this release. They are built from the\n"
-            f"geometry above and shipped with the app -- please report it with the family\n"
-            f"and the shape, and the next release will carry the set.")
+            f"There are no kernels for the shape. If this is unexpected, \n"
+            f"file a bug report at https://github.com/Atomic-Germ/OpenFlowLM-Next")
 
 
 # Families whose GGUF-direct numerics are not right yet. A model that installs, loads and
@@ -711,7 +777,7 @@ SYSTEM_XCLBIN_PREFIXES = [
 ]
 
 # Dir-name prefix -> runtime details.family, used only when no official entry
-# can be matched by name. The official model_list.json is the primary source.
+# can be matched by name or geometry
 FAMILY_ALIASES = [
     ("qwen3.5-omni", "qwen3.5-omni"),
     ("qwen3.6", "qwen3.6-moe"),
@@ -728,17 +794,9 @@ FAMILY_ALIASES = [
     ("gemma3", "gemma3"),
     ("llama3", "llama3"),
     ("llama", "llama3"),
-    # Stock quant repos keep the upstream org/model prefix the fine-tune
-    # slugs drop: bartowski/Meta-Llama-3.1-8B-Instruct-GGUF,
-    # google/gemma-3-4b-it-GGUF, microsoft/Phi-4-mini-instruct-GGUF.
     ("meta-llama", "llama3"),
     ("gemma-3", "gemma3"),
     ("phi-4", "phi4"),
-    # Granite is its own family now (the dense recipe, head_dim 64 at hidden
-    # 2560). It aliased onto llama3 because nothing served it; leaving that
-    # would route a Granite directory to the Llama 3 AutoModel, whose sampler
-    # defaults and chat-template probe are the wrong ones -- and the closed
-    # The (since-removed) closed llama_npu refused hidden_size 2560 outright.
     ("granite", "granite"),
     ("hunyuan", "hunyuan"),
     ("crow", "qwen3.5"),
@@ -814,10 +872,6 @@ CONFIG_MODEL_FAMILIES = {
     "gemma3": "gemma3",
     "gemma3_text": "gemma3",
     "phi4": "phi4",
-    # Phi-3 and Phi-4 both publish model_type `phi3`, and the engine family for the set we
-    # ship (Phi4-mini-Instruct-NPU2) is `phi4`. Mapping it to `phi3` matched no official
-    # entry, so an abliterated Phi-4-mini GGUF installed with "No official model matched; no
-    # xclbins link" -- the geometry was right and nothing was linked.
     "phi3": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
@@ -827,7 +881,6 @@ CONFIG_MODEL_FAMILIES = {
     "lfm2_moe": "lfm2moe",
     "lfm3": "lfm3",
     "gpt_oss": "gpt-oss",
-    # Qwen3.5 / 3.8's own model_type (the tag is still qwen3.5)
     "qwen3_5": "qwen3.5",
     "qwen3_5_text": "qwen3.5",
     "qwen3_next": "qwen3.5",
@@ -2914,10 +2967,11 @@ def _link_one(user_root, name, target, force, quiet):
                 f"{link} already exists and is not a symlink. Remove it or pass --force."
             )
     if not _make_dir_link(link, target):
-        raise SystemExit(
-            f"Could not link {link} -> {target}. Windows grants the symlink privilege to "
-            f"admins and developer mode only, and the junction fallback failed too."
-        )
+        detail = ("On Windows, directory symlinks need the privilege granted only to "
+                  "admins / developer mode, and the junction fallback also failed."
+                  if os.name == "nt" else
+                  "Check that the parent directory is writable and the target exists.")
+        raise SystemExit(f"Could not link {link} -> {target}. {detail}")
     if not quiet:
         log(f"[INFO] Linked xclbins: {link} -> {target}")
 
@@ -3033,6 +3087,10 @@ def _make_dir_link(link, target):
     """Symlink `link` -> `target`; a junction where symlinks need a privilege
     Windows only grants to admins / developer mode. True on success."""
     try:
+        # A fresh install has no user xclbins directory yet; os.symlink does
+        # not create parents, and the resulting FileNotFoundError used to be
+        # misreported as a Windows junction-privilege failure on Linux.
+        Path(link).parent.mkdir(parents=True, exist_ok=True)
         os.symlink(str(target), str(link), target_is_directory=True)
         return True
     except (OSError, NotImplementedError, AttributeError):
@@ -3098,8 +3156,9 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
         if not quiet:
             log(f"[INFO] Linked open kernels: {link} -> {target}")
         return True
-    log(f"[WARN] Could not link {link} -> {target} (a Windows symlink needs "
-        "developer mode or admin). Run oflm with:")
+    why = ("Windows symlinks need developer mode or admin" if os.name == "nt"
+           else "check that the parent directory is writable and the target exists")
+    log(f"[WARN] Could not link {link} -> {target} ({why}). Run oflm with:")
     log(f'           OFLM_OPEN_KERNELS_DIR="{kernel_dir}"')
     return False
 
@@ -3393,10 +3452,14 @@ GGML_TYPE_NAMES = {
     22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32",
     27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 31: "Q4_0_4_4",
     32: "Q4_0_4_8", 33: "Q4_0_8_8",
+    # llama.cpp b11556+ integer/ternary quants. Bonsai's standard Q2_0
+    # packing uses type 42; PQ2_0/PTQ1_0 (Prism fork-only) use 142/143 and
+    # are deliberately NOT listed -- they have no upstream decode law.
+    41: "Q1_0", 42: "Q2_0",
 }
 # Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
 # quants, put/pack_norm for the small float weights).
-GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q2_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
                      "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS"}
 
 
@@ -3689,8 +3752,8 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
                    if GGML_TYPE_NAMES[t] not in GGUF_ENGINE_TYPES})
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
-                       "(have F32/F16/BF16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/"
-                       "IQ4_NL/IQ4_XS); convert with q4nx-build")
+                       "(have F32/F16/BF16/Q2_0/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/"
+                       "IQ4_NL/IQ4_XS)")
     # llama.cpp's quantizers MIX types by importance: the body at the named quant,
     # the output projection and the attention V at a finer one (a Q4_1 file holds
     # Q6_K beside its Q4_1; an IQ4_XS file holds Q5_K). So the name is a hint, not
@@ -4209,7 +4272,9 @@ def main():
     # A FLUX DiT is a GGUF repo too, and `choose_gguf_file` would install it as a language
     # model (there is no model.gguf convention for it). Read the chosen file's architecture
     # -- one small range read -- and take the diffusion path when it says `flux`.
-    dit_name = _pick_dit_gguf(gguf_names) if gguf_names else None
+    # Auxiliary GGUFs are not model weights: a `dspark-...Q8_0` draft head would rank
+    # above the model's Q4 weights and name the speculative architecture instead.
+    dit_name = _pick_dit_gguf(model_gguf_names(gguf_names)) if gguf_names else None
     if dit_name and not gguf_want:
         try:
             if local_dir:

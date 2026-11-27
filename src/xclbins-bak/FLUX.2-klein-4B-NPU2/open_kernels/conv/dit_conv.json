@@ -1,0 +1,353 @@
+{
+  "family": "FLUX.2-klein-4B-NPU2",
+  "kernel": "dit_conv",
+  "DC_TAPS": 9,
+  "resolutions": [
+    512,
+    1024
+  ],
+  "edits": [],
+  "streams": {
+    "vae512_conv00": {
+      "H": 64,
+      "W": 64,
+      "Cin": 128,
+      "Cout": 512,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 264,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 132,
+        "border": 1
+      }
+    },
+    "vae512_conv01": {
+      "H": 64,
+      "W": 64,
+      "Cin": 512,
+      "Cout": 512,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 132,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 132,
+        "border": 1
+      }
+    },
+    "vae512_conv02": {
+      "H": 64,
+      "W": 64,
+      "Cin": 512,
+      "Cout": 512,
+      "up": true,
+      "x": {
+        "off": 0,
+        "pitch": 132,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 260,
+        "border": 1
+      }
+    },
+    "vae512_conv03": {
+      "H": 128,
+      "W": 128,
+      "Cin": 512,
+      "Cout": 512,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 130,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 130,
+        "border": 1
+      }
+    },
+    "vae512_conv04": {
+      "H": 128,
+      "W": 128,
+      "Cin": 512,
+      "Cout": 512,
+      "up": true,
+      "x": {
+        "off": 0,
+        "pitch": 260,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      }
+    },
+    "vae512_conv05": {
+      "H": 256,
+      "W": 256,
+      "Cin": 512,
+      "Cout": 256,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      }
+    },
+    "vae512_conv06": {
+      "H": 256,
+      "W": 256,
+      "Cin": 256,
+      "Cout": 256,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      }
+    },
+    "vae512_conv07": {
+      "H": 256,
+      "W": 256,
+      "Cin": 256,
+      "Cout": 256,
+      "up": true,
+      "x": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      }
+    },
+    "vae512_conv08": {
+      "H": 512,
+      "W": 512,
+      "Cin": 256,
+      "Cout": 128,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      }
+    },
+    "vae512_conv09": {
+      "H": 512,
+      "W": 512,
+      "Cin": 128,
+      "Cout": 128,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      }
+    },
+    "vae1024_conv00": {
+      "H": 128,
+      "W": 128,
+      "Cin": 128,
+      "Cout": 512,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 260,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 130,
+        "border": 1
+      }
+    },
+    "vae1024_conv01": {
+      "H": 128,
+      "W": 128,
+      "Cin": 512,
+      "Cout": 512,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 130,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 130,
+        "border": 1
+      }
+    },
+    "vae1024_conv02": {
+      "H": 128,
+      "W": 128,
+      "Cin": 512,
+      "Cout": 512,
+      "up": true,
+      "x": {
+        "off": 0,
+        "pitch": 130,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      }
+    },
+    "vae1024_conv03": {
+      "H": 256,
+      "W": 256,
+      "Cin": 512,
+      "Cout": 512,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      }
+    },
+    "vae1024_conv04": {
+      "H": 256,
+      "W": 256,
+      "Cin": 512,
+      "Cout": 512,
+      "up": true,
+      "x": {
+        "off": 0,
+        "pitch": 258,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      }
+    },
+    "vae1024_conv05": {
+      "H": 512,
+      "W": 512,
+      "Cin": 512,
+      "Cout": 256,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      }
+    },
+    "vae1024_conv06": {
+      "H": 512,
+      "W": 512,
+      "Cin": 256,
+      "Cout": 256,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      }
+    },
+    "vae1024_conv07": {
+      "H": 512,
+      "W": 512,
+      "Cin": 256,
+      "Cout": 256,
+      "up": true,
+      "x": {
+        "off": 0,
+        "pitch": 514,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 1026,
+        "border": 1
+      }
+    },
+    "vae1024_conv08": {
+      "H": 1024,
+      "W": 1024,
+      "Cin": 256,
+      "Cout": 128,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 1026,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 1026,
+        "border": 1
+      }
+    },
+    "vae1024_conv09": {
+      "H": 1024,
+      "W": 1024,
+      "Cin": 128,
+      "Cout": 128,
+      "up": false,
+      "x": {
+        "off": 0,
+        "pitch": 1026,
+        "border": 1
+      },
+      "y": {
+        "off": 0,
+        "pitch": 1026,
+        "border": 1
+      }
+    }
+  },
+  "complete": true
+}

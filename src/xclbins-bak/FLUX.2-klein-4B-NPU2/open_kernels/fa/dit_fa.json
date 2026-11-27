@@ -1,0 +1,174 @@
+{
+  "family": "FLUX.2-klein-4B-NPU2",
+  "kernel": "dit_fa",
+  "head_dim": 128,
+  "q_k_v_o": "bf16 [tokens, heads*128] token-major (K/V: kv_heads*128)",
+  "exp_fix": 0,
+  "tau": 32,
+  "resolutions": [
+    512,
+    1024
+  ],
+  "edits": [],
+  "streams": {
+    "r512_attn": {
+      "L": 1536,
+      "heads": 24,
+      "kv_heads": 24,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {},
+      "role": "joint.attention"
+    },
+    "r512_attn_dbl": {
+      "L": 1536,
+      "heads": 24,
+      "kv_heads": 24,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {
+        "qkv_ld": 9216,
+        "k_col": 3072,
+        "v_col": 6144,
+        "o_ld": 3072
+      },
+      "role": "double.attention"
+    },
+    "r512_attn_sgl": {
+      "L": 1536,
+      "heads": 24,
+      "kv_heads": 24,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {
+        "qkv_ld": 33792,
+        "k_col": 3072,
+        "v_col": 6144,
+        "o_ld": 33792,
+        "o_col": 9216,
+        "o_interleave": 1
+      },
+      "role": "single.attention"
+    },
+    "r1024_attn": {
+      "L": 4608,
+      "heads": 24,
+      "kv_heads": 24,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {},
+      "role": "joint.attention"
+    },
+    "r1024_attn_dbl": {
+      "L": 4608,
+      "heads": 24,
+      "kv_heads": 24,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {
+        "qkv_ld": 9216,
+        "k_col": 3072,
+        "v_col": 6144,
+        "o_ld": 3072
+      },
+      "role": "double.attention"
+    },
+    "r1024_attn_sgl": {
+      "L": 4608,
+      "heads": 24,
+      "kv_heads": 24,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {
+        "qkv_ld": 33792,
+        "k_col": 3072,
+        "v_col": 6144,
+        "o_ld": 33792,
+        "o_col": 9216,
+        "o_interleave": 1
+      },
+      "role": "single.attention"
+    },
+    "te_attn": {
+      "L": 512,
+      "heads": 32,
+      "kv_heads": 8,
+      "causal": 1,
+      "valid_len": 512,
+      "layout": {
+        "qkv_ld": 6144,
+        "k_col": 4096,
+        "v_col": 5120,
+        "o_ld": 4096
+      },
+      "role": "text_encoder.attention"
+    },
+    "vae512_fa00": {
+      "L": 4096,
+      "heads": 4,
+      "kv_heads": 4,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {
+        "qkv_ld": 2048,
+        "k_col": 512,
+        "v_col": 1024,
+        "o_ld": 512
+      },
+      "role": "vae.attention"
+    },
+    "vae1024_fa00": {
+      "L": 16384,
+      "heads": 4,
+      "kv_heads": 4,
+      "causal": 0,
+      "valid_len": 0,
+      "layout": {
+        "qkv_ld": 2048,
+        "k_col": 512,
+        "v_col": 1024,
+        "o_ld": 512
+      },
+      "role": "vae.attention"
+    }
+  },
+  "patch": {
+    "te_attn": {
+      "valid_len": [
+        26,
+        62,
+        98,
+        134,
+        170,
+        206,
+        242,
+        278,
+        314,
+        350,
+        386,
+        422,
+        458,
+        494,
+        530,
+        566,
+        602,
+        638,
+        674,
+        710,
+        746,
+        782,
+        818,
+        854,
+        890,
+        926,
+        962,
+        998,
+        1034,
+        1070,
+        1106,
+        1142
+      ]
+    }
+  },
+  "complete": true
+}

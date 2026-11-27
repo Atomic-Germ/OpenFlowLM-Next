@@ -1,0 +1,94 @@
+{
+  "xrt-kernels": [
+    {
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/empty_0.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/main.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/ew.pdi",
+          "id": 3
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/npu_insts_full_elf_main_cfg_ew.bin",
+          "id": "cfg_ew"
+        }
+      ],
+      "name": "main"
+    },
+    {
+      "PDIs": [
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/empty_0.pdi",
+          "id": 1
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/main.pdi",
+          "id": 2
+        },
+        {
+          "PDI_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/ew.pdi",
+          "id": 3
+        }
+      ],
+      "arguments": [
+        {
+          "name": "arg_0",
+          "offset": "0x0",
+          "type": "char *"
+        },
+        {
+          "name": "arg_1",
+          "offset": "0x8",
+          "type": "char *"
+        },
+        {
+          "name": "arg_2",
+          "offset": "0x10",
+          "type": "char *"
+        },
+        {
+          "name": "arg_3",
+          "offset": "0x18",
+          "type": "char *"
+        },
+        {
+          "name": "arg_4",
+          "offset": "0x20",
+          "type": "char *"
+        }
+      ],
+      "instance": [
+        {
+          "TXN_ctrl_code_file": "/home/atomic-germ/Projects/Next/src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/elf_build/ew/r1024_ln_all/prj/npu_insts_full_elf_ew_r1024_ln_all.bin",
+          "id": "r1024_ln_all"
+        }
+      ],
+      "name": "ew"
+    }
+  ]
+}

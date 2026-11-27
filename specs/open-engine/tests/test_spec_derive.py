@@ -96,3 +96,29 @@ def test_json_round_trip_and_hash():
     assert again == s and again.spec_hash() == s.spec_hash()
     with pytest.raises(SpecError, match="unknown ModelSpec field"):
         ModelSpec.from_dict(dict(s.to_dict(), bogus=1))
+
+
+def test_repo_gguf_url_finds_a_split_quant_subdirectory(monkeypatch):
+    """Unsloth's UD quants live in subdirectories; a root-only scan misses them."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    path = root / "utilities" / "gen-kernel-spec.py"
+    spec = importlib.util.spec_from_file_location("gen_kernel_spec_under_test", path)
+    assert spec is not None and spec.loader is not None
+    gen = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = gen
+    spec.loader.exec_module(gen)
+
+    sys.path.insert(0, str(root / "utilities" / "oflm-add"))
+    import oflm_add  # noqa: PLC0415
+    stem = "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL"
+    tree = [{"path": "README.md"},
+            {"path": f"{stem}-00002-of-00004.gguf"},
+            {"path": f"{stem}-00001-of-00004.gguf"}]
+    monkeypatch.setattr(oflm_add, "hf_file_tree", lambda _repo: tree)
+    url = gen.repo_gguf_url("unsloth/Qwen3.8-Flash-Next-GGUF")
+    assert url == ("https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/"
+                   f"{stem}-00001-of-00004.gguf")

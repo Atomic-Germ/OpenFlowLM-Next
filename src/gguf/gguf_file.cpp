@@ -293,6 +293,7 @@ const char* GgufFile::type_name(Type t) {
         case Type::IQ4_XS: return "IQ4_XS"; case Type::I8: return "I8"; case Type::I16: return "I16";
         case Type::I32: return "I32"; case Type::I64: return "I64"; case Type::F64: return "F64";
         case Type::IQ1_M: return "IQ1_M"; case Type::BF16: return "BF16";
+        case Type::Q1_0: return "Q1_0"; case Type::Q2_0: return "Q2_0";
     }
     return "type?";
 }
@@ -754,6 +755,26 @@ void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* o
             }
             break;
         }
+        case Type::Q2_0: {
+            // llama.cpp GGML_TYPE_Q2_0 (b11556+): a block is 64 values, one
+            // fp16 scale d, then 16 bytes of 2-bit codes (4 values/byte).
+            // Codes 00/01/10/11 map to -1/0/+1/+2 times d. Bonsai's Q2_0
+            // pack holds the same ternary weights as PQ2_0/PTQ1_0 in a
+            // standard type, with a blockwise Hadamard rotation folded into
+            // the STORED weights -- so decoding here is exactly what
+            // llama.cpp does, and the engine sees the rotated values.
+            const uint8_t* p = base + row * (dim / 64) * 18;
+            for (size_t b = 0; b < dim / 64; ++b, p += 18) {
+                uint16_t u;
+                std::memcpy(&u, p, 2);
+                const float d = fp16_to_f32(u);
+                for (size_t j = 0; j < 64; ++j) {
+                    const uint8_t q = (p[2 + j / 4] >> ((j % 4) * 2)) & 0x03;
+                    out[b * 64 + j] = static_cast<float>(static_cast<int>(q) - 1) * d;
+                }
+            }
+            break;
+        }
         case Type::Q4_0: {
             // fp16 scale + 16 nibble bytes; GGML's values are d * (q - 8)
             const uint8_t* p = base + row * (dim / 32) * 18;
@@ -974,7 +995,7 @@ void GgufFile::dequant_row(const TensorInfo& t, size_t row, size_t dim, float* o
         }
         default:
             fail(std::string("the embedding is ") + type_name(t.type) +
-                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/"
+                 "; this reader dequantizes F32/F16/BF16/Q2_0/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/"
                  "Q6_K/IQ4_NL/IQ4_XS rows "
                  "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
     }

@@ -1,0 +1,78 @@
+{
+  "model": "gemma-4-12B-it-NPU2",
+  "spec_hash": "sha256:47f6e4ed7aff6b93dc061750f41a8a5f0ae14d6fc4f31c1f716a5f70bc84a0da",
+  "build_key": "sha256:c10a44e33f5d92a08816995d30dbceb89184b83aed8cc0227689d87dc4cb1bc4",
+  "built": "2026-11-15T20:26:52-0800",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "d68cfdd26f4a9f85aa016e0cf2efb9aa7548cacd",
+  "source_git_head": "578c631735518fa6caf64e33a6231f862178b5e7",
+  "sets": {
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "3840",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "262144",
+        "LMHEAD_K": "3840",
+        "LMHEAD_CORES": "4"
+      }
+    },
+    "lm_head_q4_f32": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "262144",
+        "LMHEAD_K": "3840",
+        "LMHEAD_CORES": "4",
+        "LMHEAD_SCALES_F32": "1"
+      }
+    },
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "G4_KIND": "local"
+      }
+    },
+    "dx_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "G4_KIND": "local",
+        "GEMV_SCALES_F32": "1"
+      }
+    },
+    "dxg": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "G4_KIND": "global"
+      }
+    },
+    "dxg_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "G4_KIND": "global",
+        "GEMV_SCALES_F32": "1"
+      }
+    }
+  },
+  "sha256": {
+    "ln/final.xclbin": "9a2523a96b808c4e8a414a9dc8f50bf84f1bf636db4cfe07616008674ebb2db9",
+    "ln/insts.bin": "c3a7425044c422c0b2f6429f9efe937e30a8572dd213e0546dd471dd293763c3",
+    "lm_head_q4/final.xclbin": "c02f1440b41092a53606574f84f49e8c83695ac98e57e113750269cc85edcaec",
+    "lm_head_q4/insts.bin": "c6779fc342df33a797f01b0af53952669e38ed161b976abbe8afe93353a5687c",
+    "lm_head_q4_f32/final.xclbin": "4dc06fcecb0e189e24e1004e2f2d8fbb72bfc05b2bcac7fadb21331491058b59",
+    "lm_head_q4_f32/insts.bin": "964cf7358eb3374e9fdd92a89f28d65bee7f92b0378249c1b7b8423b735009c3",
+    "dx/final.xclbin": "ded0e57e33f117412c691eac522ad3a5a242cb79a710c39d9ddabe4a79c3cacc",
+    "dx/insts.bin": "859e16b0e5fbe3b9c45e6ab91d4f195900dbab5c21b1f0abb25b8049587bcf01",
+    "dx_f32/final.xclbin": "99d96e2e9a7f306b3c0f81438746ba89bf2d19a6d29cbbedf0b0146d1aaac073",
+    "dx_f32/insts.bin": "9315d04c8a86995b493c09d6308c5e508d0e8677b4472a0f1401b7082f4d1ceb",
+    "dxg/final.xclbin": "56d791bf262493a69aa16b5a893bff689a67d33307acabd465c255f57ea456a6",
+    "dxg/insts.bin": "99f0bce470bc9cbfe7a4b4dd77b40255895faef142bb40778081e7b0faec20dc",
+    "dxg_f32/final.xclbin": "82212de77a2923fcb876735ba7d3ee9a08243e9bcf01db09e03b2e75525a980d",
+    "dxg_f32/insts.bin": "cc5f9e148b299b7fbd01ed41361555e95807d56ac2f75dfee300ddf793cab494"
+  }
+}

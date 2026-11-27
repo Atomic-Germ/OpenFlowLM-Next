@@ -238,6 +238,11 @@ def test_no_shipped_models_hash_moved():
         "lfm2.5-24b-a2b-gguf.json": "sha256:ef9bab104443ff57e54dfc35c80e31b6ab2b64c6bd8eb42cec5077cbf91b31d7",
         "lfm2.5-8b-a1b-gguf.json": "sha256:2734c318a994cbd694fe902c5df2edc529e445b8047333df9efcb6b791ac6826",
         "lfm2-1.2b-gguf.json": "sha256:3b0be3f2642a5a661c33df1bb585c3212ae676ae24705bebbe103b782d97abd9",
+        "llama-3-experiment-v1-9b-i1-gguf.json": "sha256:089df247a377f47e0cd5265147beed53a202f9934bc320fbf1df21bca0ff7039",
+        "llama-3.1-minitron-4b-width-base.json": "sha256:1c7c2d20f8409484887b760d37359109f6dfe614677da52f2fea1dc649f50277",
+        "llama-3.1-nemotron-nano-4b-v1.1-heretic-i1-gguf.json": "sha256:3b8315b0eec019cbbfca05030bfe02fedcd03ab5b016cb6d3fb53e9479c65313",
+        "peach-2.0-9b-8k-roleplay-heretic-i1-gguf.json": "sha256:34a5b4de5abb59675972712303f38ab8f3b543a8def577f61bcc45082f33eeaa",
+        "fatgirlmagicv2-i1-gguf.json": "sha256:13151126b68d672aa7b426d83668631a1280cca798c9d9a689560d88a3065969",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

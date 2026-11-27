@@ -1,0 +1,481 @@
+{
+  "model": "Qwen3-14B-NPU2",
+  "spec_hash": "sha256:2462660b6a12ca1b5133236ff7417e0911a831c9566f4fc8a6a145cee340152d",
+  "build_key": "sha256:f5f7b9ddf30fa679c8eb14ab327b21d5212099a30ab00b4d892e43585606fd4b",
+  "built": "2026-11-15T20:28:39-0800",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "d68cfdd26f4a9f85aa016e0cf2efb9aa7548cacd",
+  "source_git_head": "578c631735518fa6caf64e33a6231f862178b5e7",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "5120",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "151936",
+        "LMHEAD_K": "5120",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "dx_attn": {
+      "design": "open_kernels/designs/dense/dx_attn.py",
+      "env": {}
+    },
+    "ag_s256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "256",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "256",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "512",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "512",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "768",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "768",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "1024",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1024",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "1280",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1280",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "1536",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1536",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "1792",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1792",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "2048",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2048",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "2304",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2304",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "2560",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2560",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "2816",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2816",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "3072",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3072",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "3328",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3328",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "3584",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3584",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "3840",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3840",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "ag_s4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "128",
+        "AG_N": "4096",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "4096",
+        "AG_N": "128",
+        "AG_COLS": "4"
+      }
+    },
+    "gemm_n5120_k5120": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "5120",
+        "GQP_K": "5120",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n5120_k17408": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "5120",
+        "GQP_K": "17408",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n7168_k5120": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "7168",
+        "GQP_K": "5120",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n17408_k5120": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "17408",
+        "GQP_K": "5120",
+        "GQP_T": "256"
+      }
+    },
+    "dit_n7168_k5120": {
+      "design": "open_kernels/designs/dit_gemm/dit_gemm.py",
+      "env": {
+        "DG_M": "1024",
+        "DG_K": "5120",
+        "DG_N": "7168",
+        "DG_LAYOUT": "{}"
+      }
+    },
+    "dit_n5120_k5120": {
+      "design": "open_kernels/designs/dit_gemm/dit_gemm.py",
+      "env": {
+        "DG_M": "1024",
+        "DG_K": "5120",
+        "DG_N": "5120",
+        "DG_LAYOUT": "{}"
+      }
+    },
+    "dit_n17408_k5120": {
+      "design": "open_kernels/designs/dit_gemm/dit_gemm.py",
+      "env": {
+        "DG_M": "1024",
+        "DG_K": "5120",
+        "DG_N": "17408",
+        "DG_LAYOUT": "{}"
+      }
+    },
+    "dit_n5120_k17408": {
+      "design": "open_kernels/designs/dit_gemm/dit_gemm.py",
+      "env": {
+        "DG_M": "1024",
+        "DG_K": "17408",
+        "DG_N": "5120",
+        "DG_LAYOUT": "{}"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "ba9efe69693524a7baec74131cd3a4df9985e9fe328ef3c5b05d3159e3746595",
+    "dx/insts.bin": "4033e5d4e886a708278b990cd64c32db65904d3b25beca4c67ee9da054a7fc90",
+    "ln/final.xclbin": "e21f7a2139ebe627675875a161953652492d5439f05a5e7107c96878fb8bdf32",
+    "ln/insts.bin": "180b7d774443d00e9437f7e29c6dc6ebddbdf9a21ea0de38561a3a7a8237f6e8",
+    "lm_head_q4/final.xclbin": "cf218743dcaa0b6878658a5770bfcab1b9c9cea5516ed07a47f3b6d22be6da75",
+    "lm_head_q4/insts.bin": "196a786955a7b51d280a1cb05feb368bbcb3730ab50a0513a51e47c1d4d06a1b",
+    "dx_attn/final.xclbin": "35b65b7ab7eb8628e0172efc1f8045ec5d0e97cbbb217d1a71987e7ba1b6282a",
+    "dx_attn/insts.bin": "3f84fd36ab66c498644643cc593d961c7f20ce9b4f1ccd976009c53cb1a52151",
+    "ag_s256/final.xclbin": "4ff63dc3a32d1229b88f5476a017573d7d9145a32fd0e288db99e9643c74d26d",
+    "ag_s256/insts.bin": "8e3165b2f4de7577c8ffd8fb1038432f8affc5b0d93a87d0fbf5413baf4081cc",
+    "ag_pv256/final.xclbin": "1a12620d432e3829d13a36cb28498b837596ff41131a433bc0016045b85cb80e",
+    "ag_pv256/insts.bin": "1c71c34c303f0d4b4f487ec77392891fd1af8576c155b625d5ffa164344ed14b",
+    "ag_s512/final.xclbin": "92db306a2b87bf9eff59d131228843f8ea5351eeea4a8f7c5cd948f731062b73",
+    "ag_s512/insts.bin": "373099f1114cf56c786a406a00e82981c870ada62c16c87e3a1767f065a8b1ad",
+    "ag_pv512/final.xclbin": "d40b960ad1cd6bd1cd6704942905d039f792225dfbb97ad6a6a7101906c89ec1",
+    "ag_pv512/insts.bin": "429a61768202110d153ede6de73b871a005d08debf969680dcd6b661ed2fa1f1",
+    "ag_s768/final.xclbin": "27f2650f880e0921a176d2e70eab338c49369dfbb01b085e6fd013b8637556a6",
+    "ag_s768/insts.bin": "1d29092773123a8ebc1a8bcd55698b5db2d588ee8fe4e484edd8d67cddfac2e0",
+    "ag_pv768/final.xclbin": "93063d56d193b0a5bac11a200b21a039840260ec91d277be74cfc310c662b052",
+    "ag_pv768/insts.bin": "f055b0c29ffedff199f09ab3aff7d25dc645f8601ba3311e44f04db1e5546282",
+    "ag_s1024/final.xclbin": "251701a94bbeb73d717c703cc9ae2b0ad8e9a1c66604497d421ddfca1e2e6389",
+    "ag_s1024/insts.bin": "304a5b3df419107a1d0cab2403e596f16444c173aeb59aba8271e9fdda1e32e9",
+    "ag_pv1024/final.xclbin": "04fefd25b16cbf424a4f70492e4a45291104c395d2308b030c09061f8826be9c",
+    "ag_pv1024/insts.bin": "4472ea344ef3f73652cef72a9f5dffda9a9c98efe42abec711dc65caa639a067",
+    "ag_s1280/final.xclbin": "95a4ff052169dcced76e57061ac45a67c8457cd475c909ca5ffd7cd06e0feb9b",
+    "ag_s1280/insts.bin": "f8ae8c62f6a257cd6fdf3b6a0b3082a5aaa461fbb536ab9ecb50d2f031328e59",
+    "ag_pv1280/final.xclbin": "40580f854caa2e2ae390738261187c68fdcf5595a1ebbdb5a843deaaf2a1be18",
+    "ag_pv1280/insts.bin": "9f2d0ed2fde29cd35231922721b834af5624aaf80e77da79a1372566a149f9f1",
+    "ag_s1536/final.xclbin": "d8622f2869f02867de699a5ab00f837917578ad5ed411429445e041e5d9ed2f4",
+    "ag_s1536/insts.bin": "2e9bc541c5dd5b2024e7f4060b0655b627ab52fbaac6fee851a14f3faba5192e",
+    "ag_pv1536/final.xclbin": "290094a1c3b836f4b3657aa22fb18a48d17b827460d2c05a14a4c67bc09d68c9",
+    "ag_pv1536/insts.bin": "f6e8881ee38f2c08d5e3c3e317a2699a9fb267323018b5ec0fc29a0ef67df3c9",
+    "ag_s1792/final.xclbin": "213b70e8ee08b0d3f31a0d26d79d4af62380ad3305b4df54d8376e9d69c87190",
+    "ag_s1792/insts.bin": "436d542becccdf5c59c4e0c5acac29d3de0a4fbd055db2029fdb09fae23fcc85",
+    "ag_pv1792/final.xclbin": "a718064205fc8b00ea9f013461ea70d697e697ee1abd34365f0aed894fa5f84c",
+    "ag_pv1792/insts.bin": "4f538e9d0c19a375ae9fa1e5436f00e76f48bc75cc396b1f3265ecc3e8bcda79",
+    "ag_s2048/final.xclbin": "db44a83e06f901ec18953cf70c419917ad63e506777aebac3c6144a6c4d8d925",
+    "ag_s2048/insts.bin": "0c9034069d8ecceeb53b3dfd759c7bdc8ecebdbb99662b04dfa713899c7d1cc9",
+    "ag_pv2048/final.xclbin": "846e5cd09451ef4ced1821d8338c29f0f26e872d82839d2f1cdeda06c6c8906e",
+    "ag_pv2048/insts.bin": "c0bd68c59cfa0dad113e6413457c65dd299e8c9498a885c8b0fedfa4c5cfc92f",
+    "ag_s2304/final.xclbin": "47367a1b6aef77dbad74ceffc3e7b85b27fc7a615c00d0bf1a37731023f088ed",
+    "ag_s2304/insts.bin": "c3f832da9e0e578f42bfcf92b47b54ef71541cb4b169f35131a1d21773d0d0df",
+    "ag_pv2304/final.xclbin": "d50dfec779cd539491719408b469762eca060f71a46f0abb6fcf70482127bb5b",
+    "ag_pv2304/insts.bin": "4b15ff9b84c1ee86369d7a05cc5afcbb7412648d95cdb22d6cc5817a4d5738a7",
+    "ag_s2560/final.xclbin": "0bb80ed0daf86a7ed76faa2760233dce20a1627e0bd36bbd227f531b12bc5b75",
+    "ag_s2560/insts.bin": "d47fc7ce041c14eb3b8ee1e1c9ce30e05ab7da04c1fc8a14b998b64966a614f1",
+    "ag_pv2560/final.xclbin": "8425bdc551aba691958722ca0eb780d990a94b8ac4f275bddf0d44dedb722bae",
+    "ag_pv2560/insts.bin": "f2ddb8fe40d069d7905e7e43b1b2986dcebfe7e018ac62d1d66c922e91a1fdef",
+    "ag_s2816/final.xclbin": "3920615043e7ad8b43b63b57c19a579d688a28220b082beddf6e0e0db9b5d1f0",
+    "ag_s2816/insts.bin": "7c6aae129e4cf30726b420c9a68140996ae2c124a17622e20f9056927a9cf64c",
+    "ag_pv2816/final.xclbin": "b6df8762db552f65763f5a096b773c69f5c1330c77306ec55b42a9e36dab12f3",
+    "ag_pv2816/insts.bin": "ed75b9d5bcb1c13daebd760e4ada771c16891a681f59f18ee979818fed694116",
+    "ag_s3072/final.xclbin": "e2d4d15ec54eecb019cdcbb8f919d007a9660a5a3bd7f5969c892de28d641095",
+    "ag_s3072/insts.bin": "a9acdd28c7ab987bf61665c3c3982bfbf5ec3b0d54626f7ba3458de80391f0eb",
+    "ag_pv3072/final.xclbin": "4097945a9a97a5144e995d28987d3cc652f70ff1ec9d042c2ce0afb811f4ef11",
+    "ag_pv3072/insts.bin": "b6a5186494afdbf9e204482be56747b154bab70679d1d1a2f81355b23eb2628a",
+    "ag_s3328/final.xclbin": "3afb3437b9c38d86fa3900905281aea9d89f173192c80658ceb1185144575a45",
+    "ag_s3328/insts.bin": "231bc456270abd068fce3d549ebad4405374f285d01ad8574544116d905d1ea6",
+    "ag_pv3328/final.xclbin": "b43bdbcaef7be039788ec44667b04e4b8ea2855284c5bd5434fc64a597c13887",
+    "ag_pv3328/insts.bin": "ec1836fe405842ef533d42f3b2d931e1009e2657f765002c76f108befbdcc567",
+    "ag_s3584/final.xclbin": "b4907bd894753471d14f8726586d5779a2276a54dbe2c4fcb13c531e3cc5cf3a",
+    "ag_s3584/insts.bin": "447e0d674e1ba7fc8881dca43daea512b5f6e2eb54d0eb1f7cfbf4b75f8740cb",
+    "ag_pv3584/final.xclbin": "3e144b3584b9eeaf5e96f9d721a75f1768a9603e145af3924ee5a598d46224f8",
+    "ag_pv3584/insts.bin": "9432b27d2950eb474cfc423ffb81b28ae994986700880ca512fc92ac425842e6",
+    "ag_s3840/final.xclbin": "f075e7fcd18ec1aa4e2f74e3c5a8d9afd4957ed7c36900ee6d82ce9468082182",
+    "ag_s3840/insts.bin": "2e08ecc977d3c8b80420e4dd43567ea6af9c8003ff2f0c375ce39e99b9b8af57",
+    "ag_pv3840/final.xclbin": "a710bff16d11bc16d78b3889eb1db311303fc082b5e6455fdcd3b6e6d468881b",
+    "ag_pv3840/insts.bin": "3e6d38e446e83e8f2e81341852944783dfdc1072b958956a6a50bab71b1e2990",
+    "ag_s4096/final.xclbin": "e1f230e92f9ac29cfe54c0b40501e2716ed09408a2616e70229dd06d65a8e774",
+    "ag_s4096/insts.bin": "a124b6e462ac82c4a3d537dc1f7a6bedf09d00be08956fb5f102522eca2899c5",
+    "ag_pv4096/final.xclbin": "8d7857501b69699c4636e82a28a51af98429300aef7dca6a2bd69a692c374d1a",
+    "ag_pv4096/insts.bin": "5f5ad535b653f5de989744b2e8e104e636525a02edade50e921fb87cf4452838",
+    "gemm_n5120_k5120/final.xclbin": "83d19e942405886ad9dbd3e55e191b32092b588be24cabf46db9081cef64b703",
+    "gemm_n5120_k5120/insts.bin": "86d12fe9b1e86a02e2b71afb6a775cfa61f9e121031805f984b808a3a1e31291",
+    "gemm_n5120_k17408/final.xclbin": "567c2a072ba7158fa762012e30ac486791c9d659e3d17f075955bcd41d7d0565",
+    "gemm_n5120_k17408/insts.bin": "3648779476135350291ab97dcc6e4fca24cd975cf8efd9bd5f7b4d371d818e26",
+    "gemm_n7168_k5120/final.xclbin": "488a9533a3ae6633b3188ee2b97b04f8061141ccbfa28cae795f4069552f2efe",
+    "gemm_n7168_k5120/insts.bin": "37b99ea104bbaf8b1f2891ee461da386ea952c7be0f7485a43330bb4e839d7a1",
+    "gemm_n17408_k5120/final.xclbin": "eba6fb6a352f569dce7f03d5f0000259305bba13629192e068d2252078de2d22",
+    "gemm_n17408_k5120/insts.bin": "9459b1712058f1c4b1e130e926b080fad92d5b8aa61d160bc7ccf66637fb353d",
+    "dit_n7168_k5120/final.xclbin": "de17059c32ac12852456389ab6a13d3b5c8c2a908cfb5e08fd3eb113b0a2899b",
+    "dit_n7168_k5120/insts.bin": "17d305aed86a1f4afcdf4544b7ced9a3861cdf79b5d829b82ecd12e5bec64154",
+    "dit_n5120_k5120/final.xclbin": "6e012ffa384bab5c16d3017a41854cf706d2fd4788bed2cc68c09d8e84e95d44",
+    "dit_n5120_k5120/insts.bin": "3fe3da8aeb6c30d2d15e7c3a245f18af9e7dbfa628d8ce17cee7ec6aa656ff19",
+    "dit_n17408_k5120/final.xclbin": "c75fbb6ebb841a60df2916da28f20649ce19b6db8693be8432fd6cd2bec53331",
+    "dit_n17408_k5120/insts.bin": "1ae4ac95082a7b52e5a9bf1d26c9326340abb428b069a0dc7108c220b37e592a",
+    "dit_n5120_k17408/final.xclbin": "289120c5723692e6a7e61965214a03cc53b2d7eb3330fa7d7f8fe724fc2e5008",
+    "dit_n5120_k17408/insts.bin": "54e3b155c40db74714832cc5e9318dff8151d25cebf84960de9ec1c2381d228c"
+  }
+}

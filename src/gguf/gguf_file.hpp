@@ -40,6 +40,11 @@ public:
         IQ2_XXS = 16, IQ2_XS = 17, IQ3_XXS = 18, IQ1_S = 19, IQ4_NL = 20,
         IQ3_S = 21, IQ2_S = 22, IQ4_XS = 23, I8 = 24, I16 = 25, I32 = 26,
         I64 = 27, F64 = 28, IQ1_M = 29, BF16 = 30,
+        // llama.cpp b11556+ adds the integer/ternary block quants. Bonsai's
+        // Q2_0 files use GGML_TYPE_Q2_0 (42): 64 values per block, one fp16
+        // scale, 2-bit codes {-1,0,+1,+2} * d. Prism's fork-only PQ2_0/PTQ1_0
+        // (types 142/143) are NOT here -- they need the fork's decode law.
+        Q1_0 = 41, Q2_0 = 42,
     };
 
     struct TensorInfo {

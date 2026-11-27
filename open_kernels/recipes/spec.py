@@ -420,6 +420,89 @@ class ModelSpec:
             raise SpecError(f"general.architecture {arch!r} has no recipe (known: {sorted(GGUF_FAMILIES)})")
         return GGUF_FAMILIES[arch](md)
 
+    @classmethod
+    def from_gguf_candidate(cls, md: Mapping[str, Any], family: str,
+                            tensors: Any = ()) -> "ModelSpec":
+        """A candidate spec for a family that owns no builder for this arch yet.
+
+        `family` is the NEAREST recipe, chosen by build-new-family from the
+        geometry; this reads the standard GGUF keys a family builder reads so
+        `build-new-spec` can build the size against it. Keys no standard field
+        expresses (loop passes, relative bias, sinks, convs) stay in
+        `extra["gguf"]` so the port can see what the nearest recipe misses.
+        """
+        arch = str(md.get("general.architecture") or "")
+
+        def raw(name: str):
+            return md.get(f"{arch}.{name}")
+
+        def first(name: str, default: int = 0) -> int:
+            value = raw(name)
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        n = max(first("block_count", 1), 1)
+        hidden = first("embedding_length")
+        heads = max(first("attention.head_count", 1), 1)
+        kv = first("attention.head_count_kv", heads)
+        head_dim = first("attention.key_length") or hidden // heads
+        # llama.cpp writes 0 for "rotate the whole head" on some architectures.
+        rotary = first("rope.dimension_count") or head_dim
+        try:
+            theta = float(raw("rope.freq_base"))
+        except (TypeError, ValueError):
+            theta = 1_000_000.0
+        window = first("attention.sliding_window")
+        pattern = raw("attention.sliding_window_pattern")
+        if isinstance(pattern, (list, tuple)) and len(pattern) >= n:
+            layer_types = tuple(DENSE_LOCAL if bool(p) else DENSE for p in pattern[:n])
+        else:
+            layer_types = tuple(DENSE_LOCAL if window else DENSE for _ in range(n))
+        vocab = first("vocab_size")
+        if not vocab:
+            toks = md.get("tokenizer.ggml.tokens")
+            vocab = len(toks) if toks else 0
+        real = first("vocab_size_unpadded", vocab)
+        try:
+            eps = float(raw("attention.layer_norm_rms_epsilon"))
+        except (TypeError, ValueError):
+            eps = 1e-6
+        try:
+            softcap = float(raw("final_logit_softcapping"))
+        except (TypeError, ValueError):
+            softcap = 0.0
+        names = {str(t[0]) for t in tensors if t}
+        return cls(
+            family=family,
+            hidden=hidden,
+            num_layers=n,
+            layer_types=layer_types,
+            vocab=vocab,
+            real_vocab=real,
+            num_heads=heads,
+            num_kv_heads=kv,
+            head_dim=head_dim,
+            rotary_dim=rotary,
+            rope_theta=theta,
+            sliding_window=window,
+            qk_norm=any(x.endswith(("attn_q_norm.weight", "attn_k_norm.weight")) for x in names),
+            attn_gate=any(x.endswith("attn_gate.weight") for x in names),
+            intermediate=first("feed_forward_length"),
+            num_experts=first("expert_count"),
+            experts_per_tok=first("expert_used_count"),
+            moe_intermediate=first("expert_feed_forward_length"),
+            norm_eps=eps,
+            final_softcap=softcap,
+            quant="q4_1",
+            extra={"architecture": arch, "source": "gguf", "nearest_recipe": family,
+                   "gguf": {k: v for k, v in md.items()
+                            if k.startswith(arch + ".") or k.startswith("general.")}},
+        )
+
 
 GEMMA4_FIELDS = ("global_head_dim", "global_kv_heads", "global_rotary_dim", "attn_k_eq_v", "v_norm",
                  "attn_scale", "final_softcap")
@@ -1362,7 +1445,7 @@ def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     embedding table, but every container the recipe packs from materialises
     `lm_head.weight` as its own q4 tensor -- OFLM's `.q4nx` does it for
     `Llama-3.2-{1,3}B-NPU2` (I8 [32064, 5120] / [48096, 5120], the whole 128256-row
-    head), and utilities/q4nx-build does it for a tied GGUF (the HunYuan converter's
+    head), and oflm pack does it for a tied GGUF (the HunYuan converter's
     zero-padded head). The derivation sees only config.json, never the container, so
     the invariant is enforced where it is observable: `pack.apply_op` refuses a
     container that lacks the tensor, by name.
@@ -1767,7 +1850,7 @@ def _granite_scale_check(where: str, attn_mult: float | None, hd: int,
         if v is not None and abs(float(v) - 1.0) > 1e-9:
             raise SpecError(
                 f"granite: {name} {v} != 1.0, so it was not folded into the weights "
-                f"(the recipe has nowhere to apply it) -- convert with q4nx-build.")
+                f"(the recipe has nowhere to apply it).")
 
 
 def _granite_unfolded(cfg: Mapping[str, Any], hd: int) -> float | None:

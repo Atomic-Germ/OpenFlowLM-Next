@@ -348,6 +348,22 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
         std::string model_name = model_info["name"];
         std::string model_server = use_modelscope ? "ModelScope" : "HuggingFace";
+
+        // A model installed by `oflm add` is a USER model, not a curated set.
+        // The merged registry marks it with a synthetic model_info_key; the
+        // shipped model_info.json has no records under that key, so a pull
+        // would either hash the user's GGUF against some unrelated curated
+        // manifest or strand a second, dishonest copy beside it. Either way
+        // the ask is wrong: re-run `oflm add` with the original source.
+        const std::string model_info_key = model_info.value("model_info_key", std::string{});
+        if (model_info_key.rfind("oflm-add:", 0) == 0 && !force_redownload) {
+            header_print("OFLM", new_model_tag + " was installed by `oflm add` from "
+                                 "`" + model_name + "`.");
+            header_print("OFLM", "`oflm pull` only fetches the provided curated set; "
+                                 "to refresh this model, re-run:");
+            header_print("OFLM", "  oflm add " + model_name);
+            return true;
+        }
         if (use_modelscope && uses_pinned_sources(model_info)) {
             // Validate this before any ready-state early return.
             resolve_file_source(model_info, model_info.at("files").at(0).get<std::string>(), true);

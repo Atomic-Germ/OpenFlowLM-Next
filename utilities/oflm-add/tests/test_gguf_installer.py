@@ -98,6 +98,37 @@ def test_explicit_kernel_manifest_can_enable_gguf(tmp_path):
 # no Q4_1, no tokenizer files, and a gated base repo.)
 
 
+def test_q2_0_is_a_standard_type_the_packers_ingest():
+    """Bonsai's Q2_0 file uses llama.cpp type 42, not a Prism custom type."""
+    assert oflm_add.GGML_TYPE_NAMES[42] == "Q2_0"
+    assert "Q2_0" in oflm_add.GGUF_ENGINE_TYPES
+    assert oflm_add.gguf_quant_of("Ternary-Bonsai-2-4B-Q2_0.gguf") == "Q2_0"
+    assert oflm_add.gguf_quant_family("Q2_0") == "Q2_0"
+    # The fork-only packings stay unknown: no upstream decode law.
+    assert 142 not in oflm_add.GGML_TYPE_NAMES
+    assert 143 not in oflm_add.GGML_TYPE_NAMES
+
+
+def test_auxiliary_gguf_files_are_not_model_weights():
+    names = [
+        "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+        "dspark-Inkling-2-Mini-Q8_0.gguf",
+        "dspark/dspark-Inkling-2-Mini-BF16.gguf",
+        "mmproj-BF16.gguf",
+        "mainline_support/mmproj-F32.gguf",
+    ]
+    assert oflm_add.is_auxiliary_gguf("dspark-Inkling-2-Mini-Q8_0.gguf")
+    assert oflm_add.is_auxiliary_gguf("mmproj-BF16.gguf")
+    assert not oflm_add.is_auxiliary_gguf("Inkling-2-Mini-UD-Q4_K_XL.gguf")
+    assert oflm_add.model_gguf_names(names) == ["Inkling-2-Mini-UD-Q4_K_XL.gguf"]
+    # A Q8 draft head must not outrank the model's own Q4 weights: the header
+    # of a `dspark-*` file names the speculative architecture (`dflash`), not
+    # the model, so choosing it would also name the wrong family.
+    chosen, refused = oflm_add.choose_gguf_file(names)
+    assert chosen == "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+    assert "auxiliary" in refused["dspark-Inkling-2-Mini-Q8_0.gguf"]
+
+
 def test_quant_suffix_must_run_to_end_of_stem():
     # Q4_0_4_4 is an ik_llama matmul layout, NOT Q4_0: installing it as Q4_0
     # pools was silent garbage. The suffix must be the whole quant token.

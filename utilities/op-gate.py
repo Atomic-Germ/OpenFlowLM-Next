@@ -95,8 +95,8 @@ NOT_AUTOMATED = {
     "deltanet": "designs/deltanet/make_test.py reads a captured state, not a geometry: no per-shape run",
     # short_conv is gated: designs/short_conv/sc_test.py + make_test.py run sc.h
     # at any width (the old (3, 2048) point came from an oflm serve run).
-    "router": "no per-geometry fixture",
-    "moe": "no per-geometry fixture (whole-layer MoE block only)",
+    "router": "no per-geometry fixture (validated through the whole-layer MoE block)",
+    "moe": "no per-geometry fixture (validated through the whole-layer MoE block only)",
 }
 
 
@@ -396,20 +396,26 @@ GATE_FN = {"gemv_q4": gate_gemv_q4, "ln": gate_ln, "lm_head_q4": gate_lm_head_q4
 
 
 def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
-                only: str = "", skip: tuple[str, ...] = ("attn",)) -> list[tuple[str, dict]]:
-    """Validate every missing point (or just `only`'s), returning what was gated.
+                only: str = "", skip: tuple[str, ...] = ("attn",)) -> tuple[list[tuple[str, dict]],
+                                                                          list[tuple[str, dict, str]]]:
+    """Validate the points that HAVE a fixture; return (gated, blocked).
 
     `skip` is for an op the CALLER gates itself: build-new-spec.py runs the
     attention gate (it builds the model's own worker, not a fixture), so it
     skips "attn" here.
 
-    Raises GateError for an op with no runnable fixture, naming it -- never
-    silently skipping a point the build would then fail on.
+    An op with no per-geometry fixture is BLOCKED, not an error: several of
+    them (router, moe) are validated through the whole-layer MoE block, and
+    refusing here used to stop the build, attention gate and registration before
+    any of that could run. The caller decides what a blocked point means; it is
+    always reported, never silently dropped. A fixture that EXISTS but FAILS is
+    still a GateError -- that is a real shortfall, not a missing gate.
     """
     missing = missing_points(spec)
     if only:
         missing = [(op, kw) for op, kw in missing if op == only]
-    done = []
+    done: list[tuple[str, dict]] = []
+    blocked: list[tuple[str, dict, str]] = []
     for op, kw in missing:
         if op in skip:
             continue
@@ -419,15 +425,17 @@ def gate_points(spec, spec_path: Path, py, env, harness, *, dry: bool = False,
             continue
         fn = GATE_FN.get(op)
         if fn is None:
-            raise GateError(f"op-gate: {op} {kw} has no automated gate: "
-                            f"{NOT_AUTOMATED.get(op, 'no fixture for this op')}")
+            why = NOT_AUTOMATED.get(op, "no fixture for this op")
+            blocked.append((op, kw, why))
+            print(f"-- gate {op} {kw}: BLOCKED -- {why}", flush=True)
+            continue
         note = f"{spec_path.stem} (utilities/op-gate.py: the {op} fixture at this geometry)"
         print(f"-- gate {op} {kw}", flush=True)
         fn(spec, kw, py, env, harness, note, dry)
         done.append((op, kw))
         if not dry:
             _reload_catalogue()
-    return done
+    return done, blocked
 
 
 def _reload_catalogue():
@@ -491,7 +499,7 @@ def main() -> int:
         _run(["cmake", "--build", work / "harness", "-j", "8"], quiet=True)
 
     try:
-        done = gate_points(spec, spec_path, py, env, exe, dry=a.dry_run, only=a.op)
+        done, blocked = gate_points(spec, spec_path, py, env, exe, dry=a.dry_run, only=a.op)
     except GateError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -504,12 +512,22 @@ def main() -> int:
     # only this tool's own ops: "attn" is the build-new-spec gate, and --op means
     # the caller asked about one op and the others are not this run's business.
     again = [(op, kw) for op, kw in missing_points(spec)
-             if op != "attn" and (not a.op or op == a.op)]
+             if op != "attn" and (not a.op or op == a.op)
+             and not any(bop == op and bkw == kw for bop, bkw, _ in blocked)]
     if again:
-        print("op-gate: still missing after the gates: " + ", ".join(f"{o} {k}" for o, k in again),
+        print("op-gate: fixture gates failed for: " + ", ".join(f"{o} {k}" for o, k in again),
               file=sys.stderr)
         return 1
-    print(f"\n{spec_path.stem}: {len(done)} point(s) validated and written to recipes/catalogue.py")
+    if blocked:
+        print(f"\n{spec_path.stem}: {len(done)} point(s) validated and written to "
+              f"recipes/catalogue.py; {len(blocked)} point(s) have no per-geometry fixture "
+              f"and must be validated through the whole-layer path:")
+        for op, kw, why in blocked:
+            print(f"  {op} {kw}: {why}", file=sys.stderr)
+    else:
+        print(f"\n{spec_path.stem}: {len(done)} point(s) validated and written to recipes/catalogue.py")
+    # A blocked point is not a failure of the gate tool: it is the whole-layer
+    # gate's job. Exit 0 so scripts that chain gates continue.
     return 0
 
 

@@ -1,6 +1,6 @@
 ---
 name: open-kernel-pipeline
-description: The one-command path from weights to a running model (geometry -> family -> spec -> kernel set -> link -> pack). Use when adding a model or size, when `oflm add` refuses a geometry, when deciding whether a change is a spec, recipe, or design change, or when rebuilding and shipping kernel sets. Supersedes the per-family manual export workflows.
+description: The one-command path from weights to a running model (geometry -> family -> spec -> kernel set -> link -> pack). Use when adding a model or size, onboarding a repo with `oflm dev build-new-family`, when `oflm add` refuses a geometry, when deciding whether a change is a spec, recipe, or design change, or when rebuilding and shipping kernel sets. Supersedes the per-family manual export workflows.
 ---
 
 # The open-kernel pipeline
@@ -22,7 +22,7 @@ weights (GGUF / q4nx / safetensors)
    -> serve           oflm run / serve / bench
 ```
 
-## Two front doors, one pipeline
+## Three front doors, one pipeline
 
 ### For a user: `oflm add`
 
@@ -101,6 +101,62 @@ Its stages, and why each exists:
 Only GATE needs an NPU. Nothing in the pipeline needs the model's weights, a
 container, or the engine. `--dry-run` stops after SPEC and prints the recipe
 walls and the catalogue points the size would need.
+
+### For an onboarding run: `oflm dev build-new-family <repo>`
+
+```bash
+oflm dev build-new-family Qwen/Qwen3-0.6B --dry-run
+oflm dev build-new-family mradermacher/Qwen2.5-7B-Instruct-i1-GGUF
+oflm dev build-new-family unsloth/Qwen3.8-Flash-Next-GGUF --dry-run
+```
+
+`utilities/build-new-family.py` is an orchestrator in front of the two commands
+above, not a second pipeline. It still lets `gen-kernel-spec.py` decide geometry
+and `build-new-spec.py` own SPEC -> BUILD -> GATE -> CATALOGUE -> REBUILD ->
+REGISTER. What it adds is the front door for "onboard this repo":
+
+1. **SPEC** — GGUF-header first; for a GGUF-only repo it scans **every** GGUF
+   path, so a dynamic quant in `UD-Q4_K_XL/...-00001-of-00004.gguf` is a geometry
+   source. The repo README's `base_model` chain is recorded as the tensors/config
+   authority only when config/tokenizer is needed; a local `--gguf` works for
+   gated repos. No q4nx builder is involved (q4nx is deprecated).
+2. **CLASSIFY** — `served` (a checked-in spec/link covers this kernel geometry
+   **and** the install probe found a loadable GGUF), `would_build` (known family,
+   new size), `would_extend` (an architecture no recipe owns), or `weights_blocked`
+   (the geometry hash matched, but the installer refused every GGUF — a ternary
+   quant with unknown ggml tensor types is not an installable model). The
+   `oflm add --dry-run` probe reads `gguf kernels` for GGUF
+   repos and `xclbin source` for config-based repos; its closest official match
+   is **not** used as geometry evidence. The probe is skipped for `would_extend`:
+   there are no kernels to link until the extension builds.
+3. **BUILD / INSTALL** — for `would_build` and `would_extend` it promotes the
+   derived spec and runs `build-new-spec.py`, then `oflm add` links/registers the
+   model. `served` skips the build and only needs `oflm add`.
+4. **UNKNOWN ARCHITECTURE** — no recipe owns the architecture. The command reads
+   the model's own GGUF header and tensor table, builds a candidate `ModelSpec`
+   from the standard GGUF keys, scores the checked-in recipes against that
+   geometry (**layer shape counts much more than headline numbers**: experts,
+   attention gate, convs), and extends the nearest one. `--family` picks a
+   different recipe. `build/new-family/<repo>/RESEARCH.md` records which recipe
+   was chosen, the unmatched tensors/metadata keys and the upstream references,
+   so the numeric gates can be trusted instead of a successful export. If the
+   recipe cannot build the shape, `build-new-spec` parks the spec in
+   `recipes/candidates/` and the command reports that path and exits 0 -- no
+   wall, no homework, evidence preserved. Auxiliary GGUFs (`mmproj-*`,
+   `dspark-*`, `draft-*`, `mtp-*`) are excluded from model selection, so a draft
+   head's `dflash` architecture cannot name the family.
+5. **VALIDATE** — layer dumps, `cmp_layers.py`, decode gates and the production
+   bar are printed as required next steps, and run here only when `--cli`,
+   `--ref-model` and `--install-dir` are supplied. A successful build is not a
+   support claim.
+
+`--dry-run` writes only temporary artifacts (candidate spec, build report, probe
+log, JSON plan); it does not promote a spec, build kernels or edit settings.
+Useful overrides are `--family` (the recipe to extend; also a conservative `oflm
+add` hint), `--tensor-repo`, `--spec-name`, `--gguf`, and the `--skip-build` /
+`--skip-install` / `--skip-validate` stage stops. A quant can be named as
+`user/repo:QUANT`; the bare repo is used for spec derivation and the quant for
+install/GGUF selection.
 
 A geometry the recipe cannot build (a width that does not fit a core, a
 `hidden` that is not a multiple of the 256-wide q4 k-tile, a split FF with no
@@ -230,6 +286,8 @@ allows only the build stamps in the xclbin to differ.
 | `the recipe cannot build this shape` | a design wall (width, k-tile, split FF, head count) | the spec is parked in `recipes/candidates/`; the shape needs a design change |
 | `the catalogue has not validated N point(s)` | a gate has not run at this geometry | `build-new-spec.py` runs them; do not ship with `OPEN_KERNELS_UNVALIDATED=1` |
 | `no recipe for family` / `not implemented` | the architecture has no recipe | that is the family work above; do not route it to the nearest recipe |
+| `status: would_extend` from `build-new-family` | the GGUF/config names an architecture no recipe owns | the nearest recipe was extended and the build attempted; read `build/new-family/<repo>/RESEARCH.md` for what it does not explain, then run the numeric gates |
+| `status: weights_blocked` from `build-new-family` | the geometry hash matched a checked-in spec, but `oflm add --dry-run` refused every GGUF (unsupported quant or unknown tensor type) | no build/install/gate is attempted; the weights must be converted to a supported quant first -- a geometry match does not make a weight file loadable |
 | `no open kernels found` at load | the model directory has no `open_kernels` link and no set matches | re-run `oflm add`, or check `OFLM_OPEN_KERNELS_DIR` |
 | `model.gguf` present but no `gguf` section | a GGUF install linked a q4nx-only set | re-export the set; the engine swaps the whole manifest view |
 

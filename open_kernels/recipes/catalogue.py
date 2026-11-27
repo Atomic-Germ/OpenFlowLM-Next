@@ -223,6 +223,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (64, 16, 8, 64, True, False, False, False),     # lfm2-350m-gguf (the attention gate, designs/attn/probe_dense.py)
                  (128, 32, 4, 128, True, False, False, False),   # qwen3-coder-30b-a3b-instruct-gguf (the attention gate, designs/attn/probe_dense.py)
                  (128, 16, 4, 128, True, True, False, False),    # lfm3-1.7b-gguf (the attention gate, designs/attn/probe_dense.py)
+                 (128, 32, 4, 128, False, False, False, False),  # peach-2.0-9b-8k-roleplay-heretic-i1-gguf (the attention gate, designs/attn/probe_dense.py)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them

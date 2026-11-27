@@ -1584,7 +1584,7 @@ if(MSVC)
 endif()
 add_test(NAME OPEN-CHAT-TEMPLATE
          COMMAND chat_template_test
-                 "${CMAKE_CURRENT_SOURCE_DIR}/../chat_templates/qwen3.x/chat_template.jinja")
+                 "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-add/oflm_add/chat_templates/qwen3.x/chat_template.jinja")
 
 # PULL-STALE, PULL-RECORD, PULL-FORCE: which files `oflm pull` fetches. No network, no device.
 add_executable(pull_plan_test pull/pull_plan_test.cpp pull/install_record.cpp)
