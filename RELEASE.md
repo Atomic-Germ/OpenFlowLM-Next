@@ -49,7 +49,7 @@ and refuse to run anywhere else. `--branch` (Linux), `-Branch` (Windows) or the
 
 `OFLM_VERSION` in **both** `CMakePresets.json` and `src/CMakePresets.json` is
 the single source of truth
-([docs/semantic-versioning.md](docs/semantic-versioning.md)). Both staging
+([docs/docs/contributing/semantic-versioning.md](docs/docs/contributing/semantic-versioning.md)). Both staging
 scripts and the release workflow refuse a tree where the two disagree, or
 where the value is not `X.Y.Z`.
 

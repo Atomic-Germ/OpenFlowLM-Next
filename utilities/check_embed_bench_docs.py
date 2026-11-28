@@ -28,6 +28,7 @@ publish, DEFAULT_LOG below, so anyone can run it. After re-measuring, replace
 that file with the new run's output and update the docs until this passes.
 Exits non-zero on any disagreement, listing every one.
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -58,10 +59,8 @@ DISPLAY = {
     "embed-gemma:300m": "EmbeddingGemma-300M",
 }
 
-# Which metric each documented table holds, and which batch sizes its columns
-# are, in order. `skip` drops leading non-metric columns (the dims column).
-# Which models each table MUST list. Without this the checker passed on a
-# gutted table: doc_rows() returns only the rows it recognises and zip()
+# Which models each table/dataset MUST list. Without this the checker passed on
+# a gutted table: doc_rows() returns only the rows it recognises and zip()
 # truncates to the shorter sequence, so deleting a model row or a trailing
 # column still printed "0 problems". A checker whose own coverage is unchecked
 # is worse than none, because its answer still looks like a verification.
@@ -70,26 +69,14 @@ ALL_SEVEN = ["all-MiniLM-L6-v2", "bge-small-en-v1.5", "bge-base-en-v1.5",
       "EmbeddingGemma-300M"]
 ADAPTER_FOUR = ["all-MiniLM-L6-v2", "bge-base-en-v1.5", "bge-large-en-v1.5", "EmbeddingGemma-300M"]
 
+EMBED_JSON = "docs/data/benchmarks/embeddings_npu_sweep.json"
+JSON_BATCHES = [1, 2, 4, 8, 16, 32, 64, 128]
+
 TABLES = [
     # (file, heading substring, metric, batches, leading cols to skip, models)
-    ("docs/docs/benchmarks/embeddings_results.md",
-     "Throughput (texts per second", "texts", [1, 4, 8, 16, 32, 64, 128], 1, ALL_SEVEN),
-    ("docs/docs/benchmarks/embeddings_results.md",
-     "Latency (seconds", "lat", [1, 4, 16, 32, 64, 128], 0, ALL_SEVEN),
-    ("docs/docs/benchmarks/embeddings_results.md",
-     "Batch speedup", "sp", [1, 2, 4, 8, 16, 32, 64, 128], 0, ALL_SEVEN),
-    ("docs/docs/benchmarks/embeddings_results.md",
-     "Token throughput", "tok", [16, 32, 64, 128], 0, ALL_SEVEN),
     ("src/open_npue_adapter/README.md",
      "is now measured, on every model", "sp", [1, 4, 8, 16, 32, 64, 128], 0, ADAPTER_FOUR),
 ]
-
-# The summary table restates three DERIVED values per model: the peak texts/s,
-# the batch it occurs at, and the single-text latency in milliseconds. Derived
-# numbers are where a page drifts first, because re-measuring updates the big
-# tables and leaves the summary behind.
-ONE_NUMBER = ("docs/docs/benchmarks/embeddings_results.md",
-              "| **Model** | **embeddings/s (peak)** |")
 
 
 def parse_truth(paths):
@@ -242,67 +229,111 @@ def main(argv):
                     bad.append("%-46s %-22s b=%-4d %-6s doc=%-9s printed=%s"
                                % (rel, name, batch, metric, cell, want))
 
-    # --- the derived summary table ------------------------------------------
-    rel, heading = ONE_NUMBER
-    path = REPO / rel
-    if path.exists():
-        rows, raw_names = doc_rows(path.read_text(encoding="utf-8"), heading)
-        if not rows:
-            missing_tables.append("%s :: %s (summary table not found)" % (rel, heading))
-        for got in (raw_names or []):
-            if got not in ALL_SEVEN:
-                bad.append("%-46s %-22s UNEXPECTED row in the summary table" %
-                           (rel, got))
-        for got in set(raw_names or []):
-            if (raw_names or []).count(got) > 1:
-                bad.append("%-46s %-22s appears %d times in the summary table" %
-                           (rel, got, (raw_names or []).count(got)))
+    # --- canonical JSON embedding dataset -----------------------------------
+    # docs/data/benchmarks/embeddings_npu_sweep.json backs the interactive
+    # charts on /benchmarks/. Validate every model, batch stage, metric array,
+    # and derived summary field directly against the printed binary output.
+    json_path = REPO / EMBED_JSON
+    if not json_path.exists():
+        missing_tables.append("%s (file missing)" % EMBED_JSON)
+    else:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        batches = data.get("batch_sizes")
+        if batches != JSON_BATCHES:
+            bad.append("%-46s batch_sizes=%r, want %r"
+                       % (EMBED_JSON, batches, JSON_BATCHES))
+            batches = JSON_BATCHES
+        models_list = data.get("models") or []
+        raw_names = [m.get("name", "") for m in models_list]
+        by_name = {m.get("name", ""): m for m in models_list}
+
         for want in ALL_SEVEN:
-            if want not in (rows or {}):
-                bad.append("%-46s %-22s ROW MISSING from the summary table"
-                           % (rel, want))
+            if want not in by_name:
+                bad.append("%-46s %-22s MODEL MISSING from JSON" % (EMBED_JSON, want))
+        for got in raw_names:
+            if got not in ALL_SEVEN:
+                bad.append("%-46s %-22s UNEXPECTED model in JSON" % (EMBED_JSON, got))
+        for got in set(raw_names):
+            if raw_names.count(got) > 1:
+                bad.append("%-46s %-22s appears %d times in JSON"
+                           % (EMBED_JSON, got, raw_names.count(got)))
+
+        metric_specs = [
+            # (json_field, truth_key, formatter)
+            ("throughput_tps", "texts", lambda v: "%.1f" % float(v)),
+            ("latency_s", "lat", lambda v: "%.4f" % float(v)),
+            ("looped_s", "loop", lambda v: "%.4f" % float(v)),
+            ("speedup_x", "sp", lambda v: "%.2f" % float(v)),
+            ("tokens_tps", "tok", lambda v: "%d" % int(round(float(v)))),
+        ]
+
+        for name in ALL_SEVEN:
+            entry = by_name.get(name)
+            if not entry:
                 continue
-            name, cells = want, rows[want]
-            # exact, like the metric tables. `< 3` let an EXTRA cell through,
-            # which is the same drift the width check exists to stop.
-            if len(cells) != 3:
-                bad.append("%-46s %-22s summary row has %d cells, want exactly 3"
-                           % (rel, name, len(cells)))
-                continue
-            peak_doc = cells[0].replace("*", "").strip()
-            at_doc = cells[1].replace("*", "").strip()
-            ms_doc = cells[2].replace("*", "").replace("ms", "").strip()
-            # recompute the peak from the log rather than trusting the label
+            for field, key, fmt in metric_specs:
+                arr = entry.get(field)
+                if not isinstance(arr, list) or len(arr) != len(batches):
+                    bad.append("%-46s %-22s %s has length %r, want %d"
+                               % (EMBED_JSON, name, field,
+                                  len(arr) if isinstance(arr, list) else type(arr).__name__,
+                                  len(batches)))
+                    continue
+                for batch, val in zip(batches, arr):
+                    want = truth.get((name, batch), {}).get(key)
+                    if val is None:
+                        if want is not None and want != "not reported":
+                            bad.append("%-46s %-22s b=%-4d %-6s json=null      printed=%s"
+                                       % (EMBED_JSON, name, batch, key, want))
+                        continue
+                    if want is None:
+                        bad.append("%-46s %-22s b=%-4d %-6s json=%-9r printed=(NOT IN LOG)"
+                                   % (EMBED_JSON, name, batch, key, val))
+                        continue
+                    compared += 1
+                    got_str = fmt(val)
+                    if got_str != want:
+                        bad.append("%-46s %-22s b=%-4d %-6s json=%-9s printed=%s"
+                                   % (EMBED_JSON, name, batch, key, got_str, want))
+
+            # Derived summary fields: peak_tps, peak_batch, single_text_tps, single_text_ms
             best_b, best_v = None, -1.0
             for (n, b), v in truth.items():
                 if n == name and v["texts"] != "not reported":
                     if float(v["texts"]) > best_v:
                         best_v, best_b = float(v["texts"]), b
             if best_b is None:
-                bad.append("%-46s %-22s summary: no texts/s in the log" % (rel, name))
+                bad.append("%-46s %-22s summary: no texts/s in the log" % (EMBED_JSON, name))
                 continue
-            compared += 3
-            if peak_doc != truth[(name, best_b)]["texts"]:
-                bad.append("%-46s %-22s summary peak doc=%-9s printed=%s"
-                           % (rel, name, peak_doc, truth[(name, best_b)]["texts"]))
+            compared += 4
+            peak_got = "%.1f" % float(entry.get("peak_tps", -1))
+            if peak_got != truth[(name, best_b)]["texts"]:
+                bad.append("%-46s %-22s peak_tps json=%-9s printed=%s"
+                           % (EMBED_JSON, name, peak_got, truth[(name, best_b)]["texts"]))
             tied = sorted(b for (n, b), v in truth.items()
                           if n == name and v["texts"] != "not reported"
                           and float(v["texts"]) == best_v)
-            if at_doc not in [str(b) for b in tied]:
-                bad.append("%-46s %-22s summary peak-batch doc=%-9s achieved at %s"
-                           % (rel, name, at_doc,
+            if entry.get("peak_batch") not in tied:
+                bad.append("%-46s %-22s peak_batch json=%-9r achieved at %s"
+                           % (EMBED_JSON, name, entry.get("peak_batch"),
                               ", ".join(str(b) for b in tied)))
+            txt1 = truth.get((name, 1), {}).get("texts")
+            if txt1 is None:
+                bad.append("%-46s %-22s summary: no batch-1 texts/s in log" % (EMBED_JSON, name))
+            else:
+                single_tps_got = "%.1f" % float(entry.get("single_text_tps", -1))
+                if single_tps_got != txt1:
+                    bad.append("%-46s %-22s single_text_tps json=%-9s printed=%s"
+                               % (EMBED_JSON, name, single_tps_got, txt1))
             lat1 = truth.get((name, 1), {}).get("lat")
             if lat1 is None:
-                bad.append("%-46s %-22s summary: no batch-1 latency in the log"
-                           % (rel, name))
+                bad.append("%-46s %-22s summary: no batch-1 latency in log" % (EMBED_JSON, name))
             else:
                 want_ms = "%.1f" % (float(lat1) * 1000.0)
-                if ms_doc != want_ms:
-                    bad.append("%-46s %-22s summary one-text doc=%-9s from %ss = %s ms"
-                               % (rel, name, ms_doc, lat1, want_ms))
-    else:
-        missing_tables.append("%s (file missing)" % rel)
+                ms_got = "%.1f" % float(entry.get("single_text_ms", -1))
+                if ms_got != want_ms:
+                    bad.append("%-46s %-22s single_text_ms json=%-9s from %ss = %s ms"
+                               % (EMBED_JSON, name, ms_got, lat1, want_ms))
 
     # --- verbatim sample blocks ---------------------------------------------
     # cli.md pastes real printed rows as an example. An example that no longer

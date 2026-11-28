@@ -1,0 +1,2 @@
+{{- $innerClean := strings.TrimRight "\r\n" .Inner -}}
+<div class="oflm-codeblock"><pre class="language-{{ .Type | default "text" }}"><code>{{- $innerClean -}}</code></pre></div>

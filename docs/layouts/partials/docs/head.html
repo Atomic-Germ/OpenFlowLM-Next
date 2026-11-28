@@ -1,0 +1,69 @@
+<head>
+    <meta charset="utf-8" />
+    <title>
+        {{- if eq .Title .Site.Title }}
+            {{- .Title }}
+        {{- else }}
+            {{- .Title }} | {{ .Site.Params.docs.Title | default (.Site.Title) }}
+        {{- end -}}
+    </title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    {{- with .Description | default ($.Param "description") }}
+    <meta name="description" content="{{ . }}" />
+    {{- end }}
+    <meta name="author" content="OpenFlowLM Contributors" />
+    {{ block "favicon" . }}{{ partialCached (printf "%s/%s" ($.Scratch.Get "pathName") "head/favicon.html") . }}{{ end }}
+    {{- partial (printf "%s/%s" ($.Scratch.Get "pathName") "head/opengraph") . }}
+    {{- partial (printf "%s/%s" ($.Scratch.Get "pathName") "head/twitter_cards") . }}
+    {{- with .Site.Title }}
+        <link rel="alternate" type="application/atom+xml" title="Atom feed for {{ . }}" href="{{ "index.xml" | relURL }}" />
+    {{- end }}
+    {{ if eq .Site.Params.docs.darkMode true -}}
+        {{ $darkModeInit := resources.Get (printf "/%s/%s" ($.Scratch.Get "pathName") "js/darkmode-init.js") | js.Build | minify -}}
+        <script>{{ $darkModeInit.Content | safeJS }}</script>
+    {{ end -}}
+    <script>document.documentElement.dataset.cbApi = {{ .Site.Params.cb_api | default "/api" | jsonify | safeJS }};</script>
+    {{ if or (not (isset .Site.Params.flexsearch "enabled")) (eq .Site.Params.flexsearch.enabled true) -}}
+        {{ if and (.Site.Params.docsearch.appID) (.Site.Params.docsearch.apiKey) -}}
+        {{ else }}
+            {{ $flexSearch := resources.Get (printf "/%s/%s" ($.Scratch.Get "pathName") "js/flexsearch.bundle.js") }}
+            {{- if not hugo.IsServer }}
+                {{ $flexSearch = $flexSearch | minify | fingerprint "sha384" }}
+                <script src="{{ $flexSearch.RelPermalink }}" integrity="{{ $flexSearch.Data.Integrity }}" crossorigin="anonymous"></script>
+            {{- else }}
+                <script src="{{ $flexSearch.RelPermalink }}"></script>
+            {{- end }}
+        {{ end }}
+    {{ end }}
+    {{- partialCached "google-fonts" . }}
+    {{- $options := dict "enableSourceMap" (not hugo.IsProduction) }}
+    {{- if hugo.IsProduction }}
+        {{- $options = dict "enableSourceMap" false "outputStyle" "compressed" }}
+    {{- end }}
+    {{- $style := resources.Get (printf "/%s/%s" ($.Scratch.Get "pathName") "scss/style.scss") }}
+    {{- $style = $style | resources.ExecuteAsTemplate (printf "/%s/%s" ($.Scratch.Get "pathName") "scss/style.scss") . | css.Sass $options }}
+    {{- $oflmStyle := resources.Get "/scss/oflm-lotus.scss" | css.Sass $options }}
+    {{- if hugo.IsProduction }}
+        {{- $style = $style | minify | fingerprint "sha384" }}
+        {{- $oflmStyle = $oflmStyle | minify | fingerprint "sha384" }}
+    {{- end -}}
+    <link rel="stylesheet" href="{{ $style.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $style.Data.Integrity }}"{{ end }} crossorigin="anonymous" />
+    <link rel="stylesheet" href="{{ $oflmStyle.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $oflmStyle.Data.Integrity }}"{{ end }} crossorigin="anonymous" />
+    {{- if .Params.katex -}}
+        {{- $katexCSS := resources.Get (printf "/%s/%s" ($.Scratch.Get "pathName") "scss/katex.scss") }}
+        {{- $katexCSS = $katexCSS | resources.ExecuteAsTemplate (printf "/%s/%s" ($.Scratch.Get "pathName") "scss/katex.scss") . | css.Sass $options }}
+        {{- if hugo.IsProduction }}
+            {{- $katexCSS = $katexCSS | minify | fingerprint "sha384" }}
+        {{- end -}}
+        <link rel="stylesheet" href="{{ $katexCSS.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $katexCSS.Data.Integrity }}"{{ end }} crossorigin="anonymous" />
+        {{ $katex := resources.Get (printf "/%s/%s" ($.Scratch.Get "pathName") "js/katex.js") }}
+        {{ $katexAutoRender := resources.Get (printf "/%s/%s" ($.Scratch.Get "pathName") "js/auto-render.js") }}
+        {{ if hugo.IsProduction }}
+            {{ $katex = $katex | minify | fingerprint "sha384" }}
+            {{ $katexAutoRender = $katexAutoRender | minify | fingerprint "sha384" }}
+        {{- end -}}
+        <script src="{{ $katex.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $katex.Data.Integrity }}"{{ end }} defer></script>
+        <script src="{{ $katexAutoRender.RelPermalink }}" {{ if hugo.IsProduction }}integrity="{{ $katexAutoRender.Data.Integrity }}"{{ end }} defer></script>
+        {{- partialCached (printf "%s/%s" ($.Scratch.Get "pathName") "footer/katex.html") . -}}
+    {{ end -}}
+</head>

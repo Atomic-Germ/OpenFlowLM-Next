@@ -35,11 +35,11 @@ required.
   ships, through [`src/open_npue/`](src/open_npue/).
 - **GGUF and Q4_K containers**, so models are not confined to one weight format.
 - **Built from source.** Use CMake presets for building; see
-  [docs/BUILD.md](docs/BUILD.md).
+  [docs/docs/contributing/build.md](docs/docs/contributing/build.md).
 
 Not every model runs on open kernels. Vision, audio and the Gemma 4, GPT-OSS
 and Whisper families have no open design yet and dispatch to the closed engine
-binaries. See [the support-status matrix](docs/docs/models/index.md) for exactly
+binaries. See [the support-status matrix](docs/docs/models/_index.md) for exactly
 what is open today.
 
 ---
@@ -53,7 +53,7 @@ what is open today.
     [official install doc](https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers)
     has the details.
 
-2. **Build it** -- [docs/BUILD.md](docs/BUILD.md). The build system handles
+2. **Build it** -- [docs/docs/contributing/build.md](docs/docs/contributing/build.md). The build system handles
     both the executable and kernel exports via CMake presets.
 
 3. **Run it:**
@@ -68,7 +68,7 @@ what is open today.
    oflm serve
    ```
 
-🐧 [Linux getting-started guide](./docs/linux-getting-started.md)
+🐧 [Linux getting-started guide](./docs/docs/install/linux/packages.md)
 
 ---
 
@@ -130,7 +130,7 @@ cmake --workflow --preset linux-package   # configures, builds, tests, packages 
 The install lands in `/opt/openflowlm` and adds `/usr/bin/oflm` plus
 `/etc/profile.d/openflowlm.sh`, so `oflm` is on `PATH` with no shell-rc edits.
 
-For detailed instructions, see [docs/BUILD.md](docs/BUILD.md).
+For detailed instructions, see [docs/docs/contributing/build.md](docs/docs/contributing/build.md).
 
 ### Prerequisites
 
@@ -156,14 +156,14 @@ families (Qwen3.6-MoE, Qwen3.5/3 dense, Qwen2.5, LFM2 hybrid, Llama 3.1, Gemma 3
   compile-only).
 
 On Windows the engine builds, and so do the NPU kernels, natively -- see
-[docs/BUILD.md](docs/BUILD.md#2-the-npu-kernels). Only the one-shot
+[docs/docs/contributing/build.md](docs/docs/contributing/build.md#kernel-export-utilitiesexport-kernelspy). Only the one-shot
 `utilities/export-kernels.py` driver (and the CMake target that calls it) is
 Linux-only. The language-model kernels are compile-only; the BERT embedding sets need
 an NPU on the build host.
 
 ### Build Instructions
 
-See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions.
+See [docs/docs/contributing/build.md](docs/docs/contributing/build.md) for detailed build instructions.
 
 **Presets:**
 - **Linux full distribution:** `cmake --preset linux-default`

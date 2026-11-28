@@ -1,0 +1,1194 @@
+{
+  "families": [
+    {
+      "name": "Qwen 3.5",
+      "doc_url": "/docs/models/qwen/",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill and ViT image encoding (when images are attached) run on the CPU.",
+      "modalities": ["llm", "vlm", "think", "tools"],
+      "size_chips": [
+        { "label": "0.8B", "kind": "size" },
+        { "label": "2B", "kind": "size" },
+        { "label": "4B", "kind": "size" },
+        { "label": "9B", "kind": "size" },
+        { "label": "27B", "kind": "size" },
+        { "label": "122B-A10B", "kind": "unsupported" },
+        { "label": "397B-A17B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/Qwen3.5-4B-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "Qwen 3.6 MoE",
+      "doc_url": "/docs/models/qwen/",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Shared layers, routed expert projections, and attention run on the NPU; top-k expert routing, long-prompt recurrent state updates, and ViT image encoding (when images are attached) run on the CPU.",
+      "modalities": ["llm", "vlm", "think", "tools"],
+      "size_chips": [
+        { "label": "35B-A3B", "kind": "size" },
+        { "label": "30B-A3B", "kind": "unsupported" },
+        { "label": "235B-A22B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/Qwen3.6-35B-A3B-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "Qwen 3 & Qwen 2.5",
+      "doc_url": "/docs/models/qwen/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "Dense language layers run on the NPU; when images are attached on Qwen 3-VL or Qwen 2.5-VL 3B GGUFs, ViT image encoding runs on the CPU.",
+      "modalities": ["llm", "vlm", "think", "tools"],
+      "size_chips": [
+        { "label": "0.6B", "kind": "size" },
+        { "label": "1.7B", "kind": "size" },
+        { "label": "3B (Qwen 2.5)", "kind": "size" },
+        { "label": "4B", "kind": "size" },
+        { "label": "8B", "kind": "size" },
+        { "label": "14B", "kind": "size" },
+        { "label": "VL 4B", "kind": "size" },
+        { "label": "VL 8B", "kind": "size" },
+        { "label": "0.5B", "kind": "unsupported" },
+        { "label": "1.5B", "kind": "unsupported" },
+        { "label": "7B", "kind": "unsupported" },
+        { "label": "14B (Qwen 2.5)", "kind": "unsupported" },
+        { "label": "30B-A3B", "kind": "unsupported" },
+        { "label": "32B", "kind": "unsupported" },
+        { "label": "72B", "kind": "unsupported" },
+        { "label": "235B-A22B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/Qwen3-8B-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "Gemma 4",
+      "doc_url": "/docs/models/gemma/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "Gemma 4 12B text runs on Open NPU. E2B/E4B .q4nx shortcuts and 12B vision/audio use Closed NPU (omitted on NixOS #244) until #236 and #73 land.",
+      "modalities": ["llm", "vlm", "asr", "think", "tools"],
+      "size_chips": [
+        { "label": "12B", "kind": "size" },
+        { "label": "E2B #236", "kind": "wip", "issue": "236" },
+        { "label": "E4B #236", "kind": "wip", "issue": "236" },
+        { "label": "26B-A4B", "kind": "unsupported" },
+        { "label": "31B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "q4nx", "label": "Legacy Q4NX" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm pull gemma4-it:12b",
+      "wip_badges": [
+        { "kind": "wip", "issue": "236", "label": "E2B/E4B Open NPU #236" },
+        { "kind": "wip", "issue": "73", "label": "Multimodal #73" }
+      ]
+    },
+    {
+      "name": "Gemma 3",
+      "doc_url": "/docs/models/gemma/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "4B and 12B text run on Open NPU; vision on gemma3:4b (.q4nx) requires OFLM_GEMMA_ENGINE=closed (omitted on NixOS #244).",
+      "modalities": ["llm", "vlm"],
+      "size_chips": [
+        { "label": "4B", "kind": "size" },
+        { "label": "12B", "kind": "size" },
+        { "label": "270M", "kind": "unsupported" },
+        { "label": "1B", "kind": "unsupported" },
+        { "label": "27B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/gemma-3-4b-it-GGUF",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" }
+      ]
+    },
+    {
+      "name": "MedGemma",
+      "doc_url": "/docs/models/medgemma/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "4B GGUF text runs on Open NPU; built-in medgemma:4b and medgemma1.5:4b .q4nx shortcuts require OFLM_GEMMA_ENGINE=closed (omitted on NixOS #244).",
+      "modalities": ["llm", "vlm"],
+      "size_chips": [
+        { "label": "4B", "kind": "size" },
+        { "label": "27B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/medgemma-1.5-4b-it-GGUF",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" }
+      ]
+    },
+    {
+      "name": "TranslateGemma",
+      "doc_url": "/docs/models/translategemma/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "4B and 12B GGUF text run on Open NPU; built-in translategemma:4b .q4nx shortcut requires OFLM_GEMMA_ENGINE=closed (omitted on NixOS #244).",
+      "modalities": ["llm", "vlm"],
+      "size_chips": [
+        { "label": "4B", "kind": "size" },
+        { "label": "12B", "kind": "size" },
+        { "label": "27B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/translategemma-4b-it-GGUF",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" }
+      ]
+    },
+    {
+      "name": "Llama 3.1 & 3.2",
+      "doc_url": "/docs/models/llama/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "modalities": ["llm"],
+      "size_chips": [
+        { "label": "1B", "kind": "size" },
+        { "label": "3B", "kind": "size" },
+        { "label": "8B", "kind": "size" },
+        { "label": "11B-Vision", "kind": "unsupported" },
+        { "label": "70B", "kind": "unsupported" },
+        { "label": "90B", "kind": "unsupported" },
+        { "label": "405B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/Llama-3.2-3B-Instruct-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "IBM Granite 4",
+      "doc_url": "/docs/models/granite/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "modalities": ["llm", "think", "tools"],
+      "size_chips": [
+        { "label": "3B (Dense)", "kind": "size" },
+        { "label": "350M", "kind": "unsupported" },
+        { "label": "1B", "kind": "unsupported" },
+        { "label": "4.0-H Hybrid", "kind": "unsupported" },
+        { "label": "7B-A1B", "kind": "unsupported" },
+        { "label": "8B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add ibm-granite/granite-4.0-micro-GGUF",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "Shortcut #240" },
+        { "kind": "wip", "issue": "189", "label": "Drafter #189" }
+      ]
+    },
+    {
+      "name": "Microsoft Phi",
+      "doc_url": "/docs/models/phi/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "modalities": ["llm"],
+      "size_chips": [
+        { "label": "4B", "kind": "size" },
+        { "label": "3.8B", "kind": "unsupported" },
+        { "label": "5.6B Multimodal", "kind": "unsupported" },
+        { "label": "14B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/Phi-4-mini-instruct-GGUF --family phi4 --xclbin-from Phi4-mini-Instruct-NPU2",
+      "wip_badges": []
+    },
+    {
+      "name": "Liquid LFM 2 & LFM 2.5",
+      "doc_url": "/docs/models/lfm/",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "modalities": ["llm", "think", "tools"],
+      "size_chips": [
+        { "label": "1.2B", "kind": "size" },
+        { "label": "2.6B", "kind": "size" },
+        { "label": "350M", "kind": "unsupported" },
+        { "label": "700M", "kind": "unsupported" },
+        { "label": "8B-A1B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "DeepSeek-R1 Distill",
+      "doc_url": "/docs/models/deepseek/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "modalities": ["llm", "think"],
+      "size_chips": [
+        { "label": "8B", "kind": "size" },
+        { "label": "1.5B", "kind": "unsupported" },
+        { "label": "7B", "kind": "unsupported" },
+        { "label": "14B", "kind": "unsupported" },
+        { "label": "32B", "kind": "unsupported" },
+        { "label": "70B", "kind": "unsupported" },
+        { "label": "671B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "Nanbeige 4.1",
+      "doc_url": "/docs/models/nanbeige/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "modalities": ["llm", "think", "tools"],
+      "size_chips": [
+        { "label": "3B", "kind": "size" },
+        { "label": "32B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add bartowski/Nanbeige_Nanbeige4.1-3B-GGUF",
+      "wip_badges": []
+    },
+    {
+      "name": "Hunyuan-MT, K2 & MiniCPM",
+      "doc_url": "/docs/models/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "Additional compiled open dense kernel geometries in open_kernels/recipes/specs/ installable directly via oflm add.",
+      "modalities": ["llm"],
+      "size_chips": [
+        { "label": "MiniCPM 2B", "kind": "size" },
+        { "label": "K2 / Horizon 3.7B & 7B", "kind": "size" },
+        { "label": "Hunyuan-MT 7B", "kind": "size" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q4_1" },
+        { "kind": "quant", "label": "Q4_0" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q8_0" },
+        { "kind": "quant", "label": "IQ4" }
+      ],
+      "example_cmd": "oflm add <hf-gguf-repo>",
+      "wip_badges": []
+    },
+    {
+      "name": "GPT-OSS",
+      "doc_url": "/docs/models/gpt-oss/",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_GPTOSS_ENGINE=closed to run inherited prebuilt NPU kernels on .q4nx shortcuts (omitted on source-built NixOS #244; >32 GB RAM recommended). Open NPU kernels are tracked in #91.",
+      "modalities": ["llm", "think"],
+      "size_chips": [
+        { "label": "20B", "kind": "size" },
+        { "label": "20B Open GGUF #91", "kind": "wip", "issue": "91" },
+        { "label": "120B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "q4nx", "label": "Legacy Q4NX" }
+      ],
+      "quant_badges": [
+        { "kind": "quant", "label": "4-bit Fixed" }
+      ],
+      "example_cmd": "OFLM_GPTOSS_ENGINE=closed oflm run gpt-oss:20b",
+      "wip_badges": [
+        { "kind": "wip", "issue": "91", "label": "Open NPU & GGUF #91" },
+        { "kind": "wip", "issue": "240", "label": "Registry #240" }
+      ]
+    },
+    {
+      "name": "BERT, BGE, Nomic & GTE",
+      "doc_url": "/docs/models/bert/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "Supports the 6 compiled encoder tags via oflm pull or oflm add --name <tag> (on NixOS, install .#oflm-with-bert #244).",
+      "modalities": ["embed"],
+      "size_chips": [
+        { "label": "MiniLM-L6 (22M)", "kind": "size" },
+        { "label": "Small (33M)", "kind": "size" },
+        { "label": "Base (109M)", "kind": "size" },
+        { "label": "Nomic (137M)", "kind": "size" },
+        { "label": "GTE (305M)", "kind": "size" },
+        { "label": "Large (335M)", "kind": "size" },
+        { "label": "BGE-M3 (568M)", "kind": "unsupported" },
+        { "label": "Qwen2-Embed (1.5B/7B)", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "safetensors", "label": "Safetensors" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q8_0" },
+        { "kind": "quant", "label": "BF16" },
+        { "kind": "quant", "label": "F16" },
+        { "kind": "quant", "label": "F32" },
+        { "kind": "quant", "label": "Q6_K" },
+        { "kind": "quant", "label": "Q5_K" },
+        { "kind": "quant", "label": "Q4_K" },
+        { "kind": "quant", "label": "Q4_0" }
+      ],
+      "example_cmd": "oflm pull bge-base:en-v1.5",
+      "wip_badges": []
+    },
+    {
+      "name": "EmbeddingGemma",
+      "doc_url": "/docs/models/embeddinggemma/",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear and FFN projections run on the NPU (npu_matmul_f32); bidirectional attention and vector pooling across 2,048-token inputs run on the CPU (falls back to CPU on source-built NixOS #244).",
+      "modalities": ["embed"],
+      "size_chips": [
+        { "label": "300M", "kind": "size" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "safetensors", "label": "Safetensors" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "Q8_0" },
+        { "kind": "quant", "label": "BF16" },
+        { "kind": "quant", "label": "F16" }
+      ],
+      "example_cmd": "oflm pull embed-gemma:300m",
+      "wip_badges": []
+    },
+    {
+      "name": "FLUX.2",
+      "doc_url": "/docs/models/flux/",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "modalities": ["image"],
+      "size_chips": [
+        { "label": "klein 4B", "kind": "size" },
+        { "label": "klein 9B", "kind": "unsupported" },
+        { "label": "dev 32B", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "bundle", "label": "Pre-packed" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "BF16 + 8-bit" }
+      ],
+      "example_cmd": "oflm pull flux2-klein:4b",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "Direct GGUF #240" }
+      ]
+    },
+    {
+      "name": "Whisper",
+      "doc_url": "/docs/models/whisper/",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Default whisper-v3:turbo .q4nx shortcut runs on inherited prebuilt Whisper NPU kernels + libwhisper_npu (omitted on source-built NixOS #244). Open NPU + CPU Whisper (src/open_whisper/) is in source and awaits prebuilt kernel packaging (#240).",
+      "modalities": ["asr"],
+      "size_chips": [
+        { "label": "Large V3 Turbo", "kind": "size" },
+        { "label": "Tiny", "kind": "unsupported" },
+        { "label": "Base", "kind": "unsupported" },
+        { "label": "Small", "kind": "unsupported" },
+        { "label": "Medium", "kind": "unsupported" },
+        { "label": "Large V3", "kind": "unsupported" }
+      ],
+      "format_badges": [
+        { "kind": "gguf", "label": "GGUF" },
+        { "kind": "safetensors", "label": "Safetensors" },
+        { "kind": "q4nx", "label": "Legacy Q4NX" }
+      ],
+      "quant_badges": [
+        { "kind": "qbest", "label": "BF16" },
+        { "kind": "quant", "label": "F16" },
+        { "kind": "quant", "label": "4-bit Fixed" }
+      ],
+      "example_cmd": "oflm pull whisper-v3:turbo",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "Open Kernels & GGUF #240" },
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    }
+  ],
+  "models": [
+    {
+      "tag": "embed-gemma:300m",
+      "family": "EmbeddingGemma",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear and FFN projections run on the NPU (npu_matmul_f32); bidirectional attention and vector pooling across 2,048-token inputs run on the CPU (falls back to CPU on source-built NixOS #244).",
+      "format": "GGUF",
+      "hf_repo": "ggml-org/embeddinggemma-300M-GGUF",
+      "context_display": "2k tok",
+      "doc_url": "/docs/models/embeddinggemma/",
+      "wip_badges": []
+    },
+    {
+      "tag": "all-minilm:l6-v2",
+      "family": "MiniLM",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Safetensors",
+      "hf_repo": "sentence-transformers/all-MiniLM-L6-v2",
+      "context_display": "512 tok",
+      "doc_url": "/docs/models/bert/",
+      "wip_badges": []
+    },
+    {
+      "tag": "bge-small:en-v1.5",
+      "family": "BGE",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Safetensors",
+      "hf_repo": "BAAI/bge-small-en-v1.5",
+      "context_display": "512 tok",
+      "doc_url": "/docs/models/bert/",
+      "wip_badges": []
+    },
+    {
+      "tag": "bge-base:en-v1.5",
+      "family": "BGE",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Safetensors",
+      "hf_repo": "BAAI/bge-base-en-v1.5",
+      "context_display": "512 tok",
+      "doc_url": "/docs/models/bert/",
+      "wip_badges": []
+    },
+    {
+      "tag": "bge-large:en-v1.5",
+      "family": "BGE",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Safetensors",
+      "hf_repo": "BAAI/bge-large-en-v1.5",
+      "context_display": "512 tok",
+      "doc_url": "/docs/models/bert/",
+      "wip_badges": []
+    },
+    {
+      "tag": "nomic-embed-text:v1.5",
+      "family": "Nomic Embed",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Safetensors",
+      "hf_repo": "nomic-ai/nomic-embed-text-v1.5",
+      "context_display": "512 tok",
+      "doc_url": "/docs/models/bert/",
+      "wip_badges": []
+    },
+    {
+      "tag": "gte-multilingual:base",
+      "family": "GTE Multilingual",
+      "modality": "Embed",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Safetensors",
+      "hf_repo": "Alibaba-NLP/gte-multilingual-base",
+      "context_display": "512 tok",
+      "doc_url": "/docs/models/bert/",
+      "wip_badges": []
+    },
+    {
+      "tag": "flux2-klein:4b",
+      "family": "FLUX.2",
+      "modality": "Image",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Pre-packed",
+      "hf_repo": "Cyronius/FLUX.2-klein-4B-NPU2",
+      "context_display": "1024px",
+      "doc_url": "/docs/models/flux/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "Direct GGUF #240" }
+      ]
+    },
+    {
+      "tag": "qwen3.6-moe:35b-a3b",
+      "family": "Qwen 3.6 MoE",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Shared layers, routed expert projections, and attention run on the NPU; top-k expert routing, long-prompt recurrent state updates, and ViT image encoding (when images are attached) run on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3.6-35B-A3B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "GGUF #240" }
+      ]
+    },
+    {
+      "tag": "qwen3.8:27b",
+      "family": "Qwen 3.5",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill run on the CPU (qwen3.8:27b shortcut is text-only).",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3.8-27B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "GGUF #240" }
+      ]
+    },
+    {
+      "tag": "qwen3.5:0.8b",
+      "family": "Qwen 3.5",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill and ViT image encoding (when images are attached) run on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3.5-0.8B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3.5:2b",
+      "family": "Qwen 3.5",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill and ViT image encoding (when images are attached) run on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3.5-2B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3.5:4b",
+      "family": "Qwen 3.5",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill and ViT image encoding (when images are attached) run on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3.5-4B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "GGUF #240" }
+      ]
+    },
+    {
+      "tag": "qwen3.5:9b",
+      "family": "Qwen 3.5",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Linear & gated attention layers and FFN projections run on the NPU; recurrent state updates during multi-token prompt prefill and ViT image encoding (when images are attached) run on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3.5-9B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "GGUF #240" }
+      ]
+    },
+    {
+      "tag": "qwen3vl-it:4b",
+      "family": "Qwen 3-VL",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Language layers run on the NPU; ViT image encoding runs on the CPU when images are attached.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-VL-4B-Instruct-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3:0.6b",
+      "family": "Qwen 3",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-0.6B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3:1.7b",
+      "family": "Qwen 3",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-1.7B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3:4b",
+      "family": "Qwen 3",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-4B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3:8b",
+      "family": "Qwen 3",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-8B-NPU2",
+      "context_display": "16k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3-it:4b",
+      "family": "Qwen 3",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-4B-Instruct-2507-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "qwen3-tk:4b",
+      "family": "Qwen 3",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen3-4B-Thinking-2507-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": []
+    },
+    {
+      "tag": "gemma4-it:12b",
+      "family": "Gemma 4",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "Text decoder runs on Open NPU; attaching images or audio on gemma4-it:12b requires OFLM_GEMMA4_ENGINE=closed (omitted on source-built NixOS #244) until #73.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Gemma4-12B-IT-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/gemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision/Audio #73" }
+      ]
+    },
+    {
+      "tag": "gemma3:4b",
+      "family": "Gemma 3",
+      "modality": "VLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "accel_tip": "Text runs on Open NPU; attaching images on gemma3:4b requires OFLM_GEMMA_ENGINE=closed (omitted on source-built NixOS #244) until #73.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Gemma3-4B-NPU2",
+      "context_display": "64k",
+      "doc_url": "/docs/models/gemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" }
+      ]
+    },
+    {
+      "tag": "translategemma:4b",
+      "family": "TranslateGemma",
+      "modality": "VLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_GEMMA_ENGINE=closed (lacks open_kernels symlink to Gemma3-4B-NPU2 and uses closed gemma_npu for vision; omitted on NixOS #244). Install a GGUF via oflm add for Open NPU text.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Translategemma-4B-Instruct-NPU2",
+      "context_display": "64k",
+      "doc_url": "/docs/models/translategemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" },
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    },
+    {
+      "tag": "medgemma:4b",
+      "family": "MedGemma",
+      "modality": "VLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_GEMMA_ENGINE=closed (lacks open_kernels symlink to Gemma3-4B-NPU2 and uses closed gemma_npu for vision; omitted on NixOS #244). Install a GGUF via oflm add for Open NPU text.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/medgemma-4b-it-NPU2",
+      "context_display": "64k",
+      "doc_url": "/docs/models/medgemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" },
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    },
+    {
+      "tag": "medgemma1.5:4b",
+      "family": "MedGemma",
+      "modality": "VLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_GEMMA_ENGINE=closed (lacks open_kernels symlink to Gemma3-4B-NPU2 and uses closed gemma_npu for vision; omitted on NixOS #244). Install a GGUF via oflm add for Open NPU text.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/medgemma-1.5-4b-it-NPU2",
+      "context_display": "64k",
+      "doc_url": "/docs/models/medgemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "73", "label": "Vision #73" },
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    },
+    {
+      "tag": "lfm2:1.2b",
+      "family": "LFM2",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/LFM2-1.2B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/lfm/",
+      "wip_badges": []
+    },
+    {
+      "tag": "lfm2:2.6b",
+      "family": "LFM2",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/LFM2-2.6B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/lfm/",
+      "wip_badges": []
+    },
+    {
+      "tag": "lfm2-trans:2.6b",
+      "family": "LFM2",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/LFM2-2.6B-Transcript-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/lfm/",
+      "wip_badges": []
+    },
+    {
+      "tag": "lfm2.5-it:1.2b",
+      "family": "LFM2.5",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/LFM2.5-1.2B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/lfm/",
+      "wip_badges": []
+    },
+    {
+      "tag": "lfm2.5-tk:1.2b",
+      "family": "LFM2.5",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "hybrid",
+      "accel_label": "NPU + CPU",
+      "accel_tip": "Short-convolution projections, gated attention, and FFN layers run on the NPU; short-conv state carry during prompt prefill runs on the CPU.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/LFM2.5-1.2B-Thinking-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/lfm/",
+      "wip_badges": []
+    },
+    {
+      "tag": "llama3.2:1b",
+      "family": "Llama 3.2",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Llama-3.2-1B-NPU2",
+      "context_display": "128k",
+      "doc_url": "/docs/models/llama/",
+      "wip_badges": []
+    },
+    {
+      "tag": "llama3.2:3b",
+      "family": "Llama 3.2",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Llama-3.2-3B-NPU2",
+      "context_display": "64k",
+      "doc_url": "/docs/models/llama/",
+      "wip_badges": []
+    },
+    {
+      "tag": "llama3.1:8b",
+      "family": "Llama 3.1",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Llama-3.1-8B-NPU2",
+      "context_display": "16k",
+      "doc_url": "/docs/models/llama/",
+      "wip_badges": []
+    },
+    {
+      "tag": "deepseek-r1:8b",
+      "family": "DeepSeek-R1 Distill",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Deepseek-R1-Distill-Llama-8B-NPU2",
+      "context_display": "16k",
+      "doc_url": "/docs/models/deepseek/",
+      "wip_badges": []
+    },
+    {
+      "tag": "deepseek-r1-0528:8b",
+      "family": "DeepSeek-R1 Distill",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/DeepSeek-R1-0528-Qwen3-8B-NPU2",
+      "context_display": "16k",
+      "doc_url": "/docs/models/deepseek/",
+      "wip_badges": []
+    },
+    {
+      "tag": "phi4-mini-it:4b",
+      "family": "Phi-4 Mini",
+      "modality": "LLM",
+      "tier": "open",
+      "accel_kind": "open",
+      "accel_label": "NPU",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Phi4-mini-Instruct-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/phi/",
+      "wip_badges": []
+    },
+    {
+      "tag": "whisper-v3:turbo",
+      "family": "Whisper",
+      "modality": "ASR",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Default whisper-v3:turbo .q4nx shortcut runs on inherited prebuilt Whisper NPU kernels + libwhisper_npu (omitted on source-built NixOS #244). Open NPU + CPU Whisper awaits prebuilt kernel packaging (#240).",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Whisper-V3-Turbo-NPU2",
+      "context_display": "30s",
+      "doc_url": "/docs/models/whisper/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "240", "label": "Open Kernels & GGUF #240" },
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    },
+    {
+      "tag": "qwen2.5vl-it:3b",
+      "family": "Qwen 2.5-VL",
+      "modality": "VLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_QWEN_ENGINE=closed on this .q4nx shortcut (no open_kernels symlink; omitted on NixOS #244). Install a Qwen 2.5-VL 3B GGUF via oflm add for Open NPU + CPU vision.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Qwen2.5-VL-3B-Instruct-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/qwen/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "244", "label": "NixOS #244" }
+      ]
+    },
+    {
+      "tag": "gemma4-it:e2b",
+      "family": "Gemma 4",
+      "modality": "VLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Runs text, vision, and audio via closed gemma4e_npu on .q4nx only (omitted on source-built NixOS #244). Open text kernels (#236) and open multimodal (#73) are in progress.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Gemma4-E2B-IT-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/gemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "236", "label": "Open NPU #236" },
+        { "kind": "wip", "issue": "73", "label": "Multimodal #73" }
+      ]
+    },
+    {
+      "tag": "gemma4-it:e4b",
+      "family": "Gemma 4",
+      "modality": "VLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Runs text, vision, and audio via closed gemma4e_npu on .q4nx only (omitted on source-built NixOS #244). Open text kernels (#236) and open multimodal (#73) are in progress.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Gemma4-E4B-IT-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/gemma/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "236", "label": "Open NPU #236" },
+        { "kind": "wip", "issue": "73", "label": "Multimodal #73" }
+      ]
+    },
+    {
+      "tag": "gemma3:1b",
+      "family": "Gemma 3",
+      "modality": "LLM",
+      "tier": "closed",
+      "accel_kind": "unsupported",
+      "accel_label": "Unsupported",
+      "accel_tip": "Closed gemma3-text engine was removed and no 1B open kernel set exists.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/Gemma3-1B-NPU2",
+      "context_display": "32k",
+      "doc_url": "/docs/models/gemma/",
+      "wip_badges": []
+    },
+    {
+      "tag": "gpt-oss:20b",
+      "family": "GPT-OSS",
+      "modality": "LLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_GPTOSS_ENGINE=closed on .q4nx only (omitted on source-built NixOS #244; >32 GB RAM recommended). Open NPU kernels are tracked in #91.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/GPT-OSS-20B-NPU2",
+      "context_display": "8k",
+      "doc_url": "/docs/models/gpt-oss/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "91", "label": "Open NPU #91" },
+        { "kind": "wip", "issue": "240", "label": "GGUF #240" }
+      ]
+    },
+    {
+      "tag": "gpt-oss-sg:20b",
+      "family": "GPT-OSS",
+      "modality": "LLM",
+      "tier": "closed",
+      "accel_kind": "closed",
+      "accel_label": "Closed NPU",
+      "accel_tip": "Requires OFLM_GPTOSS_ENGINE=closed on .q4nx only (omitted on source-built NixOS #244; >32 GB RAM recommended). Open NPU kernels are tracked in #91.",
+      "format": "Legacy Q4NX*",
+      "hf_repo": "Atomic-Germ/GPT-OSS-Safeguard-20b-NPU2",
+      "context_display": "8k",
+      "doc_url": "/docs/models/gpt-oss/",
+      "wip_badges": [
+        { "kind": "wip", "issue": "91", "label": "Open NPU #91" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{{- $mode := lower (.Get 0 | default "llm") -}}
+<span class="oflm-pill-row">
+{{- if eq $mode "embed" -}}
+  {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q8_0") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "BF16") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "F16") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "F32") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q6_K") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q5_K") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_K") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_0") }}
+{{- else if eq $mode "embedgemma" -}}
+  {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q8_0") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "BF16") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "F16") }}
+{{- else if eq $mode "diffusion" -}}
+  {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "BF16 + 8-bit") }}
+{{- else if eq $mode "whisper" -}}
+  {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "BF16") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "F16") }}
+{{- else -}}
+  {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q4_1") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_0") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_K") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q5_K") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q6_K") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q8_0") }}
+  {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "IQ4") }}
+{{- end -}}
+</span>

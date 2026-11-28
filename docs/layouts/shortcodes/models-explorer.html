@@ -1,0 +1,313 @@
+{{- $catalog := site.Data.models_catalog -}}
+{{- if $catalog -}}
+<div class="oflm-models-explorer" id="oflm-models-explorer">
+
+    <div class="oflm-two-col mb-3">
+        <div class="oflm-card">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                {{ partial "oflm-badge.html" (dict "kind" "open" "label" "Recommended" "icon" "verified") }}
+                <code>oflm add &lt;hf-repo-or-file&gt;</code>
+            </div>
+            <h3 class="mb-1">Bring Any Compatible GGUF</h3>
+            <p class="small mb-2" style="color: var(--oflm-muted);">
+                Load any Hugging Face GGUF checkpoint or fine-tune matching a supported variant in the model families below.
+            </p>
+            <div class="oflm-pill-row mb-1">
+                <span class="oflm-group-label">Chat &amp; Vision:</span>
+                {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q4_1") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_0") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_K") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q5_K") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q6_K") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q8_0") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "IQ4") }}
+            </div>
+            <div class="oflm-pill-row">
+                <span class="oflm-group-label">Embeddings:</span>
+                {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q8_0") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "BF16") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "F16") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "F32") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q6_K") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q5_K") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_K") }}
+                {{ partial "oflm-badge.html" (dict "kind" "quant" "label" "Q4_0") }}
+            </div>
+        </div>
+
+        <div class="oflm-card">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                {{ partial "oflm-badge.html" (dict "kind" "llm" "label" "One-Command Download" "icon" "download") }}
+                <code>oflm pull &lt;family:size&gt;</code>
+            </div>
+            <h3 class="mb-1">Built-in Shortcuts ({{ len $catalog.models }})</h3>
+            <p class="small mb-2" style="color: var(--oflm-muted);">
+                The installer contains no model weights. Short tags download pre-verified Hugging Face checkpoints on demand.
+            </p>
+            <div class="oflm-pill-row mb-1">
+                <span class="oflm-group-label">Current formats:</span>
+                {{ partial "oflm-badge.html" (dict "kind" "gguf") }}
+                {{ partial "oflm-badge.html" (dict "kind" "safetensors") }}
+                {{ partial "oflm-badge.html" (dict "kind" "bundle" "label" "Pre-packed") }}
+            </div>
+            <div class="oflm-pill-row">
+                <span class="oflm-group-label">Older shortcuts:</span>
+                {{ partial "oflm-badge.html" (dict "kind" "q4nx" "label" "Legacy Q4NX") }}
+                {{ partial "oflm-badge.html" (dict "kind" "wip" "issue" "240" "label" "Moving to GGUF #240") }}
+            </div>
+        </div>
+    </div>
+
+    <div class="oflm-legend">
+        <span class="oflm-legend-label">Key</span>
+        {{ partial "oflm-badge.html" (dict "kind" "open" "label" "NPU") }}
+        {{ partial "oflm-badge.html" (dict "kind" "hybrid" "label" "NPU + CPU" "title" "Open NPU runtime with light CPU helper steps. Hover any badge for the exact split.") }}
+        <span>Open runtime</span>
+        <span class="mx-1">·</span>
+        {{ partial "oflm-badge.html" (dict "kind" "closed" "label" "Closed NPU" "title" "Inherited prebuilt NPU kernels & closed library being phased out (omitted on NixOS #244).") }}
+        <span>Phasing out</span>
+        <span class="mx-1">·</span>
+        {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q4_1") }}
+        <span>Recommended quant</span>
+        <span class="mx-1">·</span>
+        {{ partial "oflm-badge.html" (dict "kind" "unsupported" "label" "32B" "mono" true) }}
+        <span>Unsupported variant</span>
+    </div>
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div class="oflm-pill-tabs" id="oflm-models-tabs" role="tablist">
+            <button type="button" class="active" data-tab="families">Model Families ({{ len $catalog.families }})</button>
+            <button type="button" data-tab="shortcuts">Built-in Shortcuts ({{ len $catalog.models }})</button>
+        </div>
+    </div>
+
+    <!-- TAB 1: Model Families -->
+    <div id="oflm-tab-families">
+        <div class="oflm-table-wrap">
+            <table class="oflm-table">
+                <thead>
+                    <tr>
+                        <th>Family</th>
+                        <th>Capabilities</th>
+                        <th>Variants</th>
+                        <th>Runtime &amp; Format</th>
+                        <th>Quantization</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{- range $catalog.families }}
+                    <tr>
+                        <td>
+                            <div class="fw-semibold">{{ .name }}</div>
+                            {{- if .doc_url }}
+                            <a href="{{ (strings.TrimPrefix "/" .doc_url) | relLangURL }}" class="small text-decoration-none">Guide →</a>
+                            {{- end }}
+                        </td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{- range .modalities }}
+                                    {{ partial "oflm-badge.html" (dict "kind" .) }}
+                                {{- end }}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{- range .size_chips }}
+                                    {{ partial "oflm-badge.html" (dict "kind" (.kind | default "size") "label" .label "issue" (.issue | default "") "title" (.tip | default "") "mono" true) }}
+                                {{- end }}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{ partial "oflm-badge.html" (dict "kind" (.accel_kind | default "open") "label" (.accel_label | default "NPU") "title" (.accel_tip | default "")) }}
+                                {{- range .format_badges }}
+                                    {{ partial "oflm-badge.html" (dict "kind" .kind "label" (.label | default "")) }}
+                                {{- end }}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{- range .quant_badges }}
+                                    {{ partial "oflm-badge.html" (dict "kind" .kind "label" .label "mono" true) }}
+                                {{- end }}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{- if .wip_badges }}
+                                    {{- range .wip_badges }}
+                                        {{ partial "oflm-badge.html" (dict "kind" (.kind | default "wip") "label" .label "issue" (.issue | default "")) }}
+                                    {{- end }}
+                                {{- else }}
+                                    {{ partial "oflm-badge.html" (dict "kind" "ok" "label" "Ready") }}
+                                {{- end }}
+                            </div>
+                        </td>
+                    </tr>
+                    {{- end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- TAB 2: Built-in Registry Shortcuts -->
+    <div id="oflm-tab-shortcuts" class="d-none">
+        <div class="oflm-filter-bar" role="search" aria-label="Filter built-in shortcuts">
+            <div>
+                <label for="oflm-model-q">Search tag or family</label>
+                <input type="search" id="oflm-model-q" placeholder="e.g. qwen3.6, gemma4, whisper, bge..." autocomplete="off" />
+            </div>
+            <div>
+                <label for="oflm-model-tier">Runtime</label>
+                <select id="oflm-model-tier">
+                    <option value="">All shortcuts ({{ len $catalog.models }})</option>
+                    <option value="open">Open NPU Runtime</option>
+                    <option value="closed">Closed Prebuilt (Phasing Out)</option>
+                </select>
+            </div>
+            <div>
+                <label for="oflm-model-modality">Capability</label>
+                <select id="oflm-model-modality">
+                    <option value="">All capabilities</option>
+                    <option value="LLM">Chat &amp; Reasoning</option>
+                    <option value="VLM">Vision (Images)</option>
+                    <option value="Embed">Embeddings</option>
+                    <option value="ASR">Speech-to-Text</option>
+                    <option value="Image">Image Generation</option>
+                </select>
+            </div>
+            <div>
+                <label for="oflm-model-format">Format</label>
+                <select id="oflm-model-format">
+                    <option value="">All formats</option>
+                    <option value="GGUF">GGUF</option>
+                    <option value="Safetensors">Safetensors</option>
+                    <option value="Open Bundle">Pre-packed</option>
+                    <option value="Legacy Q4NX*">Legacy Q4NX</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="d-flex justify-content-between align-items-center mb-2 small" style="color: var(--oflm-muted);">
+            <span id="oflm-model-count">Showing {{ len $catalog.models }} of {{ len $catalog.models }} shortcuts</span>
+            <button type="button" id="oflm-model-reset" class="btn btn-sm btn-link p-0 text-decoration-none">Reset filters</button>
+        </div>
+
+        <div class="oflm-table-wrap">
+            <table class="oflm-table" id="oflm-model-table">
+                <thead>
+                    <tr>
+                        <th>Shortcut Tag</th>
+                        <th>Family</th>
+                        <th>Capability</th>
+                        <th>Runtime &amp; Format</th>
+                        <th>Max Context</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{- range $catalog.models }}
+                    {{- $modKind := "llm" -}}
+                    {{- $modLabel := "Chat" -}}
+                    {{- if eq .modality "VLM" }}{{ $modKind = "vlm" }}{{ $modLabel = "Vision" }}{{ else if eq .modality "Embed" }}{{ $modKind = "embed" }}{{ $modLabel = "Embeddings" }}{{ else if eq .modality "ASR" }}{{ $modKind = "asr" }}{{ $modLabel = "Speech" }}{{ else if eq .modality "Image" }}{{ $modKind = "image" }}{{ $modLabel = "Image" }}{{ end -}}
+                    {{- $fmtKind := "q4nx" -}}
+                    {{- $fmtLabel := "Legacy Q4NX" -}}
+                    {{- if eq .format "GGUF" }}{{ $fmtKind = "gguf" }}{{ $fmtLabel = "GGUF" }}{{ else if eq .format "Safetensors" }}{{ $fmtKind = "safetensors" }}{{ $fmtLabel = "Safetensors" }}{{ else if eq .format "Open Bundle" }}{{ $fmtKind = "bundle" }}{{ $fmtLabel = "Pre-packed" }}{{ end -}}
+                    {{- $defaultKind := "open" -}}
+                    {{- $defaultLabel := "NPU" -}}
+                    {{- if eq .tier "closed" }}{{ $defaultKind = "closed" }}{{ $defaultLabel = "Closed NPU" }}{{ end -}}
+                    <tr data-tag="{{ lower .tag }}"
+                        data-family="{{ lower .family }}"
+                        data-repo="{{ lower .hf_repo }}"
+                        data-tier="{{ .tier }}"
+                        data-modality="{{ .modality }}"
+                        data-format="{{ .format }}">
+                        <td>
+                            <div class="fw-semibold"><code>{{ .tag }}</code></div>
+                            {{- if .doc_url }}
+                            <a href="{{ (strings.TrimPrefix "/" .doc_url) | relLangURL }}" class="small text-decoration-none">Guide →</a>
+                            {{- end }}
+                        </td>
+                        <td>{{ .family }}</td>
+                        <td>{{ partial "oflm-badge.html" (dict "kind" $modKind "label" $modLabel) }}</td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{ partial "oflm-badge.html" (dict "kind" (.accel_kind | default $defaultKind) "label" (.accel_label | default $defaultLabel) "title" (.accel_tip | default "")) }}
+                                {{ partial "oflm-badge.html" (dict "kind" $fmtKind "label" $fmtLabel) }}
+                            </div>
+                        </td>
+                        <td>{{ partial "oflm-badge.html" (dict "kind" "ctx" "label" .context_display) }}</td>
+                        <td>
+                            <div class="oflm-pill-row">
+                                {{- if .wip_badges }}
+                                    {{- range .wip_badges }}
+                                        {{ partial "oflm-badge.html" (dict "kind" (.kind | default "wip") "label" .label "issue" (.issue | default "")) }}
+                                    {{- end }}
+                                {{- else }}
+                                    {{ partial "oflm-badge.html" (dict "kind" "ok" "label" "Ready") }}
+                                {{- end }}
+                            </div>
+                        </td>
+                    </tr>
+                    {{- end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    const root = document.getElementById('oflm-models-explorer');
+    if (!root) return;
+    const tabBtns = root.querySelectorAll('#oflm-models-tabs button');
+    const tabFam = document.getElementById('oflm-tab-families');
+    const tabShort = document.getElementById('oflm-tab-shortcuts');
+    tabBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            tabBtns.forEach((b) => b.classList.remove('active'));
+            btn.classList.add('active');
+            const showFam = btn.dataset.tab === 'families';
+            tabFam.classList.toggle('d-none', !showFam);
+            tabShort.classList.toggle('d-none', showFam);
+        });
+    });
+
+    const qInput = document.getElementById('oflm-model-q');
+    const tierSel = document.getElementById('oflm-model-tier');
+    const modSel = document.getElementById('oflm-model-modality');
+    const fmtSel = document.getElementById('oflm-model-format');
+    const resetBtn = document.getElementById('oflm-model-reset');
+    const countEl = document.getElementById('oflm-model-count');
+    const rows = Array.from(root.querySelectorAll('#oflm-model-table tbody tr'));
+    const total = rows.length;
+
+    function applyFilter() {
+        const q = (qInput.value || '').trim().toLowerCase();
+        const tier = tierSel.value;
+        const mod = modSel.value;
+        const fmt = fmtSel.value;
+        let visible = 0;
+        rows.forEach((tr) => {
+            const matchQ = !q || tr.dataset.tag.includes(q) || tr.dataset.family.includes(q) || tr.dataset.repo.includes(q);
+            const matchTier = !tier || tr.dataset.tier === tier;
+            const matchMod = !mod || tr.dataset.modality === mod;
+            const matchFmt = !fmt || tr.dataset.format === fmt;
+            const show = matchQ && matchTier && matchMod && matchFmt;
+            tr.style.display = show ? '' : 'none';
+            if (show) visible++;
+        });
+        countEl.textContent = 'Showing ' + visible + ' of ' + total + ' shortcuts';
+    }
+
+    [qInput, tierSel, modSel, fmtSel].forEach((el) => {
+        el.addEventListener('input', applyFilter);
+        el.addEventListener('change', applyFilter);
+    });
+    resetBtn.addEventListener('click', () => {
+        qInput.value = ''; tierSel.value = ''; modSel.value = ''; fmtSel.value = '';
+        applyFilter();
+    });
+})();
+</script>
+{{- end -}}

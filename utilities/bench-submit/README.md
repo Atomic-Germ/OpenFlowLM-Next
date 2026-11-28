@@ -12,7 +12,7 @@ What it does: reads the CSV that `oflm bench` / `oflm bench-embed` already write
 from the local machine (`/proc/cpuinfo`, `wmic`), mints a 10-minute token from
 `GET /api/token`, and `POST`s to `/api/benchmarks`. No static secret is needed.
 
-The web-form twin is `docs/benchmarks-submit.md` → `/benchmarks/submit/`.
+The web-form twin is `docs/content/benchmarks/submit.md` → `/benchmarks/submit/`.
 Server-side validation (power-of-two stages, `min ≤ avg ≤ max`, ranges) lives in
 `benchmarks-worker/src/parse.js` and is unit-tested in `benchmarks-worker/test/`.
 

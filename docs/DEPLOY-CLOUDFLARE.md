@@ -1,91 +1,90 @@
-# Deploying the docs site + community benchmarks to Cloudflare (free tier)
+# Deploying OpenFlowLM Docs and Community Benchmarks
 
-Architecture (matches the answers you gave):
+OpenFlowLM serves static documentation built with Hugo Extended (`v0.147.9`, Lotus Docs + Apache ECharts) alongside a serverless leaderboard API backed by Cloudflare Workers and D1.
 
-| Piece | Tech | Free-tier budget |
-|---|---|---|
-| Docs site (`docs/`, Jekyll) | Cloudflare **Pages** (static `_site`) | Unlimited bandwidth, 20k builds/mo |
-| Benchmark API | Cloudflare **Worker** (`benchmarks-worker/`) | 100k req/day |
-| Benchmark DB | Cloudflare **D1** (`oflm-bench`) | 5 GB, 100k writes/day (SQL filters server-side, no KV race) |
+## Architecture Overview
 
-Everything else (forms, charts) is client-side JS (`docs/assets/community-bench.js`),
-so new posts don't need redeploys. If OpenFlowLM ever gets popular enough that
-100k req/day hurts, put a Cache rule on `GET /api/benchmarks*` first — that alone
-absorbs most leaderboard reads.
+| Component | Technology | Source Directory | Output / Binding |
+|---|---|---|---|
+| Website and docs | Hugo Extended `0.147.9` on Cloudflare Pages (or GitHub Pages) | `docs/` | `docs/public/` |
+| Community Benchmarks API | Cloudflare Worker (`/api/*`) | `benchmarks-worker/` | `oflm-bench` Worker |
+| Benchmark database | Cloudflare D1 (SQLite) | `benchmarks-worker/schema.sql` | `DB` (`oflm-bench`) |
 
-## 0. Prerequisites
+Interactive benchmark charts (`static/js/echarts.min.js` and `static/js/oflm-charts.js`) and leaderboard views (`static/js/community-bench.js`) run in the browser, so new benchmark submissions appear without rebuilding the static site.
 
-```bash
-npx --yes wrangler@latest login   # opens browser, one-time
-# Pages build needs Ruby on the build host; GitHub Actions or Cloudflare Pages both work.
-```
+## 1. Local Build Verification
 
-## 1. Provision D1 (one-time)
+Run the documentation checks and build `docs/public/` before deploying:
 
 ```bash
-cd benchmarks-worker
-cp wrangler.toml wrangler.toml.bak
-npx wrangler d1 create oflm-bench          # copy the database_id into wrangler.toml
-npx wrangler d1 execute oflm-bench --local --file schema.sql   # dev
-npx wrangler d1 execute oflm-bench --remote --file schema.sql  # prod
-# (`d1 execute --file`, not `d1 migrations apply --file`: the latter takes a
-# migrations/ directory of numbered files and rejects a --file argument.)
-npx wrangler secret put TOKEN_SECRET       # 32+ random bytes — mints form tokens
-# optional static Bearer for future `oflm bench --submit` CLI work:
-# npx wrangler secret put SUBMIT_BEARER
+python3 utilities/check_embed_bench_docs.py
+python3 utilities/check_docs_quality.py
+./docs/serve-docs.sh --build
 ```
 
-## 2. Worker API
+## 2. Cloudflare Pages Configuration (`openflowlm.org`)
+
+Connect the GitHub repository to a Cloudflare Pages project with these build settings:
+
+| Setting | Value |
+|---|---|
+| Framework preset | Hugo |
+| Root directory | `docs` |
+| Build command | `hugo --minify` |
+| Build output directory | `public` |
+| Environment variable `HUGO_VERSION` | `0.147.9` |
+
+To deploy directly from a workstation or CI job with Wrangler:
 
 ```bash
-cd benchmarks-worker
-npm test            # node --test (no deps)
-npx wrangler dev --local   # →  http://127.0.0.1:8787
-npx wrangler deploy        # prod → https://oflm-bench.<account>.workers.dev
-curl "$API/api/benchmarks?status=validated&sort=decode"
-curl "$API/api/benchmarks/000142"
+./docs/serve-docs.sh --build
+npx --yes wrangler@latest pages deploy docs/public --project-name openflowlm
 ```
 
-Endpoints (`benchmarks-worker/src/index.js`): `GET /api/benchmarks` (filters:
-model, task, hardware, backend, quantization, oflm_version, status, sort, page, size),
-`GET /api/benchmarks/:id`, `GET /api/stats`, `GET /api/token` (10-min HMAC),
-`POST /api/benchmarks` (validated against the real `oflm bench` /
-`oflm bench-embed` CSV shape — see `src/benchmarking.hpp` and
-`src/benchmark_embed.hpp`), `OPTIONS` (CORS).
+## 3. Provisioning Cloudflare D1 and `benchmarks-worker/`
 
-`oflm bench --submit` / `oflm bench-embed --submit` POST from the CLI
-(libcurl → token → POST). It attaches an anonymous per-install UUID
-(`bench_consent.json`, `~/.config/oflm` on Linux, `~/.oflm` on Windows) whose
-SHA-256 the server stores as `install_hash` to count distinct machines for the
-hardware survey. Survey fields (CPU, RAM, OS, NPU) are sent only when the user
-opted in on the first run; the embedding shape keeps batch/texts/tokens/speedup
-in `bench_stages` (`ctx_k` = batch size for embeddings) and the detail page
-renders the embedding labels instead of prefill/decode.
-
-## 3. Jekyll site → Pages
+Authenticate Wrangler once, create the D1 database, apply `schema.sql`, and store the HMAC token secret:
 
 ```bash
-cd docs
-gem install bundler && bundle install
-bundle exec jekyll build          # → docs/_site
-npx wrangler pages deploy docs/_site --project-name openflowlm
+npx --yes wrangler@latest login
+npx --yes wrangler@latest d1 create oflm-bench
 ```
 
-Then point Pages at the zone (openflowlm.org is currently GitHub Pages via
-`docs/CNAME`) — set `cb_api` in `docs/_config.yml`:
+Copy the returned `database_id` into `benchmarks-worker/wrangler.toml`, then initialize local and remote tables and deploy the Worker:
 
-```yaml
-cb_api: "https://oflm-bench.<account>.workers.dev"
+```bash
+npx --yes wrangler@latest --cwd benchmarks-worker d1 execute oflm-bench --local --file schema.sql
+npx --yes wrangler@latest --cwd benchmarks-worker d1 execute oflm-bench --remote --file schema.sql
+npx --yes wrangler@latest --cwd benchmarks-worker secret put TOKEN_SECRET
+npm --prefix benchmarks-worker test
+npx --yes wrangler@latest --cwd benchmarks-worker deploy
 ```
 
-(or leave it as `/api` and use a Pages Function proxy instead of CORS.)
+> [!NOTE]
+> Use `d1 execute --file schema.sql` rather than `d1 migrations apply`; the migrations subcommand expects a numbered `migrations/` directory. Optionally set `SUBMIT_BEARER` via `wrangler secret put SUBMIT_BEARER` if static bearer authentication is needed.
 
-CI option: GitHub Actions → `bundle exec jekyll build` + `wrangler pages deploy`.
-Only run that when you move off GitHub Pages; until then GitHub Pages keeps working
-and the Worker is independently live.
+### Routing `/api/*` and CLI Traffic
 
-## 4. Seeds / daily ops
+`docs/hugo.toml` sets `params.cb_api = "/api"` by default for same-origin browser requests on `openflowlm.org`, while `src/src/bench_submit.hpp` defaults `oflm bench --submit` to `https://oflm-bench.openflowlm.org` (overridable via `--submit-url` or `OFLM_BENCH_SUBMIT_URL`):
 
-`benchmarks-worker/schema.sql` seeds three rows mirroring the mockup (#000142…)
-so the UI is testable without hardware. To backfill real results, run
-`utilities/bench-submit/submit.py` or the `/benchmarks/submit/` form.
+- **Custom domain & routes (recommended):** In Cloudflare Dashboard under **Workers & Pages -> oflm-bench -> Settings -> Domains & Routes**, attach custom domain `oflm-bench.openflowlm.org` and bind the route `openflowlm.org/api/*` to `oflm-bench`. Browser requests to `/api/benchmarks`, `/api/benchmarks/:id`, `/api/stats`, and `/api/token` stay same-origin while CLI `--submit` uploads work out of the box.
+- **Separate `workers.dev` origin:** If hosting the static site on another domain while keeping the Worker on `workers.dev`, override `params.cb_api` in `docs/hugo.toml` to `"https://oflm-bench.<account>.workers.dev"`.
+
+Verify the live Worker endpoints after deployment:
+
+```bash
+curl --fail "https://openflowlm.org/api/benchmarks?status=validated&sort=decode"
+curl --fail "https://openflowlm.org/api/stats"
+```
+
+### CLI Submissions (`oflm bench --submit`)
+
+`oflm bench --submit` and `oflm bench-embed --submit` request a short-lived HMAC token from `GET /api/token` and submit validated CSV rows to `POST /api/benchmarks` (matching `src/src/benchmarking.hpp` and `src/src/benchmark_embed.hpp`). The CLI hashes an anonymous per-install UUID (`~/.config/oflm/bench_consent.json` on Linux, `~/.oflm/bench_consent.json` on Windows) into `install_hash` and includes host hardware fields only when the user opted in.
+
+## 4. GitHub Pages Verification and Deployment Workflow
+
+`.github/workflows/docs-pages.yml` validates pushes and pull requests touching `docs/` or the doc check scripts, and deploys `docs/public/` to GitHub Pages on `main`:
+
+1. Runs `utilities/check_embed_bench_docs.py` and `utilities/check_docs_quality.py`.
+2. Installs Go `1.24` and Hugo Extended `0.147.9`, verifying both root (`https://openflowlm.org/`) and subpath (`https://example.github.io/OpenFlowLM-Next/`) builds.
+3. On `main` pushes to `Atomic-Germ/OpenFlowLM-Next` (or manual `workflow_dispatch`), resolves `--baseURL` dynamically via `actions/configure-pages@v5` (`docs/CNAME` is intentionally omitted so fork previews never redirect to `openflowlm.org`).

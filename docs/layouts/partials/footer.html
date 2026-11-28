@@ -1,0 +1,22 @@
+<footer class="footer footer-light footer-bar">
+    <div class="footer-py-30">
+        <div class="container">
+            <div class="row align-items-center">
+                <div class="col-md-7 text-center text-md-start">
+                    <p class="mb-0 small">
+                        {{ $yearToken := (cond (isset .Site.Params (lower "copyrightYearToken")) $.Site.Params.copyrightYearToken ":YEAR:") }}
+                        {{ replace $.Site.Params.footer.copyright $yearToken (string (now.Format "2006")) | markdownify }}
+                    </p>
+                </div>
+                <div class="col-md-5 mt-3 mt-md-0 text-center text-md-end small">
+                    <a href='{{ relLangURL "models/" }}' class="text-reset text-decoration-none me-3">Models</a>
+                    <a href='{{ relLangURL "engines/" }}' class="text-reset text-decoration-none me-3">Engines</a>
+                    <a href='{{ relLangURL "benchmarks/" }}' class="text-reset text-decoration-none me-3">Benchmarks</a>
+                    <a href='{{ relLangURL "docs/" }}' class="text-reset text-decoration-none me-3">Docs</a>
+                    {{ with .Site.Params.github_url }}<a href="{{ . }}" target="_blank" rel="noopener noreferrer" class="text-reset text-decoration-none me-3">GitHub</a>{{ end }}
+                    {{ with .Site.Params.discord_url }}<a href="{{ . }}" target="_blank" rel="noopener noreferrer" class="text-reset text-decoration-none">Discord</a>{{ end }}
+                </div>
+            </div>
+        </div>
+    </div>
+</footer>

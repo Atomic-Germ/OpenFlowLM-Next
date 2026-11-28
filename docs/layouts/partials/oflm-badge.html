@@ -1,0 +1,126 @@
+{{- $kind := lower (.kind | default "neutral") -}}
+{{- $label := .label | default "" -}}
+{{- $issue := .issue | default "" -}}
+{{- $icon := .icon | default "" -}}
+{{- $mono := .mono | default false -}}
+{{- $tip := .title | default "" -}}
+{{- $trailIcon := "" -}}
+{{- $strike := false -}}
+{{- $cls := $kind -}}
+
+{{- if eq $kind "open" -}}
+  {{- $icon = $icon | default "memory" -}}
+  {{- $label = $label | default "NPU" -}}
+{{- else if eq $kind "npu" -}}
+  {{- $icon = $icon | default "memory" -}}
+  {{- $label = $label | default "NPU" -}}
+{{- else if eq $kind "cpu" -}}
+  {{- $icon = $icon | default "developer_board" -}}
+  {{- $label = $label | default "CPU" -}}
+{{- else if or (eq $kind "ok") (eq $kind "yes") (eq $kind "supported") -}}
+  {{- $cls = "ok" -}}
+  {{- $icon = $icon | default "check_circle" -}}
+  {{- $label = $label | default "Ready" -}}
+{{- else if or (eq $kind "unsupported") (eq $kind "no") -}}
+  {{- $cls = "unsupported" -}}
+  {{- $strike = true -}}
+  {{- if and (not $mono) (or (not $label) (eq $label "Unsupported")) -}}
+    {{- $icon = $icon | default "block" -}}
+  {{- end -}}
+  {{- $label = $label | default "Unsupported" -}}
+  {{- $tip = $tip | default "Not supported in OpenFlowLM" -}}
+{{- else if or (eq $kind "hybrid") (eq $kind "partial") -}}
+  {{- $cls = "hybrid" -}}
+  {{- $icon = $icon | default "splitscreen" -}}
+  {{- $label = $label | default "NPU + CPU" -}}
+  {{- $trailIcon = "info" -}}
+  {{- $tip = $tip | default "Heavy model layers run on the NPU; lightweight helper steps run on the CPU." -}}
+{{- else if eq $kind "wip" -}}
+  {{- $cls = "wip" -}}
+  {{- $icon = $icon | default "construction" -}}
+  {{- if and (not $label) $issue -}}
+    {{- $label = printf "WIP #%s" (strings.TrimPrefix "#" $issue) -}}
+  {{- else -}}
+    {{- $label = $label | default "WIP" -}}
+  {{- end -}}
+{{- else if eq $kind "closed" -}}
+  {{- $cls = "closed" -}}
+  {{- $icon = $icon | default "history" -}}
+  {{- $label = $label | default "Closed NPU" -}}
+  {{- $trailIcon = "info" -}}
+  {{- $tip = $tip | default "Uses inherited prebuilt NPU kernels and closed library (being phased out; omitted on NixOS #244)." -}}
+{{- else if or (eq $kind "legacy") (eq $kind "deprecated") -}}
+  {{- $cls = "legacy" -}}
+  {{- $icon = $icon | default "history" -}}
+  {{- $label = $label | default "Legacy" -}}
+  {{- if $tip }}{{ $trailIcon = "info" }}{{ end -}}
+{{- else if eq $kind "q4nx" -}}
+  {{- $cls = "q4nx" -}}
+  {{- $icon = $icon | default "history" -}}
+  {{- $label = $label | default "Legacy Q4NX" -}}
+  {{- $mono = true -}}
+{{- else if or (eq $kind "llm") (eq $kind "text") -}}
+  {{- $cls = "llm" -}}
+  {{- $icon = $icon | default "chat" -}}
+  {{- $label = $label | default "Chat" -}}
+{{- else if or (eq $kind "vlm") (eq $kind "vision") -}}
+  {{- $cls = "vlm" -}}
+  {{- $icon = $icon | default "visibility" -}}
+  {{- $label = $label | default "Vision" -}}
+{{- else if eq $kind "think" -}}
+  {{- $cls = "think" -}}
+  {{- $icon = $icon | default "psychology" -}}
+  {{- $label = $label | default "Reasoning" -}}
+{{- else if eq $kind "tools" -}}
+  {{- $cls = "tools" -}}
+  {{- $icon = $icon | default "build" -}}
+  {{- $label = $label | default "Tools" -}}
+{{- else if eq $kind "embed" -}}
+  {{- $cls = "embed" -}}
+  {{- $icon = $icon | default "hub" -}}
+  {{- $label = $label | default "Embeddings" -}}
+{{- else if or (eq $kind "asr") (eq $kind "audio") -}}
+  {{- $cls = "asr" -}}
+  {{- $icon = $icon | default "mic" -}}
+  {{- $label = $label | default "Speech" -}}
+{{- else if eq $kind "image" -}}
+  {{- $cls = "image" -}}
+  {{- $icon = $icon | default "palette" -}}
+  {{- $label = $label | default "Image" -}}
+{{- else if eq $kind "gguf" -}}
+  {{- $cls = "gguf" -}}
+  {{- $icon = $icon | default "deployed_code" -}}
+  {{- $label = $label | default "GGUF" -}}
+{{- else if eq $kind "safetensors" -}}
+  {{- $cls = "safetensors" -}}
+  {{- $icon = $icon | default "layers" -}}
+  {{- $label = $label | default "Safetensors" -}}
+{{- else if eq $kind "bundle" -}}
+  {{- $cls = "bundle" -}}
+  {{- $icon = $icon | default "inventory_2" -}}
+  {{- $label = $label | default "Pre-packed" -}}
+{{- else if eq $kind "qbest" -}}
+  {{- $cls = "qbest" -}}
+  {{- $icon = $icon | default "star" -}}
+  {{- $mono = true -}}
+  {{- $tip = $tip | default "Recommended quantization" -}}
+{{- else if or (eq $kind "q") (eq $kind "quant") (eq $kind "qdirect") -}}
+  {{- $cls = "quant" -}}
+  {{- $mono = true -}}
+  {{- $tip = $tip | default "Compatible quantization" -}}
+{{- else if eq $kind "ctx" -}}
+  {{- $cls = "ctx" -}}
+  {{- $icon = $icon | default "straighten" -}}
+  {{- $mono = true -}}
+{{- else if or (eq $kind "size") (eq $kind "chip") -}}
+  {{- $cls = "size" -}}
+  {{- $mono = true -}}
+{{- end -}}
+
+{{- if $issue -}}
+  {{- $num := strings.TrimPrefix "#" (printf "%v" $issue) -}}
+  {{- $issueTip := $tip | default (printf "Tracked in GitHub issue #%s" $num) -}}
+  <a class="oflm-badge {{ $cls }}{{ if $mono }} mono{{ end }}" href="https://github.com/Atomic-Germ/OpenFlowLM-Next/issues/{{ $num }}" target="_blank" rel="noopener noreferrer" data-oflm-tip="{{ $issueTip }}" aria-label="{{ $label }} ({{ $issueTip }})">{{- with $icon }}<span class="material-icons" aria-hidden="true">{{ . }}</span>{{- end }}<span class="{{ if $strike }}oflm-strike{{ end }}">{{ $label }}</span>{{- with $trailIcon }}<span class="material-icons oflm-badge-info" aria-hidden="true">{{ . }}</span>{{- end }}</a>
+{{- else -}}
+  <span class="oflm-badge {{ $cls }}{{ if $mono }} mono{{ end }}"{{ with $tip }} data-oflm-tip="{{ . }}"{{ if $trailIcon }} tabindex="0" role="note" aria-label="{{ $label }}: {{ . }}"{{ end }}{{ end }}>{{- with $icon }}<span class="material-icons" aria-hidden="true">{{ . }}</span>{{- end }}<span class="{{ if $strike }}oflm-strike{{ end }}">{{ $label }}</span>{{- with $trailIcon }}<span class="material-icons oflm-badge-info" aria-hidden="true">{{ . }}</span>{{- end }}</span>
+{{- end -}}

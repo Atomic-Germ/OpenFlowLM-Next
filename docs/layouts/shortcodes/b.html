@@ -1,0 +1,26 @@
+{{- $kind := "" -}}
+{{- $label := "" -}}
+{{- $issue := "" -}}
+{{- $icon := "" -}}
+{{- $tip := "" -}}
+{{- $mono := false -}}
+{{- if .IsNamedParams -}}
+  {{- $kind = .Get "k" | default (.Get "kind") | default "neutral" -}}
+  {{- $label = .Get "t" | default (.Get "label") | default "" -}}
+  {{- $issue = .Get "issue" | default "" -}}
+  {{- $icon = .Get "icon" | default "" -}}
+  {{- $tip = .Get "tip" | default (.Get "title") | default "" -}}
+  {{- $mono = eq (printf "%v" (.Get "mono")) "true" -}}
+{{- else -}}
+  {{- $kind = .Get 0 | default "neutral" -}}
+  {{- $arg1 := .Get 1 | default "" -}}
+  {{- $arg2 := .Get 2 | default "" -}}
+  {{- if and (eq (lower $kind) "wip") (or (strings.HasPrefix $arg1 "#") (findRE "^[0-9]+$" $arg1)) -}}
+    {{- $issue = strings.TrimPrefix "#" $arg1 -}}
+    {{- $label = $arg2 -}}
+  {{- else -}}
+    {{- $label = $arg1 -}}
+    {{- $issue = strings.TrimPrefix "#" $arg2 -}}
+  {{- end -}}
+{{- end -}}
+{{- partial "oflm-badge.html" (dict "kind" $kind "label" $label "issue" $issue "icon" $icon "title" $tip "mono" $mono) -}}

@@ -229,7 +229,7 @@ list** — `request["input"]` on a `const json&` with a missing key is undefined
 behaviour — so it is a 400 now. An empty `input` array is still 200 and an
 empty list, unchanged.
 
-Full results: [`docs/docs/benchmarks/embeddings_results.md`](../../docs/docs/benchmarks/embeddings_results.md).
+Full results: [`docs/content/benchmarks/_index.md`](../../docs/content/benchmarks/_index.md).
 
 ---
 

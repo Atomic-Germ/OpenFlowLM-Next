@@ -1,0 +1,31 @@
+{{ define "main" }}
+<div class="oflm-showcase-wrap">
+    <div class="container">
+        <header class="oflm-page-header">
+            {{- with .Params.kicker }}
+            <div class="oflm-kicker">
+                {{- with $.Params.icon }}<i class="material-icons size-18">{{ . }}</i>{{- end }}
+                <span>{{ . }}</span>
+            </div>
+            {{- end }}
+            <h1>{{ .Title }}</h1>
+            {{- with .Description }}
+            <p class="oflm-lead">{{ . | markdownify }}</p>
+            {{- end }}
+            {{- with .Params.ctas }}
+            <div class="mt-3 d-flex flex-wrap gap-2">
+                {{- range . }}
+                <a href="{{ (strings.TrimPrefix "/" .url) | relLangURL }}" class="btn btn-sm {{ if .outline }}btn-outline-primary{{ else }}btn-primary{{ end }}">
+                    {{- with .icon }}<span class="material-icons align-middle size-18 me-1">{{ . }}</span>{{- end }}
+                    {{ .text }}
+                </a>
+                {{- end }}
+            </div>
+            {{- end }}
+        </header>
+        <article class="oflm-showcase-article">
+            {{ .Content }}
+        </article>
+    </div>
+</div>
+{{ end }}

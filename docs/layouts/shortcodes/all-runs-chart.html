@@ -1,0 +1,13 @@
+{{- .Page.Store.Set "hasECharts" true -}}
+{{- $dataKey := .Get "data" | default "all_runs" -}}
+{{- $view := .Get "view" | default "full" -}}
+{{- $dataset := index site.Data.benchmarks $dataKey -}}
+{{- $uid := printf "oflm-allruns-%s-%s-%d" ($dataKey | urlize) $view .Ordinal -}}
+{{- if $dataset -}}
+<div class="oflm-npu-bench" data-oflm-allruns-chart="{{ $uid }}" data-view="{{ $view }}">
+    <div class="oflm-npu-bench-body" aria-label="{{ $dataset.title }}"></div>
+    <script type="application/json" class="oflm-chart-payload">{{ $dataset | jsonify | safeJS }}</script>
+</div>
+{{- else -}}
+<div class="alert alert-warning">Benchmark dataset <code>{{ $dataKey }}</code> was not found in <code>docs/data/benchmarks/</code>.</div>
+{{- end -}}

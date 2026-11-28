@@ -1,79 +1,48 @@
 ---
-layout: docs
-title: Local LLM Server Basics
-nav_order: 0
-parent: Local Server (Server Mode)
+title: "Server Basics"
+description: "How local AI servers and the OpenAI HTTP API standard connect client apps to your NPU."
+icon: "menu_book"
+weight: 10
 ---
 
-# 🧠 Understanding Local LLM Servers
+`oflm serve` runs an HTTP server on your Ryzen AI machine (`127.0.0.1:52625` by default). Prompts, files, and outputs stay on your device while desktop apps, editors, and SDKs connect over standard JSON endpoints.
 
-This page explains the key concepts behind **Local LLM Servers**, including OpenFlowLM (OFLM) Server and others.  
+## Why Use a Local HTTP Server?
 
----
+| Advantage | How It Helps |
+|---|---|
+| Zero client NPU setup | Apps call standard HTTP endpoints without installing C++ or driver libraries |
+| Shared NPU residency | Models load once and serve multiple apps and terminals concurrently |
+| Built-in queuing & streaming | Request queuing, SSE streaming, chat templates, and tool parsing run in `oflm serve` |
+| Drop-in OpenAI switch | Point `base_url` to `http://127.0.0.1:52625/v1` without rewriting client code |
 
-## 🔌 What is a Local Server?
+## Dual API Compatibility
 
-The word “server” can be confusing. It can mean:
+OpenFlowLM implements both major local inference protocols out of the box:
 
-- **Server hardware**: a physical machine in a data center.
-- **Server software**: a program that waits for requests (from another program) and responds to them.
+<div class="oflm-two-col">
+  <div class="oflm-card">
 
-A **local server** is simply **server software** that runs **on your own device** (like a laptop, desktop, or smartphone). It does **not** run in the cloud or on remote machines.
+### OpenAI HTTP API (`/v1/*`)
 
-In short:
+Works with official Python, JS/TS, Go, .NET, and Java SDKs, [Open WebUI](/docs/instructions/server/webui/), Continue, OpenCode, Cursor, and desktop chat clients:
 
-> **Local server = a background program on your device that handles requests.**
+- `/v1/chat/completions` & `/v1/completions`
+- `/v1/embeddings` & `/v1/audio/transcriptions`
+- `/v1/images/generations` & `/v1/images/edits`
 
----
+  </div>
+  <div class="oflm-card">
 
-## 🧠 What is a Local LLM Server?
+### Ollama HTTP API (`/api/*`)
 
-A **Local LLM Server** runs a **large language model (LLM)** entirely on your device.
+Connects Ollama clients and local automation libraries directly to `http://127.0.0.1:52625`:
 
-It loads the model into memory and exposes it to apps through an API (usually the OpenAI-style API).
+- `/api/chat`, `/api/generate`, `/api/embeddings`
+- `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`
+- `/api/cancel`, `/api/npu/status`
 
-### 🔧 Real Examples of Local LLM Servers:
+  </div>
+</div>
 
-- **Ollama**
-- **llama-cpp-server**
-
-### ✅ Why Use a Local LLM Server?
-
-Instead of directly adding the model to your app via C++ or Python, it’s often better to use a local server. Why?
-
-| Benefit | Why It Matters |
-|--------|----------------|
-| **Easy integration** | No need to worry about device-specific code (CPU, GPU, NPU). Just send simple API calls. |
-| **Saves memory** | The server loads the model **once** and shares it across apps. No need for every app to load its own copy. |
-| **Cleaner architecture** | Keeps model logic (streaming, tool use, error handling) separate from your app logic. |
-| **Cloud-to-local transition** | You can prototype your app using OpenAI cloud models, then later switch to a local model -- without changing your code much. |
-
-> In short: **Local LLM servers let your apps talk to big models running directly on your machine -- cleanly and efficiently.**
-
----
-
-## 🌐 What is the OpenAI API Standard?
-
-Every LLM server -- whether local or cloud -- needs a way to receive prompts and return completions. That’s where **APIs** come in.
-
-### ✅ The OpenAI API is the most common standard.
-
-Why?
-
-1. **Widely supported** by many local LLM servers.
-2. **Used by many apps** (so it’s easy to plug in).
-3. **Works for both local and cloud models**.
-
-> Even though OpenAI runs their own cloud-based LLMs, their **API design is public** and **free to adopt**.
-
-That means local servers like Ollama and OpenFlowLM -- and your own custom servers -- can all **pretend to be OpenAI** to your app.
-
-### 🔁 Why does this matter?
-
-It makes switching between cloud and local effortless:
-
-- You can build your app using OpenAI’s cloud models.
-- Later, switch to a local LLM (for privacy, cost, or speed).
-- Your app won’t need to change -- it keeps using the same API.
-
----
+Continue to [REST API Reference](/docs/instructions/server/openapi/), [Image Generation and Editing](/docs/instructions/server/images/), or [Server Mode](/docs/instructions/server/).

@@ -1,0 +1,33 @@
+{{- .Page.Store.Set "hasECharts" true -}}
+{{- $dataKey := .Get "data" | default "embeddings_npu_sweep" -}}
+{{- $height := .Get "height" | default "360px" -}}
+{{- $dataset := index site.Data.benchmarks $dataKey -}}
+{{- $uid := printf "oflm-embed-%s-%d" ($dataKey | urlize) .Ordinal -}}
+{{- if $dataset -}}
+<div class="oflm-chart-card" data-oflm-embed-chart="{{ $uid }}">
+    <div class="oflm-chart-header">
+        <div>
+            <div class="oflm-chart-meta mb-1">
+                <span class="oflm-badge embed"><span class="material-icons" aria-hidden="true">hub</span><span>Embeddings</span></span>
+                <span class="oflm-badge neutral"><span class="material-icons" aria-hidden="true">memory</span><span>{{ $dataset.hardware_platform | default $dataset.hardware }}</span></span>
+                <span class="oflm-badge open"><span class="material-icons" aria-hidden="true">bolt</span><span>Batched NPU (n=1 to n=128)</span></span>
+            </div>
+            <h3 class="oflm-chart-title">{{ $dataset.title }}</h3>
+            <p class="oflm-chart-subtitle">{{ $dataset.subtitle }}</p>
+        </div>
+    </div>
+    <div class="oflm-small-multiples">
+        <div class="oflm-subchart">
+            <div class="oflm-subchart-title">Throughput Scaling <span class="oflm-subchart-unit">(texts/s · log scale, higher is better)</span></div>
+            <div class="oflm-echarts-canvas" data-subchart="throughput" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} throughput scaling chart"></div>
+        </div>
+        <div class="oflm-subchart">
+            <div class="oflm-subchart-title">Batch Speedup vs. Single Text <span class="oflm-subchart-unit">(× looped baseline · linear from 0)</span></div>
+            <div class="oflm-echarts-canvas" data-subchart="speedup" style="width: 100%; height: {{ $height }};" aria-label="{{ $dataset.title }} batch speedup chart"></div>
+        </div>
+    </div>
+    <script type="application/json" class="oflm-chart-payload">{{ $dataset | jsonify | safeJS }}</script>
+</div>
+{{- else -}}
+<div class="alert alert-warning">Embeddings dataset <code>{{ $dataKey }}</code> was not found in <code>docs/data/benchmarks/</code>.</div>
+{{- end -}}

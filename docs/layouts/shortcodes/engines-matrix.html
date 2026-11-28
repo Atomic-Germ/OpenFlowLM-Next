@@ -1,0 +1,125 @@
+{{- $data := site.Data.engines -}}
+{{- if $data -}}
+<div class="oflm-engines-explorer" id="oflm-engines-explorer">
+    <div class="oflm-legend">
+        <span class="oflm-legend-label">Key</span>
+        {{ partial "oflm-badge.html" (dict "kind" "open" "label" "NPU") }}
+        <span>Open NPU</span>
+        <span class="mx-1">·</span>
+        {{ partial "oflm-badge.html" (dict "kind" "hybrid" "label" "NPU + CPU" "title" "Open NPU runtime with light CPU helper steps. Hover any badge for the exact split.") }}
+        <span>Open NPU + CPU</span>
+        <span class="mx-1">·</span>
+        {{ partial "oflm-badge.html" (dict "kind" "closed" "label" "Closed NPU" "title" "Inherited prebuilt NPU kernels & closed library being phased out (omitted on NixOS #244).") }}
+        <span>Phasing out</span>
+        <span class="mx-1">·</span>
+        {{ partial "oflm-badge.html" (dict "kind" "qbest" "label" "Q4_1") }}
+        <span>Recommended quant</span>
+    </div>
+
+    <div class="oflm-filter-bar mb-3" role="search" aria-label="Filter runtimes">
+        <div>
+            <label for="oflm-eng-status">Acceleration</label>
+            <select id="oflm-eng-status">
+                <option value="">All runtimes ({{ len $data.engines }})</option>
+                <option value="open">Open NPU</option>
+                <option value="hybrid">Open NPU + CPU</option>
+                <option value="closed">Closed NPU (Phasing Out)</option>
+            </select>
+        </div>
+        <div>
+            <label for="oflm-eng-mod">Capability</label>
+            <select id="oflm-eng-mod">
+                <option value="">All capabilities</option>
+                <option value="LLM">Chat &amp; Reasoning</option>
+                <option value="VLM">Vision (Images)</option>
+                <option value="Embed">Embeddings</option>
+                <option value="ASR">Speech-to-Text</option>
+                <option value="Image">Image Generation</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="oflm-table-wrap">
+        <table class="oflm-table" id="oflm-engines-table">
+            <thead>
+                <tr>
+                    <th>Runtime</th>
+                    <th>Supported Models</th>
+                    <th>Capabilities</th>
+                    <th>Runtime &amp; Format</th>
+                    <th>Quantization</th>
+                    <th>Limits</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{- range $data.engines }}
+                {{- $tip := .accel_tip | default .accel_note | default "" -}}
+                <tr data-status="{{ .status_class }}" data-modalities="{{ delimit .modalities "," }}">
+                    <td>
+                        <div class="fw-semibold">{{ .name }}</div>
+                        {{- with .summary }}
+                        <div class="small mt-1" style="color: var(--oflm-muted);">{{ . }}</div>
+                        {{- end }}
+                    </td>
+                    <td>
+                        <div class="oflm-pill-row">
+                            {{- range .family_chips }}
+                                {{ partial "oflm-badge.html" (dict "kind" "neutral" "label" .) }}
+                            {{- end }}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="oflm-pill-row">
+                            {{- range .capability_badges }}
+                                {{ partial "oflm-badge.html" (dict "kind" .kind "label" .label) }}
+                            {{- end }}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="oflm-pill-row">
+                            {{ partial "oflm-badge.html" (dict "kind" .status_class "label" .status_label "title" $tip) }}
+                            {{- range .format_badges }}
+                                {{ partial "oflm-badge.html" (dict "kind" .kind "label" (.label | default "")) }}
+                            {{- end }}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="oflm-pill-row">
+                            {{- range .quant_badges }}
+                                {{ partial "oflm-badge.html" (dict "kind" .kind "label" .label "mono" true) }}
+                            {{- end }}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="oflm-pill-row">
+                            {{- range .limit_badges }}
+                                {{ partial "oflm-badge.html" (dict "kind" (.kind | default "wip") "label" .label "issue" (.issue | default "")) }}
+                            {{- end }}
+                        </div>
+                    </td>
+                </tr>
+                {{- end }}
+            </tbody>
+        </table>
+    </div>
+</div>
+<script>
+(function () {
+    const statusSel = document.getElementById('oflm-eng-status');
+    const modSel = document.getElementById('oflm-eng-mod');
+    if (!statusSel || !modSel) return;
+    const rows = Array.from(document.querySelectorAll('#oflm-engines-table tbody tr'));
+    function filterEngines() {
+        const st = statusSel.value;
+        const mod = modSel.value;
+        rows.forEach((tr) => {
+            const okSt = !st || tr.dataset.status === st;
+            const okMod = !mod || (tr.dataset.modalities || '').split(',').includes(mod);
+            tr.style.display = (okSt && okMod) ? '' : 'none';
+        });
+    }
+    statusSel.addEventListener('change', filterEngines);
+    modSel.addEventListener('change', filterEngines);
+})();
+</script>
+{{- end -}}

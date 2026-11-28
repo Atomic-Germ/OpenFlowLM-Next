@@ -9,6 +9,9 @@ oflm-data
 __pycache__
 _site
 .jekyll-metadata
+docs/public/
+docs/resources/
+docs/.hugo_build.lock
 *.csv
 utilities/mlir-aie
 third_party/mlir-aie
@@ -21,6 +24,10 @@ Models
 # tracked and unaffected, and a NEW one is silently not added.
 !utilities/q4nx-build/q4nx/models/
 !utilities/q4nx-build/q4nx/models/**
+!docs/docs/models/
+!docs/docs/models/**
+!docs/content/
+!docs/content/**
 # ...but the negation above re-admits the models dir's __pycache__ too, since
 # `**` matches inside it. Re-ignore it, or a pack run commits .pyc files.
 utilities/q4nx-build/q4nx/models/__pycache__/

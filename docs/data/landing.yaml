@@ -1,0 +1,108 @@
+hero:
+  oflm: true
+  enable: true
+  weight: 10
+  template: "hero"
+  title: "Fast, Open-Source Inference on AMD Ryzen AI NPUs"
+  subtitle: "Run private chat, coding, vision, document embeddings, speech-to-text, and image generation on Ryzen AI 300 and AI Max systems while keeping your CPU and GPU free."
+  ctaButton:
+    icon: "download"
+    btnText: "Install OpenFlowLM"
+    url: "/docs/install/"
+  cta2Button:
+    icon: "view_module"
+    btnText: "Browse Models"
+    url: "/models/"
+  info: "Quickstart: `oflm pull qwen3.5:4b && oflm run qwen3.5:4b`"
+  image:
+    path: "images"
+    filename: "hero-terminal.svg"
+    alt: "OpenFlowLM terminal running local chat, Hugging Face GGUF models, and an OpenAI-compatible server on AMD Ryzen AI"
+  operatingSystems: "Windows & Linux"
+  modalities:
+    - kind: "llm"
+      label: "Chat"
+    - kind: "vlm"
+      label: "Vision"
+    - kind: "embed"
+      label: "Embeddings"
+    - kind: "asr"
+      label: "Speech"
+    - kind: "image"
+      label: "Image"
+  familyBadges:
+    - label: "Qwen"
+      url: "/docs/models/qwen/"
+    - label: "Gemma"
+      url: "/docs/models/gemma/"
+    - label: "Llama"
+      url: "/docs/models/llama/"
+    - label: "DeepSeek"
+      url: "/docs/models/deepseek/"
+    - label: "IBM Granite"
+      url: "/docs/models/granite/"
+    - label: "Liquid LFM"
+      url: "/docs/models/lfm/"
+    - label: "Phi"
+      url: "/docs/models/phi/"
+    - label: "Nanbeige"
+      url: "/docs/models/nanbeige/"
+    - label: "GPT-OSS"
+      url: "/docs/models/gpt-oss/"
+    - label: "BERT / BGE / Nomic / GTE"
+      url: "/docs/models/bert/"
+    - label: "EmbeddingGemma"
+      url: "/docs/models/embeddinggemma/"
+    - label: "MedGemma"
+      url: "/docs/models/medgemma/"
+    - label: "TranslateGemma"
+      url: "/docs/models/translategemma/"
+    - label: "FLUX.2"
+      url: "/docs/models/flux/"
+    - label: "Whisper"
+      url: "/docs/models/whisper/"
+
+featureGrid:
+  oflm: true
+  enable: true
+  weight: 20
+  template: "feature grid"
+  title: "Built for Everyday Local AI on Ryzen AI"
+  subtitle: "Run background assistants, document search, voice transcription, and image tools directly on your built-in NPU."
+  items:
+    - title: "Keep CPU & GPU Free"
+      icon: "memory"
+      description: "Offload AI inference to the dedicated Ryzen AI NPU so your processor, graphics card, and laptop fans stay quiet while you code, browse, or game."
+      ctaLink:
+        text: "How NPU runtimes work"
+        url: "/engines/"
+    - title: "Bring Any Compatible GGUF"
+      icon: "bolt"
+      description: "Download ready-to-run models with `oflm pull` or install standard Hugging Face GGUF checkpoints and fine-tunes in one command with `oflm add`."
+      ctaLink:
+        text: "Browse supported models"
+        url: "/models/"
+    - title: "Chat, Vision, Voice & Images"
+      icon: "hub"
+      description: "Ask questions about images, transcribe audio with Whisper, index documents with fast batched embeddings, and generate or edit images with FLUX.2."
+      ctaLink:
+        text: "Read model guides"
+        url: "/docs/models/"
+    - title: "Long-Context & Large Models"
+      icon: "psychology"
+      description: "Take advantage of unified memory on Ryzen AI 300 and AI Max systems to run 27B dense and 35B-A3B MoE reasoning models locally."
+      ctaLink:
+        text: "See measured speeds"
+        url: "/benchmarks/"
+    - title: "Local OpenAI & Anthropic API"
+      icon: "dns"
+      description: "`oflm serve` runs a local server compatible with Open WebUI, Continue, Claude Code, and OpenAI SDKs."
+      ctaLink:
+        text: "Server & app guides"
+        url: "/docs/instructions/server/"
+    - title: "Windows & Linux"
+      icon: "inventory_2"
+      description: "Install in minutes with the Windows MSI installer, or via DEB, RPM, Docker, and NixOS on Linux."
+      ctaLink:
+        text: "Installation guides"
+        url: "/docs/install/"
