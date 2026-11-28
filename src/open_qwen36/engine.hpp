@@ -93,8 +93,11 @@ public:
     void spec_begin();
     // uno_cycle's contract; false asks the caller for a plain step, so plain tokens come from the app's own sampler.
     bool spec_cycle(int seed, const std::vector<int>& history, std::vector<int>& out, int& p);
+    /// Token ids whose logits read -inf from here on, so the sampler never picks them.
+    void suppress_tokens(std::vector<int> ids) { suppressed_ = std::move(ids); }
 
 private:
+    std::vector<int> suppressed_;
     CoreConfig cfg_;
     oflm_rt::device* dev_;
     std::unique_ptr<Core> core_;

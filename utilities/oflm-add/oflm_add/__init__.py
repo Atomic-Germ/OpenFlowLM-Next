@@ -173,8 +173,9 @@ def _build_open_whisper(target, repo, bases, modelscope, local_dir):
 # Plain float formats (F16/BF16/F32, and the FP16/FP32 spellings repos use)
 # are whole-file formats rather than named Q families, but they are explicitly
 # supported sources (NPUE_GGUF_PREFERENCE) and must be selectable by name.
+# Google names its files <model>_<quant>-it.gguf (gemma-4-E4B_q4_0-it.gguf), so an "-it" may follow.
 GGUF_QUANT_RE = re.compile(
-    r"[.\-_ ]((?:I?Q[0-9](?:_[A-Za-z0-9]+)*|F16|BF16|F32|FP16|FP32))\.gguf$",
+    r"[.\-_ ]((?:I?Q[0-9](?:_[A-Za-z0-9]+)*?|F16|BF16|F32|FP16|FP32))(?:-it)?\.gguf$",
     re.IGNORECASE,
 )
 _FLOAT_QUANT_CANON = {"FP16": "F16", "FP32": "F32"}
@@ -671,9 +672,8 @@ GGUF_ARCH_FAMILIES = {
     "qwen3_vl": "qwen3vl",           # the same arch, spelled with the underscore
     "qwen2vl": "qwen2vl",            # Qwen2-VL / Qwen2.5-VL: same idea, on qwen2's
     "whisper": "whisper-v3",         # speech-to-text, on the open whisper_gemm set
-    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): the marker is the 12B's own arch.
-    # The E2B / E4B also call themselves gemma4; nothing serves them yet, and
-    # kernel linking fails closed rather than bind the wrong set.
+    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): the 12B's arch; family_from_gguf_arch
+    # sends a file with per-layer inputs (the E2B / E4B, which share the arch) to gemma4e.
     "gemma4": "gemma4",
 }
 
@@ -710,11 +710,12 @@ CONFIG_MODEL_FAMILIES = {
     "qwen2_5_vl": "qwen2vl",
     "qwen2_5_vl_text": "qwen2vl",
     "whisper": "whisper-v3",
-    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): only the 12B (gemma4_unified /
-    # gemma4_unified_text) is served -- the E2B / E4B (plain gemma4 / gemma4_text)
-    # need per-layer embeddings and KV sharing and stay unmapped.
+    # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): the 12B (gemma4_unified /
+    # gemma4_unified_text) and the E2B / E4B (plain gemma4 / gemma4_text, the gemma4e adapter).
     "gemma4_unified": "gemma4",
     "gemma4_unified_text": "gemma4",
+    "gemma4": "gemma4e",
+    "gemma4_text": "gemma4e",
 }
 
 
@@ -1995,7 +1996,10 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     # A local-directory install passes the directory path as `repo`; fetching
     # generation_config.json from it as an HF id is meaningless (and raises),
     # so only attempt it when `repo` is a remote id.
-    if not Path(repo).is_dir():
+    if Path(repo).is_dir():
+        # a local install reads its own generation_config.json: Google's tokenizer_config names <bos> but no ids
+        repo_gen = Path(repo) / "generation_config.json"
+    else:
         try:
             repo_gen = fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)
         except Exception:
@@ -2606,6 +2610,11 @@ def build_entry(base_entry, dir_name, files, size):
     if size:
         entry["size"] = size
     entry["vlm"] = any(f.startswith("vision") for f in files)
+    if "model.gguf" in files and entry.get("details", {}).get("family") == "gemma4e":
+        # a GGUF install is the language model only (Gemma 4's towers stay closed): no audio input either
+        entry["asr"] = False
+        if isinstance(entry.get("label"), list):
+            entry["label"] = [x for x in entry["label"] if x not in ("vision", "audio", "chat-transcription")]
     return entry
 
 
@@ -3383,7 +3392,10 @@ def family_from_gguf_arch(gguf_source):
     arch = inv[0].get("general.architecture") if inv else None
     if not arch:
         return None
-    return GGUF_ARCH_FAMILIES.get(str(arch).strip().lower())
+    family = GGUF_ARCH_FAMILIES.get(str(arch).strip().lower())
+    if family == "gemma4" and inv[0].get("gemma4.embedding_length_per_layer_input"):
+        return "gemma4e"                # the E2B / E4B: per-layer inputs, the gemma4e adapter
+    return family
 
 
 def family_from_config_dict(cfg):

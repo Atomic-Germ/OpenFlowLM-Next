@@ -11,7 +11,7 @@
 #include "AutoModel/gemma4_tool_parser.hpp"
 #include "config/settings_resolver.hpp"
 #include "metrices.hpp"
-#include "config/settings_resolver.hpp"
+#include "../../server/tool_messages.hpp"
 
 /************              Gemma4e family            **************/
 Gemma4e::Gemma4e(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4e") {}
@@ -20,13 +20,27 @@ void Gemma4e::load_model(std::string model_path, json model_info, int default_co
     
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption,
                              oflm::config::g_resolved_settings ? *oflm::config::g_resolved_settings : nlohmann::json::object());
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    this->lm_engine = std::make_unique<gemma4e_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
-    //free the q4nx
-    this->q4nx.reset();
+    // The open kernels when installed for this model (text only), the closed gemma4e_npu DLL otherwise
+    auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA4_ENGINE", "Gemma 4 (text)");
+    this->open_text_ = static_cast<bool>(open_engine);
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+        // Google's config.json nests the text model under text_config, where top-level readers (the sampler's vocab_size) never look
+        auto& jc = this->lm_config->_json_config;
+        if (jc.contains("text_config") && jc["text_config"].is_object()) {
+            const nlohmann::json tc = jc["text_config"];
+            for (auto it = tc.begin(); it != tc.end(); ++it) {
+                if (!jc.contains(it.key())) jc[it.key()] = it.value();
+            }
+        }
+    } else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<gemma4e_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        //free the q4nx
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
@@ -55,12 +69,12 @@ void Gemma4e::setup_tokenizer(std::string model_path) {
 std::string Gemma4e::apply_chat_template(nlohmann::ordered_json& messages, nlohmann::ordered_json tools) {
     minja::chat_template_inputs inputs;
     inputs.add_generation_prompt = true;
-    inputs.messages = messages;
+    inputs.messages = tool_messages::deserialize_tool_arguments(messages);
     inputs.extra_context = this->extra_context;
     inputs.extra_context["enable_thinking"] = this->enable_think;
     if (!tools.empty())
         inputs.tools = gemma4_tools::normalize_tools(tools);
-    return this->_shared_apply_template(inputs);
+    return this->_shared_apply_template(inputs, tool_messages::gemma4_template_options());
 }
 
 bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -70,6 +84,19 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
     if (input.messages.empty() && input.prompt.empty()) {
         header_print("WARNING", "No messages or prompt provided");
         return false;
+    }
+
+    if (this->open_text_) {
+        bool media = !input.images.empty() || !input.audios.empty();
+        for (const auto& m : input.messages) media = media || m.contains("images") || m.contains("audios");
+        // thrown, not false: every caller reports false as "Max length reached", and the CLI then ends the chat
+        if (media)
+            throw request_error("Gemma 4 on the open kernels is text only; for images and audio run a gemma4-it tag (FLM's .q4nx container, closed engine)");
+        nlohmann::ordered_json messages = input.messages;
+        if (messages.empty()) messages.push_back({{"role", "user"}, {"content", input.prompt}});
+        std::vector<int> tokens = this->tokenizer->encode(this->apply_chat_template(messages, input.tools));
+        this->profiler_list[TKOEN_ENCODE_TIME].stop(tokens.size());
+        return this->_shared_insert(meta_info, tokens, is_cancelled);
     }
 
     constexpr bool DEBUG_IMAGE_PREPROCESS = false;
@@ -523,8 +550,9 @@ std::string Gemma4e::generate(chat_meta_info_t& meta_info, int length_limit, std
     std::cout << std::endl;
     header_print("OFLM", "Model RAW Output: \n" + result);
     
-    if (!this->enable_think) {
-        gemma4e_npu *gemma4e_engine = dynamic_cast<gemma4e_npu*>(this->lm_engine.get());
+    gemma4e_npu *gemma4e_closed = dynamic_cast<gemma4e_npu*>(this->lm_engine.get());
+    if (!this->enable_think && gemma4e_closed) {      // the closed engine's prompt cache; the open one has none here
+        gemma4e_npu *gemma4e_engine = gemma4e_closed;
         int checkpoint_idx = gemma4e_engine->checkpoint();
         // copy the token history at the checkpoint except the last one token, which is the start token for generation and should not be included in the checkpoint history
         checkpoint_his = token_history;
@@ -543,9 +571,11 @@ std::string Gemma4e::generate_with_prompt(chat_meta_info_t& meta_info, lm_unifor
     }
 
     gemma4e_npu *gemma4e_engine = dynamic_cast<gemma4e_npu*>(this->lm_engine.get());
-    int checkpoint_idx = gemma4e_engine->checkpoint();
-    int restore_idx = gemma4e_engine->restore();
-    header_print_r("OFLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
+    if (gemma4e_engine) {
+        int checkpoint_idx = gemma4e_engine->checkpoint();
+        int restore_idx = gemma4e_engine->restore();
+        header_print_r("OFLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
+    }
     return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 

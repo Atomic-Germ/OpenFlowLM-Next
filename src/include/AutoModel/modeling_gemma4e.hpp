@@ -37,6 +37,7 @@ private:
     static constexpr int think_end_id = 101;
 
     bool enable_tool = false;
+    bool open_text_ = false;      ///< text on the open kernels (OPEN-FAMILY-GEMMA4); images and audio need the closed engine
     void setup_tokenizer(std::string model_path);
     
     // Image processing functionality

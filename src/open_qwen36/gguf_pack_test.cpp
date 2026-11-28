@@ -8,7 +8,9 @@
 /// Also covers GgufFile::embed_row (Q8_0) and pack_norm's f32 -> bf16.
 ///
 ///     cmake -S . -B build && cmake --build build && ctest --test-dir build
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -386,6 +388,16 @@ std::vector<uint8_t> bytes_of(const std::vector<T>& v) {
     return b;
 }
 
+float bf16f(uint16_t b) {
+    const uint32_t u = static_cast<uint32_t>(b) << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+uint16_t bf16_up(uint16_t b) { return static_cast<uint16_t>((b & 0x8000) ? (b == 0x8000 ? 0x0001 : b - 1) : b + 1); }
+uint16_t bf16_down(uint16_t b) { return static_cast<uint16_t>((b & 0x8000) ? b + 1 : (b == 0 ? 0x8001 : b - 1)); }
+using Tensor = SynthTensor;
+
 }  // namespace
 
 int main() {
@@ -484,6 +496,69 @@ int main() {
         }
         std::printf("%s std_perm_gguf Q4_0 (%zu values differ)\n", bad0 ? "FAIL" : "ok", bad0);
         if (bad0) return 1;
+
+        // OPEN-GGUF-BF16-POOL: the 5120 B pool holds the f32 pool's codes and the kernel's RNE narrowing of its scales
+        for (const auto* src : {&g, &g0}) {
+            std::vector<uint8_t> wide(static_cast<size_t>(op.nch) * 6144, 0), narrow(static_cast<size_t>(op.nch) * 5120, 0);
+            pools::apply(op, *src, 0, wide.data(), wide.size(), 6144);
+            pools::apply(op, *src, 0, narrow.data(), narrow.size(), 5120);
+            size_t badn = 0;
+            for (size_t c = 0; c < op.nch; ++c) {
+                const uint8_t* w = wide.data() + c * 6144;
+                const uint8_t* n = narrow.data() + c * 5120;
+                if (std::memcmp(w + 2048, n + 1024, 4096) != 0) ++badn;
+                for (size_t j = 0; j < 512; ++j) {                  // d[256] then m[256]
+                    uint32_t u;
+                    std::memcpy(&u, w + 4 * j, 4);
+                    const uint16_t want = static_cast<uint16_t>((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
+                    uint16_t got;
+                    std::memcpy(&got, n + 2 * j, 2);
+                    if (got != want) ++badn;
+                }
+            }
+            std::printf("%s std_perm_gguf bf16 pool (%s): %zu scale or code-plane mismatches against the f32 pool\n",
+                        badn ? "FAIL" : "ok", src == &g ? "Q4_1" : "Q4_0", badn);
+            if (badn) return 1;
+        }
+    }
+
+    // OPEN-GGUF-BF16-POOL: a re-quantized Q8_0 block's [m, m + 15 d] covers it and each code is the nearest level
+    {
+        const Blocks mm8 = make_blocks(64, 512, "Q8_0", rng);
+        GgufFile g8(write_gguf(dir, mm8, emb, norm));
+        std::vector<uint8_t> p8(static_cast<size_t>(op.nch) * 5120, 0);
+        pools::apply(op, g8, 0, p8.data(), p8.size(), 5120);
+        size_t bad8 = 0, blocks = 0;
+        for (size_t c = 0; c < op.nch; ++c) {
+            const uint8_t* n = p8.data() + c * 5120;
+            const size_t rows0 = 64 * (c / 4) + 32 * (c % 2), cols0 = 256 * ((c % 4) / 2);
+            for (size_t r = 0; r < 32; ++r)
+                for (size_t kb = 0; kb < 8; ++kb, ++blocks) {
+                    const float* v = mm8.values.data() + (rows0 + r) * mm8.cols + cols0 + kb * 32;
+                    float lo = v[0], hi = v[0];
+                    for (size_t i = 0; i < 32; ++i) {
+                        lo = std::min(lo, v[i]);
+                        hi = std::max(hi, v[i]);
+                    }
+                    uint16_t du, mu;
+                    std::memcpy(&du, n + 2 * (kb * 32 + r), 2);
+                    std::memcpy(&mu, n + 512 + 2 * (kb * 32 + r), 2);
+                    const float mf = bf16f(mu), df = bf16f(du), step = (hi - mf) / 15.0f;
+                    bool ok = mf <= lo && bf16f(bf16_up(mu)) > lo && df >= step && bf16f(bf16_down(du)) < step &&
+                              mf + 15.0f * df >= hi - 1e-6f * std::fabs(hi);
+                    for (size_t i = 0; i < 32 && ok; ++i) {
+                        const size_t p = (r / 16) * 4096 + (kb * 32 + i) * 16 + (r % 16);
+                        const uint8_t byte = n[1024 + (p >> 1)];
+                        const float got = static_cast<float>((p & 1) ? byte >> 4 : byte & 0xF) * df + mf;
+                        ok = std::fabs(got - v[i]) <= 0.5f * df * (1.0f + 1e-5f);
+                    }
+                    if (!ok && bad8++ < 5)
+                        std::printf("  chunk %zu r=%zu kb=%zu: m %.9g d %.9g over [%.9g, %.9g]\n", c, r, kb, mf, df, lo, hi);
+                }
+        }
+        std::printf("%s std_perm_gguf bf16 pool, Q8_0 re-quantized (%zu of %zu blocks break the law)\n",
+                    bad8 ? "FAIL" : "ok", bad8, blocks);
+        if (bad8) return 1;
     }
 
     // ---- expert_stripes_gguf / expert_down_gguf: 3-D [in, n, experts] sources
@@ -737,6 +812,30 @@ int main() {
         }
         std::printf("%s embed_row Q6_K (both super-block halves bit-exact)\n", bad6 ? "FAIL" : "ok");
         if (bad6) return 1;
+    }
+
+    // ---- the sandwich norms: a GGUF with post_attention_norm stores HF's post_attention_layernorm
+    // there and its pre_feedforward_layernorm as ffn_norm; a llama GGUF's ffn_norm is HF's
+    // post_attention_layernorm
+    {
+        auto norm_t = [](const std::string& name, float v) {
+            std::vector<uint8_t> b(8 * 4);
+            for (int i = 0; i < 8; ++i) std::memcpy(b.data() + 4 * i, &v, 4);
+            return Tensor{name, {8}, 0, b};
+        };
+        GgufFile gs(write_gguf_tensors(dir, "test-sandwich.gguf",
+                                       {norm_t("blk.0.attn_norm.weight", 1.f), norm_t("blk.0.post_attention_norm.weight", 2.f),
+                                        norm_t("blk.0.ffn_norm.weight", 3.f), norm_t("blk.0.post_ffw_norm.weight", 4.f)}));
+        GgufFile gl(write_gguf_tensors(dir, "test-llama-norms.gguf",
+                                       {norm_t("blk.0.attn_norm.weight", 1.f), norm_t("blk.0.ffn_norm.weight", 3.f)}));
+        const std::string pre = "model.layers.0.";
+        const bool ok = gs.bf16(pre + "input_layernorm.weight")[0] == 1.f &&
+                        gs.bf16(pre + "post_attention_layernorm.weight")[0] == 2.f &&
+                        gs.bf16(pre + "pre_feedforward_layernorm.weight")[0] == 3.f &&
+                        gs.bf16(pre + "post_feedforward_layernorm.weight")[0] == 4.f &&
+                        gl.bf16(pre + "post_attention_layernorm.weight")[0] == 3.f;
+        std::printf("%s sandwich-norm names resolve by what the GGUF holds\n", ok ? "ok   " : "FAIL");
+        if (!ok) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");

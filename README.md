@@ -95,7 +95,8 @@ this fork was made for](https://github.com/ROCm/FastFlowLM/issues/690).
   dispatches -- source, not pre-compiled binaries. Ten model families run on a
   shared recipe that works each model's shape out of its own geometry:
   Qwen3.6-MoE, Qwen3.5, Qwen3, Qwen2.5, Llama 3, Gemma 3, Phi-3/4, LFM2,
-  HunYuan and Granite. Gemma 4's 12B text decoder is here too.
+  HunYuan and Granite. Gemma 4's text decoder is here too: the 12B, and the
+  E2B / E4B from Google's GGUF.
 - **`oflm add` -- install any compatible model in one command.** The weights
   are the authority: the tool derives the family and geometry from the file
   itself (header, not filename), links a kernel set built for that geometry,
