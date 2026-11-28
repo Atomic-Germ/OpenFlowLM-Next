@@ -18,17 +18,62 @@ if the source is a GGUF. Start with `oflm dev build-new-family <repo>` (add
 - if the recipe could not build the shape, parked the spec in
   `open_kernels/recipes/candidates/` with the reason and printed that path.
 
-A `would_extend` result is a build to verify, not a wall to work around: most
-new families are "same layer, different constants" and the extension is the
-right answer. **This file is what the pipeline does not cover: how to port a
-family when several of the registry's checkpoints need to change in lockstep,
-or when the numeric gates show the nearest recipe dropped a stage of the
-layer.** The `RESEARCH.md` diff and the numeric gates decide which case you are
-in; do not assume a successful export means correctness.
+`build-new-family` **begins** a port effort; it does not finish one. Unlike
+`build-new-spec` (which takes a known recipe and completes a size end to end),
+it can only try the new model against the nearest existing recipe and report
+what happens. A clean build usually means it was never a new family at all —
+Bonsai is the canonical case: shape-identical to Qwen3.5, it needed only a Q2_0
+GGUF reader. A wall means the arithmetic genuinely differs and the port starts
+here.
+
+The mechanical port chain, all `oflm dev` commands:
+
+```bash
+oflm dev derive-recipe --spec <name>        # every spec-computable constant + template
+oflm dev gen-family-recipe --spec <name> --family <new> \
+    --base <closest> --design <design-dir> --dry-run
+# then without --dry-run; edit the generated module, supply design + kernel sources,
+# register the family in families.py / spec.py builders, then:
+oflm dev build-new-spec --spec <name>
+```
+
+Flint is the worked example: the GGUF header already named the shared expert
+(`expert_shared_feed_forward_length=1024`, `expert_shared_count=2`) and the
+dense lead (`leading_dense_block_count`); the generic candidate builder had
+simply not read those keys. After fixing the derivation, the wall becomes a
+*specific* arithmetic difference (a two-half shared expert, which needs
+flint's own design) rather than a generic "dense model" refusal.
+
+**This file is what the pipeline does not cover:** how to port a family when
+several of the registry's checkpoints need to change in lockstep, or when the
+numeric gates show the nearest recipe dropped a stage of the layer. The
+`RESEARCH.md` diff and the numeric gates decide which case you are in; do not
+assume a successful export means correctness, and do not assume a wall means
+the tool failed — it is the port boundary.
 
 The worked example is Gemma 4 12B (OPEN-FAMILY-GEMMA4), ported on `feat/gemma4-direct`
 on top of `feat/gguf-direct`. Everything below was built by doing that port, and
 includes the traps tripped during it.
+
+## Start with the mechanical alias command
+
+If the model is shape-identical to an existing family and only its **names**
+are new (`config.json` model_type, GGUF `general.architecture`, repo name),
+that is not a port at all. Run the official dev command:
+
+```bash
+oflm dev register-alias --family <existing-recipe> \
+    --model-type <new_model_type> --arch <new_arch> --name-prefix <prefix> --dry-run
+# then without --dry-run; --remove reverses it
+```
+
+It edits the five tables that must change in lockstep (`oflm_add`'s
+CONFIG_MODEL_FAMILIES / GGUF_ARCH_FAMILIES / FAMILY_ALIASES and `spec.py`'s
+HF_FAMILIES / GGUF_FAMILIES), aliases the new keys onto the family's EXISTING
+spec builders, and verifies the lookups resolve. It never invents new recipe
+logic. Bonsai shape-identical to Qwen3.5 is the canonical case. If the build
+still hits a wall, the wall is the port boundary and the rest of this skill
+applies.
 
 ## Decide recipe vs. design first
 

@@ -210,6 +210,25 @@ def test_tensor_suffixes_strip_the_block_prefix_and_known_roles():
     assert bf.tensor_suffixes(facts) == ["attn_q_conv.weight"]
 
 
+def test_nearest_recipe_uses_the_recipe_capability_not_a_mislabelled_spec():
+    """A spec labelled gemma3 with num_experts=256 must not make gemma3 win.
+
+    DeepSeek-V3.2 is an MoE with MLA attention; scoring the spec's own field
+    let a mislabelled dense-family spec win the MoE discriminator.
+    """
+    data = {"num_experts": 256, "experts_per_tok": 8, "attn_gate": False,
+            "conv_kernel": 0, "sliding_window": 0, "head_dim": 576,
+            "num_heads": 128, "num_kv_heads": 1, "rotary_dim": 64}
+    moe = SimpleNamespace(family="qwen36moe", num_experts=256, attn_gate=True,
+                          conv_kernel=4, sliding_window=0, head_dim=256,
+                          rotary_dim=64)
+    mislabelled = SimpleNamespace(family="gemma3", num_experts=256, attn_gate=False,
+                                  conv_kernel=0, sliding_window=1024, head_dim=256,
+                                  rotary_dim=256)
+    # The MoE recipe wins on capability; the mislabelled dense spec cannot.
+    assert bf._structural_score(moe, data) > bf._structural_score(mislabelled, data)
+
+
 def test_nearest_recipe_picks_by_geometry_not_by_name():
     facts = bf.GGUFFacts(arch="inkling2_loop", family="inkling2_loop")
     data = {"head_dim": 128, "num_heads": 24, "num_kv_heads": 8, "rotary_dim": 128,

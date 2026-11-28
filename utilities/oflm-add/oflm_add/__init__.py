@@ -858,8 +858,7 @@ GGUF_ARCH_FAMILIES = {
     # Gemma 4's open kernels (OPEN-FAMILY-GEMMA4): the marker is the 12B's own arch.
     # The E2B / E4B also call themselves gemma4; nothing serves them yet, and
     # kernel linking fails closed rather than bind the wrong set.
-    "gemma4": "gemma4",
-}
+    "gemma4": "gemma4"}
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
 # the GGUF map for repos whose names carry no family marker (chaotic finetune
@@ -894,8 +893,7 @@ CONFIG_MODEL_FAMILIES = {
     # gemma4_unified_text) is served -- the E2B / E4B (plain gemma4 / gemma4_text)
     # need per-layer embeddings and KV sharing and stay unmapped.
     "gemma4_unified": "gemma4",
-    "gemma4_unified_text": "gemma4",
-}
+    "gemma4_unified_text": "gemma4"}
 
 
 def log(msg):
@@ -1511,6 +1509,30 @@ def hf_file_tree(repo_id):
     return _http_get_json(f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true")
 
 
+def hf_model_info(repo_id):
+    """The HF model API's `gguf` + `cardData` blocks, without downloading weights.
+
+    HF indexes the GGUF header for the repo: architecture, context length,
+    chat_template, bos/eos tokens, imatrix file, total size. It also exposes
+    cardData.base_model (the base chain). This is a FAST, authoritative source
+    for exactly the fields `oflm add` otherwise range-reads from a GGUF or
+    crawls from a base repo -- useful when the quant repo's tokenizer came from
+    a base that lacks a template but the quantizer embedded one.
+    Returns {} when the API has no GGUF block (gated/offline/non-GGUF repo).
+    """
+    if not repo_id or Path(str(repo_id)).is_dir():
+        return {}
+    try:
+        d = _http_get_json(f"https://huggingface.co/api/models/{repo_id}")
+    except Exception:
+        return {}
+    out = dict(d.get("gguf") or {})
+    card = d.get("cardData") or {}
+    if card.get("base_model"):
+        out["base_model"] = card["base_model"]
+    return out
+
+
 def ms_file_tree(repo_id):
     """Root-level file listing from ModelScope.
 
@@ -1618,15 +1640,38 @@ def official_repo_id(entry, registry=None):
     return entry.get("name") or None
 
 
+def _chat_template_from_gguf(target):
+    """The GGUF header's own `tokenizer.chat_template`, when the weight file has one.
+
+    A quant repo's tokenizer often comes from its base repo (which is why
+    `extract_tokenizer_from_gguf` was skipped), but the QUANTIZER may have
+    embedded the real chat template in the GGUF metadata. HF repo structure is
+    unreliable; the weight file is the authority for what actually runs.
+    """
+    gguf = Path(target) / "model.gguf"
+    if not gguf.is_file():
+        return None
+    try:
+        inv = read_gguf_inventory(str(gguf), limit_mb=32)
+        template = (inv[0] if inv else {}).get("tokenizer.chat_template")
+        return template if isinstance(template, str) and template.strip() else None
+    except Exception:
+        return None
+
+
 def fill_chat_template(target, repo, bases, modelscope=False):
-    """Merge a chat template in from the model's chain when the installed
-    tokenizer_config.json has none.
+    """Merge a chat template in from the chain or the GGUF when there is none.
 
     A quant repo's tokenizer_config.json is often minimal (Nanbeige's has no
     chat_template; its sibling Nanbeige4.2-3B-Base does), and `oflm serve` refuses
     a model with no template -- after the weights have loaded. The aux fetch stops
     at the FIRST base that has the file, which is not necessarily the one with the
     template, so look further only for this one field.
+
+    Provenance order: installed tokenizer_config > chat_template.jinja > the
+    HF API's GGUF metadata index > the chain's tokenizer_config > the local
+    GGUF's own tokenizer.chat_template. A quantizer that embeds the template in
+    the weights wins over a missing or stale base-repo file.
     """
     tc = Path(target) / "tokenizer_config.json"
     if not tc.is_file() or (Path(target) / "chat_template.jinja").is_file():
@@ -1637,6 +1682,17 @@ def fill_chat_template(target, repo, bases, modelscope=False):
         return None
     if cfg.get("chat_template"):
         return None
+    # The HF model API indexes the quantizer's own chat_template in the GGUF
+    # block -- no base crawl and no weight download needed. This is the most
+    # reliable provenance when the repo's tokenizer came from a stub base.
+    api = hf_model_info(repo) if repo and not Path(str(repo)).is_dir() else {}
+    if api.get("chat_template"):
+        cfg["chat_template"] = api["chat_template"]
+        tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+        log("[INFO] chat_template from the HF GGUF metadata index "
+            f"({repo}'s tokenizer.chat_template)")
+        return repo
+
     tmp = Path(target) / ".tokenizer_config.from_base.json"
     try:
         for src in [repo] + list(bases):
@@ -1660,8 +1716,18 @@ def fill_chat_template(target, repo, bases, modelscope=False):
                 tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
                 log(f"[INFO] chat_template from {src} (the installed tokenizer_config had none)")
                 return src
-        log("[WARN] no chat_template in this model's chain; `oflm serve` will refuse it "
-            "(add one to tokenizer_config.json or a chat_template.jinja)")
+        # Last resort, and often the RIGHT one: the quantizer embedded the
+        # template in the weight file itself (Yi's i1 GGUF does). The base
+        # repo may be a stub, but the GGUF is what the engine runs.
+        t = _chat_template_from_gguf(target)
+        if t:
+            cfg["chat_template"] = t
+            tc.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+            log("[INFO] chat_template from the GGUF's tokenizer.chat_template "
+                "(the model's chain had none)")
+            return "model.gguf"
+        log("[WARN] no chat_template in this model's chain or GGUF; `oflm serve` "
+            "will refuse it (add one to tokenizer_config.json or a chat_template.jinja)")
         return None
     finally:
         tmp.unlink(missing_ok=True)
@@ -2126,9 +2192,41 @@ def token_id_of(target, token):
     return None
 
 
+def _gguf_vocab_size(target) -> int:
+    """The installed model.gguf's own vocabulary size, or 0 when unavailable."""
+    gguf = Path(target) / "model.gguf"
+    if not gguf.is_file():
+        return 0
+    try:
+        inv = read_gguf_inventory(str(gguf), limit_mb=32)
+        return len((inv[0] if inv else {}).get("tokenizer.ggml.tokens") or [])
+    except Exception:
+        return 0
+
+
+def _tokenizer_vocab_size(target) -> int:
+    """The installed tokenizer.json's vocabulary size (base + added tokens)."""
+    path = Path(target) / "tokenizer.json"
+    if not path.is_file():
+        return 0
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        model = cfg.get("model") or {}
+        return len(model.get("vocab") or {}) + len(cfg.get("added_tokens") or [])
+    except Exception:
+        return 0
+
+
 def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
-    stock HF repos keep them in generation_config.json -- merge them over."""
+    stock HF repos keep them in generation_config.json -- merge them over.
+
+    A GGUF install may carry a tokenizer whose vocab differs from its base
+    model's (Bonsai's 248k vs Qwen3.5's ~150k). In that case the ids in the
+    base's generation_config/config mean DIFFERENT tokens, and unioning them
+    into tokenizer_config makes the engine stop on, or loop over, the wrong
+    ones. The GGUF's own ids are authoritative; skip the base merge then.
+    """
     tc = target / "tokenizer_config.json"
     if not tc.is_file():
         return
@@ -2198,12 +2296,25 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
             if g and (isinstance(g.get("eos_token_id"), list) or
                       need_bos and isinstance(g.get("bos_token_id"), int)):
                 break
+    # A GGUF whose vocab differs from the installed tokenizer's owns its ids:
+    # ids from the base chain's generation_config/config would name DIFFERENT
+    # tokens here (the wrong-stop / repetition-loop bug). Keep only what
+    # tokenizer_config.json already carries (the GGUF's own ids, or the
+    # matching base repo's ids).
+    gguf_vocab = _gguf_vocab_size(target)
+    installed_vocab = _tokenizer_vocab_size(target)
+    vocab_mismatch = bool(gguf_vocab and installed_vocab and gguf_vocab != installed_vocab)
+    if vocab_mismatch:
+        log("[INFO] GGUF vocabulary differs from the installed tokenizer; keeping the "
+            "GGUF's own eos/bos ids (not merging the base model's ids)")
+        return
+
     # Union the generation_config's ids (whole chain's best file won the loop) with
     # config.json's, top level and text tower; a key the config omits contributes none.
     cfg_path = target / "config.json"
     conf_ids: set[int] = set()
     conf_bos: int | None = None
-    if cfg_path.is_file():
+    if not vocab_mismatch and cfg_path.is_file():
         try:
             mcfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         except Exception:

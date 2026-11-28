@@ -49,6 +49,24 @@ What the installer does:
 A repo that ships both `model.q4nx` and a GGUF installs the q4nx: it is the
 curated container, and the GGUF is a lossy re-encoding of the same weights.
 
+## HF's GGUF metadata index (no download needed)
+
+The HF model API exposes the GGUF header as JSON at
+`https://huggingface.co/api/models/<repo>` under a `gguf` block:
+
+```
+architecture, context_length, chat_template, bos_token, eos_token,
+quantize_imatrix_file, total, totalFileSize
+```
+
+plus `cardData.base_model` for the base chain. `oflm_add.hf_model_info()` reads
+this, and `fill_chat_template()` uses it **before** crawling base repos: a
+quantizer often embeds the chat template in the GGUF even when the repo's
+tokenizer.json came from a base that has none. The Yi case is the canonical
+example — `mradermacher/Yi-1.5-9B-Chat-i1-GGUF` has a 441-char template in the
+API's `gguf` block, while `mradermacher/Yi-1.5-9B-i1-GGUF` (the base) has none.
+The weight file is the authority; HF repo structure is not.
+
 ## Which quants are accepted
 
 `GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q6_K", "Q8_0", "Q5_K", "Q4_K", "IQ4"]`

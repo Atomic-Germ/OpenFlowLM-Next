@@ -333,8 +333,9 @@ def main() -> int:
     for msg in walls:
         print(f"   the RECIPE does not support this shape: {msg}")
         if "no recipe for family" in msg or "the open kernels have no recipe for" in msg:
-            print("      (no recipe owns this family: `oflm dev build-new-family` will "
-                  "extend the nearest recipe and write a build report)")
+            print("      (no recipe owns this family: run `oflm dev build-new-family <repo>` "
+                  "to pick a starting recipe; a wall after that means the arithmetic needs "
+                  "a real port -- see open-family-addition)")
         else:
             print("      (a width that does not fit the design -- a different recipe, or a "
                   "different family)")
@@ -393,8 +394,19 @@ def main() -> int:
                                                   harness_binary(work), skip=("attn",))
         except mod_gate.GateError as exc:
             print(exc, file=sys.stderr)
-            print("   (a fixture that EXISTS failed at this geometry; that is a real shortfall, "
-                  "not a missing gate)", file=sys.stderr)
+            msg = str(exc)
+            if "allocated buffers exceeded available memory" in msg or "MemoryMap" in msg:
+                # aiecc's tile allocation failed: the fixture's streaming fifos
+                # plus stack exceed the core's 64 KB local memory at this width.
+                # That is a DESIGN wall (the fixture needs a narrower buffering
+                # scheme here), not a bad spec and not a missing gate.
+                print("   DESIGN WALL: this fixture's buffers + stack exceed the AIE tile's "
+                      "64 KB local memory. The width does not fit the current streaming "
+                      "scheme; the design needs a narrower/split path (as ln.py's SPLIT "
+                      "branch does for other widths). Not a spec error.", file=sys.stderr)
+            else:
+                print("   (a fixture that EXISTS failed at this geometry; that is a real "
+                      "shortfall, not a missing gate)", file=sys.stderr)
             return 1
         if blocked:
             # No per-geometry fixture does NOT mean the recipe cannot build the

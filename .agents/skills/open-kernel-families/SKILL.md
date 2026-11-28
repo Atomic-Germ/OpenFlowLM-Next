@@ -34,11 +34,14 @@ layer and still "match" a replica making the same mistake.
 
 `oflm dev build-new-family` classifies by the derived spec's kernel hash. For an
 architecture no recipe owns it builds a candidate spec from the weight file,
-picks the nearest checked-in recipe by geometry (layer shape — experts, gate,
-convs — outweighs headline numbers), and runs `build-new-spec` against it. It
-does not silently bind and claim success: `RESEARCH.md` names what the nearest
-recipe does not explain, and the numeric gates decide whether the extension is
-correct. `--family` overrides the choice. When a spec is derived from GGUF,
+picks the nearest recipe by **recipe capability** (expert / gate / conv come
+from the family, never from a possibly mislabelled spec), and runs
+`build-new-spec` against it. It **begins a port effort**, not a completed
+family: a clean build means it was only a new size or a reader gap (Bonsai
+needed a Q2_0 reader, not a family); a wall means real port work starts here.
+`RESEARCH.md` names what the recipe does not explain, and the numeric gates
+decide whether the extension is correct. `--family` overrides the choice.
+When a spec is derived from GGUF,
 scan **all** GGUF paths, not only root files:
 Unsloth dynamic quants put split sets in `UD-Q4_K_XL/<name>-00001-of-00004.gguf`,
 and part 1's header still names the geometry. Auxiliary files (`mmproj-*`,

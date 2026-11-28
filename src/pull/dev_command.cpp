@@ -193,6 +193,18 @@ void print_help() {
         << "                             (wraps utilities/export-kernels.py)\n"
         << "      e.g. oflm dev export-kernels --specs qwen3-8b --skip-bert --skip-diffusion\n"
         << "           (use -j/--jobs to limit parallelism if builds are flaky)\n"
+        << "  register-alias [args...]   Register new config/GGUF/name keys for an EXISTING\n"
+        << "                             recipe family (the mechanical half of a port)\n"
+        << "                             (wraps utilities/register-family-alias.py)\n"
+        << "      e.g. oflm dev register-alias --family qwen35 --arch deepseek2 --dry-run\n"
+        << "  derive-recipe [args...]    Derive every spec-computable recipe constant, template\n"
+        << "                             and catalogue point for a new family (wraps\n"
+        << "                             utilities/derive-recipe.py)\n"
+        << "      e.g. oflm dev derive-recipe --spec <spec-name>\n"
+        << "  gen-family-recipe [args...] Generate a recipe MODULE from a derivation (thin\n"
+        << "                             delegation + named walls) (wraps\n"
+        << "                             utilities/gen-family-recipe.py)\n"
+        << "      e.g. oflm dev gen-family-recipe --spec <spec> --family <name> --dry-run\n"
         << "  op-gate [args...]          Validate missing catalogue points by running fixtures\n"
         << "                             (wraps utilities/op-gate.py)\n"
         << "      e.g. oflm dev op-gate --spec qwen3-8b\n"
@@ -204,13 +216,17 @@ void print_help() {
         << "  env-check                  Show toolchain/environment status\n"
         << "  help                       Show this help\n\n"
         << "Aliases accepted: --build-new-family, --build-new-spec, --probe-sizes,\n"
-        << "                  --export-kernels, --op-gate, --clean-specs, --env-check, new-spec,\n"
-        << "                  run-kernel, harness, run_kernel.\n\n"
+        << "                  --export-kernels, --register-alias, --derive-recipe,\n"
+        << "                  --gen-family-recipe, --op-gate, --clean-specs, --env-check,\n"
+        << "                  new-spec, run-kernel, harness, run_kernel.\n\n"
         << "Notes:\n"
         << "  - Geometry is the identity: new sizes of supported families are specs + builds,\n"
         << "    not new kernel code. `build-new-spec` runs SPEC->BUILD->GATE->CATALOGUE->REBUILD->REGISTER.\n"
         << "  - `build-new-family` is the front door: for an architecture no recipe owns it\n"
         << "    extends the nearest recipe by geometry and writes a build report.\n"
+        << "  - `register-alias` is the mechanical half of a family port: it maps new\n"
+        << "    config/GGUF/name keys onto an EXISTING recipe's spec builder. The math\n"
+        << "    is still research (see the open-family-addition skill).\n"
         << "  - GATE/validation needs NPU hardware; compilation needs XRT + mlir-aie/Peano.\n"
         << "  - In source trees, `cmake --workflow --preset linux-default` or `source utilities/env.sh`\n"
         << "    prepares the toolchain. From packages, install openflowlm-devel/openflowlm-dev.\n"
@@ -387,6 +403,15 @@ int run(int argc, char* argv[]) {
 
     if (cmd == "build-new-family") {
         return run_script(repo, "utilities/build-new-family.py", argc - 1, argv + 1, true);
+    }
+    if (cmd == "register-alias") {
+        return run_script(repo, "utilities/register-family-alias.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "derive-recipe") {
+        return run_script(repo, "utilities/derive-recipe.py", argc - 1, argv + 1, false);
+    }
+    if (cmd == "gen-family-recipe") {
+        return run_script(repo, "utilities/gen-family-recipe.py", argc - 1, argv + 1, false);
     }
     if (cmd == "build-new-spec" || cmd == "new-spec") {
         return run_script(repo, "utilities/build-new-spec.py", argc - 1, argv + 1, true);

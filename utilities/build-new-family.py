@@ -355,23 +355,36 @@ _RECIPE_MATCH_FIELDS = (
 )
 
 
-def _structural_score(s, data) -> int:
-    """Whether the family's LAYER SHAPE matches, apart from exact numbers.
+# Families whose RECIPE is a routed-expert recipe. This is a property of the
+# module, not of any one spec file: a spec labelled `gemma3` that happens to
+# carry num_experts=256 is a mislabelled spec, not evidence that gemma3 has an
+# expert datapath. Scoring the spec's field let such a file make a dense family
+# win the MoE discriminator (DeepSeek-V3.2 -> gemma3, 55 points).
+_MOE_RECIPES = {"qwen36moe", "qwen35moe"}
+_CONV_RECIPES = {"qwen35", "qwen35moe", "lfm2", "lfm2moe", "lfm3"}
+_GATED_RECIPES = {"qwen35", "qwen35moe", "lfm2", "lfm3"}
 
-    A model with experts belongs with the MoE recipe even when its exact expert
-    count is new; a gated-attention model belongs with a family that has a gate;
-    a hybrid with convs belongs with the conv family. These are worth more than
-    an exact head_dim match because they decide which kernels exist at all.
+
+def _structural_score(s, data) -> int:
+    """Whether the family's RECIPE fits, judged by module capability.
+
+    A model with experts belongs with an expert recipe even when the exact
+    expert count is new; a gated-attention model belongs with a family whose
+    design has a gate stream. These are hard discriminators worth far more
+    than a coincidental head_dim match, because they decide which kernels
+    exist at all. A wrong answer here sends the build into a wall instead of
+    a usable extension.
     """
+    family = getattr(s, "family", "") or ""
     score = 0
     moe = int(data.get("num_experts") or 0) > 0
-    if moe == (int(getattr(s, "num_experts", 0) or 0) > 0):
-        score += 30          # experts vs. dense is a different kernel set entirely
+    if moe == (family in _MOE_RECIPES):
+        score += 40          # experts vs. dense is a different kernel set entirely
     gate = bool(data.get("attn_gate"))
-    if gate == bool(getattr(s, "attn_gate", False)):
-        score += 15          # a gated attention needs a gate stream in the design
+    if gate == (family in _GATED_RECIPES):
+        score += 15
     conv = int(data.get("conv_kernel") or 0) > 0
-    if conv == (int(getattr(s, "conv_kernel", 0) or 0) > 0):
+    if conv == (family in _CONV_RECIPES):
         score += 10
     swa = int(data.get("sliding_window") or 0) > 0
     if swa == (int(getattr(s, "sliding_window", 0) or 0) > 0):
@@ -424,26 +437,15 @@ def nearest_recipe(data: dict[str, Any], facts: GGUFFacts) -> tuple[str, list[st
     candidates.sort(key=lambda x: -x[0])
     top = candidates[0][0]
     best = [f for score, f in candidates if score == top]
-    # On a tie, prefer the family whose LAYER SHAPE is closest: that is which
-    # kernels exist, not which headline geometry number happens to match.
-    family = max(best, key=lambda f: _shape_bonus(f, data))
+    # On a tie, prefer qwen36moe (the broadest MoE recipe) then qwen3 (the
+    # broadest dense one): capability is already scored above, so this only
+    # resolves equally-capable families deterministically.
+    family = "qwen36moe" if "qwen36moe" in best else ("qwen3" if "qwen3" in best else best[0])
     reasons = [f"{f}: {s} geometry/shape points match"
                for s, f in candidates if s > 0][:5]
     if not reasons:
         reasons = [f"no geometry field matched any recipe; using {family} as the starting point"]
     return family, reasons
-
-
-def _shape_bonus(family: str, data: dict[str, Any]) -> int:
-    """Tie-break: prefer the family whose recipe has the same layer kinds."""
-    bonus = 0
-    if int(data.get("num_experts") or 0) > 0 and family in ("qwen36moe", "qwen35moe"):
-        bonus += 3
-    if data.get("attn_gate") and family in ("qwen35", "qwen35moe", "lfm2", "lfm3"):
-        bonus += 2
-    if int(data.get("conv_kernel") or 0) > 0 and family in ("lfm2", "lfm2moe", "lfm3"):
-        bonus += 2
-    return bonus
 
 
 def tensor_suffixes(facts: GGUFFacts) -> list[str]:

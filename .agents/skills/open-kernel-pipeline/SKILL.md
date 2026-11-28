@@ -86,6 +86,21 @@ python utilities/export-kernels.py
 python utilities/export-kernels.py --specs qwen3-8b
 ```
 
+**Proven end-to-end from a public GGUF repo, with no hand-written spec:**
+
+```bash
+oflm dev build-new-spec --repo mradermacher/Yi-1.5-9B-Chat-i1-GGUF
+cmake --workflow --preset linux-package
+sudo dnf reinstall -y build/packages/openflowlm-0.1.0-1.x86_64.rpm
+oflm add mradermacher/Yi-1.5-9B-Chat-i1-GGUF
+oflm run yi-chat:9b        # answers correctly on the NPU
+```
+
+That is the whole onboarding for a shape-identical model: derive spec, build,
+gate, catalogue, register, package, install, run. The only case that still
+needs a design change is a size whose widths do not divide into whole 64-row
+bands / 256-wide k-tiles (a geometry wall, not a tooling gap).
+
 `build-new-spec.py` is the scripted form of the advice the docs used to give.
 Its stages, and why each exists:
 
@@ -113,7 +128,16 @@ oflm dev build-new-family unsloth/Qwen3.8-Flash-Next-GGUF --dry-run
 `utilities/build-new-family.py` is an orchestrator in front of the two commands
 above, not a second pipeline. It still lets `gen-kernel-spec.py` decide geometry
 and `build-new-spec.py` own SPEC -> BUILD -> GATE -> CATALOGUE -> REBUILD ->
-REGISTER. What it adds is the front door for "onboard this repo":
+REGISTER. What it adds is the front door for "onboard this repo".
+
+**It is not a sibling of `build-new-spec`.** `build-new-spec` takes a known
+recipe and *finishes* a size end to end. `build-new-family` **begins a port
+effort**: it tries building the new model against the nearest existing recipe,
+and if that succeeds the case was only a new size / new spec after all (Bonsai
+needed just a Q2_0 GGUF reader, not a family). If it hits a wall, that wall is
+the signal that real arithmetic port work is required — the tool hands you the
+evidence and stops. Do not read a `would_extend` result as "the family was
+built".
 
 1. **SPEC** — GGUF-header first; for a GGUF-only repo it scans **every** GGUF
    path, so a dynamic quant in `UD-Q4_K_XL/...-00001-of-00004.gguf` is a geometry
@@ -135,16 +159,18 @@ REGISTER. What it adds is the front door for "onboard this repo":
 4. **UNKNOWN ARCHITECTURE** — no recipe owns the architecture. The command reads
    the model's own GGUF header and tensor table, builds a candidate `ModelSpec`
    from the standard GGUF keys, scores the checked-in recipes against that
-   geometry (**layer shape counts much more than headline numbers**: experts,
-   attention gate, convs), and extends the nearest one. `--family` picks a
-   different recipe. `build/new-family/<repo>/RESEARCH.md` records which recipe
-   was chosen, the unmatched tensors/metadata keys and the upstream references,
-   so the numeric gates can be trusted instead of a successful export. If the
-   recipe cannot build the shape, `build-new-spec` parks the spec in
-   `recipes/candidates/` and the command reports that path and exits 0 -- no
-   wall, no homework, evidence preserved. Auxiliary GGUFs (`mmproj-*`,
-   `dspark-*`, `draft-*`, `mtp-*`) are excluded from model selection, so a draft
-   head's `dflash` architecture cannot name the family.
+   geometry by **recipe capability** (expert / gate / conv — from the recipe
+   family, never from a possibly mislabelled spec file), and tries the nearest
+   one. `--family` picks a different recipe. `build/new-family/<repo>/RESEARCH.md`
+   records which recipe was chosen, the unmatched tensors/metadata keys and the
+   references, so the numeric gates can be trusted instead of a successful
+   export. If the recipe cannot build the shape, `build-new-spec` parks the spec
+   in `recipes/candidates/` and the command reports that path — that is the port
+   boundary, not a failed install. A family can still turn out to need only a
+   reader change (Bonsai/Q2_0) rather than a new recipe; start from the evidence
+   before deciding it needs a port. Auxiliary GGUFs (`mmproj-*`, `dspark-*`,
+   `draft-*`, `mtp-*`) are excluded from model selection, so a draft head's
+   `dflash` architecture cannot name the family.
 5. **VALIDATE** — layer dumps, `cmp_layers.py`, decode gates and the production
    bar are printed as required next steps, and run here only when `--cli`,
    `--ref-model` and `--install-dir` are supplied. A successful build is not a
@@ -284,9 +310,10 @@ allows only the build stamps in the xclbin to differ.
 | `no open kernel set can run this model` | no installed set serves the geometry | run with a checkout so `oflm add` builds it; or install the set the release ships |
 | `this build of the set predates GGUF-direct` | the set has the geometry but no `gguf` manifest section | re-export with `python utilities/export-kernels.py` |
 | `the recipe cannot build this shape` | a design wall (width, k-tile, split FF, head count) | the spec is parked in `recipes/candidates/`; the shape needs a design change |
+| `allocated buffers exceeded available memory` (aiecc, with a `MemoryMap`) | a fixture's fifo buffers + stack exceed the AIE tile's 64 KB at this width (e.g. `ln` at N=8192 uses four 16 KB elements) | a DESIGN wall in that op's streaming scheme, not a spec error; `build-new-spec` translates the raw aiecc message. Needs a narrower/split path in the design, like `ln.py`'s `SPLIT` branch |
 | `the catalogue has not validated N point(s)` | a gate has not run at this geometry | `build-new-spec.py` runs them; do not ship with `OPEN_KERNELS_UNVALIDATED=1` |
 | `no recipe for family` / `not implemented` | the architecture has no recipe | that is the family work above; do not route it to the nearest recipe |
-| `status: would_extend` from `build-new-family` | the GGUF/config names an architecture no recipe owns | the nearest recipe was extended and the build attempted; read `build/new-family/<repo>/RESEARCH.md` for what it does not explain, then run the numeric gates |
+| `status: would_extend` from `build-new-family` | the GGUF/config names an architecture no recipe owns | the nearest recipe was tried as a starting point; a clean build means it was only a new size, a wall means begin the port with `open-family-addition`. Read `build/new-family/<repo>/RESEARCH.md` either way |
 | `status: weights_blocked` from `build-new-family` | the geometry hash matched a checked-in spec, but `oflm add --dry-run` refused every GGUF (unsupported quant or unknown tensor type) | no build/install/gate is attempted; the weights must be converted to a supported quant first -- a geometry match does not make a weight file loadable |
 | `no open kernels found` at load | the model directory has no `open_kernels` link and no set matches | re-run `oflm add`, or check `OFLM_OPEN_KERNELS_DIR` |
 | `model.gguf` present but no `gguf` section | a GGUF install linked a q4nx-only set | re-export the set; the engine swaps the whole manifest view |

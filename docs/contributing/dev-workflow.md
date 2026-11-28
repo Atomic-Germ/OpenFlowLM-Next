@@ -76,9 +76,11 @@ Aliases like `--build-new-family`, `--build-new-spec`, `--probe-sizes`, `--expor
 
 ## Typical workflow: onboard a repo
 
-`build-new-family` is the front door. It reads the weights' geometry (GGUF header
-first; the README `base_model` chain supplies config/tokenizer when a repo has
-none), then classifies the result:
+`build-new-family` is the front door, but it is **not** a sibling of
+`build-new-spec`: `build-new-spec` finishes a size for a known recipe, while
+`build-new-family` begins a port effort. It reads the weights' geometry (GGUF
+header first; the README `base_model` chain supplies config/tokenizer when a
+repo has none), then classifies the result:
 
 - **served** — a checked-in spec or installed set already covers this kernel
   geometry **and** the install probe found a loadable GGUF. No new kernels;
@@ -89,9 +91,12 @@ none), then classifies the result:
   REBUILD -> REGISTER pipeline, then `oflm add` installs it.
 - **would_extend** — an architecture no recipe owns. The command reads the
   model's own GGUF header and tensor table, writes a candidate spec from the
-  standard GGUF keys, scores the checked-in recipes against that geometry (layer
-  shape — experts, attention gate, convs — outweighs headline numbers), and
-  extends the nearest one through the same BUILD/INSTALL path as a known size.
+  standard GGUF keys, scores the checked-in recipes by **recipe capability**
+  (expert / gate / conv — from the recipe family, not from a spec file that
+  might be mislabelled), and tries the nearest one through the same
+  BUILD/INSTALL path as a known size. A clean build usually means it was never
+  a new family — Bonsai/Q2_0 needed only a GGUF reader, not a recipe — while a
+  wall is the port boundary, not a failed install.
   `build/new-family/<repo>/RESEARCH.md` records the chosen recipe and the
   tensors/metadata keys it does not explain, so the numeric gates can be
   trusted. If the recipe cannot build the shape, the spec is parked in

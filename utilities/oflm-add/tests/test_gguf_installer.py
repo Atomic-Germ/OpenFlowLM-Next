@@ -981,6 +981,29 @@ def test_a_key_with_a_manifest_default_may_stay_absent(tmp_path):
 # ---- tokenizer_config: an eos id the engine can read, and a chat template ----
 
 
+def test_a_gguf_with_a_different_vocab_keeps_its_own_eos_ids(monkeypatch, tmp_path):
+    """A base repo's eos id names a DIFFERENT token in a 248k-vocab GGUF.
+
+    Unioning it in made a Bonsai model stop on, then loop over, the wrong token.
+    The GGUF's own ids are authoritative when the vocab sizes disagree.
+    """
+    (tmp_path / "tokenizer.json").write_text(json.dumps({
+        "model": {"vocab": {"a": 0}},
+        "added_tokens": [{"id": 248046, "content": "<|endoftext|>"}],
+    }))
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+        "eos_token": "<|endoftext|>", "eos_token_id": [248046],
+    }))
+    (tmp_path / "config.json").write_text(json.dumps({"eos_token_id": 151643}))
+    monkeypatch.setattr(oflm_add, "_gguf_vocab_size", lambda target: 248320)
+
+    oflm_add.normalize_tokenizer_config(tmp_path, "local", [])
+
+    tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert tc["eos_token_id"] == [248046]
+    assert 151643 not in tc["eos_token_id"]
+
+
 def test_eos_falls_back_when_generation_config_exists_but_has_no_id(tmp_path):
     """Qwen3-4B-Base ships a generation_config.json WITHOUT eos_token_id; the file
     being found must not suppress the config.json fallback."""
@@ -994,6 +1017,30 @@ def test_eos_falls_back_when_generation_config_exists_but_has_no_id(tmp_path):
     tc = json.loads((tmp_path / "tokenizer_config.json").read_text())
     assert tc["eos_token_id"] == [151643]
     assert tc["bos_token_id"] == 151643
+
+
+def test_hf_api_gguf_metadata_supplies_chat_template(monkeypatch, tmp_path):
+    """HF indexes the GGUF header: no base crawl and no weight download."""
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 4096}))
+    monkeypatch.setattr(
+        oflm_add, "hf_model_info",
+        lambda repo: {"architecture": "llama", "chat_template": "{% for m in messages %}",
+                      "base_model": "org/Base"})
+    got = oflm_add.fill_chat_template(tmp_path, "org/Quant", [])
+    cfg = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert got == "org/Quant" and cfg["chat_template"] == "{% for m in messages %}"
+
+
+def test_chat_template_falls_back_to_the_gguf_header(monkeypatch, tmp_path):
+    """When the repo's tokenizer came from a base with no template, the
+    quantizer's own GGUF metadata is the last authority."""
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 4096}))
+    monkeypatch.setattr(oflm_add, "_chat_template_from_gguf",
+                        lambda target: "{% for m in messages %}{{ m['content'] }}{% endfor %}")
+    got = oflm_add.fill_chat_template(tmp_path, "local", [])
+    cfg = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    assert got == "model.gguf"
+    assert cfg["chat_template"]
 
 
 def test_chat_template_is_climbed_from_the_chain(tmp_path):

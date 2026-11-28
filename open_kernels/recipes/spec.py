@@ -495,6 +495,21 @@ class ModelSpec:
             num_experts=first("expert_count"),
             experts_per_tok=first("expert_used_count"),
             moe_intermediate=first("expert_feed_forward_length"),
+            # llama.cpp suffixes vary by architecture: flint uses
+            # expert_shared_feed_forward_length / expert_shared_count, qwen36moe
+            # uses shared_expert_feed_forward_length. Read both spellings --
+            # a candidate spec that drops the shared expert makes every MoE
+            # recipe refuse the shape as "a dense model", hiding the real fact
+            # the GGUF header already names.
+            shared_expert_intermediate=(first("expert_shared_feed_forward_length")
+                                        or first("shared_expert_feed_forward_length")
+                                        or first("expert_shared_intermediate")
+                                        or first("shared_expert_intermediate")),
+            # Some MoEs open with dense (non-expert) layers (flint, DeepSeek
+            # V2/V3). The header names the count; without it the recipe sees
+            # all-MoE layers and refuses the shape.
+            dense_lead=(first("leading_dense_block_count")
+                        or first("expert_leading_dense_block_count")),
             norm_eps=eps,
             final_softcap=softcap,
             quant="q4_1",
